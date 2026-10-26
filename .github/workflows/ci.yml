@@ -1,11 +1,12 @@
 name: CI
 
-# Pushes to main plus pull requests. Branch pushes are covered by their PR,
-# so a PR branch is not checked twice.
+# Pushes to main, pull requests, and manual runs. Run CI on any other branch
+# with: gh workflow run ci.yml --ref <branch>
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # Read-only token: this workflow only checks code. It does not publish,
 # release, deploy, upload artifacts, or perform Git operations.
