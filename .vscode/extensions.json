@@ -1,0 +1,9 @@
+{
+  // Optional recommendations only. Nothing here is installed automatically.
+  "recommendations": [
+    "rust-lang.rust-analyzer",
+    "tamasfe.even-better-toml",
+    "editorconfig.editorconfig",
+    "davidanson.vscode-markdownlint"
+  ]
+}

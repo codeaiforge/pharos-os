@@ -1,0 +1,19 @@
+# Rust build output
+/target/
+
+# Local secrets and environment files: never commit these
+.env
+.env.*
+*.pem
+*.key
+
+# Editor and OS files
+*.swp
+*~
+.DS_Store
+.idea/
+
+# VS Code: keep only the shared, optional project recommendations
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json

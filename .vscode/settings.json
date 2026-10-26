@@ -1,0 +1,9 @@
+{
+  // Workspace-only settings; user-wide settings are not touched.
+  "rust-analyzer.check.command": "clippy",
+  "[rust]": {
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "rust-lang.rust-analyzer"
+  },
+  "files.eol": "\n"
+}
