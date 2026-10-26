@@ -1,0 +1,19 @@
+[workspace]
+# Resolver "3" is the default for edition 2024 packages; virtual workspaces
+# must state it explicitly.
+resolver = "3"
+members = ["kernel", "tools/pharos-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# Edition 2024 requires Rust 1.85. Verified by the `msrv` CI job.
+rust-version = "1.85"
+license = "Apache-2.0"
+publish = false
+
+[workspace.lints.rust]
+# No crate needs `unsafe` at this stage. When the bootable kernel begins,
+# relax this per crate (not workspace-wide) and follow the `unsafe` policy
+# in AGENTS.md.
+unsafe_code = "forbid"

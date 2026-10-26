@@ -1,0 +1,27 @@
+# kernel (`pharos-kernel`)
+
+**Status: placeholder.** This crate is a temporary host-side architectural placeholder.
+
+It is an ordinary Rust library compiled for the host. It does **not** boot, manage hardware, provide memory protection, or implement any operating-system functionality. It exists so the workspace, CI, and docs have a stable home for kernel work.
+
+## What it contains
+
+- `src/lib.rs`: crate documentation describing its placeholder status, a `STATUS` constant, and one test.
+
+## What will change
+
+The bootable kernel is planned for Phase 2 ([roadmap](../docs/project/implementation-roadmap.md), milestones M2.1–M2.2). That work will introduce, after the decisions in M2.1 are recorded:
+
+- `#![no_std]` and `#![no_main]`;
+- a custom or built-in bare-metal x86-64 target;
+- a boot protocol and bootloader integration;
+- linker configuration;
+- QEMU-based boot tests with serial output.
+
+None of these exist yet. Until then this crate must stay a normal host-buildable library so `cargo build --workspace` and `cargo test --workspace` work on a standard Linux machine.
+
+## Rules for this crate
+
+- No `unsafe` code while it remains a placeholder (enforced by the workspace lint).
+- No hardware-specific code, inline assembly, or target-specific configuration until M2.1 decisions are recorded.
+- Do not describe anything here as implemented unless it is tested.
