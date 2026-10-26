@@ -545,7 +545,7 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 ### M5.4 — Security review and threat-model update
 
 - **Objective and scope:** Full security review before release. **Status: Planned.**
-- **Deliverables:** Updated threat model; review report; fixes; security contact channel published.
+- **Deliverables:** Updated threat model; review report; fixes; security reporting process reviewed.
 - **Prerequisites:** M5.1.
 - **Acceptance criteria:** No open critical or high findings; every `unsafe` block reviewed; dependencies audited.
 - **Validation:** Manual: review; external audit if resources allow.
