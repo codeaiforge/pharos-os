@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format is based on 
 ### Added
 
 - Boot evaluation for D-001 to D-003 (`docs/architecture/boot-evaluation.md`), with proposed recommendations: Limine, UEFI primary with BIOS secondary, `x86_64-unknown-none` with an `xtask` build tool. Not accepted yet.
+- Prototype evidence for D-001 to D-003 in the boot evaluation: Limine booted a prototype kernel under UEFI and BIOS in QEMU, with reproducible kernel and ISO builds.
 
 ### Security
 

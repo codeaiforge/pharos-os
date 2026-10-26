@@ -1,6 +1,6 @@
 # Boot evaluation (D-001, D-002, D-003)
 
-- **Status:** Draft. Recommendations are **Proposed**, not accepted. They become decisions only after the QEMU prototype ([#3](https://github.com/codeaiforge/pharos-os/issues/3)) provides evidence and the maintainer accepts them ([#4](https://github.com/codeaiforge/pharos-os/issues/4)).
+- **Status:** Draft. Recommendations are **Proposed**, not accepted. The QEMU prototype ([#3](https://github.com/codeaiforge/pharos-os/issues/3)) has provided evidence (see [Prototype evidence](#prototype-evidence-3)); they become decisions when the maintainer accepts them ([#4](https://github.com/codeaiforge/pharos-os/issues/4)).
 - **Implementation status:** Planned. Nothing here is implemented.
 - **Research date:** 2026-10-26. Versions and maintenance facts are as of that date; see [Sources](#sources).
 - **Roadmap:** [M2.1](../project/implementation-roadmap.md#m21--architecture-and-boot-protocol-decisions). **Issues:** [#1](https://github.com/codeaiforge/pharos-os/issues/1) (D-001), [#2](https://github.com/codeaiforge/pharos-os/issues/2) (D-002, D-003).
@@ -52,7 +52,7 @@ Decide between these in #4, after the prototype.
 
 **Limine with the Limine protocol.** It minimizes boot-path `unsafe` code in the kernel (no mode-switch trampoline), covers BIOS and UEFI, has permissive licenses, and supports reproducible image builds on stable Rust. **Fallback: Multiboot2**, which keeps GRUB and Limine both available as loaders if the Limine protocol proves unsuitable. Options C and D are not recommended now: C needs nightly Rust, and D adds the most code and maintenance. D can be revisited later if owning the boot chain becomes a security requirement (for example for measured or verified boot in M4.3).
 
-**Evidence still needed (from #3):** a Limine image boots our kernel in QEMU on UEFI (OVMF) and BIOS (SeaBIOS), built without root using a pinned Limine release.
+**Evidence (from #3):** a Limine 12.9.4 image booted a prototype kernel in QEMU on both UEFI (OVMF) and BIOS (SeaBIOS), built without root from a signature-verified release. See [Prototype evidence](#prototype-evidence-3).
 
 ## D-002 — BIOS and/or UEFI
 
@@ -115,12 +115,34 @@ Separately, put target-independent kernel logic (for example frame allocators) i
 | `xorriso` | Build ISO images | `sudo apt install xorriso` |
 | Limine release | Bootloader binaries | downloaded at a pinned version with a verified checksum by `xtask` (exact mechanism decided in #4) |
 
-## Open questions for the prototype (#3)
+## Prototype evidence (#3)
 
-1. Does the linker script plus `x86_64-unknown-none` produce an image that Limine loads on both OVMF and SeaBIOS?
-2. ISO (via `xorriso`) or FAT disk image: which is simpler to build reproducibly without root?
-3. How should the pinned Limine release be fetched and verified (release tarball checksum, or vendored binaries)?
-4. Does `--exclude pharos-kernel` in host commands work cleanly in CI and in rust-analyzer?
+Source, exact commands, environment, and full output: [`prototypes/limine-boot` on the `proto/limine-boot` branch](https://github.com/codeaiforge/pharos-os/tree/proto/limine-boot/prototypes/limine-boot). The prototype is throwaway and is not merged into `main`.
+
+**Environment:** Rust 1.99.1 stable, QEMU 8.2.2 (`q35`, TCG), OVMF 2024.02, xorriso 1.5.6, Limine 12.9.4 binary release.
+
+| Check | UEFI (OVMF) | BIOS (SeaBIOS) |
+| --- | --- | --- |
+| Boots and reports pass (QEMU exit status 33 plus serial marker) | yes | yes |
+| Kernel runs in the higher half (`0xffffffff80001140`) | yes | yes |
+| Base revision 6 accepted | yes | yes |
+| Bootloader info, firmware type, HHDM, memory map responses | all received | all received |
+| Reported firmware type | UEFI (64-bit) | x86 BIOS |
+
+The harness also reported **FAIL** (exit status 35) on both firmware types for a deliberately broken kernel, so it detects failures.
+
+### Answers to the open questions
+
+1. **Linker script plus `x86_64-unknown-none` with Limine on OVMF and SeaBIOS?** Yes. Two settings were needed: `-C relocation-model=static` and a linker script that keeps the `.limine_requests*` sections between the start and end markers. With them, one ELF and one hybrid ISO boot on both firmware types.
+2. **ISO or FAT image?** **ISO** built with `xorriso` plus `limine bios-install` works without root and is byte-identical across clean builds, provided file timestamps are pinned before running `xorriso`. `SOURCE_DATE_EPOCH` alone left 9 differing bytes. A FAT disk image was not tried, because it needs extra tools (`mtools`, `sgdisk`) and offers no advantage for QEMU testing. Proposed: ISO.
+3. **Fetching and verifying Limine?** The official GitHub release provides per-asset SHA-256 digests and GPG signatures. The prototype verified both; the signing key (`05D2 9860 D0A0 668A AEFB 9D69 1F3C 021B ECA2 3821`) is registered on the primary maintainer's GitHub account. Proposed for `xtask`: download a pinned release version, check a SHA-256 committed in the repository, and document the GPG check for maintainers who update the pin.
+4. **`--exclude pharos-kernel` in practice?** Works. With the kernel as a workspace member, `default-members` plus `--exclude` keep every host command passing, including plain `cargo test`. The kernel checks and builds with `--target x86_64-unknown-none`, and target-specific `rustflags` in `.cargo/config.toml` do not affect host builds. Without the exclusion, `--workspace` commands fail as predicted. **Not tested:** rust-analyzer behaviour; check in the editor during M2.2 and fall back to option 2 (separate workspace) if it is poor.
+
+### Additional findings
+
+- Hand-written Limine protocol structures for six requests took about 100 lines, which supports the option of not depending on the `limine` crate (see [supply-chain note](#supply-chain-note-on-the-limine-crate)).
+- OVMF writes console escape codes and boot messages to the serial port before the kernel starts, so tests must search for a marker rather than compare the whole log.
+- QEMU boots under TCG (no KVM) took about one second each, fast enough for every CI run.
 
 ## Sources
 

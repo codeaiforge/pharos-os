@@ -69,7 +69,7 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-001: Bootloader and boot protocol
 
-- **Status:** Proposed (2026-10-26; awaiting prototype evidence in #3 and acceptance in #4)
+- **Status:** Proposed (2026-10-26; prototype evidence recorded from #3; awaiting acceptance in #4)
 - **Needed by:** M2.1
 
 **Context.** The kernel needs a defined entry state and boot information (memory map, framebuffer, command line).
@@ -82,7 +82,7 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-002: BIOS and/or UEFI support
 
-- **Status:** Proposed (2026-10-26; awaiting prototype evidence in #3 and acceptance in #4)
+- **Status:** Proposed (2026-10-26; prototype evidence recorded from #3; awaiting acceptance in #4)
 - **Needed by:** M2.1
 
 **Context.** Determines firmware interfaces, image format, and testing matrix.
@@ -95,7 +95,7 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-003: Rust target, linker, and build strategy
 
-- **Status:** Proposed (2026-10-26; awaiting prototype evidence in #3 and acceptance in #4)
+- **Status:** Proposed (2026-10-26; prototype evidence recorded from #3; awaiting acceptance in #4)
 - **Needed by:** M2.1
 
 **Context.** A bootable kernel needs a bare-metal target, linker configuration, and a way to build a bootable image.
