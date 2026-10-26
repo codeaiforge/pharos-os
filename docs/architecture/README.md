@@ -2,7 +2,9 @@
 
 This directory will hold detailed design documents for individual subsystems. The high-level overview stays in [docs/project/architecture.md](../project/architecture.md); decisions are recorded in [docs/project/decision-log.md](../project/decision-log.md).
 
-No detailed design documents exist yet.
+Current documents:
+
+- [Boot evaluation](boot-evaluation.md) — draft evaluation of bootloader, firmware, and build options for D-001 to D-003 (recommendations proposed, not accepted).
 
 ## When to write one
 

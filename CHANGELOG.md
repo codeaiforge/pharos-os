@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+### Added
+
+- Boot evaluation for D-001 to D-003 (`docs/architecture/boot-evaluation.md`), with proposed recommendations: Limine, UEFI primary with BIOS secondary, `x86_64-unknown-none` with an `xtask` build tool. Not accepted yet.
+
 ### Security
 
 - Pin `actions/checkout` in CI to the signed v5.1.0 release commit SHA instead of the movable `v5` tag.
