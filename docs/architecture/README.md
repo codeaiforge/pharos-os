@@ -1,0 +1,44 @@
+# Architecture documents
+
+This directory will hold detailed design documents for individual subsystems. The high-level overview stays in [docs/project/architecture.md](../project/architecture.md); decisions are recorded in [docs/project/decision-log.md](../project/decision-log.md).
+
+No detailed design documents exist yet.
+
+## When to write one
+
+Write a design document before implementing a subsystem that:
+
+- crosses a privilege or trust boundary (system calls, IPC, agent sandboxing);
+- defines an interface other components depend on (boot information, memory map, capability format);
+- is hard to change later (on-disk format, ABI).
+
+## Naming and layout
+
+One file per subsystem, named after it, for example:
+
+```text
+docs/architecture/
+├── README.md          this guide
+├── boot.md            boot flow and boot protocol usage
+├── memory.md          physical/virtual memory management
+├── interrupts.md      exceptions, interrupts, timers
+├── syscalls-ipc.md    system-call interface and IPC
+├── capabilities.md    capability model and agent permissions
+└── inference.md       inference service and its isolation
+```
+
+These names are suggestions; create files only when there is content for them.
+
+## Template
+
+Each document should contain:
+
+1. **Status** — draft, accepted, or superseded; and implementation status (implemented / planned).
+2. **Context** — the problem and constraints; links to the roadmap milestone and decision records.
+3. **Design** — components, data structures, interfaces, and invariants.
+4. **Security** — trust boundaries, privileges required, how untrusted input is handled.
+5. **Testing** — how the design is validated (unit, QEMU, manual).
+6. **Alternatives** — options considered and why they were not chosen.
+7. **Open questions.**
+
+Keep documents in sync with the code: update them in the same change that alters the design.
