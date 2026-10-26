@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a feature or change for Pharos OS.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check docs/project/implementation-roadmap.md first. Proposals that skip
+        a milestone gate or widen privileges need a strong justification.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem does this solve, and for whom?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+  - type: input
+    id: milestone
+    attributes:
+      label: Related roadmap milestone
+      placeholder: e.g. M2.2 Minimal bootable kernel
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and privilege impact
+      description: Does this add privileges, new trust boundaries, `unsafe` code, dependencies, or agent capabilities?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

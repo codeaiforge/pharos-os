@@ -1,0 +1,14 @@
+// markdownlint-cli2 configuration. Run with:
+//   npx markdownlint-cli2 "**/*.md"
+{
+  "config": {
+    "default": true,
+    // Prose is wrapped by editors; long lines are acceptable.
+    "MD013": false,
+    // Repeated headings (e.g. "Acceptance criteria") are fine under different parents.
+    "MD024": { "siblings_only": true },
+    // GitHub issue templates and some docs start without a top-level heading.
+    "MD041": false
+  },
+  "ignores": ["target/**", "LICENSE"]
+}
