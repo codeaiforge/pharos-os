@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Current milestone: Phase 1 — Foundation.** Everything in Phases 2–5 is **planned, not implemented**.
+**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.1 — Architecture and boot-protocol decisions.** Everything in Phases 2–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -38,8 +38,8 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 | Phase | Name | Status |
 | --- | --- | --- |
-| 1 | Foundation | **Current** |
-| 2 | Core System | Planned |
+| 1 | Foundation | Done (v0.1.0) |
+| 2 | Core System | **Current** (M2.1) |
 | 3 | AI Agent Platform | Planned |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
@@ -48,7 +48,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ## Phase 1 — Foundation
 
-**Status: Current.**
+**Status: Done** — gate passed 2026-10-26 (CI green on `main` at commit `38cc424`; maintainer approved the release). Follow-up: the manual fresh-machine run of setup.md has not been performed yet.
 
 - **Objective and scope:** A clean, reproducible host-side Rust workspace with a placeholder kernel crate, a minimal CLI, quality gates, CI, and documentation that lets later work proceed safely.
 - **Deliverables:** M1.1–M1.5 below.
@@ -62,7 +62,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M1.1 — Repository and Rust workspace
 
-**Status: Current** — implemented locally; gate not passed (awaiting review, first commit, and CI).
+**Status: Done.**
 
 - **Objective and scope:** Conventional repository layout; Cargo virtual workspace; toolchain and formatting configuration.
 - **Deliverables:** Root `Cargo.toml` (resolver 3, shared package metadata, lints), `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.gitignore`, `.editorconfig`, `.gitattributes`, `LICENSE`, `NOTICE`.
@@ -76,7 +76,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M1.2 — Host-side kernel placeholder
 
-**Status: Current** — implemented locally; gate not passed.
+**Status: Done.**
 
 - **Objective and scope:** Reserve `kernel/` as a host-buildable library that clearly states it is not a kernel.
 - **Deliverables:** `kernel/Cargo.toml`, `kernel/src/lib.rs`, `kernel/README.md`.
@@ -90,7 +90,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M1.3 — Initial CLI
 
-**Status: Current** — implemented locally; gate not passed.
+**Status: Done.**
 
 - **Objective and scope:** A small, deterministic `pharos` CLI with `help`, `version`, `info`, `doctor`.
 - **Deliverables:** `tools/pharos-cli` with unit tests; usage in README.
@@ -104,7 +104,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M1.4 — Formatting, linting, tests, and CI
 
-**Status: Current** — CI configured; not yet run on a hosted repository.
+**Status: Done** — both CI jobs green on `main`. Follow-ups: the deliberate-failure check has not been run, and `actions/checkout` is not yet pinned to a commit SHA.
 
 - **Objective and scope:** Enforce formatting, Clippy with warnings as errors, build, and tests on every push and pull request.
 - **Deliverables:** `.github/workflows/ci.yml` with read-only permissions; workspace lint configuration.
@@ -118,7 +118,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M1.5 — Project documentation and development workflow
 
-**Status: Current** — implemented locally; gate not passed.
+**Status: Done.**
 
 - **Objective and scope:** Documentation that explains the vision, proposed architecture, roadmap, security posture, and how to develop.
 - **Deliverables:** README, AGENTS.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, CHANGELOG.md, and `docs/` (project, development, architecture, security).
@@ -134,7 +134,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ## Phase 2 — Core System
 
-**Status: Planned.**
+**Status: Current.**
 
 - **Objective and scope:** A minimal x86-64 kernel that boots in QEMU and grows, milestone by milestone, into a system with memory management, scheduling, isolated processes, IPC, storage, drivers, and networking.
 - **Deliverables:** M2.1–M2.10.
@@ -148,7 +148,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.1 — Architecture and boot-protocol decisions
 
-**Status: Planned.**
+**Status: Current.**
 
 - **Objective and scope:** Decide how the kernel boots and is built, and set an initial direction for kernel architecture, before writing kernel code.
 - **Deliverables:** Accepted decision records D-001, D-002, D-003; initial direction for D-004; `docs/architecture/boot.md`; a throwaway prototype if needed to gather evidence.
@@ -589,4 +589,4 @@ Full entries are in the [decision log](decision-log.md). None of these is settle
 
 ## Next milestone
 
-After the Phase 1 gate (scaffold committed by the maintainer and CI green on the hosted repository), the next milestone is **M2.1 — Architecture and boot-protocol decisions**. Its acceptance criteria are listed above; the first measurable kernel result follows at M2.3 (reproducible QEMU boot with observable serial output, tested in CI).
+Phase 1 passed its gate and was released as v0.1.0. The current milestone is **M2.1 — Architecture and boot-protocol decisions**. Its acceptance criteria are listed above; the first measurable kernel result follows at M2.3 (reproducible QEMU boot with observable serial output, tested in CI).
