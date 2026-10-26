@@ -148,7 +148,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.1 — Architecture and boot-protocol decisions
 
-**Status: Current.**
+**Status: Current** — gate passed 2026-10-26 (D-001, D-002, D-003 Accepted; design in [boot.md](../architecture/boot.md)). Remaining deliverable: initial D-004 direction (#5).
 
 - **Objective and scope:** Decide how the kernel boots and is built, and set an initial direction for kernel architecture, before writing kernel code.
 - **Deliverables:** Accepted decision records D-001, D-002, D-003; initial direction for D-004; `docs/architecture/boot.md`; a throwaway prototype if needed to gather evidence.
@@ -570,13 +570,13 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). None of these is settled.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
-| D-001 | Bootloader and boot protocol | M2.1 | Maturity, license, TCB size, QEMU support, Rust integration |
-| D-002 | BIOS and/or UEFI | M2.1 | Hardware relevance, QEMU firmware, test cost, Secure Boot |
-| D-003 | Rust target, linker, build strategy | M2.1 | Stable Rust if possible, reproducibility, host tests unaffected |
+| D-001 | Bootloader and boot protocol | M2.1 | **Accepted:** Limine, Limine protocol, own protocol structures |
+| D-002 | BIOS and/or UEFI | M2.1 | **Accepted:** UEFI primary, BIOS secondary |
+| D-003 | Rust target, linker, build strategy | M2.1 | **Accepted:** `x86_64-unknown-none` on stable, linker script, `xtask`, ISO, kernel as workspace member |
 | D-004 | Kernel architecture and privilege boundaries | M2.1 (direction), M2.7 | TCB size, isolation, IPC cost, complexity |
 | D-005 | Memory-management strategy | M2.5 | Correctness, fragmentation, `unsafe` surface |
 | D-006 | Interrupt controller and timer | M2.4, M2.6 | QEMU/hardware support, SMP readiness |

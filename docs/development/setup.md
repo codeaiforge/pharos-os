@@ -71,9 +71,11 @@ Expected:
 | Tool | Needed from | Purpose | Install (Mint/Ubuntu) |
 | --- | --- | --- | --- |
 | QEMU (`qemu-system-x86_64`) | M2.2 | Boot and test the kernel | `sudo apt install qemu-system-x86` |
-| OVMF | M2.2, if UEFI is chosen (D-002) | UEFI firmware for QEMU | `sudo apt install ovmf` |
+| OVMF | M2.2 | UEFI firmware for QEMU (UEFI is the primary path, D-002) | `sudo apt install ovmf` |
+| xorriso | M2.2 | Build the hybrid BIOS/UEFI ISO (D-003) | `sudo apt install xorriso` |
+| `x86_64-unknown-none` Rust target | M2.2 | Compile the kernel (D-003) | `rustup target add x86_64-unknown-none` (added to `rust-toolchain.toml` in M2.2) |
+| Limine 12.9.4 | M2.2 | Bootloader in the boot image (D-001) | fetched and verified by `cargo xtask` (M2.2); not installed system-wide |
 | GDB | M2.4 | Kernel debugging via QEMU's GDB stub | `sudo apt install gdb` |
-| Bare-metal Rust target | M2.2, per D-003 | Cross-compiling the kernel | decided in D-003 |
 | markdownlint-cli2 | any time | Lint Markdown (config in `.markdownlint-cli2.jsonc`) | `npx markdownlint-cli2 "**/*.md"` (requires Node.js) |
 
-Do not install these until the milestone that needs them; the exact packages depend on open decisions.
+The M2.2 tools follow from the accepted boot decisions; see [boot design](../architecture/boot.md). None is needed for the current workspace.

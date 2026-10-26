@@ -63,27 +63,33 @@ These were chosen during the repository bootstrap, reviewed and accepted by the 
 
 **Revisit when.** The first CLI command needs options or flags. Candidates then: `lexopt` (tiny, no dependencies) or `clap` (de facto standard, much larger); choose by the CLI's size at that time. If D-003 places kernel build tasks in a separate `xtask` crate, the CLI may never need this.
 
-## Open and proposed decisions
+## Accepted decisions (M2.1)
 
-Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
+Accepted by the maintainer on 2026-10-26, based on the [boot evaluation](../architecture/boot-evaluation.md) and its [prototype evidence](../architecture/boot-evaluation.md#prototype-evidence-3). The resulting design is in the [boot design](../architecture/boot.md).
 
 ### D-001: Bootloader and boot protocol
 
-- **Status:** Proposed (2026-10-26; prototype evidence recorded from #3; awaiting acceptance in #4)
+- **Status:** Accepted
 - **Needed by:** M2.1
+- **Date accepted:** 2026-10-26
 
 **Context.** The kernel needs a defined entry state and boot information (memory map, framebuffer, command line).
 
-**Options to evaluate.** Limine protocol; Multiboot2 (e.g. via GRUB); the Rust `bootloader` crate ecosystem; a custom UEFI loader.
+**Options.** Limine protocol; Multiboot2 (e.g. via GRUB); the Rust `bootloader` crate; a custom UEFI loader.
 
 **Evaluation criteria.** Maturity and maintenance; license compatibility with Apache-2.0; BIOS/UEFI coverage; QEMU support; amount of code added to the TCB; quality of Rust integration; reproducible image creation without root privileges.
 
-**Proposal.** Limine bootloader with the Limine boot protocol: it enters the kernel in 64-bit mode in the higher half with a memory map and direct map, so no mode-switch trampoline is needed; it supports BIOS and UEFI; it is BSD-2-Clause (protocol 0BSD); and it builds images on stable Rust without root. Fallback: Multiboot2. The `bootloader` crate is not recommended because it needs nightly Rust to build images; a custom UEFI loader is not recommended now because of its size and maintenance cost. Note the `limine` crate's change of repository (supply-chain note). Full scoring and sources: [boot evaluation](../architecture/boot-evaluation.md#d-001--bootloader-and-boot-protocol).
+**Decision.** Use the **Limine** bootloader and the **Limine boot protocol** (base revision 6). The kernel reads boot information through **protocol structures written in the project** from the 0BSD specification; it does **not** depend on the `limine` crate. Limine binaries come from a **pinned official release**, verified by a committed SHA-256 (and the maintainer's GPG signature when the pin is updated).
+
+**Consequences.** The kernel starts in 64-bit mode in the higher half with a memory map and direct map, so no mode-switch trampoline is needed. The project maintains its own protocol structures and updates them when adopting a new base revision. Limine (BSD-2-Clause) binaries are distributed in boot images, so their license must be reproduced in image notices. Multiboot2 remains the fallback if the Limine protocol becomes unsuitable.
+
+**Evidence.** The prototype booted on UEFI and BIOS in QEMU, got all requested responses, and was rejected as expected when requesting an unsupported revision. Rejected: the `bootloader` crate (needs nightly Rust for images), a custom UEFI loader (largest code and maintenance cost, UEFI only, needs Rust 1.91), and GRUB as the primary loader (32-bit entry needs a trampoline; GPL-3.0 adds distribution obligations). Details: [boot evaluation](../architecture/boot-evaluation.md#d-001--bootloader-and-boot-protocol).
 
 ### D-002: BIOS and/or UEFI support
 
-- **Status:** Proposed (2026-10-26; prototype evidence recorded from #3; awaiting acceptance in #4)
+- **Status:** Accepted
 - **Needed by:** M2.1
+- **Date accepted:** 2026-10-26
 
 **Context.** Determines firmware interfaces, image format, and testing matrix.
 
@@ -91,20 +97,38 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 **Evaluation criteria.** Relevance to modern hardware; QEMU firmware availability (e.g. OVMF for UEFI); testing cost; Secure Boot implications for later phases.
 
-**Proposal.** UEFI is the primary, required path (tested with OVMF). BIOS is supported as a secondary path (tested with SeaBIOS) while it needs no kernel-side code, which holds with Limine. Revisit at M5.2. Details: [boot evaluation](../architecture/boot-evaluation.md#d-002--bios-andor-uefi).
+**Decision.** **UEFI is the primary, required path**, tested with OVMF. **BIOS is a secondary path**, tested with SeaBIOS, supported only while it needs no kernel-side code.
+
+**Consequences.** Every boot test runs twice (about one second each). Kernel code must not depend on BIOS-only or UEFI-only facilities without a new decision. Secure Boot stays possible (Limine supports it) and is planned for M4.3. Revisit at M5.2 (hardware compatibility).
+
+**Evidence.** The same kernel and hybrid ISO booted on OVMF and SeaBIOS in the prototype, with the firmware type correctly reported. Details: [boot evaluation](../architecture/boot-evaluation.md#d-002--bios-andor-uefi).
 
 ### D-003: Rust target, linker, and build strategy
 
-- **Status:** Proposed (2026-10-26; prototype evidence recorded from #3; awaiting acceptance in #4)
+- **Status:** Accepted
 - **Needed by:** M2.1
+- **Date accepted:** 2026-10-26
 
 **Context.** A bootable kernel needs a bare-metal target, linker configuration, and a way to build a bootable image.
 
-**Options.** Built-in target (e.g. `x86_64-unknown-none`) on stable versus a custom target JSON (requires nightly `build-std`); linker script versus bootloader-provided layout; `cargo` aliases versus an `xtask` crate versus scripts for image building.
+**Options.** Built-in target (`x86_64-unknown-none`) on stable versus a custom target JSON (nightly `build-std`); linker script versus bootloader-provided layout; Cargo aliases versus an `xtask` crate versus scripts for image building; kernel as a workspace member versus a separate workspace.
 
-**Evaluation criteria.** Works on stable Rust if possible; reproducibility; no root needed; keeps `cargo test --workspace` working for host crates; clarity for contributors.
+**Evaluation criteria.** Works on stable Rust if possible; reproducibility; no root needed; keeps host checks working; clarity for contributors.
 
-**Proposal.** Built-in `x86_64-unknown-none` on stable Rust (Tier 2; `kernel` code model, no red zone, soft-float by default); a small linker script for the higher-half layout; an `xtask` crate to build images and run QEMU, keeping the `pharos` CLI read-only. The kernel stays a workspace member, excluded from host commands (`--exclude pharos-kernel`) and checked separately with `--target x86_64-unknown-none`; target-independent logic goes in a host-testable `no_std` library. Details: [boot evaluation](../architecture/boot-evaluation.md#d-003--rust-target-linker-and-build-strategy).
+**Decision.**
+
+- Target: built-in **`x86_64-unknown-none`** on **stable** Rust, with `-C relocation-model=static` set under `[target.x86_64-unknown-none]` in `.cargo/config.toml`.
+- Linker: a project **linker script** placing the kernel at `0xffffffff80000000` and keeping the Limine request sections.
+- Build: an **`xtask`** crate (`cargo xtask ...`) builds the kernel, assembles a hybrid BIOS/UEFI **ISO** with `xorriso` and `limine bios-install` (file timestamps pinned for reproducibility), and runs QEMU. The `pharos` CLI stays read-only.
+- Layout: the kernel is a **workspace member**, excluded from host commands via `default-members` and `--exclude pharos-kernel`, and checked separately with `--target x86_64-unknown-none`. Target-independent kernel logic goes in a host-testable `no_std` library when there is some.
+
+**Consequences.** CI and the documented host commands gain `--exclude pharos-kernel` when the kernel becomes `no_std` (M2.2). `rust-toolchain.toml` gains `targets = ["x86_64-unknown-none"]` at that point. The workspace `unsafe_code = "forbid"` lint is relaxed for the kernel crate only, as planned in P-001. If rust-analyzer handles the member poorly, fall back to a separate workspace through a new decision.
+
+**Evidence.** The prototype built on stable Rust; kernel ELF and ISO were byte-identical across clean builds; with the kernel as a member, `--exclude` and `default-members` kept all host commands passing, while plain `--workspace` failed as predicted. Not yet tested: rust-analyzer behaviour. Details: [boot evaluation](../architecture/boot-evaluation.md#d-003--rust-target-linker-and-build-strategy).
+
+## Open and proposed decisions
+
+Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
 
 ### D-004: Kernel architecture and privilege boundaries
 

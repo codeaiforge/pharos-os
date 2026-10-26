@@ -22,7 +22,7 @@ echo $?          # 0 success, 1 problem reported, 2 invalid usage
 
 ## Planned: kernel debugging (not available yet)
 
-Nothing below works today, because no bootable kernel exists. It records the intended approach so M2.2–M2.4 can adopt it; final details depend on decisions D-001, D-003, and D-009.
+Nothing below works today, because no bootable kernel exists. It records the intended approach so M2.2–M2.4 can adopt it; the boot path is decided ([boot.md](../architecture/boot.md)); QEMU automation details depend on decision D-009.
 
 | Technique | Purpose | Typical QEMU options |
 | --- | --- | --- |

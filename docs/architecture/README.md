@@ -4,7 +4,8 @@ This directory will hold detailed design documents for individual subsystems. Th
 
 Current documents:
 
-- [Boot evaluation](boot-evaluation.md) — draft evaluation of bootloader, firmware, and build options for D-001 to D-003 (recommendations proposed, not accepted).
+- [Boot design](boot.md) — accepted boot flow, kernel entry contract, image layout, and build tool (implementation planned for M2.2).
+- [Boot evaluation](boot-evaluation.md) — options and prototype evidence behind D-001 to D-003.
 
 ## When to write one
 

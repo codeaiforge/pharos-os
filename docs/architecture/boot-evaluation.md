@@ -1,6 +1,6 @@
 # Boot evaluation (D-001, D-002, D-003)
 
-- **Status:** Draft. Recommendations are **Proposed**, not accepted. The QEMU prototype ([#3](https://github.com/codeaiforge/pharos-os/issues/3)) has provided evidence (see [Prototype evidence](#prototype-evidence-3)); they become decisions when the maintainer accepts them ([#4](https://github.com/codeaiforge/pharos-os/issues/4)).
+- **Status:** Complete. The recommendations were **accepted** on 2026-10-26 ([#4](https://github.com/codeaiforge/pharos-os/issues/4)), with own Limine protocol structures and the kernel as a workspace member. The resulting design is in [boot.md](boot.md). This document is kept as the record of options and evidence.
 - **Implementation status:** Planned. Nothing here is implemented.
 - **Research date:** 2026-10-26. Versions and maintenance facts are as of that date; see [Sources](#sources).
 - **Roadmap:** [M2.1](../project/implementation-roadmap.md#m21--architecture-and-boot-protocol-decisions). **Issues:** [#1](https://github.com/codeaiforge/pharos-os/issues/1) (D-001), [#2](https://github.com/codeaiforge/pharos-os/issues/2) (D-002, D-003).
