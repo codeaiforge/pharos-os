@@ -104,14 +104,14 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M1.4 — Formatting, linting, tests, and CI
 
-**Status: Done** — both CI jobs green on `main`. Follow-ups: the deliberate-failure check has not been run, and `actions/checkout` is not yet pinned to a commit SHA.
+**Status: Done** — both CI jobs green on `main`. Follow-up: the deliberate-failure check has not been run.
 
 - **Objective and scope:** Enforce formatting, Clippy with warnings as errors, build, and tests on every push and pull request.
 - **Deliverables:** `.github/workflows/ci.yml` with read-only permissions; workspace lint configuration.
 - **Prerequisites:** M1.1–M1.3.
 - **Acceptance criteria:** CI runs fmt, Clippy (`-D warnings`), build, test, rustdoc, and the link check with `--locked`, plus build and test on the minimum supported Rust (1.85); uses only `actions/checkout`; has `contents: read` permission; does not publish, deploy, or upload artifacts.
 - **Validation:** Automated: the CI run itself. Manual: introduce a deliberate formatting error on a throwaway branch and confirm CI fails.
-- **Risks and mitigations:** Third-party action compromise → minimal actions; pin by commit SHA once the repository is hosted.
+- **Risks and mitigations:** Third-party action compromise → minimal actions, pinned by commit SHA.
 - **Out of scope:** QEMU in CI (starts at M2.3), release automation.
 - **Definition of done:** Standard, plus one green CI run on the hosted repository.
 - **Gate:** CI green on the default branch.

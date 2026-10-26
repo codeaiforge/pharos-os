@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+### Security
+
+- Pin `actions/checkout` in CI to the signed v5.1.0 release commit SHA instead of the movable `v5` tag.
+
 ## [0.1.0] - 2026-10-26
 
 Initial scaffold, completing Phase 1 (Foundation). Pharos OS is not bootable; this release contains host-side tooling and documentation only.
