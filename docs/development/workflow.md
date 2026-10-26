@@ -27,6 +27,8 @@ This workflow works on any branch and does not depend on hosting. Rules in [AGEN
 | Check the kernel | `cargo clippy -p pharos-kernel --target x86_64-unknown-none -- -D warnings` |
 | Test kernel library logic | `cargo test -p pharos-kernel --lib` |
 | Run the CLI | `cargo run -p pharos-cli -- <command>` |
+| Build the kernel | `cargo xtask build` |
+| Build the boot image | `cargo xtask image` (needs xorriso; downloads the pinned Limine release once) |
 | Test one package | `cargo test -p pharos-cli` |
 | Test by name | `cargo test -p pharos-cli doctor` |
 | Format | `cargo fmt --all` |

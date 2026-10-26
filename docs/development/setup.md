@@ -69,7 +69,8 @@ Expected:
 | OVMF | M2.2 | UEFI firmware for QEMU (UEFI is the primary path, D-002) | `sudo apt install ovmf` |
 | xorriso | M2.2 | Build the hybrid BIOS/UEFI ISO (D-003) | `sudo apt install xorriso` |
 | `x86_64-unknown-none` Rust target | M2.2 | Compile the kernel (D-003) | `rustup target add x86_64-unknown-none` (added to `rust-toolchain.toml` in M2.2) |
-| Limine 12.9.4 | M2.2 | Bootloader in the boot image (D-001) | fetched and verified by `cargo xtask` (M2.2); not installed system-wide |
+| Limine 12.9.4 | M2.2 | Bootloader in the boot image (D-001) | downloaded and checksum-verified by `cargo xtask image` into `target/`; not installed system-wide |
+| curl, tar (with xz), cc | M2.2 | Used by `cargo xtask image` to fetch, unpack, and build the Limine host tool | usually preinstalled; `sudo apt install curl xz-utils build-essential` |
 | GDB | M2.4 | Kernel debugging via QEMU's GDB stub | `sudo apt install gdb` |
 | markdownlint-cli2 | any time | Lint Markdown (config in `.markdownlint-cli2.jsonc`) | `npx markdownlint-cli2 "**/*.md"` (requires Node.js) |
 

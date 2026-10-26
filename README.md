@@ -81,6 +81,7 @@ This runs the same checks as CI ([.github/workflows/ci.yml](.github/workflows/ci
 | --- | --- |
 | `kernel/` | Placeholder for the future kernel ([kernel/README.md](kernel/README.md)) |
 | `tools/pharos-cli/` | The `pharos` host-side development CLI |
+| `xtask/` | `cargo xtask`: builds the kernel and boot image ([boot design](docs/architecture/boot.md#build-tool-xtask)) |
 | `docs/` | Project, development, architecture, and security docs ([index](docs/README.md)) |
 | `tests/` | Future cross-crate and QEMU integration tests ([tests/README.md](tests/README.md)) |
 | `scripts/` | Future helper scripts ([scripts/README.md](scripts/README.md)) |

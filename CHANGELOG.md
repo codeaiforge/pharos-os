@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- `cargo xtask` build tool (`xtask/`, no third-party crates): `build` compiles the kernel for `x86_64-unknown-none`; `image` downloads the pinned Limine 12.9.4 release, verifies its SHA-256, and assembles a reproducible hybrid BIOS/UEFI ISO that includes Limine's license notice.
 - `scripts/check.sh`: runs the same checks as CI's `check` job, in order.
 - Initial direction for D-004: capability-based microkernel with `unsafe` confined to a small hardware layer, plus constraints on early kernel code. Final decision due before M2.7.
 - Boot design (`docs/architecture/boot.md`): accepted boot flow, Limine entry contract, image layout, and `xtask` build plan. Nothing boots on `main` yet.

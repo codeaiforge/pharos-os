@@ -57,16 +57,28 @@ Built with `xorriso -as mkisofs` (BIOS and EFI El Torito entries, protective MBR
 
 ### Build tool (`xtask`)
 
-A host Rust crate run as `cargo xtask <command>`. Planned commands (names may change in M2.2):
+A host Rust crate (`xtask/`, standard library only) run as `cargo xtask <command>` through an alias in `.cargo/config.toml`.
 
-| Command | Does |
-| --- | --- |
-| `build` | Build the kernel for `x86_64-unknown-none` (release) |
-| `image` | Fetch and verify the pinned Limine release if needed, then assemble the ISO |
-| `run [--bios]` | Boot the ISO in QEMU (UEFI by default) with serial on stdout |
-| `test` | Boot under UEFI and BIOS headless and report pass/fail (D-009, M2.3) |
+| Command | Status | Does |
+| --- | --- | --- |
+| `build` | Implemented (#10) | Build `pharos-kernel` for `x86_64-unknown-none` (release) |
+| `image [--kernel <ELF>]` | Implemented (#10) | Fetch and verify the pinned Limine release if needed, then assemble `target/xtask/image/pharos.iso`. Uses the built kernel unless `--kernel` is given |
+| `run [--bios]` | Planned (#12) | Boot the ISO in QEMU (UEFI by default) with serial on stdout |
+| `test` | Planned (M2.3, D-009) | Boot under UEFI and BIOS headless and report pass/fail |
 
-`xtask` runs external tools (`cargo`, `xorriso`, `qemu-system-x86_64`) and writes only under `target/`. The `pharos` CLI keeps its read-only scope.
+`image` downloads `limine-binary.tar.xz` with `curl` into `target/xtask/limine-<version>/`, checks it with `sha256sum` against the SHA-256 pinned in `xtask/src/main.rs`, unpacks it with `tar`, and compiles the `limine` host tool with `cc`. A cached archive with the wrong hash, or a fresh download with the wrong hash, stops the build with an error; a bad download is deleted. The ISO also contains Limine's `LICENSE` (`boot/limine/LICENSE`) to meet its BSD-2-Clause notice requirement.
+
+`xtask` runs external tools (`cargo`, `curl`, `sha256sum`, `tar`, `cc`, `xorriso`, and later `qemu-system-x86_64`) and writes only under `target/`. It adds no third-party crates. The `pharos` CLI keeps its read-only scope.
+
+#### Updating the Limine pin
+
+Maintainers only, as a deliberate change:
+
+1. Download `limine-binary.tar.xz` and `limine-binary.tar.xz.sig` for the new version from the official release page (<https://github.com/limine-bootloader/limine/releases>).
+2. Verify the signature in a temporary keyring with the maintainer key registered on GitHub (`curl -s https://github.com/mintsuki.gpg | gpg --import`), and check that its fingerprint is `05D2 9860 D0A0 668A AEFB 9D69 1F3C 021B ECA2 3821`. If the key changed, find out why before continuing.
+3. Check that the archive's SHA-256 matches the digest GitHub shows for the asset.
+4. Update `LIMINE_VERSION` and `LIMINE_SHA256` in `xtask/src/main.rs`, read Limine's changelog for protocol changes, and run the boot tests on UEFI and BIOS.
+5. Record the update in `CHANGELOG.md`.
 
 ### Workspace layout
 
