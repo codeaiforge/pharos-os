@@ -42,7 +42,7 @@ QEMU and cross-compilation tools are **not** required yet. See [setup](docs/deve
 ## Build and run
 
 ```sh
-cargo build --workspace
+cargo build
 cargo run -p pharos-cli -- help
 ```
 
@@ -70,13 +70,10 @@ Exit status: `0` success, `1` the command reported a problem (for example, `doct
 ## Test, format, lint
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-python3 scripts/check-links.py   # Markdown link check
+scripts/check.sh
 ```
 
-These are the checks CI runs (CI also builds rustdoc and tests on Rust 1.85) ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+This runs the same checks as CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)): formatting, Clippy with warnings as errors, build, tests, rustdoc, and Markdown links. The kernel is checked for its bare-metal target, separately from the host crates. CI also builds and tests the host crates on Rust 1.85. The individual commands are in [testing.md](docs/development/testing.md#quality-gates).
 
 ## Repository layout
 

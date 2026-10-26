@@ -13,9 +13,7 @@ This workflow works on any branch and does not depend on hosting. Rules in [AGEN
 
    ```sh
    cargo fmt --all
-   cargo clippy --workspace --all-targets -- -D warnings
-   cargo test --workspace
-   python3 scripts/check-links.py
+   scripts/check.sh
    ```
 
 7. **Review.** Open a pull request with the template; list the commands you ran and their results.
@@ -24,15 +22,17 @@ This workflow works on any branch and does not depend on hosting. Rules in [AGEN
 
 | Task | Command |
 | --- | --- |
-| Build everything | `cargo build --workspace` |
-| Fast type check | `cargo check --workspace` |
+| Build host crates | `cargo build` |
+| Fast type check | `cargo check` |
+| Check the kernel | `cargo clippy -p pharos-kernel --target x86_64-unknown-none -- -D warnings` |
+| Test kernel library logic | `cargo test -p pharos-kernel --lib` |
 | Run the CLI | `cargo run -p pharos-cli -- <command>` |
 | Test one package | `cargo test -p pharos-cli` |
 | Test by name | `cargo test -p pharos-cli doctor` |
 | Format | `cargo fmt --all` |
-| Lint | `cargo clippy --workspace --all-targets -- -D warnings` |
-| Build docs | `cargo doc --workspace --no-deps --open` |
-| Same as CI | `cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo build --workspace --locked && cargo test --workspace --locked && python3 scripts/check-links.py` |
+| Lint host crates | `cargo clippy --workspace --exclude pharos-kernel --all-targets -- -D warnings` |
+| Build docs | `cargo doc --workspace --exclude pharos-kernel --no-deps --open` |
+| Same as CI | `scripts/check.sh` |
 
 ## Adding a package
 

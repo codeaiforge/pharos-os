@@ -40,7 +40,7 @@ The only exception is an explicit authorization from the maintainer for a specif
   - keep each `unsafe` block minimal and wrap it in a safe abstraction;
   - document every block with a `// SAFETY:` comment stating the invariants relied on;
   - explain it in the PR and require review of that code specifically.
-- Code must pass `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
+- Code must pass `scripts/check.sh`, which runs the same checks as CI (listed in [testing.md](docs/development/testing.md#quality-gates)). The kernel is checked for `x86_64-unknown-none` and excluded from host checks; never "fix" a failure by dropping a check.
 - Prefer clear error messages that say what failed and what to do next. Do not `unwrap()` on fallible input outside tests.
 - Keep builds reproducible: commit `Cargo.lock`, use `--locked` in CI, track the stable toolchain via `rust-toolchain.toml`, and avoid nightly features unless a decision record justifies them.
 

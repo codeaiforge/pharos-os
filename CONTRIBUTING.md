@@ -7,8 +7,8 @@ Thank you for your interest. Pharos OS is early-stage systems software, so the b
 Follow [docs/development/setup.md](docs/development/setup.md). In short: install rustup and a C linker, then run:
 
 ```sh
-cargo build --workspace
-cargo test --workspace
+cargo build
+cargo test
 ```
 
 ## Local workflow
@@ -23,14 +23,13 @@ The workflow does not depend on any branch name. See [docs/development/workflow.
 
 ## Quality checks
 
-All of these must pass before review:
+Run the full gate before review; it runs the same checks as CI and stops at the first failure:
 
 ```sh
-cargo fmt --all -- --check                               # formatting
-cargo clippy --workspace --all-targets -- -D warnings    # lints; warnings are errors
-cargo test --workspace                                   # tests
-python3 scripts/check-links.py                           # Markdown links
+scripts/check.sh
 ```
+
+It covers formatting, Clippy with warnings as errors, build, tests, rustdoc, and Markdown links. Host crates and the bare-metal kernel are checked separately; the individual commands are listed in [testing.md](docs/development/testing.md#quality-gates).
 
 Use `cargo fmt --all` to fix formatting. If `markdownlint-cli2` is available, lint docs with `npx markdownlint-cli2 "**/*.md"` (configured in `.markdownlint-cli2.jsonc`); this is optional.
 

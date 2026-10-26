@@ -5,27 +5,35 @@
 All tests run on the host:
 
 ```sh
-cargo test --workspace
+cargo test                          # host crates (default members)
+cargo test -p pharos-kernel --lib   # kernel library logic
 ```
 
 | Package | Location | Covers |
 | --- | --- | --- |
 | `pharos-cli` | `tools/pharos-cli/src/main.rs` | Command parsing and aliases, case sensitivity, missing/unknown/extra arguments, help content, version from Cargo metadata, `info` status labels, usage errors on stderr with exit 2, `doctor` results and exit codes for supported and unsupported hosts, `doctor` never claiming unbuilt capabilities |
 | `pharos-cli` | `tools/pharos-cli/tests/cli.rs` | End-to-end: runs the real binary and checks exit codes as the shell sees them, stdout/stderr separation, and that a non-UTF-8 argument is a usage error rather than a panic |
-| `pharos-kernel` | `kernel/src/lib.rs` | The crate declares itself a placeholder (a smoke test; the crate has no logic yet) |
+| `pharos-kernel` | `kernel/src/lib.rs` | The crate declares itself a placeholder (a smoke test; the crate has no logic yet). Run with `cargo test -p pharos-kernel --lib` |
 
 The CLI is tested through a `run` function that writes to in-memory buffers, and `doctor` takes the OS and architecture as parameters, so tests are deterministic and do not depend on the machine running them.
 
 ## Quality gates
 
-Run before every pull request; CI runs the same commands with `--locked`, plus rustdoc with warnings as errors and a build and test on Rust 1.85:
+Run `scripts/check.sh` before every pull request. It runs these commands, the same ones as CI's `check` job, and stops at the first failure:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --exclude pharos-kernel --all-targets --locked -- -D warnings
+cargo build --workspace --exclude pharos-kernel --locked
+cargo test --workspace --exclude pharos-kernel --locked
+cargo test -p pharos-kernel --lib --locked
+cargo clippy -p pharos-kernel --target x86_64-unknown-none --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude pharos-kernel --no-deps --locked
+RUSTDOCFLAGS="-D warnings" cargo doc -p pharos-kernel --target x86_64-unknown-none --no-deps --locked
 python3 scripts/check-links.py
 ```
+
+Why the split: the kernel targets bare metal (`x86_64-unknown-none`, decision D-003), so it is excluded from host checks and linted for its own target. Its target-independent logic is unit-tested on the host through the library. CI's `msrv` job also builds and tests the host crates and the kernel library on Rust 1.85.
 
 ## Writing tests
 

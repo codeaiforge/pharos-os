@@ -16,7 +16,7 @@ This is the authoritative plan for Pharos OS. It is ordered by dependency, not b
 Every milestone's definition of done includes the following, plus any milestone-specific items:
 
 1. All acceptance criteria are met and demonstrated by the listed validation.
-2. `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` pass locally and in CI.
+2. `scripts/check.sh` passes locally, and CI passes.
 3. Documentation (README, relevant `docs/` pages, `CHANGELOG.md`) reflects the new state honestly.
 4. Any `unsafe` code, new dependency, or privilege change has been reviewed per [AGENTS.md](../../AGENTS.md).
 5. Related decision-log entries are Accepted, and the [threat model](../security/threat-model.md) is updated if trust boundaries changed.

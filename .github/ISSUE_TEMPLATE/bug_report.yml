@@ -19,7 +19,7 @@ body:
     attributes:
       label: Steps to reproduce
       placeholder: |
-        1. cargo build --workspace
+        1. cargo build
         2. cargo run -p pharos-cli -- doctor
     validations:
       required: true

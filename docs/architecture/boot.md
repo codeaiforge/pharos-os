@@ -70,13 +70,14 @@ A host Rust crate run as `cargo xtask <command>`. Planned commands (names may ch
 
 ### Workspace layout
 
-The kernel stays the `pharos-kernel` workspace member. When it becomes `no_std` in M2.2:
+The kernel stays the `pharos-kernel` workspace member. In place since issue #9:
 
-- the root `Cargo.toml` gets `default-members` without the kernel;
-- host checks in CI and docs use `--workspace --exclude pharos-kernel`;
-- the kernel is checked with `cargo clippy -p pharos-kernel --target x86_64-unknown-none -- -D warnings` and built by `xtask`;
-- `rust-toolchain.toml` adds `targets = ["x86_64-unknown-none"]`;
-- the kernel crate overrides the workspace `unsafe_code = "forbid"` lint (P-001), with every `unsafe` block documented.
+- the root `Cargo.toml` sets `default-members` without the kernel;
+- host checks in CI, `scripts/check.sh`, and the docs use `--workspace --exclude pharos-kernel`;
+- the kernel is linted with `cargo clippy -p pharos-kernel --target x86_64-unknown-none -- -D warnings`, and its library logic is unit-tested on the host with `cargo test -p pharos-kernel --lib`;
+- `rust-toolchain.toml` lists `targets = ["x86_64-unknown-none"]`, and `.cargo/config.toml` sets `relocation-model=static` for that target only.
+
+Still to come in M2.2: `xtask` builds the kernel binary; the kernel crate overrides the workspace `unsafe_code = "forbid"` lint (P-001), with every `unsafe` block documented.
 
 ## 4. Security
 

@@ -6,9 +6,7 @@
 
 <!-- List the commands you ran and their results. Do not tick boxes for checks you did not run. -->
 
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace`
+- [ ] `scripts/check.sh` passes (formatting, Clippy, build, tests, rustdoc, links; host crates and kernel)
 - [ ] Documentation updated (README, docs/, CHANGELOG.md) where behavior changed
 
 ## Security review

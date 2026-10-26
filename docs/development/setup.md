@@ -32,27 +32,21 @@ Read the rustup script before running it if you prefer; see <https://rustup.rs/>
 From the repository root:
 
 ```sh
-cargo build --workspace
+cargo build
 ```
 
-Expected: `Finished` with no warnings. The first run may download the toolchain components named in `rust-toolchain.toml`.
+Expected: `Finished` with no warnings. The first run may download the toolchain components and the `x86_64-unknown-none` target named in `rust-toolchain.toml`. Plain `cargo build` and `cargo test` cover the host crates (the workspace's default members); the kernel is checked separately for its bare-metal target.
 
 ## Validate the workspace
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-python3 scripts/check-links.py
+scripts/check.sh
 cargo run -q -p pharos-cli -- doctor
 ```
 
 Expected:
 
-- `fmt` prints nothing and exits 0.
-- `clippy` finishes with no warnings.
-- `test` reports all tests passed for `pharos-cli` (unit and end-to-end) and `pharos-kernel`.
-- The link check reports `0 broken`.
+- `scripts/check.sh` runs each check in turn (formatting, Clippy, build, tests, rustdoc, links) and ends with `All checks passed.`
 - `doctor` shows `PASS` for host OS and architecture on Linux x86-64, `SKIP` for QEMU and inference (they do not exist yet), and `Result: no problems found.` It exits 0.
 
 ## Common failures
@@ -64,7 +58,8 @@ Expected:
 | `feature 'edition2024' is required` or similar edition error | Rust older than 1.85 | `rustup update stable` |
 | `error: 'cargo-fmt' is not installed` | Component missing | `rustup component add rustfmt clippy` |
 | `doctor` shows `WARN` and exits 1 | Host is not Linux x86-64 | Expected on other hosts; the supported environment is Linux x86-64 |
-| `--locked` fails in CI | `Cargo.lock` out of date | Run `cargo build --workspace` locally and include the updated `Cargo.lock` |
+| `--locked` fails in CI | `Cargo.lock` out of date | Run `cargo build` locally and include the updated `Cargo.lock` |
+| `can't find crate for 'core'` with `x86_64-unknown-none` | Kernel target not installed | `rustup target add x86_64-unknown-none` (normally automatic via `rust-toolchain.toml`) |
 
 ## Optional tools for later phases (not required now)
 

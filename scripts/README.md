@@ -6,6 +6,7 @@ This directory is reserved for small helper scripts for development tasks, such 
 
 | Script | Purpose | Requirements |
 | --- | --- | --- |
+| `check.sh` | Runs the same checks as the CI `check` job, in order, and stops at the first failure. Run: `scripts/check.sh` | Rust toolchain from `rust-toolchain.toml`, Python 3 |
 | `check-links.py` | Checks relative links and `#anchors` in all Markdown files; exits 1 if any are broken. Read-only; external URLs are not checked. Run: `python3 scripts/check-links.py` | Python 3.9+ (standard library only) |
 
 Everything else is a plain Cargo command (see [docs/development/workflow.md](../docs/development/workflow.md)).

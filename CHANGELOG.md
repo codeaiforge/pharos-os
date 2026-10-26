@@ -6,11 +6,18 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- `scripts/check.sh`: runs the same checks as CI's `check` job, in order.
 - Initial direction for D-004: capability-based microkernel with `unsafe` confined to a small hardware layer, plus constraints on early kernel code. Final decision due before M2.7.
 - Boot design (`docs/architecture/boot.md`): accepted boot flow, Limine entry contract, image layout, and `xtask` build plan. Nothing boots on `main` yet.
 - Accepted decisions D-001 (Limine, own protocol structures), D-002 (UEFI primary, BIOS secondary), and D-003 (`x86_64-unknown-none` on stable, linker script, `xtask`, ISO images, kernel as workspace member).
 - Boot evaluation for D-001 to D-003 (`docs/architecture/boot-evaluation.md`), with proposed recommendations: Limine, UEFI primary with BIOS secondary, `x86_64-unknown-none` with an `xtask` build tool. Not accepted yet.
 - Prototype evidence for D-001 to D-003 in the boot evaluation: Limine booted a prototype kernel under UEFI and BIOS in QEMU, with reproducible kernel and ISO builds.
+
+### Changed
+
+- Prepared the workspace for a bare-metal kernel (D-003): `default-members` excludes `pharos-kernel`; host checks use `--exclude pharos-kernel`; the kernel is linted for `x86_64-unknown-none` and its library tests run on the host; `rust-toolchain.toml` adds the `x86_64-unknown-none` target; `.cargo/config.toml` sets `relocation-model=static` for that target only.
+- `pharos-kernel` is now `no_std` outside tests. It is still a placeholder and does not boot.
+- Contributor docs, the PR template, and CI use the new commands.
 
 ### Security
 

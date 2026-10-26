@@ -1,0 +1,5 @@
+# Kernel target settings (D-003). These apply only when building for
+# x86_64-unknown-none; host builds are unaffected.
+[target.x86_64-unknown-none]
+# The kernel is linked at fixed higher-half addresses; no position-independent code.
+rustflags = ["-C", "relocation-model=static"]

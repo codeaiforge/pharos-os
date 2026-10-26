@@ -18,7 +18,7 @@ The bootable kernel is planned for Phase 2 ([roadmap](../docs/project/implementa
 - a linker script placing the kernel at `0xffffffff80000000`;
 - an `xtask` build tool and QEMU boot tests with serial output (UEFI and BIOS).
 
-None of these exist yet. Until then this crate must stay a normal host-buildable library so `cargo build --workspace` and `cargo test --workspace` work on a standard Linux machine.
+None of these exist yet. Today the crate is a `no_std` library (outside tests) that builds for `x86_64-unknown-none`. Host checks exclude it (`--exclude pharos-kernel`); its unit tests run on the host with `cargo test -p pharos-kernel --lib`, and it is linted with `cargo clippy -p pharos-kernel --target x86_64-unknown-none`.
 
 ## Rules for this crate
 

@@ -13,8 +13,11 @@ There are no tests here yet. Current tests live in each crate:
 Run them with:
 
 ```sh
-cargo test --workspace
+cargo test                          # host crates (default members)
+cargo test -p pharos-kernel --lib   # kernel library logic, on the host
 ```
+
+Or run the full gate with `scripts/check.sh`.
 
 Note: Cargo only builds `tests/*.rs` automatically for a package whose root contains them. This root is a virtual workspace (no package), so files placed directly here will **not** run until a test package or harness is added. Crate-specific integration tests belong in that crate's own `tests/` directory (for example `tools/pharos-cli/tests/`).
 
