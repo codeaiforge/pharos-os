@@ -104,7 +104,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M1.4 — Formatting, linting, tests, and CI
 
-**Status: Done** — both CI jobs green on `main`. Follow-up: the deliberate-failure check has not been run.
+**Status: Done** — both CI jobs green on `main`. Deliberate-failure check passed on 2026-10-26: CI failed at "Check formatting" on a branch with planted errors ([run 40382690825](https://github.com/codeaiforge/pharos-os/actions/runs/40382690825)).
 
 - **Objective and scope:** Enforce formatting, Clippy with warnings as errors, build, and tests on every push and pull request.
 - **Deliverables:** `.github/workflows/ci.yml` with read-only permissions; workspace lint configuration.
