@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.1 — Architecture and boot-protocol decisions.** Everything in Phases 2–5 is **planned, not implemented**.
+**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.2 — Minimal bootable x86-64 kernel.** Everything in Phases 2–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -39,7 +39,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | Phase | Name | Status |
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
-| 2 | Core System | **Current** (M2.1) |
+| 2 | Core System | **Current** (M2.2) |
 | 3 | AI Agent Platform | Planned |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
@@ -148,7 +148,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.1 — Architecture and boot-protocol decisions
 
-**Status: Current** — gate passed 2026-10-26 (D-001, D-002, D-003 Accepted; design in [boot.md](../architecture/boot.md)). Remaining deliverable: initial D-004 direction (#5).
+**Status: Done** — gate passed 2026-10-26: D-001, D-002, D-003 Accepted (design in [boot.md](../architecture/boot.md)); initial D-004 direction recorded (capability-based microkernel, final decision before M2.7).
 
 - **Objective and scope:** Decide how the kernel boots and is built, and set an initial direction for kernel architecture, before writing kernel code.
 - **Deliverables:** Accepted decision records D-001, D-002, D-003; initial direction for D-004; `docs/architecture/boot.md`; a throwaway prototype if needed to gather evidence.
@@ -162,9 +162,9 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.2 — Minimal bootable x86-64 kernel
 
-**Status: Planned.**
+**Status: Current.**
 
-- **Objective and scope:** Convert the `kernel` crate (or add a new one, per D-003) into a `no_std` kernel that reaches its entry point in QEMU and halts cleanly.
+- **Objective and scope:** Convert the `kernel` crate into a `no_std` kernel that boots via Limine and reaches its entry point in QEMU and halts cleanly, following [boot.md](../architecture/boot.md) and the D-004 constraints on early kernel code.
 - **Deliverables:** Kernel entry point; panic handler; build configuration; reproducible bootable image creation without root privileges.
 - **Prerequisites:** M2.1.
 - **Acceptance criteria:** A single documented command builds the image; QEMU reaches the kernel entry point and halts or exits with a known status; host crates still build and test normally.
@@ -577,7 +577,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-001 | Bootloader and boot protocol | M2.1 | **Accepted:** Limine, Limine protocol, own protocol structures |
 | D-002 | BIOS and/or UEFI | M2.1 | **Accepted:** UEFI primary, BIOS secondary |
 | D-003 | Rust target, linker, build strategy | M2.1 | **Accepted:** `x86_64-unknown-none` on stable, linker script, `xtask`, ISO, kernel as workspace member |
-| D-004 | Kernel architecture and privilege boundaries | M2.1 (direction), M2.7 | TCB size, isolation, IPC cost, complexity |
+| D-004 | Kernel architecture and privilege boundaries | M2.1 (direction), M2.7 | **Direction:** capability-based microkernel; final decision open |
 | D-005 | Memory-management strategy | M2.5 | Correctness, fragmentation, `unsafe` surface |
 | D-006 | Interrupt controller and timer | M2.4, M2.6 | QEMU/hardware support, SMP readiness |
 | D-007 | Filesystem and persistent storage | M2.8 | Crash consistency, simplicity, host tooling |
@@ -589,4 +589,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. The current milestone is **M2.1 — Architecture and boot-protocol decisions**. Its acceptance criteria are listed above; the first measurable kernel result follows at M2.3 (reproducible QEMU boot with observable serial output, tested in CI).
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26. The current milestone is **M2.2 — Minimal bootable x86-64 kernel**; the first measurable kernel result follows at M2.3 (reproducible QEMU boot with observable serial output, tested in CI).

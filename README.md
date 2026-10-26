@@ -7,7 +7,7 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 
 ## Status
 
-**v0.1.0 — Phase 1 (Foundation) complete.** The next milestone is M2.1, architecture and boot-protocol decisions. See the [implementation roadmap](docs/project/implementation-roadmap.md).
+**v0.1.0 — Phase 1 (Foundation) complete.** Boot decisions are made (M2.1, see [boot design](docs/architecture/boot.md)); the current milestone is M2.2, a minimal bootable kernel. See the [implementation roadmap](docs/project/implementation-roadmap.md).
 
 | Area | Status |
 | --- | --- |

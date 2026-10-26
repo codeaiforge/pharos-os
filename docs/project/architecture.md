@@ -55,7 +55,7 @@ Agents start with no authority. The user or a policy grants specific capabilitie
 
 ### Kernel style
 
-Whether the kernel is a microkernel, a hybrid, or a monolithic kernel with strong internal boundaries is **not decided** (see decision D-004). The boundaries above lean toward keeping drivers and services out of the kernel where practical, but this must be evaluated against complexity and performance in Phase 2.
+The final kernel style is **not decided** (decision D-004, due before M2.7). The **initial direction** (recorded at M2.1) is a **capability-based microkernel**: the kernel keeps address spaces, threads and scheduling, IPC, capabilities, and interrupt delivery, while drivers, filesystems, networking, and AI services run in user space. Inside the kernel, `unsafe` code is confined to a small hardware layer. The direction, the evidence that would change it, and the constraints it places on early kernel code are in the [decision log](decision-log.md#d-004-kernel-architecture-and-privilege-boundaries).
 
 ## Keeping this document accurate
 

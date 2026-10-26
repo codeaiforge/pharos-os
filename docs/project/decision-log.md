@@ -132,12 +132,44 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-004: Kernel architecture and privilege boundaries
 
-- **Status:** Open
+- **Status:** Open — initial direction recorded 2026-10-26 (M2.1). The final decision is due before M2.7.
 - **Needed by:** initial direction at M2.1; final before M2.7
 
-**Options.** Microkernel; hybrid; monolithic with strict internal module boundaries.
+**Options.**
+
+- **Microkernel** (reference point: seL4). The kernel provides only address spaces, threads and scheduling, IPC, capabilities, and interrupt delivery. Drivers, filesystems, networking, and AI services run as user-space processes.
+- **Hybrid.** A microkernel structure with selected services (for example a filesystem or network stack) moved into the kernel for performance.
+- **Monolithic with strict internal module boundaries.** One privileged address space. Isolation comes from module interfaces and Rust's type system. A variant confines all `unsafe` code to a small core and writes the rest of the kernel in safe Rust (reference point: the Asterinas "framekernel").
 
 **Evaluation criteria.** TCB size; isolation of drivers and AI services; IPC performance; implementation complexity for a small team; testability in QEMU.
+
+**Initial direction: capability-based microkernel, with `unsafe` confined to a small hardware layer inside it.**
+
+Rationale:
+
+- **Security goals match.** The project's core requirements are untrusted agents, inference isolated from privileged code, and no ambient authority. A microkernel enforces these with hardware address-space isolation, not just module discipline: a bug in a driver, filesystem, or inference service does not compromise the kernel.
+- **Capabilities must be kernel-enforced anyway.** D-012 needs unforgeable, revocable access rights. A capability-based IPC kernel provides that as its central mechanism instead of adding it later.
+- **Smallest TCB to review.** A small team can realistically review a small kernel, and all of the kernel's `unsafe` code.
+- **Safe/unsafe split inside the kernel.** Borrowing the framekernel idea, hardware access (`asm`, port I/O, page tables, CPU tables) lives in one small module layer with safe interfaces, keeping the reviewed `unsafe` surface minimal.
+- **Low cost now.** M2.2 to M2.6 (boot, interrupts, memory, timers, scheduling) are needed by every option. The direction mainly shapes how that code is structured, so committing to it early costs little.
+
+Known costs: IPC overhead on hot paths (notably moving large model data to and from the inference service, which will need shared-memory capabilities, not message copies); more user-space infrastructure before the system is useful; harder debugging across processes.
+
+**Evidence that would change the direction** (to be gathered by M2.7):
+
+- IPC round-trip or shared-memory setup costs, measured in QEMU against a budget set in the M2.7 design document, that cannot be met for the planned inference data paths;
+- user-space driver support (IRQ forwarding, I/O port and MMIO grants, DMA restrictions) proving too complex for the team at M2.9 scale. That would argue for a hybrid with specific, documented in-kernel drivers;
+- a capability model that cannot express the agent permissions in D-012 without large in-kernel policy.
+
+**Constraints on M2.2–M2.6 code**, so that the final decision is not boxed in:
+
+1. Keep architecture-specific and `unsafe` code in a small hardware layer (for example `arch::x86_64`: port I/O, GDT/IDT, page tables, interrupt entry) with safe interfaces. Other kernel modules use those interfaces.
+2. In-kernel drivers are limited to what the kernel itself needs: serial (debug output), interrupt controller, and timer. No storage, network, or display drivers in the kernel before D-004 is final.
+3. Model address spaces as first-class objects from M2.5 (no single-global-address-space assumptions), and design the frame allocator so memory regions can later be granted and revoked (future memory capabilities).
+4. Route interrupts through a dispatch layer so that IRQs can later be forwarded to user-space drivers.
+5. Keep the scheduler generic over threads; do not assume all threads run in the kernel.
+6. Avoid kernel-wide mutable global state, except documented singletons in the hardware layer; pass explicit handles where practical.
+7. No filesystem, network-stack, or agent-related code in the kernel before D-004 is final.
 
 ### D-005: Memory-management strategy
 
