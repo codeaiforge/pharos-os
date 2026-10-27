@@ -89,7 +89,7 @@ The kernel stays the `pharos-kernel` workspace member. In place since issue #9:
 - the kernel is linted with `cargo clippy -p pharos-kernel --target x86_64-unknown-none -- -D warnings`, and its library logic is unit-tested on the host with `cargo test -p pharos-kernel --lib`;
 - `rust-toolchain.toml` lists `targets = ["x86_64-unknown-none"]`, and `.cargo/config.toml` sets `relocation-model=static` for that target only.
 
-Still to come in M2.2: `xtask` builds the kernel binary; the kernel crate overrides the workspace `unsafe_code = "forbid"` lint (P-001), with every `unsafe` block documented.
+Since issue #11: `cargo xtask build` builds the kernel binary. The kernel crate has its own lint table instead of inheriting `unsafe_code = "forbid"` (P-001): `unsafe_code = "deny"`, allowed only in `arch::x86_64` and `limine`, plus Clippy's `undocumented_unsafe_blocks = "deny"`. The crate has a library (host-testable logic and the hardware layer) and a binary (entry point and Limine requests); `build.rs` passes `linker.ld` to the binary only when building for `x86_64-unknown-none`.
 
 ## 4. Security
 

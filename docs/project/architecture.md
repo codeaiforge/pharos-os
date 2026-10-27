@@ -2,17 +2,21 @@
 
 This document has two parts: what is **implemented** today, and the **proposed** architecture. The proposed architecture is a direction, not an approved design; the decisions it depends on are open in the [decision log](decision-log.md).
 
-## Implemented architecture (Phase 1)
+## Implemented architecture
 
 ```text
-Cargo workspace (host, stable Rust, edition 2024)
-├── tools/pharos-cli   binary `pharos` — host-side CLI, std only, no dependencies
-└── kernel             library `pharos_kernel` — host-side placeholder, std, no OS functionality
+Cargo workspace (stable Rust, edition 2024)
+├── tools/pharos-cli   binary `pharos` (host): read-only development CLI, std only
+├── xtask              binary `xtask` (host): builds the kernel and the boot ISO, std only
+└── kernel             `pharos-kernel` for x86_64-unknown-none:
+                       ├── library (no_std): Limine protocol structures, boot-info logic,
+                       │                     x86-64 hardware layer (serial, halt)
+                       └── binary (no_main): entry point, Limine requests
 ```
 
-- The two packages are independent; the CLI does not depend on the kernel crate. A host tool should not link the future `no_std` kernel.
-- Neither package uses `unsafe` (forbidden by workspace lints) or third-party dependencies.
-- Nothing boots. There is no kernel, no target configuration, and no QEMU integration.
+- **Kernel (M2.2, minimal):** Limine boots it on UEFI and BIOS. It checks the protocol revision, reads the memory map and other boot information, reports them over COM1, and halts. It has no interrupts, memory management, scheduling, processes, or drivers beyond serial. Booting has been verified manually in QEMU; automated boot tests are planned (#12, M2.3).
+- `unsafe` is forbidden in host crates. In the kernel it is denied by default and allowed only in the hardware layer and the Limine protocol module, each block documented (enforced by lints).
+- No package has third-party dependencies. The CLI and `xtask` do not depend on the kernel crate.
 
 ## Proposed architecture (planned)
 

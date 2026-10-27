@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- Minimal `no_std` kernel (`pharos-kernel`): Limine boots it on UEFI and BIOS (verified manually in QEMU); it checks base revision 6, reads the memory map, direct-map offset, bootloader info, and firmware type, reports them on COM1, and halts. Limine protocol structures are written in the project; all hardware `unsafe` code is in `arch::x86_64`.
+- Kernel lint rules: `unsafe` denied except in the hardware layer and the Limine protocol module; every `unsafe` block needs a `// SAFETY:` comment (Clippy `undocumented_unsafe_blocks`).
 - `cargo xtask` build tool (`xtask/`, no third-party crates): `build` compiles the kernel for `x86_64-unknown-none`; `image` downloads the pinned Limine 12.9.4 release, verifies its SHA-256, and assembles a reproducible hybrid BIOS/UEFI ISO that includes Limine's license notice.
 - `scripts/check.sh`: runs the same checks as CI's `check` job, in order.
 - Initial direction for D-004: capability-based microkernel with `unsafe` confined to a small hardware layer, plus constraints on early kernel code. Final decision due before M2.7.

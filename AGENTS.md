@@ -34,8 +34,9 @@ The only exception is an explicit authorization from the maintainer for a specif
 
 ## 5. Rust standards
 
-- Use safe Rust by default. The workspace currently forbids `unsafe` (`unsafe_code = "forbid"` in `Cargo.toml`).
-- When `unsafe` becomes necessary (expected in the kernel from Phase 2):
+- Use safe Rust by default. Host crates forbid `unsafe` (`unsafe_code = "forbid"` in the workspace `Cargo.toml`).
+- The kernel denies `unsafe` by default (`kernel/Cargo.toml`) and allows it only in the hardware layer (`kernel/src/arch/x86_64.rs`) and the Limine protocol module (`kernel/src/limine.rs`). Clippy's `undocumented_unsafe_blocks` lint fails the build for any `unsafe` block without a `// SAFETY:` comment. Adding a module to that list is a reviewed design change.
+- When `unsafe` is necessary:
   - allow it only in the specific crate or module that needs it, never workspace-wide;
   - keep each `unsafe` block minimal and wrap it in a safe abstraction;
   - document every block with a `// SAFETY:` comment stating the invariants relied on;

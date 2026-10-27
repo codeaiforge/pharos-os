@@ -1,11 +1,19 @@
 [package]
 name = "pharos-kernel"
-description = "Temporary host-side architectural placeholder for the future Pharos OS kernel. Not bootable."
+description = "Pharos OS kernel: a minimal no_std x86-64 kernel booted by Limine (M2.2)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[lints]
-workspace = true
+# The kernel cannot inherit the workspace's `unsafe_code = "forbid"` (P-001):
+# hardware access needs `unsafe`. It is denied by default here and allowed only
+# in the hardware layer (`arch::x86_64`) and the Limine protocol module (D-004).
+# Every unsafe block must carry a `// SAFETY:` comment (enforced by Clippy).
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
