@@ -83,7 +83,7 @@ Everything below is **planned**; none of it is implemented.
 
 ### Kernel/user boundary (designed for M2.7)
 
-Designed in [syscalls-ipc.md](../architecture/syscalls-ipc.md) and [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism). Rows marked **(tested)** are implemented and covered by QEMU tests (#38–#40); the rest are still planned. Refined when M2.7 closes.
+Designed in [syscalls-ipc.md](../architecture/syscalls-ipc.md) and [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism). Rows marked **(tested)** are implemented and covered by QEMU tests (#38–#41); the rest are still planned. Refined when M2.7 closes.
 
 | Threat | Planned mitigation |
 | --- | --- |
@@ -91,8 +91,8 @@ Designed in [syscalls-ipc.md](../architecture/syscalls-ipc.md) and [D-014](../pr
 | A process reaches another process's memory | **(tested)** Separate user halves per process; the kernel decides all user mappings. A process reading a page only another process maps is killed (not-present fault) |
 | A malicious system-call argument corrupts the kernel | **(tested)** Every argument is checked, and the kernel never dereferences user addresses: it copies through the direct map after validating range, mapping, and access. Unknown calls return errors. The `syscalls` test kernel passes kernel, unmapped, page-crossing, overflowing, and oversized buffers, unknown numbers, and bad handles. `syscall::decode` is fuzzed on the host with 200,000 random calls |
 | `sysret` to a non-canonical address faults in ring 0 (CVE-2012-0217) | **(tested)** The last user page is never mapped, and the return address is checked before `sysret` (falling back to `iretq`). A `syscall` at the very end of the page below returns, then faults in user mode, killing only the process. This passed under TCG and under KVM on an Intel CPU |
-| A process uses an object it was not given | Capabilities only, with per-process handle tables and rights checked on every call (**tested**: handle 0, unknown and deleted handles, and missing rights are rejected). Delegation only with `GRANT`, and revocation through the derivation tree (planned, #41) |
-| A process exhausts kernel memory through IPC | Synchronous IPC: one 256-byte buffer and one wait per thread; process creation is kernel-only |
+| A process uses an object it was not given | **(tested)** Capabilities only, with per-process handle tables and rights checked on every call. Delegation is possible only with `GRANT` and can only narrow rights, and revocation goes through the derivation tree. The `ipc` test kernel passes a console capability with `WRITE` only, sees the receiver unable to pass it on, revokes it, and sees the receiver's next use fail with `REVOKED`. A process cannot send on a receive-only endpoint, or receive on a send-only one |
+| A process exhausts kernel memory through IPC | **(tested in part)** Synchronous IPC: one 256-byte message and one wait per thread, in the endpoint queue; process creation is kernel-only. The `ipc` test checks that no thread is left queued after the exchanges. Limit: a server that never receives blocks its clients forever (no timeouts yet) |
 | A process crashes the kernel with a fault or a privileged instruction | **(tested)** Exceptions from user mode kill the process, not the kernel; `cli`, `hlt`, and `mov cr3` in user mode are killed with general-protection faults, and the other processes keep running |
 | Speculative execution leaks kernel memory (Meltdown class) | Not mitigated in M2.7 (no KPTI); revisit before real-hardware use |
 

@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.7, #37). It follows [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries) (capability-based microkernel), the [D-012 direction](../project/decision-log.md#d-012-agent-sandboxing-tool-permissions-and-network-isolation) (kernel-enforced capabilities), and [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism) (IPC model and system-call mechanism).
-- **Implementation:** per-process address spaces (#38) and ring 3 execution with user faults killing the process (#39) are **implemented** (`process::load`, `process::start`, `process::spawn`). So are the system-call entry and the calls `exit`, `yield`, `debug_write`, and `delete`, with capability tables (#40). IPC (`send`, `receive`) and `revoke` are **planned** (#41); until then they return `UNKNOWN_CALL`.
+- **Implementation:** per-process address spaces (#38) and ring 3 execution with user faults killing the process (#39) are **implemented** (`process::load`, `process::start`, `process::spawn`). So are the system-call entry and the calls `exit`, `yield`, `debug_write`, and `delete`, with capability tables (#40). So are IPC endpoints with `send` and `receive`, capability passing, and `revoke` (#41). Every M2.7 interface in this document is now implemented.
 
 ## 2. Context
 
@@ -101,6 +101,8 @@ The prototype for D-004 showed that QEMU's default CPU under TCG, which CI uses,
 - `delete(handle)` removes a handle from the caller's table. It does not affect derived capabilities; use `revoke` for that.
 
 ### IPC (D-014): synchronous endpoints
+
+Implemented in `ipc` (endpoint queues, host-tested) and `syscall` (#41). A blocked thread leaves the ready queue through `sched::block_current` and returns through `sched::wake`. A message handed to a waiting receiver goes into that process's inbox (`process::Process::inbox`). `receive` checks the buffer (writable user pages) and a free handle before it takes a message, so none is lost to a bad buffer.
 
 - **Messages:** at most **256 bytes** of data plus at most one capability. Large data will use shared-memory capabilities (a later memory object), not messages.
 - **`send(endpoint, buffer, len, cap, rights)`:**
@@ -202,6 +204,11 @@ Planned test kernels (QEMU under TCG, run in CI):
 - Multiple threads per process, and a spawn system call (with a process capability).
 - Memory capabilities for shared memory (the inference data path; D-004's 100 µs grant budget).
 - Interrupt capabilities for user-space drivers (M2.9, D-008).
-- `call`/reply for faster round trips, if measurements need them.
+- **The IPC round trip meets the D-004 budget at the limit:** 1.97–2.00 µs against at most 2 µs (KVM, release build, i9-10900K, 100,000 round trips). Candidates if later work makes it slower:
+  - a combined `call`/reply (one system call and one block per side instead of two);
+  - PCID, so CR3 switches keep user TLB entries;
+  - fewer lock acquisitions on the IPC path.
+
+  Global kernel pages (#41) already cut it from about 2.9 µs to 2.65 µs in the 1,000-round-trip test (which includes starting the process).
 - SMP: per-CPU scratch slots (`swapgs`), and locking for mappings during copies.
 - KPTI or other mitigations for speculative-execution attacks on real hardware.

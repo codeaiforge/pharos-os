@@ -16,6 +16,7 @@ M2.6 asks for several kernel tasks running interleaved, a preemptive scheduler, 
 - `sched::init()` turns the running code (on the kernel stack) into task 0. It needs the heap.
 - `sched::spawn(closure)` creates a task with its own stack and queues it behind the ready tasks; IDs count up from 1. The task runs the closure with interrupts enabled and exits when it returns.
 - `sched::yield_now()` lets the next ready task run and returns when this task's turn comes again (at once if nothing else is ready). `sched::exit()` ends the running task.
+- `sched::block_current()` takes the running task off the CPU until `sched::wake(id)` makes it ready again (IPC, #41). The caller records its ID where the waker finds it, with interrupts disabled until it blocks, so a wake cannot be missed.
 - `sched::sleep(duration)` blocks the task for at least `duration`, rounded up to whole ticks plus one (the next tick may be moments away). Before preemption is enabled it busy-waits instead.
 - Every switch also loads the incoming thread's kernel stack top into TSS `rsp0` (#39), the stack for interrupts and exceptions that arrive while it runs in user mode. A user thread enters ring 3 with `context::enter_user` (via `process::start`); its preemption works the same way, inside the timer handler on its kernel stack.
 - `sched::spawn_in(space, closure)` runs the task in a process address space (#38). The switch loads that space's root into CR3, and back to the kernel root for kernel tasks. The task's context owns the space and destroys it when the task is reaped.

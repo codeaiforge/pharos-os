@@ -116,4 +116,74 @@ programs! {
      4:  xor eax, eax
          mov edi, 0x600d
          syscall";
+    Ping, pharos_up_ping, pharos_up_ping_end,
+        "IPC ping: `rdi` times, sends an 8-byte counter on handle 1 and \
+         receives on handle 2; each reply must be the counter plus one. Exits \
+         with 0, with `0xbad0` plus the status of a failed call, or with \
+         `0xbadd` for a wrong reply.",
+        "mov r12, rdi
+         xor r14d, r14d
+         sub rsp, 256
+         mov r13, rsp
+     2:  test r12, r12
+         jz 3f
+         mov [r13], r14
+         mov eax, 3
+         mov edi, 1
+         mov rsi, r13
+         mov edx, 8
+         xor r10d, r10d
+         xor r8d, r8d
+         syscall
+         test rax, rax
+         jnz 4f
+         mov eax, 4
+         mov edi, 2
+         mov rsi, r13
+         mov edx, 256
+         syscall
+         test rax, rax
+         jnz 4f
+         lea rax, [r14 + 1]
+         cmp [r13], rax
+         jne 5f
+         inc r14
+         dec r12
+         jmp 2b
+     3:  xor eax, eax
+         xor edi, edi
+         syscall
+     4:  lea rdi, [rax + 0xbad0]
+         xor eax, eax
+         syscall
+     5:  mov edi, 0xbadd
+         xor eax, eax
+         syscall";
+    Pong, pharos_up_pong, pharos_up_pong_end,
+        "IPC pong: forever, receives on handle 1, adds one to the first 8 \
+         bytes, and sends them back on handle 2. Exits with `0xbad0` plus the \
+         status of a failed call.",
+        "sub rsp, 256
+         mov r13, rsp
+     2:  mov eax, 4
+         mov edi, 1
+         mov rsi, r13
+         mov edx, 256
+         syscall
+         test rax, rax
+         jnz 4f
+         inc qword ptr [r13]
+         mov eax, 3
+         mov edi, 2
+         mov rsi, r13
+         mov edx, 8
+         xor r10d, r10d
+         xor r8d, r8d
+         syscall
+         test rax, rax
+         jnz 4f
+         jmp 2b
+     4:  lea rdi, [rax + 0xbad0]
+         xor eax, eax
+         syscall";
 }

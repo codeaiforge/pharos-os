@@ -1,12 +1,18 @@
 //! Capabilities (D-012 direction, syscalls-ipc.md): a reference to a kernel
 //! object plus rights, held in a per-process table and named by handle.
 //!
-//! Issue #40 adds the table, the debug-console object, and `delete`; IPC
-//! endpoints, granting, and revocation through the derivation tree follow
-//! in #41.
+//! Granting a capability over IPC derives a child with the same or fewer
+//! rights. The derivation tree makes revocation possible without the
+//! holders' cooperation: [`Capability::revoke`] marks every descendant
+//! revoked, and every lookup checks the mark (lazy invalidation).
 
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::ipc::Endpoint;
+use crate::mm::raw::IrqMutex;
 
 /// Index into a process's capability table; 0 is never valid.
 pub type Handle = u64;
@@ -27,23 +33,86 @@ pub const WRITE: Rights = 1 << 3;
 pub const MAX_HANDLES: usize = 64;
 
 /// A kernel object that capabilities refer to.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum Object {
     /// The kernel's serial debug console.
     DebugConsole,
+    /// An IPC endpoint.
+    Endpoint(Arc<Endpoint>),
 }
 
-/// A capability: an object and the rights its holder has on it.
-#[derive(Debug)]
+impl fmt::Debug for Object {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DebugConsole => f.write_str("DebugConsole"),
+            Self::Endpoint(e) => write!(f, "Endpoint({:p})", Arc::as_ptr(e)),
+        }
+    }
+}
+
+/// A capability: an object, the rights its holder has on it, and the
+/// capabilities derived from it.
 pub struct Capability {
     object: Object,
     rights: Rights,
+    revoked: AtomicBool,
+    children: IrqMutex<Vec<Weak<Capability>>>,
+}
+
+impl fmt::Debug for Capability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Capability")
+            .field("object", &self.object)
+            .field("rights", &self.rights)
+            .field("revoked", &self.is_revoked())
+            .finish()
+    }
 }
 
 impl Capability {
     /// A new (original) capability.
     pub fn new(object: Object, rights: Rights) -> Arc<Self> {
-        Arc::new(Self { object, rights })
+        Arc::new(Self {
+            object,
+            rights,
+            revoked: AtomicBool::new(false),
+            children: IrqMutex::new(Vec::new()),
+        })
+    }
+
+    /// A child capability for the same object with this one's rights
+    /// limited to `mask`, recorded in the derivation tree.
+    pub fn derive(self: &Arc<Self>, mask: Rights) -> Arc<Self> {
+        let child = Self::new(self.object.clone(), self.rights & mask);
+        if self.is_revoked() {
+            child.revoked.store(true, Ordering::Relaxed);
+        }
+        let mut children = self.children.lock();
+        children.retain(|c| c.strong_count() > 0);
+        children.push(Arc::downgrade(&child));
+        child
+    }
+
+    /// Revokes every capability derived from this one, at any depth, and
+    /// returns how many were newly revoked. This one stays valid.
+    pub fn revoke(&self) -> usize {
+        let mut pending: Vec<Weak<Capability>> = core::mem::take(&mut *self.children.lock());
+        let mut count = 0;
+        while let Some(child) = pending.pop() {
+            let Some(child) = child.upgrade() else {
+                continue;
+            };
+            if !child.revoked.swap(true, Ordering::Relaxed) {
+                count += 1;
+            }
+            pending.append(&mut child.children.lock());
+        }
+        count
+    }
+
+    /// True once an ancestor revoked it.
+    pub fn is_revoked(&self) -> bool {
+        self.revoked.load(Ordering::Relaxed)
     }
 
     /// The object referred to.
@@ -62,6 +131,8 @@ impl Capability {
 pub enum CapError {
     /// No capability under this handle.
     InvalidHandle,
+    /// The capability was revoked.
+    Revoked,
     /// The capability lacks a needed right.
     MissingRight,
     /// The table holds [`MAX_HANDLES`] capabilities already.
@@ -102,6 +173,9 @@ impl CapTable {
     /// The capability under `handle`, if it has every right in `needed`.
     pub fn get(&mut self, handle: Handle, needed: Rights) -> Result<Arc<Capability>, CapError> {
         let cap = self.slot(handle)?.as_ref().ok_or(CapError::InvalidHandle)?;
+        if cap.is_revoked() {
+            return Err(CapError::Revoked);
+        }
         if cap.rights & needed != needed {
             return Err(CapError::MissingRight);
         }
@@ -158,7 +232,10 @@ mod tests {
         assert_eq!(t.get(3, 0).unwrap_err(), CapError::InvalidHandle);
         assert_eq!(t.get(u64::MAX, 0).unwrap_err(), CapError::InvalidHandle);
         assert_eq!(t.get(2, WRITE).unwrap_err(), CapError::MissingRight);
-        assert_eq!(t.get(1, WRITE).unwrap().object(), &Object::DebugConsole);
+        assert!(matches!(
+            t.get(1, WRITE).unwrap().object(),
+            Object::DebugConsole
+        ));
         assert_eq!(t.get(1, WRITE | GRANT).unwrap_err(), CapError::MissingRight);
     }
 
@@ -174,5 +251,59 @@ mod tests {
             t.insert(console(0)).unwrap();
         }
         assert_eq!(t.insert(console(0)), Err(CapError::TableFull));
+    }
+
+    #[test]
+    fn derive_limits_rights() {
+        let parent = console(WRITE | GRANT);
+        let child = parent.derive(WRITE | SEND);
+        assert_eq!(child.rights(), WRITE, "never more than the parent");
+        assert!(!child.is_revoked());
+    }
+
+    #[test]
+    fn revoke_reaches_every_descendant_and_spares_the_holder() {
+        let root = console(WRITE | GRANT);
+        let a = root.derive(WRITE | GRANT);
+        let b = a.derive(WRITE);
+        let c = root.derive(WRITE);
+        let mut t = CapTable::new();
+        let hb = t.insert(b.clone()).unwrap();
+        assert_eq!(root.revoke(), 3);
+        assert!(a.is_revoked() && b.is_revoked() && c.is_revoked());
+        assert!(!root.is_revoked(), "the revoker keeps its capability");
+        assert_eq!(t.get(hb, WRITE).unwrap_err(), CapError::Revoked);
+        assert_eq!(
+            t.delete(hb),
+            Ok(()),
+            "a revoked handle can still be deleted"
+        );
+        assert_eq!(root.revoke(), 0, "nothing left to revoke");
+        let d = root.derive(WRITE);
+        assert!(!d.is_revoked(), "new grants after a revocation work");
+    }
+
+    #[test]
+    fn revoking_a_middle_node_spares_siblings_and_ancestors() {
+        let root = console(WRITE | GRANT);
+        let a = root.derive(WRITE | GRANT);
+        let sibling = root.derive(WRITE);
+        let b = a.derive(WRITE);
+        assert_eq!(a.revoke(), 1);
+        assert!(b.is_revoked() && !a.is_revoked() && !sibling.is_revoked());
+        let from_revoked = b.derive(WRITE);
+        assert!(
+            from_revoked.is_revoked(),
+            "children of revoked capabilities are revoked"
+        );
+    }
+
+    #[test]
+    fn dropped_children_are_skipped() {
+        let root = console(WRITE | GRANT);
+        drop(root.derive(WRITE));
+        let kept = root.derive(WRITE);
+        assert_eq!(root.revoke(), 1);
+        assert!(kept.is_revoked());
     }
 }

@@ -9,7 +9,9 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::arch::x86_64::{disable_interrupts, enable_interrupts, interrupts_enabled};
+use crate::arch::x86_64::interrupts_enabled;
+#[cfg(target_os = "none")]
+use crate::arch::x86_64::{disable_interrupts, enable_interrupts};
 use crate::sync::{SpinGuard, SpinLock};
 
 use super::heap::{HEAP_BITMAP_WORDS, Heap};
@@ -49,7 +51,10 @@ impl<T> IrqMutex<T> {
     }
 
     pub fn lock(&self) -> IrqMutexGuard<'_, T> {
-        let interrupts_were_enabled = interrupts_enabled();
+        // Host unit tests run in user mode, where `cli` would fault and no
+        // kernel interrupts exist: there this is a plain spin lock.
+        let interrupts_were_enabled = cfg!(target_os = "none") && interrupts_enabled();
+        #[cfg(target_os = "none")]
         disable_interrupts();
         let guard = self.lock.lock();
         HELD.fetch_add(1, Ordering::Relaxed);
@@ -91,6 +96,7 @@ impl<T> Drop for IrqMutexGuard<'_, T> {
         drop(self.guard.take());
         HELD.fetch_sub(1, Ordering::Relaxed);
         if self.interrupts_were_enabled {
+            #[cfg(target_os = "none")]
             enable_interrupts();
         }
     }

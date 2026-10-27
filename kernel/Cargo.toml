@@ -99,3 +99,7 @@ harness = false
 [[test]]
 name = "syscalls"
 harness = false
+
+[[test]]
+name = "ipc"
+harness = false

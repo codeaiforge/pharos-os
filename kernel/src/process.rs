@@ -95,6 +95,9 @@ pub fn load(image: &[u8]) -> Result<AddressSpace, ProcessError> {
 pub struct Process {
     /// The process's capabilities.
     pub caps: IrqMutex<CapTable>,
+    /// A message handed over by a sender while this process waited in
+    /// `receive` (#41).
+    pub inbox: IrqMutex<Option<crate::ipc::Message>>,
 }
 
 /// Live processes by task ID (one thread each).
@@ -121,6 +124,7 @@ pub fn start(
     }
     let process = Arc::new(Process {
         caps: IrqMutex::new(table),
+        inbox: IrqMutex::new(None),
     });
     // Register the process before its thread can run (no preemption here).
     without_interrupts(|| {
@@ -149,6 +153,11 @@ pub fn current() -> Option<Arc<Process>> {
     PROCESSES.lock().get(&id).cloned()
 }
 
+/// The process whose thread is task `id`.
+pub fn by_id(id: TaskId) -> Option<Arc<Process>> {
+    PROCESSES.lock().get(&id).cloned()
+}
+
 /// Live processes.
 pub fn count() -> usize {
     PROCESSES.lock().len()
@@ -168,6 +177,8 @@ fn end_current() -> ! {
 pub struct Exit {
     pub task: TaskId,
     pub code: u64,
+    /// Uptime when it exited.
+    pub at: core::time::Duration,
 }
 
 // ponytail: exits, kills, and debug output are kept in full for tests and
@@ -176,9 +187,14 @@ static EXITS: IrqMutex<Vec<Exit>> = IrqMutex::new(Vec::new());
 static DEBUG_OUTPUT: IrqMutex<Vec<(TaskId, Vec<u8>)>> = IrqMutex::new(Vec::new());
 
 /// The `exit` system call: records the code and ends the process.
+#[cfg_attr(not(target_os = "none"), allow(dead_code))] // used by the kernel-only handler
 pub(crate) fn exit_current(code: u64) -> ! {
     let task = sched::current_id().unwrap_or(0);
-    EXITS.lock().push(Exit { task, code });
+    EXITS.lock().push(Exit {
+        task,
+        code,
+        at: crate::time::uptime(),
+    });
     end_current()
 }
 
@@ -189,6 +205,7 @@ pub fn exits() -> Vec<Exit> {
 
 /// The `debug_write` system call's output: prints `bytes` (non-printable
 /// bytes as `?`) prefixed with the process ID, and records them.
+#[cfg_attr(not(target_os = "none"), allow(dead_code))] // used by the kernel-only handler
 pub(crate) fn debug_write(bytes: &[u8]) {
     let task = sched::current_id().unwrap_or(0);
     let mut text = [0u8; crate::syscall::MAX_MESSAGE];

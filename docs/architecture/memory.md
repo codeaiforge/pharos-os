@@ -49,6 +49,10 @@ References to responses obtained before reclaim must not be used afterwards; thi
 
 - `AddressSpace` owns a 4-level tree; table frames come from the frame allocator and are zeroed through the direct map. It maps 4 KiB and 2 MiB pages, unmaps (with `invlpg` when active), and translates. Permissions live in leaf entries, including the user bit; table entries allow everything.
 - NX bits are set only when `EFER.NXE` is on.
+- **Global pages (#41):** kernel-half leaf entries have the global bit and `CR4.PGE` is on (enabled after the switch to the kernel's tables, which flushes the whole TLB). So kernel translations survive CR3 switches between process address spaces. User-half entries are never global.
+- **TLB flushes:** unmapping from the kernel address space always flushes the page (`invlpg`), even while a process space is active, because the kernel half is shared by every space.
+  - Before #41, the flush happened only when the kernel space was active. A task stack freed while a user thread ran could then stay reachable through a stale TLB entry.
+  - The `address_spaces` test kernel now checks a kernel remap made while a process space is active.
 - Lock order: the frame allocator first, then the kernel address space.
 
 ### Process address spaces (M2.7, #38)

@@ -42,6 +42,8 @@ const USER: u64 = 1 << 2;
 const WRITE_THROUGH: u64 = 1 << 3;
 const CACHE_DISABLE: u64 = 1 << 4;
 const HUGE: u64 = 1 << 7;
+/// Kept in the TLB across CR3 switches (with CR4.PGE): kernel-half pages.
+const GLOBAL: u64 = 1 << 8;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 
@@ -440,7 +442,13 @@ impl AddressSpace {
         // The entry was not present, and x86 does not cache not-present
         // translations, so no TLB flush is needed.
         let nx = NX.load(Ordering::Relaxed);
-        write_entry(table, indexes[levels], leaf_entry(phys, flags, size, nx));
+        let mut entry = leaf_entry(phys, flags, size, nx);
+        // The kernel half is the same in every address space, so its
+        // translations stay valid across CR3 switches; user-half ones never.
+        if virt >= USER_END {
+            entry |= GLOBAL;
+        }
+        write_entry(table, indexes[levels], entry);
         Ok(())
     }
 
@@ -509,6 +517,13 @@ impl AddressSpace {
         })
     }
 
+    /// Checks that `[virt, virt + len)` could be read (or written, if
+    /// `write`) by [`read_user`](Self::read_user) or
+    /// [`write_user`](Self::write_user), without copying anything.
+    pub fn check_user(&self, virt: u64, len: usize, write: bool) -> Result<(), MapError> {
+        self.user_chunks(virt, len, write, |_, _, _| {})
+    }
+
     /// Checks `[virt, virt + len)` page by page and calls `copy(phys,
     /// offset, len)` for each piece, only after every page passed.
     fn user_chunks(
@@ -559,7 +574,10 @@ impl AddressSpace {
             let leaf = level == 3 || (level == 2 && entry & HUGE != 0);
             if leaf {
                 write_entry(table, index, 0);
-                if self.is_active() {
+                // Kernel-space pages are mapped (and may be cached, global)
+                // in every address space, so flush even when another space
+                // is active.
+                if self.is_active() || !self.user {
                     // SAFETY: `invlpg` only drops the TLB entry for `virt`.
                     unsafe { asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) };
                 }
@@ -728,10 +746,17 @@ pub fn init_kernel_space(
     // IDT, and TSS are kernel statics. Writing CR3 flushes the old
     // non-global translations.
     unsafe { asm!("mov cr3, {}", in(reg) space.root(), options(nostack, preserves_flags)) };
+    // Global pages on: kernel-half translations survive CR3 switches.
+    // Turning PGE on flushes the whole TLB, including anything left from
+    // Limine's tables.
+    // SAFETY: only changes which TLB entries survive CR3 writes; every
+    // global entry is a kernel-half mapping shared by all address spaces.
+    unsafe { asm!("mov cr4, {}", in(reg) read_cr4() | CR4_PGE, options(nostack, preserves_flags)) };
     *kernel = Some(space);
     Ok(())
 }
 
+const CR4_PGE: u64 = 1 << 7;
 const CR4_SMEP: u64 = 1 << 20;
 const CR4_SMAP: u64 = 1 << 21;
 
@@ -822,6 +847,20 @@ pub fn read_phys_u64(phys: u64) -> Option<u64> {
     // SAFETY: the kernel maps `virt` (checked just above), it is 8-byte
     // aligned, and a read changes nothing.
     Some(unsafe { (virt as *const u64).read_volatile() })
+}
+
+/// Reads the first byte of [`TEST_PAGE`] through the active address space
+/// (possibly from a cached TLB entry), or `None` if the tables do not map
+/// it. Tests use it to catch stale translations.
+pub fn read_test_page() -> Option<u8> {
+    let active = AddressSpace {
+        root: active_root(),
+        user: true,
+    };
+    active.translate(TEST_PAGE)?;
+    // SAFETY: the active tables map `TEST_PAGE` (checked just above) as a
+    // kernel page; a one-byte read changes nothing.
+    Some(unsafe { (TEST_PAGE as *const u8).read_volatile() })
 }
 
 /// Reads the first byte of [`USER_TEST_PAGE`] through the active address

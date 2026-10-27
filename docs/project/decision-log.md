@@ -364,6 +364,11 @@ That is under 1 µs, half the budget.
 - **SMEP and SMAP:** QEMU's default CPU under TCG (used by CI) reports neither. `-cpu max` under TCG and `-cpu host` under KVM report both. Limine leaves CR4 at `0x20`, so neither is enabled.
 - **Timing under TCG is noisy:** the debug build's empty `syscall` measured faster (43 ns) than the release build.
 
+**Measured against the budget (M2.7, #41, 2026-10-27).** The implemented IPC (synchronous endpoints, D-014) was measured between two user processes, as call and reply with 8-byte messages: ping sends and receives, pong receives and sends.
+- **Steady state:** 1.97–2.00 µs per round trip under KVM, release build, i9-10900K (three runs of 100,000 round trips). This meets the 2 µs budget, with no margin.
+- **Global kernel pages (added for this):** without them, the 1,000-round-trip test took 2.9 µs per trip; with them, 2.65 µs (both figures include starting the process).
+- **If later work pushes it over:** see `syscalls-ipc.md` (open questions).
+
 ### D-014: IPC model and system-call mechanism
 
 - **Status:** Accepted

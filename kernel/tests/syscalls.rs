@@ -142,10 +142,10 @@ fn cases() -> Vec<Case> {
             Err(Error::UnknownCall),
         ),
         case(
-            "send before IPC exists",
+            "send on a debug-console capability",
             SEND,
             [1, MESSAGE_AT, 4],
-            Err(Error::UnknownCall),
+            Err(Error::MissingRight),
         ),
         case("delete handle 2", DELETE, [2, 0, 0], Ok(0)),
         case(

@@ -69,6 +69,39 @@ fn visitor(marker: u8, root: u64, ok: &'static AtomicBool) {
     }
 }
 
+static REMAP_OK: AtomicBool = AtomicBool::new(false);
+
+/// Maps a frame holding 0x11 at the kernel test page, reads it (filling the
+/// TLB), unmaps it, maps a frame holding 0x22 there, and reads again.
+fn remap_kernel_test_page() -> bool {
+    let mut guard = mm::frames();
+    let Some(frames) = guard.as_mut() else {
+        return false;
+    };
+    let (Ok(first), Ok(second)) = (frames.alloc(), frames.alloc()) else {
+        return false;
+    };
+    let map = |frame: mm::frame::Frame, frames: &mut _| {
+        paging::map_kernel_page(
+            paging::TEST_PAGE,
+            frame.addr(),
+            PageSize::Size4K,
+            Flags::DATA,
+            frames,
+        )
+    };
+    let ok = paging::fill_frame_for_test(first, 0x11)
+        && paging::fill_frame_for_test(second, 0x22)
+        && map(first, frames).is_ok()
+        && paging::read_test_page() == Some(0x11)
+        && paging::unmap_kernel_page(paging::TEST_PAGE) == Ok(first.addr())
+        && map(second, frames).is_ok()
+        && paging::read_test_page() == Some(0x22)
+        && paging::unmap_kernel_page(paging::TEST_PAGE) == Ok(second.addr());
+    let _ = (frames.free(first), frames.free(second));
+    ok
+}
+
 fn run(t: &mut TestRun) {
     gdt::init();
     idt::init();
@@ -222,5 +255,26 @@ fn run(t: &mut TestRun) {
     t.check(
         "a kernel mapping added later appears in existing process spaces",
         late_kernel_mapping,
+    );
+
+    // Last (the kernel keeps the tables it creates here). While a process
+    // space is active, unmapping a kernel page must flush its (global) TLB
+    // entry: the kernel half is shared by every space. The frame-allocator
+    // guard must be gone before spawning: task stacks take that lock too.
+    let space = mm::frames()
+        .as_mut()
+        .and_then(|frames| AddressSpace::new_user(frames).ok());
+    let remap_ok = space.is_some_and(|space| {
+        sched::spawn_in(space, || {
+            REMAP_OK.store(remap_kernel_test_page(), Ordering::Relaxed);
+        })
+        .is_ok()
+    });
+    while sched::live_tasks() > 1 {
+        sched::yield_now();
+    }
+    t.check(
+        "a kernel page remapped while a process space is active shows the new frame",
+        remap_ok && REMAP_OK.load(Ordering::Relaxed),
     );
 }

@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- IPC (D-014, #41).
+  - Synchronous endpoints (`ipc`, with host-tested queues) and the system calls `send`, `receive`, and `revoke`.
+  - `sched::block_current` and `sched::wake` let a thread wait without polling.
+  - Capabilities gain endpoint objects, derivation (passing with `GRANT`, rights narrowed by a mask), and revocation through the derivation tree, checked on every lookup.
+  - Global kernel pages (`CR4.PGE`).
+  - Process exits record their time. `IrqMutex` is a plain spin lock in host tests.
+  - New test kernel `ipc` (34 checks). It was checked to fail when revocation marks nothing, when derivation keeps all rights, or when `receive` skips its buffer check.
+  - Round trip under KVM, release build: 1.97–2.00 µs, which meets the D-004 budget of 2 µs with no margin.
 - System calls (D-014, #40).
   - The `syscall`/`sysret` entry (`arch::x86_64::syscall`) runs on the thread's kernel stack with interrupts disabled. Its return address is checked before `sysret`, with an `iretq` fallback, and process address spaces refuse the last user page (CVE-2012-0217).
   - `syscall::decode` performs the stateless checks and is fuzzed on the host. The handler checks capabilities in the per-process `cap::CapTable`, and `AddressSpace::read_user`/`write_user` copy through the direct map after checking range, presence, and access.
@@ -97,6 +105,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Security
 
+- Fixed a stale-TLB bug from #38: unmapping a kernel page (such as a freed task stack) while a process address space was active did not flush the TLB, so the freed frame could stay reachable. Unmapping from the kernel space now always flushes. A new `address_spaces` check fails without the fix.
 - Pin `actions/checkout` in CI to the signed v5.1.0 release commit SHA instead of the movable `v5` tag.
 
 ## [0.1.0] - 2026-10-26

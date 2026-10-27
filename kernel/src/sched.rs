@@ -16,7 +16,7 @@
 //! is (D-004 constraint 5) and host-tested.
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
@@ -197,6 +197,8 @@ struct Task {
 struct Scheduler {
     queue: RunQueue<Arc<Task>>,
     sleepers: SleepQueue<Arc<Task>>,
+    /// Tasks waiting for [`wake`] (for example on an IPC endpoint).
+    blocked: BTreeMap<TaskId, Arc<Task>>,
     /// The last exited task, freed by the next scheduling call.
     exited: Option<Arc<Task>>,
     next_id: TaskId,
@@ -224,6 +226,7 @@ pub fn init() -> Result<(), SchedError> {
     *scheduler = Some(Scheduler {
         queue: RunQueue::new(boot),
         sleepers: SleepQueue::new(),
+        blocked: BTreeMap::new(),
         exited: None,
         next_id: 1,
         live: 1,
@@ -397,6 +400,40 @@ pub fn yield_now() {
             run_switch(switch);
         }
     });
+}
+
+/// Takes the running task off the CPU until [`wake`] names it. The caller
+/// must have recorded its ID where the waker will find it, with interrupts
+/// disabled since then (system calls run that way), so the wake cannot be
+/// missed. Needs [`enable_preemption`] (the idle task runs meanwhile).
+pub fn block_current() {
+    without_interrupts(|| {
+        check_no_locks();
+        let switch = pick_next(Leave::Block, |s| {
+            assert!(s.queue.has_idle(), "blocking needs enable_preemption");
+            let current = s.queue.current().clone();
+            s.blocked.insert(current.id, current);
+        });
+        if let Some(switch) = switch {
+            run_switch(switch);
+        }
+    });
+}
+
+/// Makes the blocked task `id` ready again. Returns false if it was not
+/// blocked.
+pub fn wake(id: TaskId) -> bool {
+    let mut scheduler = SCHEDULER.lock();
+    let Some(scheduler) = scheduler.as_mut() else {
+        return false;
+    };
+    match scheduler.blocked.remove(&id) {
+        Some(task) => {
+            scheduler.queue.push(task);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Sleeps for at least `duration`, rounded up to whole ticks (10 ms).
