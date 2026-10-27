@@ -246,7 +246,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.8 — Storage abstractions and filesystem
 
-**Status: Current.** Needs D-007 (filesystem and persistent storage) accepted first.
+**Status: Current.** D-007 accepted on 2026-10-27 (#43).
 
 - **Objective and scope:** A block-device abstraction and a filesystem (per D-007), starting read-only.
 - **Deliverables:** Block device interface; initial RAM disk or virtio-blk support; filesystem implementation; host tool to build images.
@@ -570,7 +570,7 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, and D-014 on 2026-10-27; D-012 has a recorded direction; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, and D-007 on 2026-10-27; D-012 has a recorded direction; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -580,7 +580,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-004 | Kernel architecture and privilege boundaries | M2.1 (direction), M2.7 | **Accepted:** capability-based microkernel, `unsafe` in a small hardware layer; IPC round trip ≤ 2 µs (KVM) |
 | D-005 | Memory-management strategy | M2.5 | **Accepted:** bitmap frame allocator per region, own page tables, Limine's HHDM with 2 MiB pages, own bitmap heap, `unsafe` in `mm::raw` |
 | D-006 | Interrupt controller and timer | M2.4, M2.6 | **Accepted:** local APIC (xAPIC), PICs masked; APIC timer at 100 Hz calibrated against the PIT, TSC uptime clock |
-| D-007 | Filesystem and persistent storage | M2.8 | Crash consistency, simplicity, host tooling |
+| D-007 | Filesystem and persistent storage | M2.8 | **Accepted:** read-only RAM disk from a Limine module; small custom format with CRC-32 checksums, one safe `no_std` parser for kernel and host; in the kernel for now, files through capabilities only |
 | D-008 | Driver strategy | M2.9 | TCB size, DMA isolation, effort |
 | D-009 | QEMU automation and debugging | M2.3 | **Accepted:** status 33 + serial marker, 60 s timeout, test kernels via Cargo runner and `cargo xtask test` |
 | D-010 | Inference runtime, model formats, licensing | M3.1 | Licenses, memory safety, performance, portability |

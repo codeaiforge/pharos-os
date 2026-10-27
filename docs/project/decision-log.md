@@ -408,18 +408,56 @@ That is under 1 µs, half the budget.
 
 Two system calls per direction plus two task switches and two address-space switches leave the estimated round trip well under 2 µs.
 
-## Open and proposed decisions
-
-Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
+## Accepted decisions (M2.8)
 
 ### D-007: Filesystem and persistent storage
 
-- **Status:** Open
+- **Status:** Accepted
 - **Needed by:** M2.8
+- **Date accepted:** 2026-10-27
 
-**Options.** Read-only initial RAM disk first; existing format (e.g. FAT for interoperability, ext2 for simplicity) versus a custom design; user-space versus kernel filesystem.
+**Context.**
+- The kernel is a capability-based microkernel (D-004). Processes get kernel objects only through capabilities (D-012 direction), and IPC carries 256 bytes plus one capability (D-014).
+- There is no program loader and no shared memory yet, so a user-space filesystem server could not be loaded from storage.
+- There are no device drivers yet; device interrupts and PCI come with M2.9 (D-008).
+- Limine can load files from the boot image as modules. The kernel already maps module memory read-only and no-execute in the direct map, and never gives it to the frame allocator (memory type "executable and modules").
+- A storage image is untrusted input to the kernel.
 
-**Evaluation criteria.** Crash consistency; simplicity; tooling to build images on the host; fit with capability-based access control.
+**Options.**
+- **Storage source:** a Limine module used as a read-only RAM disk; or virtio-blk, which needs PCI, interrupts or polling, and DMA.
+- **Format:**
+  - FAT: interoperable, but large, hard to validate, and without checksums;
+  - ext2: simpler, but built for writing and without checksums;
+  - a small custom read-only format with checksums.
+- **Placement:** the filesystem in the kernel for now; or a user-space server from the start, which needs program loading, shared memory, and bulk IPC first.
+- **Writes:** none in M2.8; or now, which needs a journal or copy-on-write.
+
+**Evaluation criteria.** Crash consistency; simplicity; tooling to build images on the host; fit with capability-based access control; how safely the kernel can parse an untrusted image.
+
+**Decision.**
+
+1. **A Limine module is the first block device:** a read-only RAM disk behind a block-device trait. virtio-blk implements the same trait in M2.9.
+2. **A small custom read-only format:**
+   - a header, a directory table, and file data;
+   - CRC-32 checksums on the header, the directory, and each file;
+   - fixed limits (entries, name length, sizes);
+   - a version field.
+
+   CRC-32 detects corruption; it does not prove where an image came from. Authenticating images belongs with secure boot, later.
+3. **One parser for the kernel and the host:** a new `no_std` crate with `unsafe` forbidden and no dependencies. It builds and validates images. It is used by the kernel and by the host tool (`cargo xtask`), and fuzzed on the host. Every check runs before any data is used.
+4. **The filesystem runs in the kernel for M2.8,** behind the block-device trait. It moves to a user-space server once program loading and shared memory exist.
+5. **Processes reach files only through capabilities:** a filesystem capability opens files; a file capability carries a `READ` right. Both pass over IPC and can be revoked like endpoints.
+6. **Read-only in M2.8.** The direction for writes is copy-on-write: new blocks are written first, then the root is switched in one step. The design comes before any write code.
+
+**Consequences.**
+- Images need our own host tool and inspector, since no existing tool reads the format.
+- The parser joins the kernel's trusted computing base until it moves to a server. Safe Rust, fixed limits, and fuzzing keep that risk small.
+- Files are limited to what fits in the boot image and in memory until virtio-blk.
+- Moving the filesystem out of the kernel later changes the kernel side only; the capability interface processes use stays the same.
+
+## Open and proposed decisions
+
+Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
 
 ### D-008: Driver strategy
 
