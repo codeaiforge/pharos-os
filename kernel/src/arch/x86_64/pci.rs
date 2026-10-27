@@ -1,7 +1,7 @@
 //! PCI configuration access, mechanism #1 (ports `0xCF8`/`0xCFC`; D-008,
-//! drivers.md). Safe functions only: reads, and BAR size probing that puts
-//! everything back. Writes that could re-point a BAR or start DMA are not
-//! offered here.
+//! drivers.md). Safe functions only: reads; BAR size probing that puts
+//! everything back; and the command and MSI-X control bits the kernel's
+//! device handling sets (`device.rs`). Nothing here re-points a BAR.
 
 use core::arch::asm;
 
@@ -13,6 +13,10 @@ const DATA: u16 = 0xcfc;
 const COMMAND: u8 = 0x04;
 /// Command bits: I/O space and memory space decoding.
 const DECODE: u32 = 0b11;
+/// Command bit: memory space decoding.
+const MEMORY: u32 = 1 << 1;
+/// Command bit: the device may master the bus (DMA, MSI writes).
+const BUS_MASTER: u32 = 1 << 2;
 
 /// Serialises address/data pairs (one CPU; interrupts off while held).
 static LOCK: IrqMutex<()> = IrqMutex::new(());
@@ -88,6 +92,37 @@ pub fn probe_bar(address: Address, index: u8) -> (u32, u32) {
     write32_locked(address, offset, original);
     write32_locked(address, COMMAND, command & 0xffff);
     (original, probe)
+}
+
+/// Turns memory decoding and bus mastering on (`on`) or off together with
+/// I/O decoding (`!on`). Turning them off stops the device's DMA and MSI
+/// writes. Writes zeros to the status half, which clears nothing.
+pub fn set_enabled(address: Address, on: bool) {
+    let _guard = LOCK.lock();
+    let command = read32_locked(address, COMMAND) & 0xffff;
+    let command = if on {
+        command | MEMORY | BUS_MASTER
+    } else {
+        command & !(DECODE | BUS_MASTER)
+    };
+    write32_locked(address, COMMAND, command);
+}
+
+/// The command register's memory-decoding and bus-master bits.
+pub fn enabled_bits(address: Address) -> (bool, bool) {
+    let command = read32(address, COMMAND);
+    (command & MEMORY != 0, command & BUS_MASTER != 0)
+}
+
+/// Sets the MSI-X capability at `cap` (its configuration offset): MSI-X
+/// enable and the function mask (which masks every vector).
+pub fn set_msix_control(address: Address, cap: u8, enable: bool, function_mask: bool) {
+    let _guard = LOCK.lock();
+    let header = read32_locked(address, cap);
+    let mut control = header >> 16;
+    control = (control & !(3 << 14)) | u32::from(enable) << 15 | u32::from(function_mask) << 14;
+    // The low half (ID and next pointer) is read-only.
+    write32_locked(address, cap, (header & 0xffff) | control << 16);
 }
 
 #[cfg(test)]

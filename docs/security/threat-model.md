@@ -73,7 +73,7 @@ Design: [storage.md](../architecture/storage.md) and [D-007](../project/decision
 
 ### Drivers and devices (M2.9, planned)
 
-Design: [drivers.md](../architecture/drivers.md) and [D-008](../project/decision-log.md#d-008-driver-strategy). **Planned, not implemented:** the rows below become mitigations as #52–#56 land.
+Design: [drivers.md](../architecture/drivers.md) and [D-008](../project/decision-log.md#d-008-driver-strategy). The first row is **implemented** (#52), and so are the second and fourth (#55: device capabilities, MMIO limits, and stopping a device before its DMA buffers are freed, all tested in `device_caps`). The other rows are **planned** (#54, #56).
 
 | Threat | Planned mitigation |
 | --- | --- |

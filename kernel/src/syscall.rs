@@ -22,6 +22,9 @@ pub mod number {
     pub const REVOKE: u64 = 6;
     pub const OPEN: u64 = 7;
     pub const READ: u64 = 8;
+    pub const CONFIG_READ: u64 = 9;
+    pub const MMIO_MAP: u64 = 10;
+    pub const DMA_ALLOC: u64 = 11;
 }
 
 /// Largest buffer `debug_write` accepts (and the IPC message size).
@@ -43,6 +46,7 @@ pub enum Error {
     TooLarge = 6,
     NoMemory = 7,
     NotFound = 8,
+    InUse = 9,
 }
 
 impl From<CapError> for Error {
@@ -105,6 +109,34 @@ pub enum Call {
         len: usize,
         offset: u64,
     },
+    ConfigRead {
+        handle: Handle,
+        offset: u8,
+        width: u8,
+    },
+    MmioMap {
+        handle: Handle,
+        bar: u64,
+        offset: u64,
+        len: u64,
+        addr: u64,
+    },
+    DmaAlloc {
+        handle: Handle,
+        pages: usize,
+        addr: u64,
+    },
+}
+
+/// A page-aligned user range of `len` bytes (at least one page).
+fn user_pages(addr: u64, len: u64) -> Result<u64, Error> {
+    if addr % 4096 != 0 || len == 0 || len % 4096 != 0 {
+        return Err(Error::BadAddress);
+    }
+    if !user_range_ok(addr, len) {
+        return Err(Error::BadAddress);
+    }
+    Ok(addr)
 }
 
 /// Checks a user buffer argument of at most `max` bytes: length first,
@@ -161,6 +193,35 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             len: buffer_up_to(MAX_READ, args[1], args[2])?,
             offset: args[3],
         }),
+        number::CONFIG_READ => {
+            let (offset, width) = (args[1], args[2]);
+            if !matches!(width, 1 | 2 | 4) || offset >= 256 || offset % width != 0 {
+                return Err(Error::TooLarge);
+            }
+            Ok(Call::ConfigRead {
+                handle: args[0],
+                offset: offset as u8,
+                width: width as u8,
+            })
+        }
+        number::MMIO_MAP => Ok(Call::MmioMap {
+            handle: args[0],
+            bar: args[1],
+            offset: args[2],
+            len: args[3],
+            addr: user_pages(args[4], args[3])?,
+        }),
+        number::DMA_ALLOC => {
+            let pages = args[1];
+            if pages == 0 || pages > crate::device::MAX_DMA_ALLOC as u64 {
+                return Err(Error::TooLarge);
+            }
+            Ok(Call::DmaAlloc {
+                handle: args[0],
+                pages: pages as usize,
+                addr: user_pages(args[2], pages * 4096)?,
+            })
+        }
         _ => Err(Error::UnknownCall),
     }
 }
@@ -172,6 +233,8 @@ pub fn needed_rights(call: &Call) -> cap::Rights {
         Call::Send { .. } => cap::SEND,
         Call::Receive { .. } => cap::RECEIVE,
         Call::Open { .. } | Call::Read { .. } => cap::READ,
+        Call::ConfigRead { .. } => cap::CONFIG,
+        Call::MmioMap { .. } | Call::DmaAlloc { .. } => cap::MAP,
         _ => 0,
     }
 }
@@ -186,6 +249,27 @@ mod kernel {
     use crate::cap::{MAX_HANDLES, Object};
     use crate::ipc::{self, Message};
     use crate::{process, sched};
+
+    /// Device memory mapped into a driver: user, writable, uncached,
+    /// no-execute.
+    const USER_MMIO: crate::arch::x86_64::paging::Flags = crate::arch::x86_64::paging::Flags {
+        writable: true,
+        executable: false,
+        uncached: true,
+        user: true,
+    };
+
+    /// The device behind `handle`, if the caller holds `needed` on it.
+    fn device(
+        process: &process::Process,
+        handle: Handle,
+        needed: cap::Rights,
+    ) -> Result<alloc::sync::Arc<crate::device::DeviceHandle>, Error> {
+        match process.caps.lock().get(handle, needed)?.object() {
+            Object::Device(device) => Ok(device.clone()),
+            _ => Err(Error::MissingRight),
+        }
+    }
 
     /// The endpoint behind `handle`, if the caller holds `needed` on it.
     fn endpoint(
@@ -329,6 +413,83 @@ mod kernel {
                     .ok_or(Error::BadAddress)??;
                 Ok(n as u64)
             }
+            Call::ConfigRead {
+                handle,
+                offset,
+                width,
+            } => {
+                let device = device(&process, handle, cap::CONFIG)?;
+                let dword = crate::arch::x86_64::pci::read32(device.pci.address, offset);
+                let shift = u32::from(offset % 4) * 8;
+                let mask = if width == 4 {
+                    u32::MAX
+                } else {
+                    (1 << (u32::from(width) * 8)) - 1
+                };
+                Ok(u64::from((dword >> shift) & mask))
+            }
+            Call::MmioMap {
+                handle,
+                bar,
+                offset,
+                len,
+                addr,
+            } => {
+                let device = device(&process, handle, cap::MAP)?;
+                let phys = crate::device::mmio_range(&device.pci, bar, offset, len).map_err(
+                    |e| match e {
+                        crate::device::MmioError::NoBar => Error::NotFound,
+                        _ => Error::BadAddress,
+                    },
+                )?;
+                let pages = len / 4096;
+                sched::with_current_space(|space| {
+                    if !space.range_free(addr, pages) {
+                        return Err(Error::InUse);
+                    }
+                    let mut guard = crate::mm::frames();
+                    let frames = guard.as_mut().ok_or(Error::NoMemory)?;
+                    for i in 0..pages {
+                        let (virt, at) = (addr + i * 4096, phys + i * 4096);
+                        if let Err(e) = space.map_device(virt, at, USER_MMIO, frames) {
+                            for j in 0..i {
+                                let _ = space.unmap(addr + j * 4096);
+                            }
+                            return Err(e.into());
+                        }
+                    }
+                    Ok(0)
+                })
+                .ok_or(Error::BadAddress)?
+            }
+            Call::DmaAlloc {
+                handle,
+                pages,
+                addr,
+            } => {
+                let device = device(&process, handle, cap::MAP)?;
+                if !device.dma_fits(pages) {
+                    return Err(Error::NoMemory);
+                }
+                let phys = sched::with_current_space(|space| {
+                    if !space.range_free(addr, pages as u64) {
+                        return Err(Error::InUse);
+                    }
+                    let mut guard = crate::mm::frames();
+                    let frames = guard.as_mut().ok_or(Error::NoMemory)?;
+                    space.map_dma(addr, pages, frames).map_err(|e| match e {
+                        MapError::OutOfMemory => Error::NoMemory,
+                        _ => Error::BadAddress,
+                    })
+                })
+                .ok_or(Error::BadAddress)??;
+                device.add_dma(phys, pages);
+                let mut pins = process.pins.lock();
+                if !pins.iter().any(|p| alloc::sync::Arc::ptr_eq(p, &device)) {
+                    pins.push(device);
+                }
+                Ok(phys)
+            }
         }
     }
 }
@@ -360,7 +521,45 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(9, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(12, [0; 6]), Err(Error::UnknownCall));
+        let config = |offset, width| decode(9, [1, offset, width, 0, 0, 0]);
+        assert_eq!(
+            config(0x10, 4),
+            Ok(Call::ConfigRead {
+                handle: 1,
+                offset: 0x10,
+                width: 4
+            })
+        );
+        assert_eq!(config(0xff, 1).map(|_| ()), Ok(()));
+        assert_eq!(config(0x11, 2), Err(Error::TooLarge), "unaligned");
+        assert_eq!(config(0x100, 1), Err(Error::TooLarge), "past the header");
+        assert_eq!(config(0, 3), Err(Error::TooLarge), "bad width");
+        let mmio = |len, addr| decode(10, [1, 4, 0, len, addr, 0]);
+        assert!(mmio(0x1000, 0x1000_0000).is_ok());
+        assert_eq!(
+            mmio(0x1000, 0x1000_0010),
+            Err(Error::BadAddress),
+            "unaligned"
+        );
+        assert_eq!(mmio(0, 0x1000_0000), Err(Error::BadAddress), "empty");
+        assert_eq!(
+            mmio(0x1000, 0xffff_ffff_8000_0000),
+            Err(Error::BadAddress),
+            "kernel"
+        );
+        let dma = |pages, addr| decode(11, [1, pages, addr, 0, 0, 0]);
+        assert_eq!(
+            dma(16, 0x2000_0000),
+            Ok(Call::DmaAlloc {
+                handle: 1,
+                pages: 16,
+                addr: 0x2000_0000
+            })
+        );
+        assert_eq!(dma(0, 0x2000_0000), Err(Error::TooLarge));
+        assert_eq!(dma(17, 0x2000_0000), Err(Error::TooLarge));
+        assert_eq!(dma(1, 0), Err(Error::BadAddress), "null page");
         let open = |addr, len| decode(7, [1, addr, len, 0, 0, 0]);
         assert_eq!(
             open(0x40_0000, 104),
@@ -433,7 +632,7 @@ mod tests {
         let mut accepted = 0;
         for _ in 0..200_000 {
             // Small numbers and lengths often, huge ones sometimes.
-            let number = next() % 10;
+            let number = next() % 13;
             let args: [u64; 6] = core::array::from_fn(|_| next() >> (next() % 64));
             match decode(number, args) {
                 Ok(
@@ -457,8 +656,19 @@ mod tests {
                     assert!(len <= MAX_READ);
                     assert!(user_range_ok(addr, len as u64));
                 }
+                Ok(Call::ConfigRead { offset, width, .. }) => {
+                    assert!(matches!(width, 1 | 2 | 4) && offset % width == 0);
+                }
+                Ok(Call::MmioMap { addr, len, .. }) => {
+                    assert!(addr % 4096 == 0 && len % 4096 == 0 && len > 0);
+                    assert!(user_range_ok(addr, len));
+                }
+                Ok(Call::DmaAlloc { addr, pages, .. }) => {
+                    assert!((1..=16).contains(&pages) && addr % 4096 == 0);
+                    assert!(user_range_ok(addr, pages as u64 * 4096));
+                }
                 Ok(_) => assert!(matches!(number, 0 | 1 | 5 | 6)),
-                Err(error) => assert!(error as u64 >= 1 && error as u64 <= 8),
+                Err(error) => assert!(error as u64 >= 1 && error as u64 <= 9),
             }
         }
         assert!(accepted > 0, "the generator must reach valid buffers");

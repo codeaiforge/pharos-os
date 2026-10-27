@@ -204,13 +204,18 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
     ]
 }
 
-/// The filesystem image of programs the loader tests use (`programs`):
-/// `bin/hello` and every [`bad_programs`] copy of it.
-pub fn program_test_image(hello: &[u8]) -> Vec<u8> {
+/// The filesystem image of programs the tests use (`programs`): every
+/// program in `programs` (`bin/<name>`), and every [`bad_programs`] copy of
+/// `bin/hello`.
+pub fn program_test_image(programs: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut b = Builder::new();
-    b.add(b"bin/hello", hello).expect("valid path");
-    for (path, bytes) in bad_programs(hello) {
-        b.add(path.as_bytes(), &bytes).expect("valid path");
+    for (path, bytes) in programs {
+        b.add(path.as_bytes(), bytes).expect("valid path");
+    }
+    if let Some((_, hello)) = programs.iter().find(|(p, _)| p == "bin/hello") {
+        for (path, bytes) in bad_programs(hello) {
+            b.add(path.as_bytes(), &bytes).expect("valid path");
+        }
     }
     b.build().expect("program test image fits")
 }
@@ -273,7 +278,8 @@ pub(crate) mod tests {
                 assert_eq!(check(bytes).err(), Some(want), "{name}");
             }
         }
-        let image = Image::mount(&program_test_image(&good)[..]).map(|i| i.entries().count());
+        let programs = [("bin/hello".to_owned(), good.clone())];
+        let image = Image::mount(&program_test_image(&programs)[..]).map(|i| i.entries().count());
         assert_eq!(image, Ok(11));
     }
 

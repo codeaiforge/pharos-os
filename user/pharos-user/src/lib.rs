@@ -4,9 +4,11 @@
 //!
 //! `no_std`. The only `unsafe` code is in the `syscall` module.
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 mod syscall;
+
+pub use syscall::Mapped;
 
 /// Call numbers (syscalls-ipc.md, storage.md).
 pub mod number {
@@ -19,6 +21,9 @@ pub mod number {
     pub const REVOKE: u64 = 6;
     pub const OPEN: u64 = 7;
     pub const READ: u64 = 8;
+    pub const CONFIG_READ: u64 = 9;
+    pub const MMIO_MAP: u64 = 10;
+    pub const DMA_ALLOC: u64 = 11;
 }
 
 /// A capability handle in this process's table.
@@ -35,6 +40,7 @@ pub enum Error {
     TooLarge,
     NoMemory,
     NotFound,
+    InUse,
     /// A code this library does not know.
     Other(u64),
 }
@@ -50,6 +56,7 @@ impl Error {
             6 => Self::TooLarge,
             7 => Self::NoMemory,
             8 => Self::NotFound,
+            9 => Self::InUse,
             other => Self::Other(other),
         }
     }
@@ -65,6 +72,7 @@ impl Error {
             Self::TooLarge => 6,
             Self::NoMemory => 7,
             Self::NotFound => 8,
+            Self::InUse => 9,
             Self::Other(code) => code,
         }
     }
@@ -158,6 +166,28 @@ pub fn read(file: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
     call(number::READ, args).map(|n| n as usize)
 }
 
+/// Reads `width` (1, 2, or 4) bytes of the device's PCI configuration
+/// space at `offset`.
+pub fn config_read(device: Handle, offset: u8, width: u8) -> Result<u32, Error> {
+    let args = [device, offset.into(), width.into(), 0, 0, 0];
+    call(number::CONFIG_READ, args).map(|v| v as u32)
+}
+
+/// Maps `len` bytes (whole pages) at `offset` in memory BAR `bar` of the
+/// device at user address `at` (page-aligned, unused).
+pub fn mmio_map(device: Handle, bar: u8, offset: u64, len: u64, at: u64) -> Result<Mapped, Error> {
+    call(number::MMIO_MAP, [device, bar.into(), offset, len, at, 0])?;
+    Ok(Mapped::new(at, len))
+}
+
+/// Allocates `pages` contiguous, zeroed DMA pages for the device at user
+/// address `at`; returns the mapping and the physical address the device
+/// uses.
+pub fn dma_alloc(device: Handle, pages: u64, at: u64) -> Result<(Mapped, u64), Error> {
+    let phys = call(number::DMA_ALLOC, [device, pages, at, 0, 0, 0])?;
+    Ok((Mapped::new(at, pages * 4096), phys))
+}
+
 /// Exit code a program's panic ends it with.
 pub const PANIC_EXIT: u64 = 0xdead;
 
@@ -188,10 +218,25 @@ mod tests {
 
     #[test]
     fn error_codes_round_trip() {
-        for code in 1..=9 {
+        for code in 1..=10 {
             assert_eq!(Error::from_code(code).code(), code);
         }
         assert_eq!(result((0, 42)), Ok(42));
         assert_eq!(result((8, 0)), Err(Error::NotFound));
+    }
+
+    #[test]
+    fn mapped_checks_bounds_and_alignment() {
+        let mut page = [0u64; 512];
+        let m = Mapped::new(page.as_mut_ptr() as u64, 4096);
+        m.write32(8, 0xdead_beef);
+        assert_eq!(m.read32(8), 0xdead_beef);
+        assert_eq!(m.read16(10), 0xdead);
+        m.write64(4088, 7);
+        assert_eq!(m.read64(4088), 7);
+        let past = std::panic::catch_unwind(|| m.read32(4094));
+        assert!(past.is_err(), "past the end");
+        let odd = std::panic::catch_unwind(|| m.read32(2));
+        assert!(odd.is_err(), "misaligned");
     }
 }

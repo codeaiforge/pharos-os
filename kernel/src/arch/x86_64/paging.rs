@@ -44,6 +44,10 @@ const CACHE_DISABLE: u64 = 1 << 4;
 const HUGE: u64 = 1 << 7;
 /// Kept in the TLB across CR3 switches (with CR4.PGE): kernel-half pages.
 const GLOBAL: u64 = 1 << 8;
+/// Software bit (ignored by the CPU): the page is device memory or a DMA
+/// buffer that this address space does not own, so `destroy` never frees
+/// it (drivers.md).
+const DEVICE: u64 = 1 << 9;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 
@@ -371,7 +375,7 @@ impl AddressSpace {
                     }
                     for i1 in 0..512 {
                         let page = read_entry(pt & ADDRESS_MASK, i1);
-                        if page & PRESENT != 0 {
+                        if page & PRESENT != 0 && page & DEVICE == 0 {
                             free(page & ADDRESS_MASK, 1);
                         }
                     }
@@ -408,6 +412,80 @@ impl AddressSpace {
         flags: Flags,
         frames: &mut FrameAllocator<'_>,
     ) -> Result<(), MapError> {
+        self.map_with(virt, phys, size, flags, 0, frames)
+    }
+
+    /// Maps a page this address space does not own (device memory or a DMA
+    /// buffer): `destroy` unmaps it without freeing the frame.
+    pub fn map_device(
+        &mut self,
+        virt: u64,
+        phys: u64,
+        flags: Flags,
+        frames: &mut FrameAllocator<'_>,
+    ) -> Result<(), MapError> {
+        self.map_with(virt, phys, PageSize::Size4K, flags, DEVICE, frames)
+    }
+
+    /// True if no page of the `pages` pages from `virt` is mapped.
+    pub fn range_free(&self, virt: u64, pages: u64) -> bool {
+        (0..pages).all(|i| {
+            virt.checked_add(i * FRAME_SIZE)
+                .is_some_and(|v| self.translate(v).is_none())
+        })
+    }
+
+    /// Allocates `pages` physically contiguous, zeroed frames and maps them
+    /// at `virt` as user data that this space does not own (a DMA buffer).
+    /// Returns the physical address of the first frame; the caller owns the
+    /// frames and frees them with `free_contiguous`. Maps nothing on error.
+    pub fn map_dma(
+        &mut self,
+        virt: u64,
+        pages: usize,
+        frames: &mut FrameAllocator<'_>,
+    ) -> Result<u64, MapError> {
+        if virt % FRAME_SIZE != 0 {
+            return Err(MapError::Misaligned);
+        }
+        if !self.range_free(virt, pages as u64) {
+            return Err(MapError::AlreadyMapped);
+        }
+        let first = frames
+            .alloc_contiguous(pages, 1)
+            .map_err(|_| MapError::OutOfMemory)?;
+        let phys = first.addr();
+        let dest = HHDM.load(Ordering::Relaxed) + phys;
+        // SAFETY: the frames were just allocated, so nothing else uses them,
+        // and the direct map covers usable RAM.
+        unsafe { core::ptr::write_bytes(dest as *mut u8, 0, pages * FRAME_SIZE as usize) };
+        for i in 0..pages as u64 {
+            let mapped = self.map_device(
+                virt + i * FRAME_SIZE,
+                phys + i * FRAME_SIZE,
+                Flags::USER_DATA,
+                frames,
+            );
+            if let Err(error) = mapped {
+                for j in 0..i {
+                    let _ = self.unmap(virt + j * FRAME_SIZE);
+                }
+                let _ = frames.free_contiguous(first, pages);
+                return Err(error);
+            }
+        }
+        Ok(phys)
+    }
+
+    fn map_with(
+        &mut self,
+        virt: u64,
+        phys: u64,
+        size: PageSize,
+        flags: Flags,
+        extra: u64,
+        frames: &mut FrameAllocator<'_>,
+    ) -> Result<(), MapError> {
         if virt % size.bytes() != 0 || phys % size.bytes() != 0 {
             return Err(MapError::Misaligned);
         }
@@ -441,7 +519,7 @@ impl AddressSpace {
         // The entry was not present, and x86 does not cache not-present
         // translations, so no TLB flush is needed.
         let nx = NX.load(Ordering::Relaxed);
-        let mut entry = leaf_entry(phys, flags, size, nx);
+        let mut entry = leaf_entry(phys, flags, size, nx) | extra;
         // The kernel half is the same in every address space, so its
         // translations stay valid across CR3 switches; user-half ones never.
         if virt >= USER_END {

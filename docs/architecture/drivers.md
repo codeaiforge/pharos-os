@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.9, #51). It follows [D-008](../project/decision-log.md#d-008-driver-strategy) (user-space drivers with device capabilities, virtio-blk only, MSI-X, no IOMMU yet) and [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries).
-- **Implementation:** Rust user programs and the ELF loader are **implemented** (#52: `user/pharos-user`, `user/programs`, `crates/pharos-elf`, `process::load_elf` and `spawn_elf`; programs are in the boot filesystem as `bin/<name>`). So is PCI discovery (#53: `arch::x86_64::pci` for configuration access and BAR probing, `pci::enumerate` with decoding and a bounded capability walk, the boot log listing devices; every QEMU run attaches `disk.img` as `virtio-blk-pci,disable-legacy=on` and has no network card). The `Device` capability object comes with the device-memory work (#55), where it is first used. **Planned:** device interrupts (#54), MMIO and DMA capabilities (#55), and the virtio-blk driver (#56).
+- **Implementation:** Rust user programs and the ELF loader are **implemented** (#52: `user/pharos-user`, `user/programs`, `crates/pharos-elf`, `process::load_elf` and `spawn_elf`; programs are in the boot filesystem as `bin/<name>`). So is PCI discovery (#53: `arch::x86_64::pci` for configuration access and BAR probing, `pci::enumerate` with decoding and a bounded capability walk, the boot log listing devices; every QEMU run attaches `disk.img` as `virtio-blk-pci,disable-legacy=on` and has no network card). So are the `Device` capability with `config_read`, `mmio_map`, and `dma_alloc` (#55: `device::DeviceHandle`, `device::mmio_range`, the `DEVICE` page-table bit, `Mapped` in `pharos-user`, and the `devprobe` test program). **Planned:** device interrupts (#54) and the virtio-blk driver (#56).
 
 ## 2. Context
 
@@ -76,8 +76,8 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
 
 - **Driver lifecycle:**
   - when the kernel hands out a `Device`, it enables memory decoding and bus mastering in the PCI command register;
-  - when the `Device` object's last reference goes (the driver exits or is killed, and nothing else holds it), the kernel disables bus mastering and memory decoding and masks every MSI-X entry. Only then are the driver's frames freed.
-  - So a device can never DMA into freed memory. Process teardown drops the capability table before destroying the address space; this order is a tested rule.
+  - when the `Device` object's last reference goes (the driver exits or is killed, and nothing else holds it or pins it), the kernel disables bus mastering and memory decoding and masks MSI-X (function mask). Only then are the device's DMA buffers freed.
+  - So a device can never DMA into freed memory. Firmware may leave a device enabled before it is granted; granting sets a known state.
 - **New rights:** `MAP = 1 << 5`, `IRQ = 1 << 6`, `CONFIG = 1 << 7`, `WAIT = 1 << 8`.
 
 ### New system calls
@@ -99,8 +99,9 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
   - **pages that overlap the MSI-X table or PBA are refused,** so a driver cannot aim interrupts at arbitrary vectors;
   - the mapping is user, writable, no-execute, and uncached. Its page-table entries carry a software bit (`DEVICE`) so `destroy` unmaps them without freeing the frames.
 - **`dma_alloc`:**
-  - physically contiguous fresh zeroed frames, mapped user, writable, no-execute at the given address;
-  - at most 64 pages per device at a time; the address space owns them, and they are freed with it after bus mastering is off;
+  - physically contiguous fresh zeroed frames, mapped user, writable, no-execute at the given address, with the `DEVICE` bit (the address space does not own them);
+  - at most 64 pages per device at a time;
+  - **the device handle owns them,** not the address space, and frees them only after bus mastering is off. The process records the device as pinned, so even if it deletes every device handle, the buffers it still has mapped stay allocated until the process ends. (Tightened during #55: an address space freeing them could race a device still granted to another process.)
   - the result is the physical address the driver writes into descriptors.
 - **`irq_create`:**
   - allocates a free vector from 48–63 and programs MSI-X entry `index` to target the bootstrap CPU's local APIC (message address `0xFEE00000`, data = the vector), then unmasks it and enables MSI-X (function mask off);

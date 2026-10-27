@@ -482,7 +482,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 1] = ["hello"];
+const USER_PROGRAMS: [&str; 2] = ["hello", "devprobe"];
 
 /// A file for a filesystem image: its path and contents.
 type ImageFile = (String, Vec<u8>);
@@ -526,26 +526,17 @@ fn kernel_modules(paths: &Paths, programs: &[ImageFile]) -> Result<Vec<Module>> 
 
 /// Modules for test kernels, with contents the test kernels know. Must
 /// match `kernel/tests/ramdisk.rs`, `fs.rs`, and `user_elf.rs`. At most 16
-/// (`storage::MAX_MODULES`). `hello` is the built `hello` program.
-fn test_modules(hello: &[u8]) -> Vec<Module> {
+/// (`storage::MAX_MODULES`). `programs` are the built user programs.
+fn test_modules(programs: &[ImageFile]) -> Vec<Module> {
     let pattern = |len: usize| (0..len).map(|i| ((i * 7) ^ (i >> 9)) as u8).collect();
     let mut modules = vec![
         ("pattern", pattern(41 * 512)),
         ("odd", pattern(1000)),
         ("fs-good", fs_image::good_test_image()),
-        ("programs", fs_image::program_test_image(hello)),
+        ("programs", fs_image::program_test_image(programs)),
     ];
     modules.extend(fs_image::corrupt_test_images());
     modules
-}
-
-/// Builds the user programs and returns `hello`.
-fn built_hello(paths: &Paths) -> Result<Vec<u8>> {
-    build_user_programs(paths)?
-        .into_iter()
-        .find(|(path, _)| path == "bin/hello")
-        .map(|(_, bytes)| bytes)
-        .ok_or_else(|| "user program hello was not built".to_owned())
 }
 
 /// Modules for an image: the kernel's own, or the test modules when a
@@ -553,7 +544,7 @@ fn built_hello(paths: &Paths) -> Result<Vec<u8>> {
 fn modules_for(paths: &Paths, kernel: &Option<PathBuf>) -> Result<Vec<Module>> {
     match kernel {
         None => kernel_modules(paths, &build_user_programs(paths)?),
-        Some(_) => Ok(test_modules(&built_hello(paths)?)),
+        Some(_) => Ok(test_modules(&build_user_programs(paths)?)),
     }
 }
 
@@ -1008,7 +999,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     let name = test_name(elf);
     let out = paths.runner_dir(&name);
     fs::create_dir_all(&out).map_err(io_err("cannot create", &out))?;
-    let modules = test_modules(&built_hello(paths)?);
+    let modules = test_modules(&build_user_programs(paths)?);
     let iso = image(paths, Some(elf.to_path_buf()), &modules, &out)?;
     let logs = paths.logs_dir();
     fs::create_dir_all(&logs).map_err(io_err("cannot create", &logs))?;
@@ -1080,7 +1071,7 @@ mod tests {
 
     #[test]
     fn test_modules_match_the_ramdisk_test() {
-        let m = test_modules(&fs_image::tests::tiny_elf());
+        let m = test_modules(&[("bin/hello".to_owned(), fs_image::tests::tiny_elf())]);
         assert_eq!((m[0].0, m[0].1.len()), ("pattern", 20992));
         assert_eq!((m[1].0, m[1].1.len()), ("odd", 1000));
         assert_eq!(m[2].0, "fs-good");

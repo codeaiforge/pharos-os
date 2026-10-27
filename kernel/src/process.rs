@@ -193,6 +193,10 @@ pub struct Process {
     /// A message handed over by a sender while this process waited in
     /// `receive` (#41).
     pub inbox: IrqMutex<Option<crate::ipc::Message>>,
+    /// Devices whose DMA buffers are mapped into this process. Holding them
+    /// keeps the buffers allocated for as long as the process lives, even if
+    /// it deletes its device handle (drivers.md).
+    pub pins: IrqMutex<Vec<Arc<crate::device::DeviceHandle>>>,
 }
 
 /// Live processes by task ID (one thread each).
@@ -220,6 +224,7 @@ pub fn start(
     let process = Arc::new(Process {
         caps: IrqMutex::new(table),
         inbox: IrqMutex::new(None),
+        pins: IrqMutex::new(Vec::new()),
     });
     // Register the process before its thread can run (no preemption here).
     without_interrupts(|| {
@@ -262,7 +267,10 @@ pub fn count() -> usize {
 /// address space is freed when the thread is reaped).
 fn end_current() -> ! {
     if let Some(id) = sched::current_id() {
-        PROCESSES.lock().remove(&id);
+        // Dropped after the table's lock is released: dropping a process may
+        // drop device handles, which stop their devices and free memory.
+        let process = PROCESSES.lock().remove(&id);
+        drop(process);
     }
     sched::exit()
 }

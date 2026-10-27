@@ -44,3 +44,94 @@ pub fn raw(number: u64, args: [u64; 6]) -> (u64, u64) {
     }
     (status, value)
 }
+
+/// Memory the kernel mapped for this process: device registers
+/// ([`crate::mmio_map`]) or a DMA buffer ([`crate::dma_alloc`]). Accesses
+/// are volatile, bounds-checked, and naturally aligned; a bad offset is a
+/// program bug and panics (ending the process). Values are created only
+/// after the kernel confirmed the mapping, which lasts as long as the
+/// process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mapped {
+    base: usize,
+    len: usize,
+}
+
+impl Mapped {
+    /// Called only by the wrappers in `lib.rs`, after the kernel mapped
+    /// `len` bytes at `base` into this process.
+    pub(crate) fn new(base: u64, len: u64) -> Self {
+        Self {
+            base: base as usize,
+            len: len as usize,
+        }
+    }
+
+    /// Size in bytes.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Always false: mappings are at least one page.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn at(&self, offset: usize, size: usize) -> usize {
+        assert!(
+            offset % size == 0 && offset.checked_add(size).is_some_and(|end| end <= self.len),
+            "mapped memory access out of bounds or misaligned"
+        );
+        self.base + offset
+    }
+
+    pub fn read8(&self, offset: usize) -> u8 {
+        let at = self.at(offset, 1);
+        // SAFETY: `at` lies inside memory the kernel mapped for this process
+        // (checked by `at`), which stays mapped while the process lives.
+        unsafe { (at as *const u8).read_volatile() }
+    }
+
+    pub fn read16(&self, offset: usize) -> u16 {
+        let at = self.at(offset, 2);
+        // SAFETY: as in `read8`; `at` is 2-byte aligned (checked).
+        unsafe { (at as *const u16).read_volatile() }
+    }
+
+    pub fn read32(&self, offset: usize) -> u32 {
+        let at = self.at(offset, 4);
+        // SAFETY: as in `read8`; `at` is 4-byte aligned (checked).
+        unsafe { (at as *const u32).read_volatile() }
+    }
+
+    pub fn read64(&self, offset: usize) -> u64 {
+        let at = self.at(offset, 8);
+        // SAFETY: as in `read8`; `at` is 8-byte aligned (checked).
+        unsafe { (at as *const u64).read_volatile() }
+    }
+
+    pub fn write8(&self, offset: usize, value: u8) {
+        let at = self.at(offset, 1);
+        // SAFETY: as in `read8`; the kernel maps these pages writable, and no
+        // Rust reference points into them.
+        unsafe { (at as *mut u8).write_volatile(value) }
+    }
+
+    pub fn write16(&self, offset: usize, value: u16) {
+        let at = self.at(offset, 2);
+        // SAFETY: as in `write8`; `at` is 2-byte aligned (checked).
+        unsafe { (at as *mut u16).write_volatile(value) }
+    }
+
+    pub fn write32(&self, offset: usize, value: u32) {
+        let at = self.at(offset, 4);
+        // SAFETY: as in `write8`; `at` is 4-byte aligned (checked).
+        unsafe { (at as *mut u32).write_volatile(value) }
+    }
+
+    pub fn write64(&self, offset: usize, value: u64) {
+        let at = self.at(offset, 8);
+        // SAFETY: as in `write8`; `at` is 8-byte aligned (checked).
+        unsafe { (at as *mut u64).write_volatile(value) }
+    }
+}

@@ -30,6 +30,10 @@ pub const GRANT: Rights = 1 << 2;
 pub const WRITE: Rights = 1 << 3;
 /// Open files (on a filesystem) or read them (on a file).
 pub const READ: Rights = 1 << 4;
+/// Map a device's BARs and allocate DMA buffers for it.
+pub const MAP: Rights = 1 << 5;
+/// Read a device's PCI configuration space.
+pub const CONFIG: Rights = 1 << 7;
 
 /// Largest number of handles a process can hold.
 // ponytail: fixed cap per process; make it a quota when processes need more.
@@ -49,6 +53,8 @@ pub enum Object {
         fs: Arc<Fs>,
         file: pharos_fs::FileId,
     },
+    /// One PCI function handed to a driver (drivers.md).
+    Device(Arc<crate::device::DeviceHandle>),
 }
 
 impl fmt::Debug for Object {
@@ -58,6 +64,7 @@ impl fmt::Debug for Object {
             Self::Endpoint(e) => write!(f, "Endpoint({:p})", Arc::as_ptr(e)),
             Self::Filesystem(fs) => write!(f, "Filesystem({:p})", Arc::as_ptr(fs)),
             Self::File { fs, file } => write!(f, "File({:p}, {file:?})", Arc::as_ptr(fs)),
+            Self::Device(d) => write!(f, "{d:?}"),
         }
     }
 }

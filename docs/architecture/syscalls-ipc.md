@@ -131,6 +131,9 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 6 | `revoke` | handle | revoked count | none (own handle) |
 | 7 | `open` (M2.8) | filesystem handle, path buffer, path len (≤ 104) | new file handle | filesystem, `READ` |
 | 8 | `read` (M2.8) | file handle, buffer, len (≤ 4096), file offset | bytes read (0 at end of file) | file, `READ` |
+| 9 | `config_read` (M2.9) | device, offset (< 256, aligned), width (1, 2, 4) | the value | device, `CONFIG` |
+| 10 | `mmio_map` (M2.9) | device, BAR, offset, length, user address (pages) | 0 | device, `MAP` |
+| 11 | `dma_alloc` (M2.9) | device, pages (1–16), user address | physical address | device, `MAP` |
 
 Error codes (`rax`):
 
@@ -143,7 +146,8 @@ Error codes (`rax`):
 | 5 | `BAD_ADDRESS` | A buffer is outside user space, unmapped, or lacks access |
 | 6 | `TOO_LARGE` | A length exceeds the call's limit |
 | 7 | `NO_MEMORY` | The kernel could not allocate |
-| 8 | `NOT_FOUND` | No file with this path (M2.8) |
+| 8 | `NOT_FOUND` | No file with this path (M2.8), or no such BAR (M2.9) |
+| 9 | `IN_USE` | The user address is already mapped (M2.9) |
 
 ### Programs for tests
 
