@@ -47,6 +47,59 @@ pub fn summarize<I: IntoIterator<Item = (u64, u64)>>(entries: I) -> MemorySummar
     summary
 }
 
+/// Entries a [`MemoryMapCopy`] holds; more are counted as truncated.
+pub const MEMORY_MAP_CAPACITY: usize = 128;
+
+/// One memory-map entry, copied out of bootloader memory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryMapEntry {
+    pub base: u64,
+    pub length: u64,
+    pub kind: u64,
+}
+
+/// The memory map copied into kernel memory, so it outlives bootloader-
+/// reclaimable memory.
+pub struct MemoryMapCopy {
+    entries: [MemoryMapEntry; MEMORY_MAP_CAPACITY],
+    len: usize,
+    truncated: usize,
+}
+
+impl MemoryMapCopy {
+    /// Copies up to [`MEMORY_MAP_CAPACITY`] `(base, length, kind)` entries.
+    pub fn new(entries: impl Iterator<Item = (u64, u64, u64)>) -> Self {
+        let mut copy = Self {
+            entries: [MemoryMapEntry::default(); MEMORY_MAP_CAPACITY],
+            len: 0,
+            truncated: 0,
+        };
+        for (base, length, kind) in entries {
+            if copy.len < MEMORY_MAP_CAPACITY {
+                copy.entries[copy.len] = MemoryMapEntry { base, length, kind };
+                copy.len += 1;
+            } else {
+                copy.truncated += 1;
+            }
+        }
+        copy
+    }
+
+    pub fn entries(&self) -> &[MemoryMapEntry] {
+        &self.entries[..self.len]
+    }
+
+    /// Entries that did not fit.
+    pub fn truncated(&self) -> usize {
+        self.truncated
+    }
+
+    /// The entries as `(base, length, kind)` tuples.
+    pub fn tuples(&self) -> impl Iterator<Item = (u64, u64, u64)> + Clone + '_ {
+        self.entries().iter().map(|e| (e.base, e.length, e.kind))
+    }
+}
+
 /// Converts bytes to whole mebibytes (rounded down).
 pub fn mib(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
@@ -95,5 +148,24 @@ mod tests {
     fn converts_to_mib() {
         assert_eq!(mib(256 * 1024 * 1024), 256);
         assert_eq!(mib(1024 * 1024 - 1), 0);
+    }
+
+    #[test]
+    fn memory_map_copy_keeps_order_and_counts_overflow() {
+        let copy = MemoryMapCopy::new((0..3).map(|i| (i * 0x1000, 0x1000, i)));
+        assert_eq!(copy.entries().len(), 3);
+        assert_eq!(
+            copy.entries()[2],
+            MemoryMapEntry {
+                base: 0x2000,
+                length: 0x1000,
+                kind: 2
+            }
+        );
+        assert_eq!(copy.truncated(), 0);
+        let big = MemoryMapCopy::new((0..MEMORY_MAP_CAPACITY as u64 + 5).map(|i| (i, 1, 0)));
+        assert_eq!(big.entries().len(), MEMORY_MAP_CAPACITY);
+        assert_eq!(big.truncated(), 5);
+        assert_eq!(big.tuples().next(), Some((0, 1, 0)));
     }
 }

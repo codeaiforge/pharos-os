@@ -97,11 +97,15 @@ impl StoragePlan {
     }
 }
 
-/// Picks the storage for the bitmaps of `spans`: the start of the largest
-/// span, if it can hold them.
-pub fn plan_storage(spans: &[Span]) -> Option<StoragePlan> {
-    let words = spans.iter().map(|s| Bitmap::words_for(s.frames)).sum();
-    let largest = spans.iter().max_by_key(|s| s.frames)?;
+/// Picks the storage for the bitmaps of all `usable` and `pending` spans:
+/// the start of the largest usable span, if it can hold them.
+pub fn plan_storage(usable: &[Span], pending: &[Span]) -> Option<StoragePlan> {
+    let words = usable
+        .iter()
+        .chain(pending)
+        .map(|s| Bitmap::words_for(s.frames))
+        .sum();
+    let largest = usable.iter().max_by_key(|s| s.frames)?;
     let plan = StoragePlan {
         base: largest.base,
         words,
@@ -112,6 +116,9 @@ pub fn plan_storage(spans: &[Span]) -> Option<StoragePlan> {
 struct Region<'a> {
     span: Span,
     bitmap: Bitmap<'a>,
+    /// Reserved until [`FrameAllocator::release_pending`] (bootloader-
+    /// reclaimable memory).
+    pending: bool,
 }
 
 /// Counters for reporting.
@@ -131,22 +138,37 @@ pub struct FrameAllocator<'a> {
 }
 
 impl<'a> FrameAllocator<'a> {
-    /// Builds the allocator for `spans` (at most [`MAX_REGIONS`] are used),
-    /// with the bitmaps in `storage` (from [`plan_storage`]). Frames that
-    /// hold the storage itself, at `storage_base`, are reserved.
-    pub fn new(spans: &[Span], storage: &'a mut [u64], storage_base: u64) -> Self {
+    /// Builds the allocator for `usable` spans and `pending` spans (at most
+    /// [`MAX_REGIONS`] in total), with the bitmaps in `storage` (from
+    /// [`plan_storage`]). Pending spans start fully reserved. Frames that hold
+    /// the storage itself, at `storage_base`, are reserved.
+    pub fn new(
+        usable: &[Span],
+        pending: &[Span],
+        storage: &'a mut [u64],
+        storage_base: u64,
+    ) -> Self {
+        let all = usable
+            .iter()
+            .map(|s| (s, false))
+            .chain(pending.iter().map(|s| (s, true)));
         let mut allocator = FrameAllocator {
             regions: [const { None }; MAX_REGIONS],
             count: 0,
-            skipped: spans.len().saturating_sub(MAX_REGIONS),
+            skipped: (usable.len() + pending.len()).saturating_sub(MAX_REGIONS),
         };
         let mut rest = storage;
-        for span in spans.iter().take(MAX_REGIONS) {
+        for (span, pending) in all.take(MAX_REGIONS) {
             let (words, tail) = rest.split_at_mut(Bitmap::words_for(span.frames));
             rest = tail;
+            let mut bitmap = Bitmap::new(words, span.frames);
+            if pending {
+                bitmap.reserve(0, span.frames);
+            }
             allocator.regions[allocator.count] = Some(Region {
                 span: *span,
-                bitmap: Bitmap::new(words, span.frames),
+                bitmap,
+                pending,
             });
             allocator.count += 1;
         }
@@ -232,6 +254,28 @@ impl<'a> FrameAllocator<'a> {
         }
     }
 
+    /// Frees every pending region (bootloader-reclaimable memory) and
+    /// returns the number of frames released. Later calls release nothing.
+    pub fn release_pending(&mut self) -> usize {
+        let mut released = 0;
+        for region in self.regions_mut().filter(|r| r.pending) {
+            let frames = region.span.frames;
+            region.pending = false;
+            if region.bitmap.free(0, frames).is_ok() {
+                released += frames;
+            }
+        }
+        released
+    }
+
+    /// Frames still waiting in pending regions.
+    pub fn pending_frames(&self) -> usize {
+        self.regions()
+            .filter(|r| r.pending)
+            .map(|r| r.span.frames)
+            .sum()
+    }
+
     /// Counts usable regions the caller could not pass in.
     pub fn note_skipped(&mut self, regions: usize) {
         self.skipped += regions;
@@ -299,19 +343,47 @@ mod tests {
     #[test]
     fn storage_goes_in_the_largest_span() {
         let s = spans(&[(0x10_0000, 0x10_0000), (0x100_0000, 0x400_0000)]);
-        let plan = plan_storage(&s).unwrap();
+        let plan = plan_storage(&s, &[]).unwrap();
         assert_eq!(plan.base, 0x100_0000);
         // 256 + 16384 frames -> 4 + 256 words.
         assert_eq!(plan.words, 4 + 256);
         assert_eq!(plan.frames(), 1);
-        assert_eq!(plan_storage(&[]), None);
+        assert_eq!(plan_storage(&[], &s), None, "storage only in usable memory");
     }
 
     fn build(list: &[(u64, u64)]) -> (FrameAllocator<'static>, StoragePlan) {
-        let s = spans(list);
-        let plan = plan_storage(&s).unwrap();
+        build_with_pending(list, &[])
+    }
+
+    fn build_with_pending(
+        list: &[(u64, u64)],
+        pending: &[(u64, u64)],
+    ) -> (FrameAllocator<'static>, StoragePlan) {
+        let (s, p) = (spans(list), spans(pending));
+        let plan = plan_storage(&s, &p).unwrap();
         let storage = Box::leak(vec![0u64; plan.words].into_boxed_slice());
-        (FrameAllocator::new(&s, storage, plan.base), plan)
+        (FrameAllocator::new(&s, &p, storage, plan.base), plan)
+    }
+
+    #[test]
+    fn pending_regions_wait_for_release() {
+        let (mut a, plan) = build_with_pending(&[(0x10_0000, 0x10000)], &[(0x80_0000, 0x8000)]);
+        let usable_free = 16 - plan.frames();
+        assert_eq!(a.stats().total, 16 + 8);
+        assert_eq!(a.stats().free, usable_free, "pending frames start used");
+        assert_eq!(a.pending_frames(), 8);
+        assert!(plan.base < 0x80_0000, "storage is in usable memory");
+        let before: Vec<u64> = std::iter::from_fn(|| a.alloc().ok().map(Frame::addr)).collect();
+        assert!(
+            before.iter().all(|&f| f < 0x80_0000),
+            "no pending frame handed out"
+        );
+        assert_eq!(a.release_pending(), 8);
+        assert_eq!(a.release_pending(), 0, "second release frees nothing");
+        assert_eq!(a.pending_frames(), 0);
+        let after: Vec<u64> = std::iter::from_fn(|| a.alloc().ok().map(Frame::addr)).collect();
+        assert_eq!(after.len(), 8);
+        assert!(after.iter().all(|&f| (0x80_0000..0x80_8000).contains(&f)));
     }
 
     #[test]
@@ -372,9 +444,9 @@ mod tests {
                 frames: 16,
             })
             .collect();
-        let plan = plan_storage(&many).unwrap();
+        let plan = plan_storage(&many, &[]).unwrap();
         let storage = Box::leak(vec![0u64; plan.words].into_boxed_slice());
-        let a = FrameAllocator::new(&many, storage, plan.base);
+        let a = FrameAllocator::new(&many, &[], storage, plan.base);
         assert_eq!(a.stats().skipped_regions, 3);
         assert_eq!(a.stats().total, MAX_REGIONS * 16);
     }

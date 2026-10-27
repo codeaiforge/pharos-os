@@ -502,6 +502,11 @@ pub fn translate_kernel(virt: u64) -> Option<Translation> {
     KERNEL_SPACE.lock().as_ref()?.translate(virt)
 }
 
+/// True once CR3 holds the kernel address space (Limine's tables unused).
+pub fn kernel_space_active() -> bool {
+    kernel_root() == Some(active_root())
+}
+
 /// Root table of the kernel address space, once built.
 pub fn kernel_root() -> Option<u64> {
     KERNEL_SPACE.lock().as_ref().map(AddressSpace::root)
@@ -556,6 +561,21 @@ pub fn alias_check(frames: &mut FrameAllocator<'_>) -> Result<AliasCheck, MapErr
         alias_matches,
         unmapped,
     })
+}
+
+/// Fills `frame` with `byte` through the direct map and reads back its
+/// first and last bytes. For test kernels: `frame` must have just been
+/// allocated by the caller, so nothing else uses it.
+#[doc(hidden)]
+pub fn fill_frame_for_test(frame: crate::mm::frame::Frame, byte: u8) -> bool {
+    let virt = (HHDM.load(Ordering::Relaxed) + frame.addr()) as *mut u8;
+    // SAFETY: per the contract the frame is owned by the caller and unused;
+    // the direct map covers all managed frames writable, and the accesses
+    // stay inside the 4 KiB frame.
+    unsafe {
+        core::ptr::write_bytes(virt, byte, FRAME_SIZE as usize);
+        virt.read_volatile() == byte && virt.add(FRAME_SIZE as usize - 1).read_volatile() == byte
+    }
 }
 
 /// Reads [`TEST_PAGE`]; faults if it is unmapped (after [`alias_check`]).

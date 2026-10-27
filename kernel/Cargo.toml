@@ -57,5 +57,9 @@ name = "paging"
 harness = false
 
 [[test]]
+name = "reclaim"
+harness = false
+
+[[test]]
 name = "write_protect"
 harness = false

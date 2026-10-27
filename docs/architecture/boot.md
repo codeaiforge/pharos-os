@@ -28,7 +28,7 @@ firmware (UEFI: OVMF / BIOS: SeaBIOS)
 - **CPU state:** 64-bit long mode with paging, PAE, write protection, and NX (if available) enabled; interrupts disabled (`RFLAGS = 0x2`); no IDT, TSS, or LDT; legacy PIC IRQs masked; kernel segments mapped in the higher half. Limine's GDT and boot stack live in bootloader-reclaimable memory, so `kmain` first switches to the kernel's own stack, which has an unmapped guard page below it (implemented, issue #22), then loads its own GDT and TSS (issue #20; `arch::x86_64::gdt`) and its IDT for CPU exceptions (issue #21; `arch::x86_64::idt`). After building its frame allocator it switches to its own page tables (issue #27; [memory.md](memory.md)), so Limine's page tables are no longer used either.
 - **Requests:** the kernel declares requests as statics in `.limine_requests` sections, between the start and end markers. Required in M2.2: base revision, memory map, HHDM. Bootloader info and firmware type are optional but useful for diagnostics.
 - **Revision check:** the kernel must verify that the base-revision tag's third value was set to 0. If not, it reports an error and halts, instead of running with a protocol it did not ask for.
-- **Responses:** read with volatile loads, because the bootloader writes them outside the compiler's view. A missing response is an error the kernel reports, not undefined behaviour.
+- **Responses:** valid only until the kernel reclaims bootloader memory (issue #28; after that `response()` returns `None` and the kernel uses its own copy of the memory map). Read with volatile loads, because the bootloader writes them outside the compiler's view. A missing response is an error the kernel reports, not undefined behaviour.
 
 ### Protocol structures
 

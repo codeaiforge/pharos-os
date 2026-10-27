@@ -109,6 +109,20 @@ extern "C" fn kernel_main() -> ! {
         apic::version() & 0xff
     );
 
+    // Last step that may touch bootloader memory is done: `memmap`, `hhdm`,
+    // and the other Limine responses must not be used after this.
+    match mm::reclaim_bootloader_memory() {
+        Ok(frames) => {
+            let free = mm::frames().as_ref().map_or(0, |f| f.stats().free);
+            kprintln!(
+                "  reclaimed:  {} MiB of bootloader memory ({frames} frames); {} MiB free",
+                mib(frames as u64 * mm::frame::FRAME_SIZE),
+                mib(free as u64 * mm::frame::FRAME_SIZE)
+            );
+        }
+        Err(error) => fail(format_args!("reclaiming bootloader memory failed: {error}")),
+    }
+
     kprintln!("PHAROS: boot ok");
     qemu_exit(QemuExit::Success);
     halt()

@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** Accepted with [D-005](../project/decision-log.md#d-005-memory-management-strategy) (2026-10-27).
-- **Implementation:** the frame allocator (#26) and the kernel's own page tables with guard pages (#27) are **implemented**. Reclaiming bootloader memory (#28) and the kernel heap (#29) are **planned** ([M2.5](../project/implementation-roadmap.md#m25--physical-and-virtual-memory-management)). This document is completed and reviewed at the M2.5 gate (#30).
+- **Implementation:** the frame allocator (#26), the kernel's own page tables with guard pages (#27), and reclaiming bootloader memory (#28) are **implemented**. The kernel heap (#29) is **planned** ([M2.5](../project/implementation-roadmap.md#m25--physical-and-virtual-memory-management)). This document is completed and reviewed at the M2.5 gate (#30).
 
 ## 2. Context
 
@@ -15,13 +15,24 @@ Limine hands over its own page tables (in bootloader-reclaimable memory), a dire
 
 After the GDT and IDT, `kmain` (and test kernels through `testing::init_memory`):
 
-1. builds the frame allocator from the memory map (`mm::init_frames`);
+1. copies the memory map into kernel memory and builds the frame allocator from it (`mm::init_frames`);
 2. builds the kernel address space and switches CR3 to it (`mm::init_paging`);
-3. maps the local APIC registers through it (`apic::init`).
+3. maps the local APIC registers through it (`apic::init`);
+4. after its last read of a Limine response, reclaims bootloader memory (`mm::reclaim_bootloader_memory`; `kmain` only, as its last step before `PHAROS: boot ok`).
+
+### Reclaiming bootloader memory
+
+Bootloader-reclaimable regions hold Limine's boot stack, GDT, page tables, and its responses (including the memory map). The kernel stops using each of them: it switches to its own stack (first thing in `kmain`), GDT (#20), and page tables (#27), and copies the memory map into a kernel static (`mm::memory_map()`, up to 128 entries; more are counted as truncated). The frame allocator is built over usable **and** reclaimable regions from the start (their bitmap storage is planned up front), with reclaimable frames marked used. Reclaim then:
+
+1. refuses to run unless the kernel's own page tables are active;
+2. retires Limine's responses: from then on every `Request::response()` returns `None`;
+3. frees the reclaimable frames (once; later calls gain nothing).
+
+References to responses obtained before reclaim must not be used afterwards; this is a documented rule, not enforced by the type system. In QEMU with 256 MiB, reclaim adds 41 MiB under UEFI and 144 frames under BIOS.
 
 ### Physical frames (`mm::frame`, `mm::bitmap`)
 
-- One bitmap per usable region, one bit per 4 KiB frame, set = used. Only usable regions at or above 1 MiB are managed today; at most 64 regions (more are counted and reported as skipped).
+- One bitmap per usable or bootloader-reclaimable region, one bit per 4 KiB frame, set = used. Only regions at or above 1 MiB are managed; at most 64 regions (more are counted and reported as skipped).
 - The bitmaps live at the start of the largest usable region, reached through the direct map; those frames are reserved. About 8 KiB covers 256 MiB.
 - Single frames use next fit; contiguous runs use a linear scan with physical alignment. Double frees and frees of unknown frames are errors; out of memory is an error value.
 - The allocator sits behind `IrqMutex` (`mm::raw`), which disables interrupts while held.
@@ -63,7 +74,7 @@ In QEMU with 256 MiB the kernel tables take 19 frames under UEFI and 10 under BI
 ## 5. Testing
 
 - Host unit tests: bitmap and frame allocation (alignment, edges, double frees, exhaustion), page-table entry encoding, page splitting, and direct-map kinds.
-- Test kernels: `frames` (allocation, freeing, exhaustion), `paging` (segment permissions, guard pages, direct map with 2 MiB pages, map/write/alias/unmap, page fault after unmap), `write_protect` (writing rodata faults with a protection-violation write), `no_execute` (executing data faults with an instruction-fetch error), and `double_fault` (stack overflow on the kernel's own tables). Each was checked once to fail when the property it tests is broken.
+- Test kernels: `frames` (allocation, freeing, exhaustion), `reclaim` (reclaimed frame count, retired responses, every frame written afterwards with the copied memory map intact), `paging` (segment permissions, guard pages, direct map with 2 MiB pages, map/write/alias/unmap, page fault after unmap), `write_protect` (writing rodata faults with a protection-violation write), `no_execute` (executing data faults with an instruction-fetch error), and `double_fault` (stack overflow on the kernel's own tables). Each was checked once to fail when the property it tests is broken.
 
 ## 6. Alternatives
 
@@ -71,7 +82,7 @@ See D-005: free-list and buddy frame allocators, extending Limine's page tables,
 
 ## 7. Open questions
 
-- Reclaiming bootloader memory and copying Limine responses first (#28).
+- Enforcing the end of Limine responses in the type system instead of by rule.
 - Heap size and growth (#29).
 - Freeing empty page tables when address spaces come and go (M2.7).
 - KASLR.

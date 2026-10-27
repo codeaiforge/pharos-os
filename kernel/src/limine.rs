@@ -13,6 +13,7 @@
 
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Base revision this kernel is written against ("Base Revisions").
 pub const BASE_REVISION: u64 = 6;
@@ -105,12 +106,28 @@ impl<R: 'static> Request<R> {
     }
 
     /// The bootloader's response, if it answered this request.
+    /// The bootloader's response, if it gave one and responses have not
+    /// been retired (see [`retire_responses`]).
     pub fn response(&self) -> Option<&'static R> {
+        if RESPONSES_RETIRED.load(Ordering::Acquire) {
+            return None;
+        }
         // SAFETY: the pointer is null or was set by the bootloader to a
-        // response in bootloader-reclaimable memory, which the kernel does
-        // not reclaim or modify (see boot.md).
+        // response in bootloader-reclaimable memory, which stays untouched
+        // until `retire_responses` (checked above).
         unsafe { self.response.read().as_ref() }
     }
+}
+
+static RESPONSES_RETIRED: AtomicBool = AtomicBool::new(false);
+
+/// Marks all responses invalid: from now on every `response()` returns
+/// `None`. Called before bootloader-reclaimable memory, where the responses
+/// live, is reused. References obtained earlier must not be used after this.
+// ponytail: earlier `&'static` references stay usable by safe code; the rule
+// above is documented, not enforced. Revisit if responses spread further.
+pub fn retire_responses() {
+    RESPONSES_RETIRED.store(true, Ordering::Release);
 }
 
 /// Reads a 0-terminated string provided by the bootloader.
