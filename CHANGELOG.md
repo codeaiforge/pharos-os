@@ -26,6 +26,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Changed
 
+- M2.3 (QEMU boot validation) is done: CI boots the kernel and runs kernel tests on every push; the CI image hash matched a local build. M2.4 (exceptions and interrupts) is current. `pharos info` shows the new stage.
 - `pharos info` reports the minimal kernel and `cargo xtask` as implemented and CI boot tests as planned; the stage is Phase 2 (M2.2). `pharos doctor` points to `cargo xtask run` for the QEMU check.
 - M2.2 (minimal bootable kernel) is done; M2.3 (automated QEMU boot tests) is current.
 - rust-analyzer's on-save check runs `scripts/ra-check.sh`, which checks host crates and the kernel separately, removing false editor errors in `kernel/src/main.rs`. The kernel's hardware layer now compiles on any x86-64 build so editors can resolve it.

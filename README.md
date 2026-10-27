@@ -7,7 +7,7 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 
 ## Status
 
-**Phase 2 — Core System.** M2.2 is done: a minimal kernel boots in QEMU on UEFI and BIOS with one command (`cargo xtask run`). The current milestone is M2.3, automated QEMU boot tests in CI. See the [implementation roadmap](docs/project/implementation-roadmap.md) and [boot design](docs/architecture/boot.md).
+**Phase 2 — Core System.** M2.2 and M2.3 are done: a minimal kernel boots in QEMU on UEFI and BIOS with one command (`cargo xtask run`), and CI boots it and runs kernel tests inside QEMU on every push. The current milestone is M2.4, exceptions and interrupts. See the [implementation roadmap](docs/project/implementation-roadmap.md) and [boot design](docs/architecture/boot.md).
 
 | Area | Status |
 | --- | --- |
@@ -68,7 +68,7 @@ pharos 0.1.0
 $ cargo run -q -p pharos-cli -- info
 Pharos OS 0.1.0
 Project of: CodeAIForge
-Stage:      Phase 2 - Core System (minimal kernel, M2.2)
+Stage:      Phase 2 - Core System (M2.3 complete, M2.4 next)
 ...
 
 $ cargo run -q -p pharos-cli -- doctor

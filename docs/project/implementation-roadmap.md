@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.3 — Early serial output and QEMU boot validation.** Everything in Phases 2–5 is **planned, not implemented**.
+**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.4 — Exceptions, interrupts, and debugging.** Everything in Phases 2–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -39,7 +39,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | Phase | Name | Status |
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
-| 2 | Core System | **Current** (M2.3) |
+| 2 | Core System | **Current** (M2.4) |
 | 3 | AI Agent Platform | Planned |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
@@ -176,7 +176,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.3 — Early serial output and QEMU boot validation
 
-**Status: Current.** Done so far: serial output (M2.2), D-009 accepted, `cargo xtask test` boot check (#14), and the CI `qemu` job running it (#17; green on `main` in 44 s, and confirmed to fail on a broken kernel). Also done: kernel logging macros (#15) and kernel tests inside QEMU (#16; test kernels report each check over serial). All M2.3 issues are complete; the milestone is marked done once the CI `qemu` job passes with the kernel tests included.
+**Status: Done** — gate passed 2026-10-27: the CI `qemu` job passed on `main` with the boot check (UEFI and BIOS) and the `boot_info` test kernel (9 checks), and the CI image hash matched a local build (`f4fc294`, [run 40476613340](https://github.com/codeaiforge/pharos-os/actions/runs/40476613340)). Delivered: D-009 (#13), `cargo xtask test` (#14), logging macros (#15), kernel tests inside QEMU (#16), CI job (#17). A hung boot fails within the time limit; failing, panicking, and empty test kernels fail the run.
 
 - **Objective and scope:** Serial (COM1) output and an automated QEMU test harness that runs in CI.
 - **Deliverables:** Serial driver; logging macros; QEMU harness (per D-009) with timeout and serial capture; CI job running it headless.
@@ -190,7 +190,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.4 — Exceptions, interrupts, and debugging
 
-**Status: Planned.**
+**Status: Current.**
 
 - **Objective and scope:** IDT, CPU exception handlers, double-fault handling on a separate stack, interrupt controller setup (per D-006), and debugging support.
 - **Deliverables:** Exception handlers that log diagnostic state over serial; interrupt controller driver; GDB workflow in [debugging.md](../development/debugging.md).
@@ -589,4 +589,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26 and M2.2 on 2026-10-27. The current milestone is **M2.3 — Early serial output and QEMU boot validation**: decide D-009 and run the QEMU boot test automatically in CI.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. The current milestone is **M2.4 — Exceptions, interrupts, and debugging**, which needs decision D-006 (interrupt controller) and must make the console interrupt-safe (see the kernel README).

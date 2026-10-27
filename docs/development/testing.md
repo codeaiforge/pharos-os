@@ -54,6 +54,8 @@ To add a test kernel:
 2. Add a `[[test]]` entry with `name = "<name>"` and `harness = false` to `kernel/Cargo.toml`.
 3. Run `cargo xtask test`. Each test kernel costs about two seconds under UEFI, so group related checks.
 
+In CI the first run with kernel tests (2026-10-27, [run 40476613340](https://github.com/codeaiforge/pharos-os/actions/runs/40476613340)) took 9 s for the boot check and the `boot_info` test kernel. The job itself took 555 s that time because Ubuntu's package mirror delivered the QEMU packages at 44 kB/s (8.5 minutes); the earlier run took 44 s in total. If slow mirrors keep recurring, consider caching the packages; the job's 20-minute limit covers occasional slowness.
+
 
 ## Quality gates
 
