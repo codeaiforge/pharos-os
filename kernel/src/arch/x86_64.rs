@@ -239,6 +239,15 @@ pub fn qemu_exit(status: QemuExit) {
 /// RFLAGS interrupt-enable flag (IF).
 const RFLAGS_IF: u64 = 1 << 9;
 
+/// The current RFLAGS.
+pub(crate) fn rflags() -> u64 {
+    let rflags: u64;
+    // SAFETY: `pushfq; pop` reads RFLAGS through the stack and changes
+    // nothing else.
+    unsafe { asm!("pushfq", "pop {}", out(reg) rflags, options(nomem, preserves_flags)) };
+    rflags
+}
+
 /// True if maskable interrupts are enabled (RFLAGS.IF).
 pub fn interrupts_enabled() -> bool {
     let rflags: u64;

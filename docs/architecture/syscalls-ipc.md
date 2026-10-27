@@ -176,6 +176,9 @@ Error codes (`rax`):
 
 ## 5. Testing
 
+The [M2.7 security review](../security/review-m2.7-kernel-user-boundary.md) covers this interface; its findings are fixed and tested in the `hardening` test kernel.
+
+
 Planned test kernels (QEMU under TCG, run in CI):
 
 - **Address spaces (#38):** the same user address maps to different frames in two processes; destroying a process returns its frames.

@@ -73,6 +73,55 @@ programs! {
     WriteCr3, pharos_up_cr3, pharos_up_cr3_end,
         "Loads `rdi` into CR3 (privileged).",
         "mov cr3, rdi";
+    PortOut, pharos_up_out, pharos_up_out_end,
+        "Writes QEMU's debug-exit port (I/O ports are privileged). The value \
+         would end QEMU with a failure status if the write got through.",
+        "mov dx, 0xf4
+         mov al, 0x11
+         out dx, al";
+    X87, pharos_up_x87, pharos_up_x87_end,
+        "Loads 1.0 onto the x87 stack (the FPU is disabled for processes).",
+        "fld1";
+    Int3, pharos_up_int3, pharos_up_int3_end,
+        "Raises a breakpoint with `int3` (IDT gates are kernel-only).",
+        "int3";
+    Int80, pharos_up_int80, pharos_up_int80_end,
+        "Raises interrupt 0x80 (IDT gates are kernel-only).",
+        "int 0x80";
+    FlagsSpin, pharos_up_flags, pharos_up_flags_end,
+        "Sets the direction (DF) and alignment-check (AC) flags, then \
+         increments the counter at `rdi` forever, checking both flags each \
+         time; `ud2` if an interrupt returned without them.",
+        "std
+         pushfq
+         or qword ptr [rsp], 0x40000
+         popfq
+     2:  pushfq
+         pop rax
+         bt rax, 10
+         jnc 3f
+         bt rax, 18
+         jnc 3f
+         inc qword ptr [rdi]
+         jmp 2b
+     3:  ud2";
+    WriteLoop, pharos_up_wloop, pharos_up_wloop_end,
+        "Calls `debug_write` on handle 1 with 256 bytes `rdi` times, then \
+         exits with code 0.",
+        "mov r12, rdi
+         sub rsp, 256
+     2:  test r12, r12
+         jz 3f
+         mov eax, 2
+         mov edi, 1
+         mov rsi, rsp
+         mov edx, 256
+         syscall
+         dec r12
+         jmp 2b
+     3:  xor eax, eax
+         xor edi, edi
+         syscall";
     SyscallTable, pharos_up_table, pharos_up_table_end,
         "Runs the system calls in the table at `rdi`, then exits with code \
          `0x600d`. Table: a count, then entries of ten 8-byte words: `rax`, \

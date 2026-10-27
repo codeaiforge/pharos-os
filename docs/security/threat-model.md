@@ -1,6 +1,6 @@
 # Threat model
 
-**Status:** initial draft. It covers what exists today (a host-side Rust workspace) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
+**Status:** updated at the M2.7 gate (2026-10-27). It covers what exists today, the host workspace and a kernel with isolated user processes, and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
 
 ## Security principles
 
@@ -12,7 +12,7 @@
 6. **Controlled resource access.** Files, processes, devices, and network endpoints are reachable only through mediated interfaces.
 7. **Safe Rust by default.** `unsafe` is minimal, justified, documented, and reviewed.
 
-## Part 1 — Current scope (Phase 1)
+## Part 1 — Current scope (implemented)
 
 ### Assets
 
@@ -42,10 +42,30 @@
 | Secrets committed by mistake | `.gitignore` covers `.env`, `*.pem`, `*.key`; AGENTS.md forbids secrets; PR template asks for confirmation. |
 | An AI assistant performs unwanted Git or system changes | AGENTS.md forbids commits, pushes, history rewrites, and privileged commands without explicit authorization. |
 
+### Kernel/user boundary (M2.7)
+
+User processes run in ring 3 since M2.7. Design: [syscalls-ipc.md](../architecture/syscalls-ipc.md) and [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism). Review: [M2.7 security review](review-m2.7-kernel-user-boundary.md). Every mitigation below is implemented and covered by QEMU test kernels, except where marked as a limit.
+
+| Threat | Mitigation |
+| --- | --- |
+| A process reads or writes kernel memory | Kernel pages never have the user bit; SMEP/SMAP are on where available. `user_mode` has processes read and write kernel data and jump into kernel code; each is killed with the expected page fault |
+| A process reaches another process's memory | Separate user halves per process; the kernel decides all user mappings. A process reading a page only another process maps is killed |
+| A malicious system-call argument corrupts the kernel | Every argument is checked, and the kernel never dereferences user addresses: it copies through the direct map after validating range, mapping, and access. `syscalls` passes bad buffers, numbers, and handles. `syscall::decode` is fuzzed on the host with 200,000 random calls |
+| `sysret` to a non-canonical address faults in ring 0 (CVE-2012-0217) | The last user page is never mapped, and the return address is checked before `sysret`. Tested under TCG, and under KVM on an Intel CPU |
+| A process uses an object it was not given | Capabilities only: per-process handle tables, and rights checked on every call. Delegation only with `GRANT`, narrowing rights; revocation through the derivation tree (`ipc`) |
+| A process exhausts kernel memory | IPC uses one 256-byte message and one wait per thread; process creation is kernel-only; kernel logs keep their newest 64 entries (review F2, `hardening`). Limit: a server that never receives blocks its clients forever (no timeouts yet) |
+| A process crashes the kernel with a fault or a privileged instruction | Exceptions from user mode kill only the process. `cli`, `hlt`, `mov cr3`, port I/O, and `int n` (all gates are DPL 0) are killed with general-protection faults (`user_mode`, `hardening`) |
+| User flags leak into the kernel (DF, AC) | Interrupt entry clears DF and AC (review F1); `syscall` clears them through `SFMASK`. Debug builds assert both are clear in every dispatcher (`hardening`) |
+| FPU state leaks between processes | `CR0.EM` makes x87/MMX instructions fault, and SSE/AVX are off, so no process can use registers the kernel does not save (review F3, `hardening`) |
+| A stale TLB entry keeps a freed kernel page reachable | Kernel-space unmaps always flush, even while a process space is active (review F4, `address_spaces`) |
+| Speculative execution leaks kernel memory (Meltdown class) | **Limit:** not mitigated (no KPTI); revisit before real-hardware use |
+| Timing side channels | **Limit:** `rdtsc` is available in user mode |
+
 ### Known limitations
 
 - No automated secret scanning or dependency auditing is configured yet (nothing to audit today).
-- The kernel runs only in ring 0 (no user mode yet), so these protections guard against kernel bugs, not against untrusted code. One stack frame larger than a guard page could skip it. All kernel memory is reachable through the writable direct map.
+- User processes are isolated from the kernel and from each other (see the kernel/user boundary above). Inside the kernel, the protections guard against kernel bugs: one stack frame larger than a guard page could skip it, and all kernel memory is reachable through the writable direct map.
+- One CPU only: the kernel/user boundary's reasoning about system calls and TLB flushes assumes it.
 
 ## Part 2 — Planned system (Phases 2–5)
 
@@ -80,21 +100,6 @@ Everything below is **planned**; none of it is implemented.
 - **Malicious local input** — crafted disk images, files, or devices.
 - **Supply-chain attacker** — compromises a dependency, toolchain, or build artifact.
 - **Physical attacker** — access to the machine (largely out of scope initially).
-
-### Kernel/user boundary (designed for M2.7)
-
-Designed in [syscalls-ipc.md](../architecture/syscalls-ipc.md) and [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism). Rows marked **(tested)** are implemented and covered by QEMU tests (#38–#41); the rest are still planned. Refined when M2.7 closes.
-
-| Threat | Planned mitigation |
-| --- | --- |
-| A process reads or writes kernel memory | **(tested)** Kernel pages never have the user bit; SMEP/SMAP on where available. The `user_mode` test kernel has processes read and write kernel data and jump into kernel code; each is killed with the expected page fault |
-| A process reaches another process's memory | **(tested)** Separate user halves per process; the kernel decides all user mappings. A process reading a page only another process maps is killed (not-present fault) |
-| A malicious system-call argument corrupts the kernel | **(tested)** Every argument is checked, and the kernel never dereferences user addresses: it copies through the direct map after validating range, mapping, and access. Unknown calls return errors. The `syscalls` test kernel passes kernel, unmapped, page-crossing, overflowing, and oversized buffers, unknown numbers, and bad handles. `syscall::decode` is fuzzed on the host with 200,000 random calls |
-| `sysret` to a non-canonical address faults in ring 0 (CVE-2012-0217) | **(tested)** The last user page is never mapped, and the return address is checked before `sysret` (falling back to `iretq`). A `syscall` at the very end of the page below returns, then faults in user mode, killing only the process. This passed under TCG and under KVM on an Intel CPU |
-| A process uses an object it was not given | **(tested)** Capabilities only, with per-process handle tables and rights checked on every call. Delegation is possible only with `GRANT` and can only narrow rights, and revocation goes through the derivation tree. The `ipc` test kernel passes a console capability with `WRITE` only, sees the receiver unable to pass it on, revokes it, and sees the receiver's next use fail with `REVOKED`. A process cannot send on a receive-only endpoint, or receive on a send-only one |
-| A process exhausts kernel memory through IPC | **(tested in part)** Synchronous IPC: one 256-byte message and one wait per thread, in the endpoint queue; process creation is kernel-only. The `ipc` test checks that no thread is left queued after the exchanges. Limit: a server that never receives blocks its clients forever (no timeouts yet) |
-| A process crashes the kernel with a fault or a privileged instruction | **(tested)** Exceptions from user mode kill the process, not the kernel; `cli`, `hlt`, and `mov cr3` in user mode are killed with general-protection faults, and the other processes keep running |
-| Speculative execution leaks kernel memory (Meltdown class) | Not mitigated in M2.7 (no KPTI); revisit before real-hardware use |
 
 ### Threats and planned mitigations
 

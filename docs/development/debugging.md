@@ -164,6 +164,42 @@ Triple fault
 
 A page fault (`0xe`), a second page fault while delivering it (which becomes a double fault, `0x8`), and a page fault while delivering the double fault. The lines before them give `RIP`, `CR2`, and the registers at each step. Do not commit `qemu.log`.
 
+### Debug a user program (across the privilege boundary)
+
+GDB follows a process into ring 3 and back. User programs are flat binaries without symbols, so stop in the kernel first, read the user address from the system-call frame, and set a hardware breakpoint there. A hardware breakpoint writes nothing into the process's read-only code page. QEMU's GDB stub uses the current CR3, so user addresses resolve in the running process's address space.
+
+```text
+$ cargo test -p pharos-kernel --target x86_64-unknown-none --test syscalls --no-run
+$ cargo xtask run --kernel target/x86_64-unknown-none/debug/deps/syscalls-<hash> --gdb
+$ gdb target/x86_64-unknown-none/debug/deps/syscalls-<hash>   # second terminal
+(gdb) target remote localhost:1234
+(gdb) break pharos_kernel::syscall::kernel::handle
+(gdb) continue
+Breakpoint 1, pharos_kernel::syscall::kernel::handle (frame=0xffffc8000000ffb0) at kernel/src/syscall.rs:169
+(gdb) print frame.rax          # the call number: 1 = yield
+$1 = 1
+(gdb) print/x frame.rip        # where sysret will return to
+$2 = 0x400030
+(gdb) print/x $cs              # still the kernel
+$3 = 0x8
+(gdb) hbreak *0x400030
+(gdb) delete 1
+(gdb) continue
+Breakpoint 2, 0x0000000000400030 in ?? ()
+(gdb) print/x $cs              # ring 3: user code selector
+$4 = 0x33
+(gdb) print/x $rax             # the call's status: 0 = success
+$5 = 0x0
+(gdb) x/3i $pc
+=> 0x400030:	mov    %rax,0x38(%r13)
+   0x400034:	mov    %rdx,0x40(%r13)
+   0x400038:	mov    $0x1,%r14
+(gdb) delete
+(gdb) continue
+```
+
+Verified on 2026-10-27 (GDB 15.1, QEMU 8.2.2, UEFI). The breakpoint in the handler stopped on the process's first call, with its own CR3 loaded (`print/x $cr3` showed `0x621000`, not the kernel root). The hardware breakpoint stopped in ring 3 right after `sysret`, at the table program's instruction that stores the result (`TestProgram::SyscallTable`). After `continue` the test kernel passed (QEMU status 33), and GDB reported the closed connection when QEMU exited. To stop on a fault in user mode instead, break on `pharos_kernel::process::on_user_fault`.
+
 ### Trace task switches
 
 `sched::set_trace(true)` prints every task switch over serial, with the scheduler's tick count. Task 0 is the boot thread; with preemption enabled, the idle task is the first task created by `sched::enable_preemption`. The `preemption` test kernel turns tracing on while three tasks sleep 50, 10, and 30 ms and task 0 sleeps 100 ms. Boot that test kernel to see the trace:

@@ -103,3 +103,7 @@ harness = false
 [[test]]
 name = "ipc"
 harness = false
+
+[[test]]
+name = "hardening"
+harness = false

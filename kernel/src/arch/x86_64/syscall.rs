@@ -127,6 +127,8 @@ unsafe extern "C" {
 }
 
 extern "C" fn dispatch(frame: &mut SyscallFrame) {
+    // SFMASK clears both on entry.
+    debug_assert_eq!(super::rflags() & (1 << 10 | 1 << 18), 0, "DF or AC set");
     let handler = HANDLER.load(Ordering::Acquire);
     if handler.is_null() {
         frame.rax = NO_HANDLER;

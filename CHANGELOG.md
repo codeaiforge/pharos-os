@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- M2.7 security review (`docs/security/review-m2.7-kernel-user-boundary.md`, #42) of the kernel/user boundary, covering every system call, user-memory path, entry path, and `unsafe` block added in M2.7. Fixes from it:
+  - interrupt entry clears AC, and debug builds assert DF and AC are clear (F1);
+  - the kernel's process logs keep their newest 64 entries (F2);
+  - `CR0.EM` keeps processes off the x87 FPU and MMX, whose state is not saved per process (F3).
+  - New test kernel `hardening` (12 checks), each fix checked to fail without it.
+  - The threat model moves the kernel/user boundary into the current scope. The debugging guide shows a verified GDB session that follows a system call back into ring 3.
 - IPC (D-014, #41).
   - Synchronous endpoints (`ipc`, with host-tested queues) and the system calls `send`, `receive`, and `revoke`.
   - `sched::block_current` and `sched::wake` let a thread wait without polling.

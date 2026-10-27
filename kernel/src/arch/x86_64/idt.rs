@@ -206,6 +206,9 @@ fn fatal_hook() -> Option<fn(&ExceptionFrame) -> !> {
     Some(unsafe { core::mem::transmute::<*mut (), fn(&ExceptionFrame) -> !>(hook) })
 }
 
+const RFLAGS_DF: u64 = 1 << 10;
+const RFLAGS_AC: u64 = 1 << 18;
+
 /// Handler for CPU exceptions raised in user mode; null if none.
 static USER_FAULT_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
@@ -289,6 +292,11 @@ pub fn touch_unmapped_probe() {
 
 /// Called by the entry stubs with interrupts disabled.
 extern "C" fn dispatch(frame: &mut ExceptionFrame) {
+    debug_assert_eq!(
+        super::rflags() & (RFLAGS_DF | RFLAGS_AC),
+        0,
+        "DF or AC set in the kernel"
+    );
     if frame.vector == BREAKPOINT as u64 {
         BREAKPOINTS.fetch_add(1, Ordering::Relaxed);
         crate::kprintln!("PHAROS: breakpoint at {:#018x}, continuing", frame.rip - 1);
@@ -343,7 +351,14 @@ mod entry {
         "push r8", "push r9", "push r10", "push r11", "push r12", "push r13", "push r14", "push r15",
         // 22 quadwords are on the stack (176 bytes) and the CPU aligned RSP
         // to 16 at entry, so RSP is 16-byte aligned for the call.
+        // The interrupted code may be user code with DF or AC set (`std`,
+        // `popf`). Rust needs DF clear; AC set would switch off SMAP checks.
+        // `btr` on the saved flags works without SMAP support, unlike `clac`.
+        // The user's flags come back with `iretq`.
         "cld",
+        "pushfq",
+        "btr qword ptr [rsp], 18",
+        "popfq",
         "mov rdi, rsp",
         "call {dispatch}",
         "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10", "pop r9", "pop r8",

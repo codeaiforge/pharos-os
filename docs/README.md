@@ -22,6 +22,7 @@
 ## Security
 
 - [Threat model](security/threat-model.md) — assets, trust boundaries, threats, and mitigations.
+- [M2.7 security review](security/review-m2.7-kernel-user-boundary.md) — the kernel/user boundary: system calls, user memory, entry paths, and `unsafe` code.
 - [Security policy](../SECURITY.md) — how to report vulnerabilities.
 
 ## Repository policies

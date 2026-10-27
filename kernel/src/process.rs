@@ -11,7 +11,7 @@
 //! it with the initial capabilities, under handles 1, 2, ... in order.
 //! System calls (#40) reach the calling process through [`current`].
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
@@ -181,16 +181,39 @@ pub struct Exit {
     pub at: core::time::Duration,
 }
 
-// ponytail: exits, kills, and debug output are kept in full for tests and
-// reports; cap or ring-buffer them when processes come and go in numbers.
-static EXITS: IrqMutex<Vec<Exit>> = IrqMutex::new(Vec::new());
-static DEBUG_OUTPUT: IrqMutex<Vec<(TaskId, Vec<u8>)>> = IrqMutex::new(Vec::new());
+/// Entries each log keeps (the newest). Processes drive these logs, so they
+/// must not grow without bound (security review F2, #42).
+pub const LOG_ENTRIES: usize = 64;
+
+/// A log that keeps only its newest [`LOG_ENTRIES`] entries.
+struct Log<T>(IrqMutex<VecDeque<T>>);
+
+impl<T: Clone> Log<T> {
+    const fn new() -> Self {
+        Self(IrqMutex::new(VecDeque::new()))
+    }
+
+    fn push(&self, entry: T) {
+        let mut log = self.0.lock();
+        if log.len() == LOG_ENTRIES {
+            log.pop_front();
+        }
+        log.push_back(entry);
+    }
+
+    fn entries(&self) -> Vec<T> {
+        self.0.lock().iter().cloned().collect()
+    }
+}
+
+static EXITS: Log<Exit> = Log::new();
+static DEBUG_OUTPUT: Log<(TaskId, Vec<u8>)> = Log::new();
 
 /// The `exit` system call: records the code and ends the process.
 #[cfg_attr(not(target_os = "none"), allow(dead_code))] // used by the kernel-only handler
 pub(crate) fn exit_current(code: u64) -> ! {
     let task = sched::current_id().unwrap_or(0);
-    EXITS.lock().push(Exit {
+    EXITS.push(Exit {
         task,
         code,
         at: crate::time::uptime(),
@@ -198,9 +221,9 @@ pub(crate) fn exit_current(code: u64) -> ! {
     end_current()
 }
 
-/// Processes that exited so far, oldest first.
+/// The newest [`LOG_ENTRIES`] process exits, oldest first.
 pub fn exits() -> Vec<Exit> {
-    EXITS.lock().clone()
+    EXITS.entries()
 }
 
 /// The `debug_write` system call's output: prints `bytes` (non-printable
@@ -218,12 +241,12 @@ pub(crate) fn debug_write(bytes: &[u8]) {
     }
     let text = core::str::from_utf8(&text[..bytes.len()]).unwrap_or("");
     kprintln!("process {task}: {text}");
-    DEBUG_OUTPUT.lock().push((task, bytes.to_vec()));
+    DEBUG_OUTPUT.push((task, bytes.to_vec()));
 }
 
-/// Everything processes wrote with `debug_write`, oldest first.
+/// The newest [`LOG_ENTRIES`] `debug_write` outputs, oldest first.
 pub fn debug_output() -> Vec<(TaskId, Vec<u8>)> {
-    DEBUG_OUTPUT.lock().clone()
+    DEBUG_OUTPUT.entries()
 }
 
 /// A process killed by a CPU exception in user mode.
@@ -238,7 +261,7 @@ pub struct Kill {
     pub cr2: u64,
 }
 
-static KILLS: IrqMutex<Vec<Kill>> = IrqMutex::new(Vec::new());
+static KILLS: Log<Kill> = Log::new();
 
 /// Installs the user-fault handler and the system-call entry. Call once,
 /// after `sched::init`.
@@ -248,9 +271,9 @@ pub fn init() {
     crate::arch::x86_64::syscall::init(crate::syscall::handle);
 }
 
-/// Processes killed so far, oldest first.
+/// The newest [`LOG_ENTRIES`] processes killed, oldest first.
 pub fn kills() -> Vec<Kill> {
-    KILLS.lock().clone()
+    KILLS.entries()
 }
 
 /// A CPU exception in user mode: report it, record it, and end the thread
@@ -260,7 +283,7 @@ fn on_user_fault(frame: &ExceptionFrame) -> ! {
     let task = sched::current_id().unwrap_or(0);
     let cr2 = idt::read_cr2();
     kprintln!("PHAROS: process {task} killed: {}", Report { frame, cr2 });
-    KILLS.lock().push(Kill {
+    KILLS.push(Kill {
         task,
         vector: frame.vector,
         error_code: frame.error_code,
