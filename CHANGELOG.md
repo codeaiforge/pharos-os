@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- System-call and IPC design (`docs/architecture/syscalls-ipc.md`, #37), approved by the maintainer, and accepted decision D-014.
+  - Processes with one thread each, an address-space layout with W^X, and `syscall`/`sysret` with register arguments.
+  - The kernel never dereferences user addresses: it copies through the direct map after validating each buffer. SMEP/SMAP are enabled where available.
+  - Capability tables with endpoint and debug-console objects, delegation with `GRANT`, and revocation through a derivation tree.
+  - Synchronous IPC endpoints with 256-byte messages and one capability per message.
+  - Seven system calls with error codes, and test programs as `global_asm!` flat binaries.
+  - The threat model gains a kernel/user boundary section, including the `sysret` non-canonical-address hazard.
 - Accepted D-004 as final and recorded the D-012 direction (#36).
   - D-004: the kernel is a capability-based microkernel, with `unsafe` confined to a small hardware layer. It keeps only address spaces, threads and scheduling, IPC, capabilities, interrupt delivery, the timer, the interrupt controller, and the debug console. The IPC budget, measured under KVM with a release build: a message round trip of at most 2 µs and a 1 MiB shared-memory grant of at most 100 µs.
   - D-012 direction: the kernel enforces capabilities (per-process handle tables, rights, passing capabilities over IPC with a grant right, revocation by the original holder) and user space decides policy. The final decision is due at M3.4.

@@ -570,7 +570,7 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, and D-004 on 2026-10-27; D-012 has a recorded direction; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, and D-014 on 2026-10-27; D-012 has a recorded direction; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -585,6 +585,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-009 | QEMU automation and debugging | M2.3 | **Accepted:** status 33 + serial marker, 60 s timeout, test kernels via Cargo runner and `cargo xtask test` |
 | D-010 | Inference runtime, model formats, licensing | M3.1 | Licenses, memory safety, performance, portability |
 | D-011 | CPU/GPU support, memory/VRAM | M3.1, M3.2 | Hardware requirements, driver availability |
+| D-014 | IPC model and system-call mechanism | M2.7 | **Accepted:** `syscall`/`sysret`; synchronous endpoints, 256-byte messages plus one capability, bounded per-thread buffers |
 | D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | **Direction:** kernel-enforced capabilities (per-process handle tables, rights, grant over IPC, revocation), policy in user space; final at M3.4 |
 | D-013 | Scheduling model | M2.6 | **Accepted:** preemptive round-robin on one CPU, 10 ms slice, kernel threads on guarded stacks, no lock held across a switch |
 

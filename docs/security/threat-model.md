@@ -81,6 +81,21 @@ Everything below is **planned**; none of it is implemented.
 - **Supply-chain attacker** — compromises a dependency, toolchain, or build artifact.
 - **Physical attacker** — access to the machine (largely out of scope initially).
 
+### Kernel/user boundary (designed for M2.7)
+
+Designed in [syscalls-ipc.md](../architecture/syscalls-ipc.md) and [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism); not implemented yet. Refined when M2.7 closes.
+
+| Threat | Planned mitigation |
+| --- | --- |
+| A process reads or writes kernel memory | Kernel pages never have the user bit; SMEP/SMAP on where available; tests try reads, writes, and jumps into the kernel |
+| A process reaches another process's memory | Separate user halves per process; the kernel decides all user mappings |
+| A malicious system-call argument corrupts the kernel | Every argument checked; the kernel never dereferences user addresses and copies through the direct map after validating range, mapping, and access; unknown calls return errors; randomized host tests of validation |
+| `sysret` to a non-canonical address faults in ring 0 (CVE-2012-0217) | The last user page is never mapped; the return address is checked before `sysret` |
+| A process uses an object it was not given | Capabilities only, per-process handle tables, rights checked on every call, delegation only with `GRANT`, revocation through the derivation tree |
+| A process exhausts kernel memory through IPC | Synchronous IPC: one 256-byte buffer and one wait per thread; process creation is kernel-only |
+| A process crashes the kernel with a fault | Exceptions from user mode kill the process, not the kernel |
+| Speculative execution leaks kernel memory (Meltdown class) | Not mitigated in M2.7 (no KPTI); revisit before real-hardware use |
+
 ### Threats and planned mitigations
 
 | Threat | Planned mitigation | Milestone |

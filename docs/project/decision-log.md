@@ -364,6 +364,45 @@ That is under 1 µs, half the budget.
 - **SMEP and SMAP:** QEMU's default CPU under TCG (used by CI) reports neither. `-cpu max` under TCG and `-cpu host` under KVM report both. Limine leaves CR4 at `0x20`, so neither is enabled.
 - **Timing under TCG is noisy:** the debug build's empty `syscall` measured faster (43 ns) than the release build.
 
+### D-014: IPC model and system-call mechanism
+
+- **Status:** Accepted
+- **Needed by:** M2.7
+- **Date accepted:** 2026-10-27
+
+**Context.** D-004 makes IPC and capabilities the kernel's main interface, with an IPC round trip of at most 2 µs under KVM. D-012 asks for capabilities that move only over IPC. M2.7 needs a system-call entry and one IPC primitive that untrusted processes cannot use to exhaust kernel memory. Design details are in [syscalls-ipc.md](../architecture/syscalls-ipc.md).
+
+**Options.**
+- **System-call entry:** `syscall`/`sysret` or a software interrupt (`int 0x80`).
+- **IPC:**
+  - synchronous endpoints, where sender and receiver meet;
+  - asynchronous queues, where the kernel buffers messages;
+  - shared-memory rings set up through the kernel.
+
+**Evaluation criteria.** Bounded kernel memory under untrusted use; round-trip cost against the D-004 budget; amount of code and `unsafe`; room for capability passing and a later shared-memory path.
+
+**Decision.**
+
+1. **`syscall`/`sysret`.** Arguments go in registers. The status returns in `rax` and the value in `rdx`. The entry switches to the thread's kernel stack through a scratch slot (one CPU). The stub checks that the return address is canonical before `sysret` (falling back to `iretq`), and the last user page is never mapped (CVE-2012-0217).
+2. **Synchronous endpoints.**
+   - A message is at most 256 bytes plus one capability.
+   - `send` copies the message into a per-thread kernel buffer and blocks until a receiver takes it; `receive` blocks until a message arrives.
+   - Queues are first in first out per endpoint. Each thread waits on at most one endpoint, so kernel memory for IPC is bounded by the number of threads.
+3. **Large data uses shared-memory capabilities later,** not bigger messages.
+4. **No combined `call`/reply in M2.7.** Add it if round-trip measurements need fewer system calls.
+
+**Consequences.**
+- Senders block, so a server that never receives stalls its clients. Timeouts or non-blocking variants come when a service needs them.
+- Two system calls per direction (send and receive) until `call` exists.
+- SMP will need per-CPU entry state (`swapgs`).
+
+**Evidence.** The D-004 prototype (2026-10-27, KVM, release build, i9-10900K):
+- `syscall`/`sysret` with a stack switch, register save, and Rust call: 21 ns;
+- `int 0x80`/`iretq`: 138 ns;
+- task switch round trip: 145 ns.
+
+Two system calls per direction plus two task switches and two address-space switches leave the estimated round trip well under 2 µs.
+
 ## Open and proposed decisions
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
@@ -433,4 +472,3 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
    - revocation as designed in #37.
 
    Memory, process, and interrupt capabilities follow with their milestones.
-

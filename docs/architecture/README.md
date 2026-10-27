@@ -8,6 +8,7 @@ Current documents:
 - [Memory management](memory.md) — frame allocator, the kernel's own page tables, and the kernel address space (M2.5, D-005).
 - [Exceptions and interrupts](interrupts.md) — IDT, exception handling, the double-fault stack, and the local APIC timer (M2.4, D-006).
 - [Scheduling](scheduling.md) — kernel tasks, their stacks, the context switch, and locking rules (M2.6, D-013).
+- [System calls and IPC](syscalls-ipc.md) — processes, the system-call interface, capabilities, and IPC (M2.7, D-004, D-012, D-014).
 - [Boot evaluation](boot-evaluation.md) — options and prototype evidence behind D-001 to D-003.
 
 ## When to write one
