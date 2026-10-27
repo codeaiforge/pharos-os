@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- Storage design (`docs/architecture/storage.md`, #44), approved by the maintainer: block-device trait, read-only image format version 1 with CRC-32 checksums, validation order, kernel interface, file capabilities with `open` and `read` system calls, and the host tool. The threat model lists storage images as untrusted input.
 - Accepted decision D-007 (#43): M2.8 storage is a read-only RAM disk loaded as a Limine module, in a small custom format with CRC-32 checksums, parsed by one safe `no_std` crate shared by the kernel and the host tool. Processes reach files only through capabilities; writes will use copy-on-write.
 - M2.7 security review (`docs/security/review-m2.7-kernel-user-boundary.md`, #42) of the kernel/user boundary, covering every system call, user-memory path, entry path, and `unsafe` block added in M2.7. Fixes from it:
   - interrupt entry clears AC, and debug builds assert DF and AC are clear (F1);
