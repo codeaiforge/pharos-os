@@ -579,7 +579,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-003 | Rust target, linker, build strategy | M2.1 | **Accepted:** `x86_64-unknown-none` on stable, linker script, `xtask`, ISO, kernel as workspace member |
 | D-004 | Kernel architecture and privilege boundaries | M2.1 (direction), M2.7 | **Direction:** capability-based microkernel; final decision open |
 | D-005 | Memory-management strategy | M2.5 | Correctness, fragmentation, `unsafe` surface |
-| D-006 | Interrupt controller and timer | M2.4, M2.6 | QEMU/hardware support, SMP readiness |
+| D-006 | Interrupt controller and timer | M2.4, M2.6 | **Accepted (controller):** local APIC (xAPIC), APIC timer first, PICs masked; timer choice open until M2.6 |
 | D-007 | Filesystem and persistent storage | M2.8 | Crash consistency, simplicity, host tooling |
 | D-008 | Driver strategy | M2.9 | TCB size, DMA isolation, effort |
 | D-009 | QEMU automation and debugging | M2.3 | **Accepted:** status 33 + serial marker, 60 s timeout, test kernels via Cargo runner and `cargo xtask test` |
@@ -589,4 +589,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. The current milestone is **M2.4 — Exceptions, interrupts, and debugging**, which needs decision D-006 (interrupt controller) and must make the console interrupt-safe (see the kernel README).
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. The current milestone is **M2.4 — Exceptions, interrupts, and debugging**. D-006 (interrupt controller) is accepted and the console is interrupt-safe; the next steps are the kernel's own GDT and TSS, the IDT and exception handlers, and the local APIC timer.

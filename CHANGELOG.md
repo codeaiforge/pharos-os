@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- Accepted decision D-006 (controller part): local APIC in xAPIC mode, with the local APIC timer as the first hardware interrupt; the legacy PICs stay masked; M2.4 maps the APIC register page into Limine's page tables until M2.5. Prototypes showed that QEMU under TCG cannot provide x2APIC and that PIC interrupts cannot get past Limine's masked LINT0. The timer choice stays open until M2.6.
 - Interrupt-safe kernel console (#19): `interrupts_enabled`, `enable_interrupts`, `disable_interrupts`, and `without_interrupts` in the hardware layer; `kprint!`/`kprintln!` hold the console lock with interrupts disabled and restore the previous state. Fatal exception handlers will use the panic handler's print path. New test kernel `interrupt_state` (9 checks).
 - Kernel tests inside QEMU (D-009): test kernels in `kernel/tests/` (first: `boot_info`, 9 checks), the `test_kernel!` and `limine_requests!` macros, and `TestRun`. `cargo xtask runner` boots each test kernel under UEFI as Cargo's runner; `cargo xtask test` runs them after the boot check, so CI runs them too. Kernel Clippy now covers test kernels.
 - Kernel logging: `kprint!` and `kprintln!` write to one COM1 console behind a new `SpinLock` (no `unsafe`, unit-tested with threads). The panic handler releases the lock first, so a panic during printing is still reported. Not interrupt-safe yet (M2.4).

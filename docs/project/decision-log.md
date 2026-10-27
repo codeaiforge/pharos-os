@@ -159,6 +159,39 @@ Accepted by the maintainer on 2026-10-26, based on the [boot evaluation](../arch
 - A test kernel reporting failure produced QEMU status 35 and Cargo's `test failed` error (exit 1).
 - A hung test kernel was stopped by the timeout and reported as a failure.
 
+## Accepted decisions (M2.4)
+
+### D-006: Interrupt controller and timer design
+
+- **Status:** Accepted (controller part). The timer part stays Open until M2.6.
+- **Needed by:** M2.4 (controller), M2.6 (timer)
+- **Date accepted:** 2026-10-27
+
+**Context.** M2.4 must receive one hardware interrupt, tested in QEMU under TCG (CI has no KVM). Limine (base revision 6) leaves the legacy PICs fully masked and the local APIC enabled in xAPIC mode with LINT0, LINT1, and the timer masked. Its higher-half direct map (HHDM) covers only memory-map regions, so the local APIC registers at `0xfee00000` are not mapped.
+
+**Options.** Legacy 8259 PIC versus local APIC/IOAPIC (xAPIC or x2APIC); PIT, HPET, APIC timer, or TSC-deadline.
+
+**Evaluation criteria.** Works in QEMU under TCG on UEFI and BIOS; SMP readiness; amount of code; precision needed by the scheduler.
+
+**Decision (controller).**
+
+1. Use the **local APIC in xAPIC mode** (memory-mapped registers). The first hardware interrupt is the **local APIC timer**, which needs no IOAPIC and no input.
+2. Keep the legacy PICs masked (as Limine leaves them) and never use them.
+3. Before M2.5 replaces Limine's page tables, M2.4 maps the single local APIC register page (uncached, no-execute) into Limine's page tables at `HHDM + 0xfee00000`, using page-table pages reserved statically in the kernel image (no frame allocator). M2.5 takes over this mapping.
+4. x2APIC is not used for now: QEMU 8.2 under TCG cannot provide it. Revisit with SMP or a newer QEMU in CI.
+5. The IOAPIC (device interrupts such as the keyboard) comes later and needs ACPI MADT parsing; it is not part of M2.4.
+
+**Timer direction (Open, for M2.6).** Lean: local APIC timer, calibrated against the PIT (channel 2, polled, no interrupts) or the HPET; TSC-deadline where available.
+
+**Consequences.** M2.4 gains a small page-mapping helper in the hardware layer (page-table writes are `unsafe` and stay in `arch::x86_64`). Interrupt handlers send EOI through the mapped register page. No legacy PIC code. SMP later needs per-CPU local APIC setup and the IOAPIC.
+
+**Evidence.** Prototype test kernels on 2026-10-27 (not committed), booted in QEMU 8.2.2 (TCG, `-M q35`, default `qemu64` CPU):
+
+- **x2APIC:** CPUID reports no x2APIC on the default CPU. `-cpu qemu64,+x2apic` prints "TCG doesn't support requested feature: CPUID.01H:ECX.x2apic", and `-cpu max` does not report it either. Ruled out for TCG.
+- **PIC + PIT, local APIC as Limine left it:** the PIT fires (PIC IRR bit 0 set) but no interrupt reaches the CPU, matching the masked LINT0 (`0x10700` read back later: ExtINT, masked).
+- **PIC + PIT, local APIC globally disabled through `IA32_APIC_BASE`:** still no interrupt; the run hung until the 60-second timeout. In QEMU, PIC interrupts still pass through the masked LINT0 entry. So the PIC needs local APIC register access as well and offers no shortcut.
+- **xAPIC timer with a self-made mapping:** mapping the register page into Limine's page tables (1–2 new page-table pages) made the registers readable (version `0x50014`); the periodic timer delivered 50 interrupts to a handler, with 0 spurious ones, under **UEFI (PASS) and BIOS (QEMU status 33)**.
+
 ## Open and proposed decisions
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
@@ -212,15 +245,6 @@ Known costs: IPC overhead on hot paths (notably moving large model data to and f
 **Options.** Physical frame allocator design (bitmap, free list, buddy); page-table management approach; kernel heap allocator; address-space layout; use of KASLR later.
 
 **Evaluation criteria.** Correctness and testability; fragmentation; amount of `unsafe`; support for later isolation of agents and large model memory.
-
-### D-006: Interrupt controller and timer design
-
-- **Status:** Open
-- **Needed by:** M2.4 (controller), M2.6 (timer)
-
-**Options.** Legacy 8259 PIC versus local APIC/IOAPIC (x2APIC later); PIT, HPET, APIC timer, or TSC-deadline.
-
-**Evaluation criteria.** QEMU and real-hardware support; SMP readiness; precision needed by the scheduler.
 
 ### D-007: Filesystem and persistent storage
 
