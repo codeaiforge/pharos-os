@@ -106,6 +106,41 @@ $2 = 0xffffffff7ffff000
 
 Verified on 2026-10-27 (GDB 15.1, QEMU 8.2.2, UEFI): the breakpoint stopped on the page fault with the values above, `print/x *frame` showed the saved registers, and after `continue` the test kernel passed (QEMU status 33). Without the condition, the breakpoint also stops on each `int3` the test kernel executes (vector 3). GDB's Rust mode uses `frame.vector`, not `frame->vector`. Breakpoints set through QEMU's GDB stub do not use the guest's `int3`, so they do not disturb the kernel's breakpoint handler.
 
+### Inspect page tables
+
+Stop a test kernel after the switch to the kernel's own page tables, for example at the start of `init_heap` in the `heap` test kernel:
+
+```sh
+cargo test -p pharos-kernel --target x86_64-unknown-none --test heap --no-run
+cargo xtask run --kernel target/x86_64-unknown-none/debug/deps/heap-<hash> --gdb
+```
+
+```text
+$ gdb target/x86_64-unknown-none/debug/deps/heap-<hash>
+(gdb) target remote localhost:1234
+(gdb) break pharos_kernel::mm::global::init_heap
+(gdb) continue
+(gdb) monitor info mem
+...
+ffffffff80000000-ffffffff80001000 0000000000001000 -rw
+ffffffff80001000-ffffffff80026000 0000000000025000 -r-
+ffffffff80026000-ffffffff80031000 000000000000b000 -rw
+ffffffff80032000-ffffffff80042000 0000000000010000 -rw
+ffffffff80043000-ffffffff80047000 0000000000004000 -rw
+```
+
+`monitor info mem` (QEMU's monitor, through GDB) lists mapped ranges with read/write rights; above are the kernel image (requests, text plus rodata, data) and the two stacks, with the unmapped guard pages as gaps at `…31000` and `…42000`. It does not show NX. `monitor info tlb` lists every page individually. To read raw entries, walk the tables through the direct map in GDB's C mode:
+
+```text
+(gdb) set language c
+(gdb) set $root = 0xffff800000000000 + ($cr3 & ~0xfff)
+(gdb) printf "%#018lx\n", *(unsigned long *)($root + 511*8)
+```
+
+and so on down the levels (mask entries with `0x000ffffffffff000`). Bit 0 is present, bit 1 writable, bit 7 a 2 MiB page, bit 63 no-execute.
+
+Verified on 2026-10-27 (GDB 15.1, QEMU 8.2.2, UEFI): `monitor info mem` showed the layout above; the raw entries were `0x…9d58001` for a text page (present, not writable, executable), `0x8000…9d7d023` for a data page (no-execute, writable), `0` for the kernel stack's guard page, and `0x8000…200083` for the direct map at 2–4 MiB (a 2 MiB no-execute page). After `continue` the test kernel passed (QEMU status 33). GDB's default Rust mode rejects C expressions such as `~0xfff`; use `set language c`.
+
 ### Diagnose a triple fault
 
 If QEMU exits with status 0 and no kernel report, the CPU most likely triple-faulted (the kernel's handlers could not run). Re-run the same image with QEMU's interrupt log:
@@ -141,7 +176,7 @@ A page fault (`0xe`), a second page fault while delivering it (which becomes a d
 | Interrupt/exception log | Diagnose faults | `-d int,cpu_reset -D qemu.log` |
 | GDB stub | Breakpoints and stepping in the kernel | `-s -S`, then `gdb` with `target remote :1234` |
 | Debug exit device | Report test results via QEMU exit code | `-device isa-debug-exit,iobase=0xf4,iosize=0x04` |
-| QEMU monitor | Inspect registers and memory | `-monitor stdio` (`info registers`, `info mem`) |
+| QEMU monitor | Inspect registers and memory | `-monitor stdio` (`info registers`, `info mem`, `info tlb`), or `monitor <command>` from GDB |
 
 Rules for kernel debugging:
 
