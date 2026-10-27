@@ -106,7 +106,7 @@ Since issue #11: `cargo xtask build` builds the kernel binary. The kernel crate 
 
 - **M2.2 (done):** `cargo xtask run` and `cargo xtask run --bios` boot the kernel, which signals success through `isa-debug-exit` (QEMU exit status 33) or failure (35). The kernel writes to that port only when CPUID reports a hypervisor, so real hardware never sees it.
 - **M2.3 (D-009 accepted):** `cargo xtask test` runs the boot check headless under UEFI and BIOS, then every test kernel in `kernel/tests/` under UEFI. A boot passes only with QEMU status 33 and its serial marker (`PHAROS: boot ok` or `PHAROS: tests ok`), within 60 seconds. OVMF writes its own output to serial first, so the marker is searched for, not matched against the whole log. Logs go to `target/xtask/logs/`, and their end is printed on failure.
-- **Reproducibility:** CI builds the ISO twice and compares SHA-256 hashes (D-009).
+- **CI:** the `qemu` job (Ubuntu 24.04 runner) installs QEMU, OVMF, and xorriso, runs `cargo xtask test`, then builds the ISO twice and compares SHA-256 hashes (D-009). It uploads no artifacts; failing serial logs are printed in the job output.
 - **Host checks:** remain `cargo fmt`, Clippy, and tests with `--exclude pharos-kernel`.
 
 ## 6. Alternatives

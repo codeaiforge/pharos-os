@@ -87,3 +87,44 @@ jobs:
           cargo +1.85 build --workspace --exclude pharos-kernel --locked
           cargo +1.85 test --workspace --exclude pharos-kernel --locked
           cargo +1.85 test -p pharos-kernel --lib --locked
+
+  qemu:
+    name: QEMU boot check (UEFI and BIOS)
+    # Pinned image: OVMF file names and QEMU behaviour come from the distro
+    # packages that cargo xtask expects (Ubuntu 24.04, as on the dev host).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      # Pinned to a commit SHA (signed v5.1.0 release commit) instead of a
+      # movable tag. Update the SHA and the version comment together.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          rustup target add x86_64-unknown-none
+          rustc --version
+
+      # Packages for the runner VM only. curl, xz, and cc are preinstalled.
+      - name: Install QEMU, OVMF, and xorriso
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf xorriso
+          qemu-system-x86_64 --version | head -1
+
+      # Builds the kernel and image, then boots headless under UEFI and BIOS.
+      # Pass = QEMU exit status 33 and "PHAROS: boot ok" within 60 s (D-009).
+      # On failure the end of each serial log is printed here; no artifacts.
+      - name: Boot check
+        run: cargo xtask test
+
+      # D-009: two image builds must be byte-identical.
+      - name: Reproducible ISO
+        run: |
+          first=$(cargo xtask image | sed -n 's/^SHA-256: //p')
+          rm -rf target/xtask/image
+          second=$(cargo xtask image | sed -n 's/^SHA-256: //p')
+          echo "first:  $first"
+          echo "second: $second"
+          test -n "$first" && test "$first" = "$second"

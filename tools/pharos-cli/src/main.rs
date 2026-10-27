@@ -57,7 +57,8 @@ const COMPONENTS: &[(&str, &str)] = &[
         "minimal x86-64 kernel: boots in QEMU via Limine (UEFI and BIOS), \
          reports boot information over serial, then halts",
     ),
-    ("planned", "automated QEMU boot tests in CI"),
+    ("implemented", "QEMU boot check in CI (UEFI and BIOS)"),
+    ("planned", "kernel tests inside QEMU"),
     (
         "planned",
         "memory management, interrupts, scheduling, processes, IPC",
@@ -346,7 +347,7 @@ mod tests {
         assert!(out.contains(VERSION));
         assert!(out.contains(STAGE));
         assert!(out.contains("[implemented] minimal x86-64 kernel"));
-        assert!(out.contains("[planned]     automated QEMU boot tests"));
+        assert!(out.contains("[planned]     kernel tests inside QEMU"));
         assert!(out.contains("not a usable or production-ready"));
     }
 
@@ -359,9 +360,12 @@ mod tests {
             .filter(|(status, _)| *status == "implemented")
             .map(|(_, what)| *what)
             .collect();
-        assert_eq!(implemented.len(), 3);
+        assert_eq!(implemented.len(), 4);
         assert!(implemented.iter().all(|what| {
-            what.contains("workspace") || what.contains("xtask") || what.contains("minimal")
+            what.contains("workspace")
+                || what.contains("xtask")
+                || what.contains("minimal")
+                || what.contains("CI")
         }));
         for (status, _) in COMPONENTS {
             assert!(["implemented", "placeholder", "planned"].contains(status));

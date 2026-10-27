@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- CI `qemu` job (Ubuntu 24.04): installs QEMU, OVMF, and xorriso on the runner, runs `cargo xtask test` (boot check under UEFI and BIOS), and checks that two image builds are byte-identical. No new actions, no artifacts.
 - `cargo xtask test [--timeout <SECS>]`: headless boot check under UEFI and BIOS. A boot passes only with QEMU exit status 33 and the `PHAROS: boot ok` line within the limit (60 s by default); hung boots are stopped. Serial logs go to `target/xtask/logs/`, and their end is printed on failure.
 - Accepted decision D-009 (QEMU automation): pass = QEMU status 33 and a serial marker, 60-second timeout, logs printed on failure, boot check on UEFI and BIOS, test kernels on stable Rust through Cargo's runner and `cargo xtask test`, ISO reproducibility check in CI. Prototyped before acceptance.
 - `cargo xtask run [--bios] [--gdb]`: builds the kernel and image and boots it in QEMU (OVMF or SeaBIOS) with serial on the terminal; succeeds only when the kernel signals success (QEMU exit status 33). `--gdb` waits for GDB on `localhost:1234`.

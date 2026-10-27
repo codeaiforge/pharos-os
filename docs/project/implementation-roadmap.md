@@ -176,7 +176,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.3 — Early serial output and QEMU boot validation
 
-**Status: Current.** Serial output already exists (M2.2) and D-009 is accepted; the remaining work is the `xtask test` harness, logging macros, kernel tests, and the CI job.
+**Status: Current.** Done so far: serial output (M2.2), D-009 accepted, `cargo xtask test` boot check (#14), and the CI `qemu` job running it (#17). Remaining: kernel logging macros (#15) and kernel tests inside QEMU (#16), which the roadmap's acceptance criteria require ("kernel tests can report results over serial").
 
 - **Objective and scope:** Serial (COM1) output and an automated QEMU test harness that runs in CI.
 - **Deliverables:** Serial driver; logging macros; QEMU harness (per D-009) with timeout and serial capture; CI job running it headless.

@@ -27,7 +27,7 @@ cargo xtask test --timeout 120 # longer limit per boot (default 60 s)
 
 Each boot passes only if QEMU exits with status 33 **and** the serial log contains the line `PHAROS: boot ok`, within the time limit (decision D-009). A kernel that reports failure (status 35), exits without signalling, prints a different marker, or hangs fails the check; a hung QEMU is stopped at the limit. The command prints one line per firmware and, on failure, the last lines of the serial log. Full logs: `target/xtask/logs/boot-uefi.log` and `boot-bios.log`.
 
-Needs QEMU, OVMF, and xorriso, so it is not part of `scripts/check.sh`. Kernel test targets (#16) and the CI job (#17) are still to come in M2.3. For an interactive boot with serial on the terminal, use `cargo xtask run` (see [debugging.md](debugging.md)).
+Needs QEMU, OVMF, and xorriso, so it is not part of `scripts/check.sh`. CI runs it in the `qemu` job on every push to `main` and on manual runs (Ubuntu 24.04 runner), followed by a check that two image builds are byte-identical. Kernel test targets (#16) are still to come in M2.3. For an interactive boot with serial on the terminal, use `cargo xtask run` (see [debugging.md](debugging.md)).
 
 ## Quality gates
 

@@ -15,7 +15,8 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 | `pharos` host-side CLI (`help`, `version`, `info`, `doctor`) | Implemented |
 | `cargo xtask` (kernel build, reproducible boot image, QEMU run) | Implemented |
 | Minimal x86-64 kernel: boots via Limine in QEMU (UEFI and BIOS), reports boot information over serial, halts | Implemented |
-| Automated QEMU boot tests in CI | Planned (M2.3) |
+| Automated QEMU boot check in CI (UEFI and BIOS, reproducible image) | Implemented |
+| Kernel tests inside QEMU | Planned (M2.3) |
 | Memory management, interrupts, scheduling, processes, IPC | Planned |
 | Storage, drivers, networking | Planned |
 | Local AI inference and agent platform | Planned |
@@ -56,7 +57,7 @@ cargo xtask run          # UEFI (OVMF)
 cargo xtask run --bios   # BIOS (SeaBIOS)
 ```
 
-The serial output ends with `PHAROS: boot ok`, and the command exits 0 only when the kernel reports success. `cargo xtask test` runs the same boot headless under both firmwares, with a time limit, and reports pass or fail for each.
+The serial output ends with `PHAROS: boot ok`, and the command exits 0 only when the kernel reports success. `cargo xtask test` runs the same boot headless under both firmwares, with a time limit, and reports pass or fail for each; CI runs it on every push to `main`.
 
 ## CLI usage
 
