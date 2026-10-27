@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.7, #37). It follows [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries) (capability-based microkernel), the [D-012 direction](../project/decision-log.md#d-012-agent-sandboxing-tool-permissions-and-network-isolation) (kernel-enforced capabilities), and [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism) (IPC model and system-call mechanism).
-- **Implementation:** per-process address spaces are **implemented** (#38). Ring 3 execution (#39), system calls (#40), and IPC (#41) are **planned**.
+- **Implementation:** per-process address spaces (#38) and ring 3 execution with user faults killing the process (#39) are **implemented** (`process::load`, `process::start`, `process::spawn`). System calls (#40) and IPC (#41) are **planned**.
 
 ## 2. Context
 
@@ -138,7 +138,8 @@ Error codes (`rax`):
 
 ### Programs for tests
 
-- M2.7 test programs are small flat binaries written with `global_asm!` inside test kernels: position-independent code with an entry offset, copied to `0x400000`. They need no new build steps, and every instruction is visible in review.
+- M2.7 test programs are small flat binaries written with `global_asm!`: position-independent code with an entry offset, copied to `0x400000`. They need no new build steps, and every instruction is visible in review.
+- They live in the hardware layer (`arch::x86_64::user_programs`), not in test kernels: the kernel lints treat `global_asm!` and `unsafe extern` blocks as `unsafe` code, which AGENTS.md allows only there. Test kernels load them as data (`TestProgram::bytes`).
 - **Not in M2.7:** a Rust user crate with an ELF loader. It arrives when real user-space services do (from M2.8); M2.7 needs only the test programs above.
 
 ### Interrupts from user mode

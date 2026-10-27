@@ -206,6 +206,27 @@ fn fatal_hook() -> Option<fn(&ExceptionFrame) -> !> {
     Some(unsafe { core::mem::transmute::<*mut (), fn(&ExceptionFrame) -> !>(hook) })
 }
 
+/// Handler for CPU exceptions raised in user mode; null if none.
+static USER_FAULT_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Routes CPU exceptions raised in user mode (CS ring 3) to `handler`
+/// instead of the fatal report: the process module kills the faulting
+/// process and the kernel continues (M2.7). Exceptions in ring 0 stay fatal.
+pub fn set_user_fault_handler(handler: fn(&ExceptionFrame) -> !) {
+    USER_FAULT_HOOK.store(handler as *mut (), Ordering::Release);
+}
+
+fn user_fault_hook() -> Option<fn(&ExceptionFrame) -> !> {
+    let hook = USER_FAULT_HOOK.load(Ordering::Acquire);
+    if hook.is_null() {
+        return None;
+    }
+    // SAFETY: the only non-null values stored in `USER_FAULT_HOOK` come from
+    // `set_user_fault_handler`, which stores a `fn(&ExceptionFrame) -> !`.
+    // Function and data pointers have the same size on x86-64.
+    Some(unsafe { core::mem::transmute::<*mut (), fn(&ExceptionFrame) -> !>(hook) })
+}
+
 /// Reads CR2, the address of the most recent page fault.
 pub fn read_cr2() -> u64 {
     let cr2: u64;
@@ -280,6 +301,11 @@ extern "C" fn dispatch(frame: &mut ExceptionFrame) {
     if frame.vector == u64::from(super::apic::SPURIOUS_VECTOR) {
         super::apic::on_spurious();
         return;
+    }
+    if frame.cs & 3 == 3
+        && let Some(hook) = user_fault_hook()
+    {
+        hook(frame);
     }
     if let Some(hook) = fatal_hook() {
         hook(frame);

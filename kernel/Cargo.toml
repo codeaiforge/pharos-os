@@ -91,3 +91,7 @@ harness = false
 [[test]]
 name = "address_spaces"
 harness = false
+
+[[test]]
+name = "user_mode"
+harness = false

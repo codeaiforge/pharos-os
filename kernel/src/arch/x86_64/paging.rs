@@ -422,6 +422,33 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Maps a fresh, zeroed frame at `virt` holding `contents` (at most one
+    /// page) at its start, and returns the frame's physical address. The
+    /// frame belongs to this address space from now on.
+    pub fn map_new_page(
+        &mut self,
+        virt: u64,
+        flags: Flags,
+        contents: &[u8],
+        frames: &mut FrameAllocator<'_>,
+    ) -> Result<u64, MapError> {
+        assert!(contents.len() <= FRAME_SIZE as usize, "more than one page");
+        let phys = alloc_table(frames)?; // a zeroed frame
+        let dest = HHDM.load(Ordering::Relaxed) + phys;
+        // SAFETY: the frame was just allocated, so nothing else uses it; the
+        // direct map covers it; `contents` fits in it (checked above).
+        unsafe {
+            core::ptr::copy_nonoverlapping(contents.as_ptr(), dest as *mut u8, contents.len())
+        };
+        if let Err(error) = self.map(virt, phys, PageSize::Size4K, flags, frames) {
+            if let Some(frame) = Frame::from_addr(phys) {
+                let _ = frames.free(frame);
+            }
+            return Err(error);
+        }
+        Ok(phys)
+    }
+
     /// Unmaps the page at `virt` and returns its physical address. Empty
     /// page tables are kept.
     // ponytail: empty intermediate tables are never freed; free them when
@@ -600,6 +627,8 @@ pub fn init_kernel_space(
         }
     }
 
+    enable_smep_smap();
+
     // SAFETY: the new tables map everything the kernel uses from here on:
     // its code, data, and both stacks at their link addresses (the CPU is on
     // the kernel stack), and the direct map, which holds the frame
@@ -609,6 +638,42 @@ pub fn init_kernel_space(
     unsafe { asm!("mov cr3, {}", in(reg) space.root(), options(nostack, preserves_flags)) };
     *kernel = Some(space);
     Ok(())
+}
+
+const CR4_SMEP: u64 = 1 << 20;
+const CR4_SMAP: u64 = 1 << 21;
+
+fn read_cr4() -> u64 {
+    let cr4: u64;
+    // SAFETY: reading CR4 has no side effects.
+    unsafe { asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags)) };
+    cr4
+}
+
+/// Turns on SMEP and SMAP when CPUID reports them (syscalls-ipc.md): the
+/// kernel then faults if it executes or touches a user page by accident.
+/// Defence in depth: the kernel never accesses user pages directly, and
+/// QEMU's default CPU (used by CI) has neither feature.
+#[allow(unused_unsafe)] // `__cpuid_count` is safe in recent Rust, `unsafe` in 1.85
+fn enable_smep_smap() {
+    // SAFETY: CPUID exists on every x86-64 CPU and has no side effects.
+    let leaf7 = unsafe { core::arch::x86_64::__cpuid_count(7, 0) };
+    let mut cr4 = read_cr4();
+    if leaf7.ebx & (1 << 7) != 0 {
+        cr4 |= CR4_SMEP;
+    }
+    if leaf7.ebx & (1 << 20) != 0 {
+        cr4 |= CR4_SMAP;
+    }
+    // SAFETY: setting SMEP/SMAP only adds checks on user pages, which the
+    // kernel neither executes nor accesses (no user pages exist yet).
+    unsafe { asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags)) };
+}
+
+/// Whether SMEP and SMAP are on, `(smep, smap)`.
+pub fn smep_smap_enabled() -> (bool, bool) {
+    let cr4 = read_cr4();
+    (cr4 & CR4_SMEP != 0, cr4 & CR4_SMAP != 0)
 }
 
 /// Maps one page into the kernel address space.
@@ -655,6 +720,17 @@ pub fn kernel_root() -> Option<u64> {
 /// User-half address that address-space tests map (as a kernel-only page,
 /// so the kernel may read it even with SMAP on).
 pub const USER_TEST_PAGE: u64 = 0x0000_0000_1000_0000;
+
+/// Reads the 8 bytes at physical address `phys` through the direct map, or
+/// `None` if the direct map does not cover it. For tests that watch a
+/// process's page from the kernel.
+pub fn read_phys_u64(phys: u64) -> Option<u64> {
+    let virt = HHDM.load(Ordering::Relaxed) + (phys & !7);
+    translate_kernel(virt)?;
+    // SAFETY: the kernel maps `virt` (checked just above), it is 8-byte
+    // aligned, and a read changes nothing.
+    Some(unsafe { (virt as *const u64).read_volatile() })
+}
 
 /// Reads the first byte of [`USER_TEST_PAGE`] through the active address
 /// space, or `None` if it is not mapped there.

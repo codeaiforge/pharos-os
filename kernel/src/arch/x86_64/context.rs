@@ -145,6 +145,60 @@ unsafe extern "C" {
     fn pharos_switch_context(save: *mut u64, next: u64);
     /// First code a new context runs (see `global_asm!` below).
     fn pharos_task_trampoline();
+    /// Enters ring 3 at `rip` with stack `rsp` and `arg` in `rdi`.
+    fn pharos_enter_user(rip: u64, rsp: u64, arg: u64) -> !;
+}
+
+// Ring 3 entry: an `iretq` frame with the user selectors, interrupts enabled
+// in user mode, and every other register cleared so no kernel value leaks.
+global_asm!(
+    ".global pharos_enter_user",
+    "pharos_enter_user:",
+    "push {user_data}",
+    "push rsi",
+    "push 0x202",
+    "push {user_code}",
+    "push rdi",
+    "mov rdi, rdx",
+    "xor eax, eax",
+    "xor ebx, ebx",
+    "xor ecx, ecx",
+    "xor edx, edx",
+    "xor esi, esi",
+    "xor ebp, ebp",
+    "xor r8d, r8d",
+    "xor r9d, r9d",
+    "xor r10d, r10d",
+    "xor r11d, r11d",
+    "xor r12d, r12d",
+    "xor r13d, r13d",
+    "xor r14d, r14d",
+    "xor r15d, r15d",
+    "iretq",
+    user_data = const super::gdt::USER_DATA,
+    user_code = const super::gdt::USER_CODE,
+);
+
+/// Leaves the kernel for user mode: runs the calling thread at `rip` with
+/// stack pointer `rsp` and `arg` in `rdi`, in ring 3 with interrupts
+/// enabled. Interrupts, exceptions, and (from #40) system calls return to
+/// the kernel on this thread's kernel stack. Call from a thread whose
+/// process address space maps `rip` and the stack. Panics if either address
+/// is outside the user half.
+pub fn enter_user(rip: u64, rsp: u64, arg: u64) -> ! {
+    let user = 0x1000..paging::USER_END;
+    assert!(
+        user.contains(&rip) && user.contains(&(rsp - 1)),
+        "user entry point or stack outside the user half"
+    );
+    super::disable_interrupts();
+    // SAFETY: `rip` and `rsp` are canonical user-half addresses (checked),
+    // so `iretq` cannot fault in ring 0. The user selectors are valid GDT
+    // entries; the CPU switches back to ring 0 only through gates, onto the
+    // kernel stack that `do_switch` put in the TSS. User code cannot reach
+    // kernel memory: kernel pages never have the user bit. This stack frame
+    // is abandoned; the next entry from user mode starts at the stack top.
+    unsafe { pharos_enter_user(rip, rsp, arg) }
 }
 
 // A new context's stack holds six zeroed callee-saved registers, with r12 =
@@ -311,6 +365,11 @@ fn do_switch(from: Arc<Context>, to: Arc<Context>) {
     };
     if root != 0 && root != paging::active_root() {
         paging::load_root(root);
+    }
+    // Interrupts and exceptions taken in user mode arrive on the thread's
+    // own kernel stack.
+    if let Some((_, top)) = to.stack_bounds() {
+        super::gdt::set_kernel_stack(top);
     }
     // Other references keep both contexts alive (checked), and nothing else
     // runs until the switch completes (interrupts are disabled, one CPU).

@@ -2,11 +2,16 @@
 //!
 //! Limine's GDT lives in bootloader-reclaimable memory, which M2.5 will reuse,
 //! and Limine loads no TSS. [`init`] loads a static GDT (null, kernel code,
-//! kernel data, TSS) and a static TSS whose interrupt stack table (IST) gives
-//! the double-fault handler its own stack.
+//! kernel data, TSS, user data, user code) and a static TSS whose interrupt
+//! stack table (IST) gives the double-fault handler its own stack, and whose
+//! ring-0 stack pointer ([`set_kernel_stack`]) is the running thread's kernel
+//! stack for interrupts and exceptions taken in user mode (M2.7).
+//!
+//! The user segments follow the TSS in the order `sysret` expects (D-014):
+//! user data at `0x28`, user code at `0x30`.
 //!
 //! Descriptor layout: Intel SDM vol. 3A, sections 3.4.5 (segment descriptors)
-//! and 8.2.3 (64-bit TSS descriptor). User segments come with M2.7.
+//! and 8.2.3 (64-bit TSS descriptor).
 
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +22,10 @@ pub const KERNEL_CODE: u16 = 0x08;
 pub const KERNEL_DATA: u16 = 0x10;
 /// TSS selector (GDT index 3; the descriptor takes indexes 3 and 4).
 pub const TSS: u16 = 0x18;
+/// User data segment selector (GDT index 5, requested privilege level 3).
+pub const USER_DATA: u16 = 0x28 | 3;
+/// User code segment selector (GDT index 6, requested privilege level 3).
+pub const USER_CODE: u16 = 0x30 | 3;
 
 /// IST slot (1-based, as IDT gates name it) of the double-fault stack.
 pub const DOUBLE_FAULT_IST: u8 = 1;
@@ -29,6 +38,10 @@ const ACCESS_CODE: u8 = 0x9a;
 const ACCESS_DATA: u8 = 0x92;
 /// Access byte: present, ring 0, available 64-bit TSS.
 const ACCESS_TSS: u8 = 0x89;
+/// Present, ring 3, code, readable.
+const ACCESS_USER_CODE: u8 = 0xfa;
+/// Present, ring 3, data, writable.
+const ACCESS_USER_DATA: u8 = 0xf2;
 /// Flags nibble: 4 KiB granularity, 64-bit code (L).
 const FLAGS_CODE64: u8 = 0xa;
 /// Flags nibble: 4 KiB granularity, 32-bit default size (ignored in 64-bit mode).
@@ -89,7 +102,9 @@ struct Stack([u8; DOUBLE_FAULT_STACK_SIZE]);
 #[unsafe(link_section = ".double_fault_stack")]
 static mut DOUBLE_FAULT_STACK: Stack = Stack([0; DOUBLE_FAULT_STACK_SIZE]);
 static mut TSS_SEGMENT: Tss = Tss::new();
-static mut GDT: [u64; 5] = [0; 5];
+/// Descriptors in the GDT (the TSS takes two).
+const GDT_ENTRIES: usize = 7;
+static mut GDT: [u64; GDT_ENTRIES] = [0; GDT_ENTRIES];
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Operand of `lgdt`/`sgdt`.
@@ -120,10 +135,12 @@ pub fn init() {
             descriptor(0, 0xf_ffff, ACCESS_DATA, FLAGS_DATA),
             tss_low,
             tss_high,
+            descriptor(0, 0xf_ffff, ACCESS_USER_DATA, FLAGS_DATA),
+            descriptor(0, 0xf_ffff, ACCESS_USER_CODE, FLAGS_CODE64),
         ];
     }
     let pointer = DescriptorTablePointer {
-        limit: (size_of::<[u64; 5]>() - 1) as u16,
+        limit: (size_of::<[u64; GDT_ENTRIES]>() - 1) as u16,
         base: gdt as u64,
     };
     // SAFETY: the GDT is static, so it outlives its use by the CPU, and holds
@@ -199,7 +216,28 @@ pub fn segment_state() -> SegmentState {
 /// True if the GDTR points at the kernel's own GDT.
 pub fn kernel_gdt_loaded() -> bool {
     let state = segment_state();
-    state.gdt_base == (&raw const GDT) as u64 && state.gdt_limit == 39
+    state.gdt_base == (&raw const GDT) as u64
+        && usize::from(state.gdt_limit) == size_of::<[u64; GDT_ENTRIES]>() - 1
+}
+
+/// Sets the TSS ring-0 stack pointer: where the CPU switches to when an
+/// interrupt or exception arrives in user mode. The scheduler sets it to the
+/// top of each thread's kernel stack on every switch. Interrupts must be
+/// disabled (the value must match the running thread).
+pub fn set_kernel_stack(top: u64) {
+    let tss = &raw mut TSS_SEGMENT;
+    // SAFETY: one CPU, interrupts disabled: nothing else writes the TSS, and
+    // the CPU reads `rsp0` only on a privilege change, which cannot happen
+    // during this write. The field is packed, hence `write_unaligned`.
+    unsafe { (&raw mut (*tss).rsp[0]).write_unaligned(top) };
+}
+
+/// The TSS ring-0 stack pointer (see [`set_kernel_stack`]).
+pub fn kernel_stack() -> u64 {
+    let tss = &raw const TSS_SEGMENT;
+    // SAFETY: as in `double_fault_stack_top`; an unaligned read of a packed
+    // field, raced by no writer while interrupts are disabled or one CPU runs.
+    unsafe { (&raw const (*tss).rsp[0]).read_unaligned() }
 }
 
 /// Top of the double-fault stack as stored in the TSS (0 before [`init`]).
@@ -262,5 +300,18 @@ mod tests {
         assert_eq!(KERNEL_DATA >> 3, 2);
         assert_eq!(TSS >> 3, 3);
         assert_eq!(KERNEL_CODE & 0b111, 0, "ring 0, GDT");
+        assert_eq!((USER_DATA >> 3, USER_DATA & 3), (5, 3));
+        assert_eq!((USER_CODE >> 3, USER_CODE & 3), (6, 3));
+        // `sysret` loads SS = base + 8 and CS = base + 16 (D-014, STAR base 0x20).
+        assert_eq!(USER_DATA & !3, 0x20 + 8);
+        assert_eq!(USER_CODE & !3, 0x20 + 16);
+    }
+
+    #[test]
+    fn user_segments_are_ring_3() {
+        let code = descriptor(0, 0xf_ffff, ACCESS_USER_CODE, FLAGS_CODE64);
+        let data = descriptor(0, 0xf_ffff, ACCESS_USER_DATA, FLAGS_DATA);
+        assert_eq!(code, 0x00af_fa00_0000_ffff, "64-bit code, DPL 3");
+        assert_eq!(data, 0x00cf_f200_0000_ffff, "data, DPL 3");
     }
 }

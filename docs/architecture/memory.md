@@ -85,6 +85,7 @@ In QEMU with 256 MiB the kernel tables take 273 frames under UEFI and 264 under 
 ## 4. Security
 
 - Write protection (CR0.WP, enabled by Limine) and NX make the kernel's code read-only and its data non-executable, and remove the writable alias of the kernel image from the direct map.
+- SMEP and SMAP are enabled after the switch to the kernel's tables when CPUID reports them (#39). QEMU's default CPU does not, so CI runs without them; all test kernels also passed locally with `-cpu max` (both on).
 - Stack overflows hit a guard page and are reported as double faults; the double-fault stack has its own guard page.
 - `unsafe` code: page-table and CR3 writes in `arch::x86_64::paging`; raw memory (bitmap storage, the lock cell) in `mm::raw`. Allocator logic is safe Rust.
 - Limits: there is still only one address space and no user mode; all kernel memory is reachable through the writable direct map; one stack frame larger than a guard page could jump over it.

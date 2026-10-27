@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- User code in ring 3 (#39).
+  - The GDT gains user data and code segments in `sysret` order, and every task switch loads TSS `rsp0` with the thread's kernel stack.
+  - `context::enter_user` enters ring 3 with every other register cleared and interrupts on.
+  - `process::load`, `start`, and `spawn` run a flat binary at `0x400000` with a 64 KiB stack.
+  - A CPU exception in user mode kills only that process (`idt::set_user_fault_handler`, `process::init`).
+  - SMEP/SMAP are enabled where the CPU has them. `AddressSpace::map_new_page` maps a fresh page with given contents.
+  - Test programs live in `arch::x86_64::user_programs`, because `global_asm!` counts as `unsafe`.
+  - New test kernel `user_mode` (15 checks), checked to fail without `rsp0`, without the user-fault handler, with interrupts off in user mode, or with kernel pages user-accessible. All test kernels also passed locally with SMEP/SMAP on (`-cpu max`).
 - Process address spaces (#38).
   - `AddressSpace::new_user` shares the kernel half, and the kernel pre-creates every kernel-half PML4 table at boot (1 MiB) so the shared entries never change.
   - Page mappings gain a user flag (`Flags::USER_DATA` and `Flags::USER_CODE`, with W^X), and `MapError::WrongHalf` keeps processes out of the kernel half and user pages out of the kernel space.
