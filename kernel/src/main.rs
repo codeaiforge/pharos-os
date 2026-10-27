@@ -20,7 +20,7 @@ use pharos_kernel::limine::BASE_REVISION;
 use pharos_kernel::mm;
 use pharos_kernel::storage;
 use pharos_kernel::time;
-use pharos_kernel::{fs, kprintln};
+use pharos_kernel::{fs, kprintln, pci};
 
 pharos_kernel::limine_requests!();
 
@@ -159,6 +159,24 @@ extern "C" fn kernel_main() -> ! {
     match fs::mount_root() {
         Ok(files) => kprintln!("  filesystem: root mounted, files: {files}"),
         Err(error) => kprintln!("  filesystem: root not mounted: {error}"),
+    }
+
+    let functions = pci::enumerate();
+    kprintln!("  pci:        {functions} functions");
+    for d in pci::devices() {
+        let a = d.address;
+        kprintln!(
+            "    {:02x}:{:02x}.{} {:04x}:{:04x} class {:02x}.{:02x} {}{}",
+            a.bus,
+            a.device,
+            a.function,
+            d.vendor,
+            d.device,
+            d.class[0],
+            d.class[1],
+            d.name(),
+            if d.msix.is_some() { " (MSI-X)" } else { "" }
+        );
     }
 
     // Smoke test: `alloc` works in the kernel.

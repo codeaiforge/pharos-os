@@ -104,6 +104,10 @@ name = "task_overflow"
 harness = false
 
 [[test]]
+name = "pci"
+harness = false
+
+[[test]]
 name = "preemption"
 harness = false
 

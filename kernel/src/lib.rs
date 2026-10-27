@@ -34,6 +34,7 @@ pub mod fs;
 pub mod ipc;
 pub mod limine;
 pub mod mm;
+pub mod pci;
 #[cfg(target_arch = "x86_64")]
 pub mod process;
 #[cfg(target_arch = "x86_64")]

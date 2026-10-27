@@ -467,6 +467,17 @@ fn build(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// The virtio-blk disk image written next to every ISO.
+const DISK_IMAGE: &str = "disk.img";
+
+/// Contents of the test disk: the known `fs-good` filesystem image, padded
+/// to 64 KiB. Must match the virtio-blk tests (drivers.md).
+fn disk_image() -> Vec<u8> {
+    let mut disk = fs_image::good_test_image();
+    disk.resize(64 * 1024, 0);
+    disk
+}
+
 /// A boot module: its name (Limine's `module_string`) and contents.
 type Module = (&'static str, Vec<u8>);
 
@@ -608,6 +619,8 @@ fn image(
     pin_timestamps(&root, SystemTime::UNIX_EPOCH + Duration::from_secs(epoch))?;
 
     let iso = out.join("pharos.iso");
+    let disk = out.join(DISK_IMAGE);
+    fs::write(&disk, disk_image()).map_err(io_err("cannot write", &disk))?;
     run(
         Command::new("xorriso")
             .env("SOURCE_DATE_EPOCH", epoch.to_string())
@@ -657,6 +670,9 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
         "-display",
         "none",
         "-no-reboot",
+        // No network card: only devices the tests know about.
+        "-nic",
+        "none",
         "-device",
         "isa-debug-exit,iobase=0xf4,iosize=0x04",
         "-cdrom",
@@ -665,6 +681,15 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
     .map(OsString::from)
     .collect();
     args.push(iso.into());
+    // A read-only virtio-blk disk (modern device only, MSI-X) for the
+    // driver work in M2.9: `disk.img` next to the ISO (drivers.md).
+    let mut disk = OsString::from("if=none,id=disk0,format=raw,readonly=on,file=");
+    disk.push(iso.with_file_name(DISK_IMAGE));
+    args.extend(["-drive".into(), disk]);
+    args.extend([
+        "-device".into(),
+        "virtio-blk-pci,drive=disk0,disable-legacy=on".into(),
+    ]);
     args.push("-serial".into());
     args.push(serial.into());
     if !bios {
@@ -1156,6 +1181,8 @@ mod tests {
         let uefi = joined(qemu_args(iso, vars, stdio, false, false));
         assert!(uefi.contains("isa-debug-exit,iobase=0xf4,iosize=0x04"));
         assert!(uefi.contains("-cdrom pharos.iso"));
+        assert!(uefi.contains("readonly=on,file=disk.img"));
+        assert!(uefi.contains("virtio-blk-pci,drive=disk0,disable-legacy=on"));
         assert!(uefi.contains(OVMF_CODE) && uefi.contains("file=vars.fd"));
         assert!(!uefi.contains(" -S"));
         assert!(uefi.contains("-serial stdio"));
