@@ -19,6 +19,7 @@ use pharos_kernel::boot_info::{firmware_name, mib, summarize};
 use pharos_kernel::kprintln;
 use pharos_kernel::limine::BASE_REVISION;
 use pharos_kernel::mm;
+use pharos_kernel::time;
 
 pharos_kernel::limine_requests!();
 
@@ -110,6 +111,15 @@ extern "C" fn kernel_main() -> ! {
         apic::id(),
         apic::version() & 0xff
     );
+    match time::init() {
+        Ok(c) => kprintln!(
+            "  timer:      APIC {} kHz (divided by 16), TSC {} MHz, tick {} Hz",
+            c.apic_per_ms,
+            c.tsc_per_ms / 1_000,
+            time::TICK_HZ
+        ),
+        Err(error) => fail(format_args!("timer calibration failed: {error}")),
+    }
 
     // Last step that may touch bootloader memory is done: `memmap`, `hhdm`,
     // and the other Limine responses must not be used after this.

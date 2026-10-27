@@ -28,6 +28,7 @@ const REG_EOI: u64 = 0xb0;
 const REG_SVR: u64 = 0xf0;
 const REG_LVT_TIMER: u64 = 0x320;
 const REG_TIMER_INITIAL: u64 = 0x380;
+const REG_TIMER_CURRENT: u64 = 0x390;
 const REG_TIMER_DIVIDE: u64 = 0x3e0;
 
 const SVR_ENABLE: u32 = 1 << 8;
@@ -132,6 +133,26 @@ pub fn start_timer(count: u32) {
     write(REG_TIMER_DIVIDE, DIVIDE_BY_16);
     write(REG_LVT_TIMER, u32::from(TIMER_VECTOR) | LVT_TIMER_PERIODIC);
     write(REG_TIMER_INITIAL, count);
+}
+
+/// Measures how far the APIC timer (divided by 16) and the TSC advance
+/// while PIT channel 2 counts `pit_ticks` periods (D-006 timer part). Both
+/// counters start just before the PIT, so a delay can only make the result
+/// larger, never smaller. Call with interrupts disabled; leaves the timer
+/// stopped and masked.
+pub fn measure_against_pit(pit_ticks: u16) -> (u32, u64) {
+    let pit_ticks = pit_ticks.max(1);
+    write(REG_TIMER_DIVIDE, DIVIDE_BY_16);
+    write(REG_LVT_TIMER, LVT_MASKED); // one-shot, no interrupt
+    super::pit_arm(pit_ticks);
+    write(REG_TIMER_INITIAL, u32::MAX);
+    let tsc_start = super::rdtsc();
+    super::pit_start(pit_ticks);
+    super::pit_wait_done();
+    let tsc = super::rdtsc() - tsc_start;
+    let apic = u32::MAX - read(REG_TIMER_CURRENT);
+    write(REG_TIMER_INITIAL, 0);
+    (apic, tsc)
 }
 
 /// Stops the timer and masks its interrupt.

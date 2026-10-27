@@ -74,7 +74,7 @@ It then builds the kernel's own page tables and switches to them (`mm::init_pagi
 
 ## Interrupts
 
-The local APIC is the interrupt controller (D-006); the legacy PICs stay masked. `apic::init(hhdm_offset)` maps the APIC register page uncached at `HHDM + physical address` and enables the APIC; `kmain` calls it and prints the APIC ID and version. The main kernel never enables interrupts; the `apic_timer` test kernel starts the periodic timer, enables interrupts, and waits for 20 ticks. Design and limits: [docs/architecture/interrupts.md](../docs/architecture/interrupts.md).
+The local APIC is the interrupt controller (D-006); the legacy PICs stay masked. `apic::init(hhdm_offset)` maps the APIC register page uncached at `HHDM + physical address` and enables the APIC; `kmain` calls it and prints the APIC ID and version. `time::init()` then calibrates the APIC timer and the TSC against PIT channel 2 (the smallest of five 10 ms runs; D-006) and prints the `timer:` line; `time::uptime()` reads the TSC, `time::delay()` busy-waits, and `time::start_tick()` starts the 100 Hz tick. The main kernel never enables interrupts; the `apic_timer` test kernel starts the periodic timer, enables interrupts, and waits for 20 ticks. Design and limits: [docs/architecture/interrupts.md](../docs/architecture/interrupts.md).
 
 ## Segments and stacks
 

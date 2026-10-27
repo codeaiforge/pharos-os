@@ -1,6 +1,6 @@
 //! x86-64 hardware layer: port I/O, the COM1 serial port and kernel
-//! console, interrupt control, QEMU exit signalling, halting, and (in
-//! submodules) the GDT, TSS, IDT, exception handlers, page tables, and the
+//! console, interrupt control, the PIT and TSC (timer calibration), QEMU
+//! exit signalling, halting, and (in submodules) the GDT, TSS, IDT, exception handlers, page tables, and the
 //! local APIC.
 //!
 //! All of the kernel's hardware `unsafe` code lives here and in submodules
@@ -148,6 +148,66 @@ pub fn wait_for_interrupt() {
     // SAFETY: `hlt` only pauses the CPU until an interrupt; it touches no
     // memory.
     unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
+}
+
+/// Reads the time-stamp counter.
+pub fn rdtsc() -> u64 {
+    let (lo, hi): (u32, u32);
+    // SAFETY: `rdtsc` only reads a counter into EDX:EAX; it touches no memory.
+    unsafe {
+        asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags))
+    };
+    u64::from(hi) << 32 | u64::from(lo)
+}
+
+/// Input clock of the legacy PIT, in Hz.
+pub const PIT_HZ: u64 = 1_193_182;
+
+// PIT channel 2 (D-006 timer part): its gate and output are wired to port
+// 0x61, so it can be polled without interrupts.
+const PIT_CHANNEL2: u16 = 0x42;
+const PIT_COMMAND: u16 = 0x43;
+const PIT_GATE_PORT: u16 = 0x61;
+/// Channel 2, low byte then high byte, mode 0 (interrupt on terminal count), binary.
+const PIT_CH2_ONE_SHOT: u8 = 0b1011_0000;
+const GATE2_ON: u8 = 1 << 0;
+const SPEAKER_ON: u8 = 1 << 1;
+const OUT2: u8 = 1 << 5;
+
+/// Programs PIT channel 2 for a one-shot count of `ticks` (at least 1) with
+/// the speaker off. Counting starts when [`pit_start`] writes the high byte.
+fn pit_arm(ticks: u16) {
+    // SAFETY: ports 0x42, 0x43, and 0x61 are the PIT and its gate/speaker
+    // control; programming them touches no memory.
+    unsafe {
+        let control = inb(PIT_GATE_PORT);
+        outb(PIT_GATE_PORT, (control & !SPEAKER_ON) | GATE2_ON);
+        outb(PIT_COMMAND, PIT_CH2_ONE_SHOT);
+        outb(PIT_CHANNEL2, ticks as u8);
+    }
+}
+
+/// Starts the count armed by [`pit_arm`].
+fn pit_start(ticks: u16) {
+    // SAFETY: as in `pit_arm`.
+    unsafe { outb(PIT_CHANNEL2, (ticks >> 8) as u8) };
+}
+
+/// Busy-waits until the started count reaches zero.
+fn pit_wait_done() {
+    // SAFETY: reading port 0x61 has no side effects.
+    while unsafe { inb(PIT_GATE_PORT) } & OUT2 == 0 {
+        core::hint::spin_loop();
+    }
+}
+
+/// Busy-waits for `ticks` periods of the PIT (1 to 65,535, about 55 ms at
+/// most), independent of the TSC and the APIC. Used to check calibration.
+pub fn pit_wait(ticks: u16) {
+    let ticks = ticks.max(1);
+    pit_arm(ticks);
+    pit_start(ticks);
+    pit_wait_done();
 }
 
 /// I/O port of QEMU's `isa-debug-exit` device, attached by `cargo xtask run`.

@@ -71,3 +71,7 @@ harness = false
 [[test]]
 name = "write_protect"
 harness = false
+
+[[test]]
+name = "timer"
+harness = false

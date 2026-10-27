@@ -29,6 +29,8 @@ pub mod mm;
 pub mod sync;
 #[cfg(target_arch = "x86_64")]
 pub mod testing;
+#[cfg(target_arch = "x86_64")]
+pub mod time;
 
 /// Prints to the kernel console (COM1), like `print!`.
 #[cfg(target_arch = "x86_64")]
@@ -139,7 +141,7 @@ macro_rules! test_kernel {
 
 /// Human-readable implementation status of this crate.
 pub const STATUS: &str = "minimal kernel: boots via Limine and reports boot information over \
-                          serial; handles CPU exceptions and local APIC timer interrupts; manages \
+                          serial; handles CPU exceptions and local APIC timer interrupts with a calibrated clock; manages \
                           physical memory, its own page tables, and a heap; no scheduling or \
                           processes";
 
