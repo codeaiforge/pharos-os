@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.8, #44). It follows [D-007](../project/decision-log.md#d-007-filesystem-and-persistent-storage) (read-only RAM disk, custom checked format, files through capabilities).
-- **Implementation:** the image format, parser, and host tool are **implemented** (#45: `crates/pharos-fs`, `cargo xtask fs build` and `fs ls`). So is the RAM disk (#46: the Limine module request, `storage::record_modules` and `storage::ram_disk`, the slice from `mm::raw::module_bytes`, and the modules in the boot image). The kernel filesystem (#47) and file capabilities (#48) are **planned**.
+- **Implementation:** the image format, parser, and host tool are **implemented** (#45: `crates/pharos-fs`, `cargo xtask fs build` and `fs ls`). So is the RAM disk (#46: the Limine module request, `storage::record_modules` and `storage::ram_disk`, the slice from `mm::raw::module_bytes`, and the modules in the boot image). So is the kernel filesystem (#47: `fs::mount`, and `fs::mount_root` at boot). File capabilities (#48) are **planned**.
 
 ## 2. Context
 

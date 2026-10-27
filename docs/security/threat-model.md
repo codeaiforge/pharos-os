@@ -63,12 +63,12 @@ User processes run in ring 3 since M2.7. Design: [syscalls-ipc.md](../architectu
 
 ### Storage images (M2.8, planned)
 
-Design: [storage.md](../architecture/storage.md) and [D-007](../project/decision-log.md#d-007-filesystem-and-persistent-storage). **Planned, not implemented:** the rows below become mitigations as #45–#48 land.
+Design: [storage.md](../architecture/storage.md) and [D-007](../project/decision-log.md#d-007-filesystem-and-persistent-storage). The first row is **implemented** (#45–#47); file capabilities (#48) are **planned**.
 
-| Threat | Planned mitigation |
+| Threat | Mitigation |
 | --- | --- |
 | A corrupt or hostile filesystem image crashes or corrupts the kernel | The image is untrusted input. One safe `no_std` parser (`unsafe` forbidden) checks every offset, size, path, and CRC-32 before use, with fixed limits; it is fuzzed on the host, and a QEMU test boots one corrupted image per check. A bad image fails to mount and the kernel keeps running |
-| A process reads files it was not given | Files only through capabilities: a filesystem capability with `READ` opens files, file capabilities narrow rights, pass over IPC only with `GRANT`, and are revoked through the derivation tree |
+| A process reads files it was not given | **Planned (#48):** files only through capabilities: a filesystem capability with `READ` opens files, file capabilities narrow rights, pass over IPC only with `GRANT`, and are revoked through the derivation tree |
 | An image is replaced or tampered with | **Limit:** CRC-32 detects corruption only; images are not authenticated until secure boot |
 
 ### Known limitations

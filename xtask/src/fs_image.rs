@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use pharos_fs::{Builder, Image};
+use pharos_fs::{BLOCK_SIZE, Builder, ENTRY_SIZE, HEADER_SIZE, Image, crc32};
 
 use crate::Result;
 
@@ -74,9 +74,130 @@ pub fn ls(image: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The filesystem image test kernels read (`fs-good`). Must match
+/// `kernel/tests/fs.rs`. Entries in path order: 0 `a-b`, 1 `dir/big.bin`,
+/// 2 `dir/empty`, 3 `hello.txt`.
+pub fn good_test_image() -> Vec<u8> {
+    let mut b = Builder::new();
+    let big: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
+    for (path, data) in [
+        (
+            &b"hello.txt"[..],
+            &b"Hello from the Pharos filesystem.\n"[..],
+        ),
+        (b"dir/empty", b""),
+        (b"dir/big.bin", &big),
+        (b"a-b", b"x"),
+    ] {
+        b.add(path, data).expect("valid test file");
+    }
+    b.build().expect("test image fits")
+}
+
+/// Recomputes the directory and header checksums after an edit, so the
+/// edit reaches the checks behind them.
+fn reseal(img: &mut [u8]) {
+    let n = u32::from_le_bytes(img[12..16].try_into().expect("4 bytes")) as usize;
+    let dir_end = (HEADER_SIZE + n * ENTRY_SIZE).min(img.len());
+    let dir_crc = crc32(&img[HEADER_SIZE..dir_end]);
+    img[24..28].copy_from_slice(&dir_crc.to_le_bytes());
+    let header_crc = crc32(&img[..60]);
+    img[60..64].copy_from_slice(&header_crc.to_le_bytes());
+}
+
+fn entry(img: &mut [u8], i: usize) -> &mut [u8] {
+    &mut img[HEADER_SIZE + i * ENTRY_SIZE..][..ENTRY_SIZE]
+}
+
+/// Corrupted copies of [`good_test_image`], one per check in storage.md,
+/// named `fs-<check>`. Must match `kernel/tests/fs.rs`.
+pub fn corrupt_test_images() -> Vec<(&'static str, Vec<u8>)> {
+    type Edit = fn(&mut Vec<u8>);
+    let edits: [(&'static str, Edit); 12] = [
+        ("fs-magic", |i| i[0] = b'X'),
+        ("fs-version", |i| {
+            i[8] = 2;
+            reseal(i)
+        }),
+        ("fs-header-crc", |i| i[16] ^= 1),
+        ("fs-entry-count", |i| {
+            i[12..16].copy_from_slice(&1025u32.to_le_bytes());
+            reseal(i)
+        }),
+        ("fs-image-size", |i| {
+            let size = i.len() as u64 + BLOCK_SIZE as u64;
+            i[16..24].copy_from_slice(&size.to_le_bytes());
+            reseal(i)
+        }),
+        ("fs-dir-crc", |i| entry(i, 0)[30] ^= 1),
+        ("fs-path", |i| {
+            entry(i, 0)[24] = b' ';
+            reseal(i)
+        }),
+        ("fs-order", |i| {
+            // "dir/empty" -> "aaaaaaaaa": now before "dir/big.bin".
+            entry(i, 2)[24..33].copy_from_slice(b"aaaaaaaaa");
+            reseal(i)
+        }),
+        ("fs-overlap", |i| {
+            let first = entry(i, 0)[0..8].to_vec();
+            entry(i, 1)[0..8].copy_from_slice(&first);
+            reseal(i)
+        }),
+        ("fs-range", |i| {
+            let len = i.len() as u64;
+            entry(i, 3)[8..16].copy_from_slice(&len.to_le_bytes());
+            reseal(i)
+        }),
+        ("fs-file-crc", |i| {
+            let at = u64::from_le_bytes(entry(i, 1)[0..8].try_into().expect("8 bytes")) as usize;
+            i[at + 1000] ^= 1;
+        }),
+        ("fs-truncated", |i| i.truncate(BLOCK_SIZE)),
+    ];
+    let good = good_test_image();
+    edits
+        .into_iter()
+        .map(|(name, edit)| {
+            let mut img = good.clone();
+            edit(&mut img);
+            (name, img)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_images_mount_or_fail_as_expected() {
+        use pharos_fs::FsError::*;
+        let good = good_test_image();
+        assert!(good.len() > 2 * BLOCK_SIZE, "big.bin spans blocks");
+        let image = Image::mount(&good[..]).unwrap();
+        assert_eq!(image.entries().count(), 4);
+        let expected = [
+            ("fs-magic", BadMagic),
+            ("fs-version", BadVersion(2)),
+            ("fs-header-crc", HeaderCrc),
+            ("fs-entry-count", TooManyEntries(1025)),
+            ("fs-image-size", DeviceTooSmall),
+            ("fs-dir-crc", DirCrc),
+            ("fs-path", EntryPath { index: 0 }),
+            ("fs-order", EntryOrder { index: 2 }),
+            ("fs-overlap", EntryRange { index: 1 }),
+            ("fs-range", EntryRange { index: 3 }),
+            ("fs-file-crc", FileCrc { index: 1 }),
+            ("fs-truncated", DeviceTooSmall),
+        ];
+        let images = corrupt_test_images();
+        assert_eq!(images.len(), expected.len());
+        for ((name, bytes), (want_name, want)) in images.iter().zip(expected) {
+            assert_eq!(*name, want_name);
+            assert_eq!(Image::mount(&bytes[..]).err(), Some(want), "{name}");
+        }
+    }
 
     #[test]
     fn packs_a_directory_tree() {

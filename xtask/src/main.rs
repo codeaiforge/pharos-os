@@ -480,10 +480,17 @@ fn kernel_modules(paths: &Paths) -> Result<Vec<Module>> {
 }
 
 /// Modules for test kernels, with contents the test kernels know. Must
-/// match `kernel/tests/ramdisk.rs`.
+/// match `kernel/tests/ramdisk.rs` and `kernel/tests/fs.rs`. At most 16
+/// (`storage::MAX_MODULES`).
 fn test_modules() -> Vec<Module> {
     let pattern = |len: usize| (0..len).map(|i| ((i * 7) ^ (i >> 9)) as u8).collect();
-    vec![("pattern", pattern(41 * 512)), ("odd", pattern(1000))]
+    let mut modules = vec![
+        ("pattern", pattern(41 * 512)),
+        ("odd", pattern(1000)),
+        ("fs-good", fs_image::good_test_image()),
+    ];
+    modules.extend(fs_image::corrupt_test_images());
+    modules
 }
 
 /// Modules for an image: the kernel's own, or the test modules when a
@@ -1004,10 +1011,11 @@ mod tests {
     #[test]
     fn test_modules_match_the_ramdisk_test() {
         let m = test_modules();
-        assert_eq!(
-            m.iter().map(|(n, b)| (*n, b.len())).collect::<Vec<_>>(),
-            [("pattern", 20992), ("odd", 1000)]
-        );
+        assert_eq!((m[0].0, m[0].1.len()), ("pattern", 20992));
+        assert_eq!((m[1].0, m[1].1.len()), ("odd", 1000));
+        assert_eq!(m[2].0, "fs-good");
+        assert!(m.len() <= 16, "storage::MAX_MODULES");
+        assert!(m.iter().all(|(n, _)| n.len() <= 32), "storage::MAX_NAME");
         assert_eq!(m[0].1[513], ((513 * 7) ^ 1) as u8);
     }
 

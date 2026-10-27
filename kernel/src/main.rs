@@ -16,11 +16,11 @@ use pharos_kernel::arch::x86_64::{
     _print_panic, QemuExit, apic, gdt, halt, idt, paging, qemu_exit, run_on_kernel_stack,
 };
 use pharos_kernel::boot_info::{firmware_name, mib, summarize};
-use pharos_kernel::kprintln;
 use pharos_kernel::limine::BASE_REVISION;
 use pharos_kernel::mm;
 use pharos_kernel::storage;
 use pharos_kernel::time;
+use pharos_kernel::{fs, kprintln};
 
 pharos_kernel::limine_requests!();
 
@@ -154,6 +154,11 @@ extern "C" fn kernel_main() -> ! {
             disk.len()
         ),
         None => kprintln!("  storage:    none ({modules} modules, {skipped} skipped)"),
+    }
+    // A bad or missing image is reported; the kernel runs on without it.
+    match fs::mount_root() {
+        Ok(files) => kprintln!("  filesystem: root mounted, files: {files}"),
+        Err(error) => kprintln!("  filesystem: root not mounted: {error}"),
     }
 
     // Smoke test: `alloc` works in the kernel.

@@ -9,8 +9,9 @@
 //! manages physical memory and a heap, drives the calibrated local APIC
 //! timer, schedules tasks preemptively, and runs user processes in ring 3
 //! with system calls, capabilities, and IPC. Boot modules become read-only
-//! RAM disks. It has **no** device interrupts or drivers beyond serial and
-//! the interrupt controller, and no filesystem yet.
+//! RAM disks, and the root filesystem image is mounted read-only. It has
+//! **no** device interrupts or drivers beyond serial and the interrupt
+//! controller.
 //!
 //! This library holds the parts that do not depend on the entry point. Logic
 //! that is independent of hardware is unit-tested on the host
@@ -28,6 +29,7 @@ pub mod arch;
 pub mod boot_info;
 #[cfg(target_arch = "x86_64")]
 pub mod cap;
+pub mod fs;
 #[cfg(target_arch = "x86_64")]
 pub mod ipc;
 pub mod limine;
@@ -163,8 +165,8 @@ pub const STATUS: &str = "minimal kernel: boots via Limine and reports boot info
                           serial; handles CPU exceptions and local APIC timer interrupts with a \
                           calibrated clock; manages physical memory, its own page tables, and a \
                           heap; schedules tasks preemptively; runs user processes with system \
-                          calls, capabilities, and IPC; read-only RAM disks from boot modules; \
-                          no device drivers";
+                          calls, capabilities, and IPC; read-only RAM disks and filesystem \
+                          from boot modules; no device drivers";
 
 #[cfg(test)]
 mod tests {
