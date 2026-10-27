@@ -192,6 +192,48 @@ Accepted by the maintainer on 2026-10-26, based on the [boot evaluation](../arch
 - **PIC + PIT, local APIC globally disabled through `IA32_APIC_BASE`:** still no interrupt; the run hung until the 60-second timeout. In QEMU, PIC interrupts still pass through the masked LINT0 entry. So the PIC needs local APIC register access as well and offers no shortcut.
 - **xAPIC timer with a self-made mapping:** mapping the register page into Limine's page tables (1–2 new page-table pages) made the registers readable (version `0x50014`); the periodic timer delivered 50 interrupts to a handler, with 0 spurious ones, under **UEFI (PASS) and BIOS (QEMU status 33)**.
 
+## Accepted decisions (M2.5)
+
+### D-005: Memory-management strategy
+
+- **Status:** Accepted
+- **Needed by:** M2.5
+- **Date accepted:** 2026-10-27
+
+**Context.** After M2.4 the kernel runs on Limine's page tables (in bootloader-reclaimable memory) plus one mapping of its own (the local APIC page, D-006). Its stack has a linker-made guard gap; the double-fault stack has none. There is no allocator. D-004 constraint 3 asks for address spaces as first-class objects and a frame allocator whose regions can later be granted and revoked.
+
+**Options.** Frame allocator: bitmap, free list, or buddy. Page tables: keep extending Limine's, or build our own. Heap: own allocator or a crate. Layout: keep Limine's HHDM or choose our own; 4 KiB, 2 MiB, or 1 GiB pages for the direct map; KASLR now or later.
+
+**Evaluation criteria.** Correctness and testability; fragmentation; amount of `unsafe`; support for later isolation of agents and large model memory.
+
+**Decision.**
+
+1. **Frame allocator: one bitmap per region** (one bit per 4 KiB frame), only over usable regions and, after reclaim, bootloader-reclaimable ones. The bitmaps live in frames taken from the largest usable region at boot. Single frames use a next-fit search; contiguous ranges a linear scan. Double frees and frees of unknown frames are errors. A bitmap makes it easy to hand out and take back exact ranges (future memory capabilities, D-004).
+2. **One range allocator for both frames and heap.** The bitmap code finds `n` free units with a given alignment. It is plain safe Rust over slices, unit-tested on the host.
+3. **Page tables: the kernel builds its own and switches CR3.** 4-level paging. An `AddressSpace` object owns a root table; the kernel half (PML4 entries 256–511) will be shared by later address spaces. Page-table frames come from the frame allocator and are reached through the direct map.
+4. **Kernel layout:**
+   - **Direct map:** keep Limine's HHDM offset, so addresses computed so far stay valid. Map usable, bootloader-reclaimable, executable, ACPI, and framebuffer regions; 2 MiB pages where both ends are aligned, 4 KiB at the edges; writable and no-execute.
+   - **Kernel image:** at its link address, with text read+execute, rodata read-only+no-execute, and data/bss writable+no-execute, using linker symbols. Its physical base comes from Limine's executable-address request.
+   - **Stacks:** the kernel stack and the double-fault stack each get an unmapped guard page (the double-fault stack moves to its own linker section after a gap, like the kernel stack).
+   - **MMIO:** the local APIC stays at `HHDM + physical address`, uncached, now mapped through the mapper; the M2.4 stopgap tables go.
+   - **Heap:** a fixed virtual window at `0xffff_c000_0000_0000`, above any direct map the kernel accepts (physical memory must stay below 64 TiB; checked at boot).
+   - KASLR is deferred.
+5. **Reclaim:** copy everything the kernel still needs from Limine responses (memory map, HHDM offset, bootloader and firmware info, executable address) into kernel memory early in boot, switch to the kernel's own tables, then add the bootloader-reclaimable regions to the frame allocator. Limine responses are not used after that point.
+6. **Heap: own allocator, no crate.** A bitmap over 16-byte units in a fixed 4 MiB heap at first (growth later), using the shared range allocator; sizes come from `Layout` on free, so the heap keeps no headers in allocated memory. Its lock disables interrupts while held, like the console.
+7. **`unsafe` boundaries:** page-table and CR3 code stays in `arch::x86_64`. One new module, `mm::raw`, may use `unsafe` for raw memory: turning direct-map ranges into slices, the `GlobalAlloc` implementation, and the lock cell that guards allocator state. Allocator logic stays safe Rust. This adds `mm::raw` to the AGENTS.md list (a reviewed design change, made by this decision).
+8. **Out of memory:** the frame allocator returns an error. Heap exhaustion returns null to Rust's allocation machinery, which on stable `no_std` calls the panic handler with `memory allocation of N bytes failed`; acceptable for now (verified in the prototype).
+9. **Testing:** allocator and range logic host-tested (Miri optional, local only, since it needs nightly); test kernels for frames, mappings, permissions, guard pages, reclaim, and heap.
+
+**Consequences.** Every kernel memory structure (bitmaps, page tables, heap) is reached through the direct map, so physical memory beyond what the direct map covers cannot be used; fine for now. Bitmap scans are linear; acceptable at today's sizes and replaceable behind the same interface. The heap's fixed size caps kernel allocations until growth is added. A second module joins the `unsafe` list.
+
+**Evidence.** Prototype test kernel on 2026-10-27 (not committed), QEMU 8.2.2, TCG, `-m 256M`, default CPU:
+
+- **Memory map:** 32 entries under UEFI (10 usable regions, the largest 135 MiB) and 20 under BIOS; reserved regions reach up to 1 TiB (`0x0100_0000_0000`). A single bitmap over the whole physical range would need 32 MiB; per-region bitmaps for about 250 MiB of usable and reclaimable memory need about 8 KiB.
+- **Limine responses** are in bootloader-reclaimable memory (the memory-map response was at `HHDM + 0xa011000`, inside a reclaimable region), so they must be copied before reclaim.
+- **CPU:** no 1 GiB pages (CPUID `0x80000001` EDX bit 26 clear); NX supported and enabled (`EFER = 0xd00`). Hence 2 MiB pages for the direct map.
+- **Out of memory:** with a global allocator that always fails, `Vec::with_capacity(64)` reached the kernel's panic handler with `memory allocation of 64 bytes failed` (QEMU status 35).
+- **HHDM offset** was `0xffff_8000_0000_0000` under UEFI and BIOS.
+
 ## Open and proposed decisions
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
@@ -236,15 +278,6 @@ Known costs: IPC overhead on hot paths (notably moving large model data to and f
 5. Keep the scheduler generic over threads; do not assume all threads run in the kernel.
 6. Avoid kernel-wide mutable global state, except documented singletons in the hardware layer; pass explicit handles where practical.
 7. No filesystem, network-stack, or agent-related code in the kernel before D-004 is final.
-
-### D-005: Memory-management strategy
-
-- **Status:** Open
-- **Needed by:** M2.5
-
-**Options.** Physical frame allocator design (bitmap, free list, buddy); page-table management approach; kernel heap allocator; address-space layout; use of KASLR later.
-
-**Evaluation criteria.** Correctness and testability; fragmentation; amount of `unsafe`; support for later isolation of agents and large model memory.
 
 ### D-007: Filesystem and persistent storage
 

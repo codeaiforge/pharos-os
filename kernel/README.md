@@ -74,7 +74,7 @@ Limitations: the double-fault stack has no guard page, so a handler that overflo
 
 ## Rules for this crate
 
-- `unsafe` is denied by default (`Cargo.toml`). It is allowed only in `arch::x86_64` (and its submodules) and `limine`, and every `unsafe` block needs a `// SAFETY:` comment; Clippy fails the build otherwise. `main.rs` uses only placement attributes (`link_section`, `no_mangle`).
+- `unsafe` is denied by default (`Cargo.toml`). It is allowed only in `arch::x86_64` (and its submodules), `limine`, and `mm::raw` (from M2.5, D-005), and every `unsafe` block needs a `// SAFETY:` comment; Clippy fails the build otherwise. `main.rs` uses only placement attributes (`link_section`, `no_mangle`).
 - Follow the [D-004 constraints](../docs/project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries) for early kernel code: hardware access only through the hardware layer; no drivers beyond serial, interrupt controller, and timer; no filesystem, network, or agent code.
 - Keep hardware-independent logic in host-testable modules with unit tests.
 - Do not describe anything here as implemented unless it is tested.

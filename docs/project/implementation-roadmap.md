@@ -578,7 +578,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-002 | BIOS and/or UEFI | M2.1 | **Accepted:** UEFI primary, BIOS secondary |
 | D-003 | Rust target, linker, build strategy | M2.1 | **Accepted:** `x86_64-unknown-none` on stable, linker script, `xtask`, ISO, kernel as workspace member |
 | D-004 | Kernel architecture and privilege boundaries | M2.1 (direction), M2.7 | **Direction:** capability-based microkernel; final decision open |
-| D-005 | Memory-management strategy | M2.5 | Correctness, fragmentation, `unsafe` surface |
+| D-005 | Memory-management strategy | M2.5 | **Accepted:** bitmap frame allocator per region, own page tables, Limine's HHDM with 2 MiB pages, own bitmap heap, `unsafe` in `mm::raw` |
 | D-006 | Interrupt controller and timer | M2.4, M2.6 | **Accepted (controller):** local APIC (xAPIC), APIC timer first, PICs masked; timer choice open until M2.6 |
 | D-007 | Filesystem and persistent storage | M2.8 | Crash consistency, simplicity, host tooling |
 | D-008 | Driver strategy | M2.9 | TCB size, DMA isolation, effort |
@@ -589,4 +589,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4 passed its gate on 2026-10-27. The current milestone is **M2.5 — Physical and virtual memory management**, which needs decision D-005 (memory-management strategy) first. It also takes over the temporary local APIC mapping from M2.4 and adds guard pages for all kernel stacks ([interrupts.md](../architecture/interrupts.md#7-open-questions)).
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4 passed its gate on 2026-10-27. The current milestone is **M2.5 — Physical and virtual memory management**, with decision D-005 (memory-management strategy) accepted. It also takes over the temporary local APIC mapping from M2.4 and adds guard pages for all kernel stacks ([interrupts.md](../architecture/interrupts.md#7-open-questions)).
