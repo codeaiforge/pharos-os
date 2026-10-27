@@ -5,7 +5,8 @@
 //!
 //! What it does today: start in the higher half, check the Limine protocol
 //! revision, read the memory map and other boot information, report them over
-//! the COM1 serial port, and halt. It has **no** interrupt handling, memory
+//! the COM1 serial port, and halt. It loads its own GDT, TSS, and IDT and
+//! reports CPU exceptions. It has **no** hardware interrupts, memory
 //! management, scheduling, processes, or drivers beyond serial.
 //!
 //! This library holds the parts that do not depend on the entry point. Logic
@@ -124,7 +125,8 @@ macro_rules! test_kernel {
 
 /// Human-readable implementation status of this crate.
 pub const STATUS: &str = "minimal kernel: boots via Limine and reports boot information over \
-                          serial; no interrupts, memory management, scheduling, or processes";
+                          serial; handles CPU exceptions; no hardware interrupts, memory management, \
+                          scheduling, or processes";
 
 #[cfg(test)]
 mod tests {
@@ -133,6 +135,6 @@ mod tests {
     #[test]
     fn status_states_the_limits() {
         assert!(STATUS.contains("minimal"));
-        assert!(STATUS.contains("no interrupts"));
+        assert!(STATUS.contains("no hardware interrupts"));
     }
 }

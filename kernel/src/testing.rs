@@ -9,6 +9,7 @@
 //! [`test_kernel!`]: crate::test_kernel
 
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::arch::x86_64::{_print_panic, QemuExit, halt, qemu_exit};
 use crate::kprintln;
@@ -16,39 +17,38 @@ use crate::kprintln;
 /// Final serial line of a passing test kernel. Must match `xtask`.
 pub const TESTS_OK_MARKER: &str = "PHAROS: tests ok";
 
-/// Counts the checks of one test kernel.
-pub struct TestRun {
-    passed: usize,
-    failed: usize,
-}
+static PASSED: AtomicUsize = AtomicUsize::new(0);
+static FAILED: AtomicUsize = AtomicUsize::new(0);
+
+/// Records the checks of the test kernel. A test kernel has one run, so all
+/// handles share one count: an exception hook can create a handle, add
+/// checks, and finish the run that `kmain` started.
+pub struct TestRun(());
 
 impl TestRun {
     pub const fn new() -> Self {
-        Self {
-            passed: 0,
-            failed: 0,
-        }
+        Self(())
     }
 
     /// Records and prints the result of one check.
     pub fn check(&mut self, name: &str, ok: bool) {
         if ok {
-            self.passed += 1;
+            PASSED.fetch_add(1, Ordering::Relaxed);
             kprintln!("PHAROS-TEST: {name} ... ok");
         } else {
-            self.failed += 1;
+            FAILED.fetch_add(1, Ordering::Relaxed);
             kprintln!("PHAROS-TEST: {name} ... FAILED");
         }
     }
 
     /// Prints the summary and the final marker, signals QEMU, and halts.
     pub fn finish(self) -> ! {
-        kprintln!(
-            "PHAROS-TEST: {} passed, {} failed",
-            self.passed,
-            self.failed
+        let (p, f) = (
+            PASSED.load(Ordering::Relaxed),
+            FAILED.load(Ordering::Relaxed),
         );
-        if passed(self.passed, self.failed) {
+        kprintln!("PHAROS-TEST: {p} passed, {f} failed");
+        if passed(p, f) {
             kprintln!("{TESTS_OK_MARKER}");
             qemu_exit(QemuExit::Success);
         } else {

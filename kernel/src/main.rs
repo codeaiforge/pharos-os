@@ -10,7 +10,7 @@
 
 use core::panic::PanicInfo;
 
-use pharos_kernel::arch::x86_64::{_print_panic, QemuExit, gdt, halt, qemu_exit};
+use pharos_kernel::arch::x86_64::{_print_panic, QemuExit, gdt, halt, idt, qemu_exit};
 use pharos_kernel::boot_info::{firmware_name, mib, summarize};
 use pharos_kernel::kprintln;
 use pharos_kernel::limine::BASE_REVISION;
@@ -22,6 +22,7 @@ pharos_kernel::limine_requests!();
 #[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
     gdt::init();
+    idt::init();
     kprintln!("Pharos OS {} kernel", env!("CARGO_PKG_VERSION"));
 
     if !requests::BASE_REVISION_TAG.is_supported() {

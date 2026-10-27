@@ -25,6 +25,10 @@ name = "boot_info"
 harness = false
 
 [[test]]
+name = "exceptions"
+harness = false
+
+[[test]]
 name = "gdt"
 harness = false
 
