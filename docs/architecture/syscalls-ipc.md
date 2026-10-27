@@ -149,7 +149,7 @@ Error codes (`rax`):
 
 - M2.7 test programs are small flat binaries written with `global_asm!`: position-independent code with an entry offset, copied to `0x400000`. They need no new build steps, and every instruction is visible in review.
 - They live in the hardware layer (`arch::x86_64::user_programs`), not in test kernels: the kernel lints treat `global_asm!` and `unsafe extern` blocks as `unsafe` code, which AGENTS.md allows only there. Test kernels load them as data (`TestProgram::bytes`).
-- **Not in M2.7:** a Rust user crate with an ELF loader. It arrives when real user-space services do (from M2.8); M2.7 needs only the test programs above.
+- **Not in M2.7:** a Rust user crate with an ELF loader. It arrived in M2.9 (#52, [drivers.md](drivers.md#user-programs)): `user/pharos-user` wraps every call, and `process::spawn_elf` loads programs from the filesystem.
 
 ### Interrupts from user mode
 

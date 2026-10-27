@@ -1,0 +1,11 @@
+[package]
+name = "pharos-elf"
+description = "Pharos OS program loader format: a validating parser for static ELF64 executables (D-008, drivers.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

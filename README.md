@@ -20,6 +20,7 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 | Memory management, exceptions and timer interrupts, preemptive scheduling, user processes, system calls, IPC with capabilities | Implemented |
 | Filesystem image format and host tool (`crates/pharos-fs`, `cargo xtask fs`) | Implemented |
 | Read-only storage in the kernel (RAM disk, filesystem, file capabilities) | Implemented |
+| Rust user programs loaded from the filesystem (ELF loader, system-call library) | Implemented |
 | Device interrupts, drivers, networking | Planned |
 | Local AI inference and agent platform | Planned |
 
@@ -95,6 +96,8 @@ This runs the same checks as CI ([.github/workflows/ci.yml](.github/workflows/ci
 | Path | Purpose |
 | --- | --- |
 | `kernel/` | The minimal `no_std` kernel ([kernel/README.md](kernel/README.md)) |
+| `crates/pharos-elf/` | Program format: a validating parser for static ELF64 user programs ([driver design](docs/architecture/drivers.md)) |
+| `user/` | User space: `pharos-user` (system-call library) and `programs/` (Rust user programs, built for the bare-metal target and stored in the boot filesystem) |
 | `crates/pharos-fs/` | Filesystem image format: builder, validating parser, block-device trait, shared by the kernel and `cargo xtask` ([storage design](docs/architecture/storage.md)) |
 | `tools/pharos-cli/` | The `pharos` host-side development CLI |
 | `xtask/` | `cargo xtask`: builds the kernel and boot image ([boot design](docs/architecture/boot.md#build-tool-xtask)) |

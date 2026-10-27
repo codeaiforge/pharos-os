@@ -22,6 +22,8 @@ undocumented_unsafe_blocks = "deny"
 # (D-007). `no_std`, no dependencies of its own, `unsafe` forbidden.
 [dependencies]
 pharos-fs = { path = "../crates/pharos-fs" }
+# The user-program format (D-008): same rules, no dependencies of its own.
+pharos-elf = { path = "../crates/pharos-elf" }
 
 # Test kernels (D-009): each file in tests/ is a no_main kernel booted in QEMU
 # by `cargo xtask runner`. List every test kernel here with harness = false.
@@ -107,6 +109,10 @@ harness = false
 
 [[test]]
 name = "address_spaces"
+harness = false
+
+[[test]]
+name = "user_elf"
 harness = false
 
 [[test]]

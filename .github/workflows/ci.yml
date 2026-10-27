@@ -39,15 +39,16 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # Host crates. The kernel targets bare metal and is checked separately.
+      # Host crates. The kernel and user programs target bare metal and are
+      # checked separately.
       - name: Clippy, host crates (warnings are errors)
-        run: cargo clippy --workspace --exclude pharos-kernel --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --exclude pharos-kernel --exclude pharos-programs --all-targets --locked -- -D warnings
 
       - name: Build, host crates
-        run: cargo build --workspace --exclude pharos-kernel --locked
+        run: cargo build --workspace --exclude pharos-kernel --exclude pharos-programs --locked
 
       - name: Test, host crates
-        run: cargo test --workspace --exclude pharos-kernel --locked
+        run: cargo test --workspace --exclude pharos-kernel --exclude pharos-programs --locked
 
       # Target-independent kernel logic, unit-tested on the host.
       - name: Test, kernel library on host
@@ -57,9 +58,13 @@ jobs:
         # Library, kernel binary, and test kernels (not the library's host unit tests).
         run: cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --test '*' --locked -- -D warnings
 
+      # User programs are bare-metal binaries too (drivers.md).
+      - name: Clippy, user programs for x86_64-unknown-none (warnings are errors)
+        run: cargo clippy -p pharos-programs --target x86_64-unknown-none --locked -- -D warnings
+
       - name: Rustdoc (warnings are errors)
         run: |
-          cargo doc --workspace --exclude pharos-kernel --no-deps --locked
+          cargo doc --workspace --exclude pharos-kernel --exclude pharos-programs --no-deps --locked
           cargo doc -p pharos-kernel --target x86_64-unknown-none --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
@@ -85,8 +90,8 @@ jobs:
       # only; the kernel target is checked on stable in the `check` job.
       - name: Build and test on 1.85
         run: |
-          cargo +1.85 build --workspace --exclude pharos-kernel --locked
-          cargo +1.85 test --workspace --exclude pharos-kernel --locked
+          cargo +1.85 build --workspace --exclude pharos-kernel --exclude pharos-programs --locked
+          cargo +1.85 test --workspace --exclude pharos-kernel --exclude pharos-programs --locked
           cargo +1.85 test -p pharos-kernel --lib --locked
 
   qemu:

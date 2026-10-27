@@ -21,7 +21,8 @@ use crate::arch::x86_64::paging::{AddressSpace, Flags, MapError};
 use crate::arch::x86_64::{context, without_interrupts};
 use crate::cap::{CapTable, Capability};
 use crate::kprintln;
-use crate::mm::{self, frame::FRAME_SIZE, raw::IrqMutex};
+use crate::mm::frame::{FRAME_SIZE, FrameAllocator};
+use crate::mm::{self, raw::IrqMutex};
 use crate::sched::{self, SchedError, TaskId};
 
 /// Where a program image is loaded.
@@ -32,11 +33,16 @@ pub const STACK_TOP: u64 = 0x7fff_ff80_0000;
 pub const STACK_SIZE: u64 = 64 * 1024;
 /// Largest program image.
 pub const MAX_IMAGE: usize = 1024 * 1024;
+/// Where ELF programs may place segments (drivers.md).
+pub const PROGRAM_RANGE: core::ops::Range<u64> = USER_BASE..USER_BASE + 16 * 1024 * 1024;
+/// Largest ELF program file.
+pub const MAX_PROGRAM: u64 = 4 * 1024 * 1024;
 
 /// Why a process could not be created.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProcessError {
-    /// The image is empty or larger than [`MAX_IMAGE`].
+    /// The image is empty, or larger than [`MAX_IMAGE`] (flat) or
+    /// [`MAX_PROGRAM`] (ELF).
     BadImage,
     /// The entry point lies outside the image.
     BadEntry,
@@ -48,17 +54,23 @@ pub enum ProcessError {
     Sched(SchedError),
     /// More initial capabilities than a table holds.
     TooManyCapabilities,
+    /// No program file with that path.
+    NoSuchProgram,
+    /// The program file failed a check.
+    Elf(pharos_elf::ElfError),
 }
 
 impl fmt::Display for ProcessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BadImage => write!(f, "program image empty or over {MAX_IMAGE} bytes"),
+            Self::BadImage => f.write_str("program image empty or too large"),
             Self::BadEntry => f.write_str("entry point outside the program image"),
             Self::NoFrameAllocator => f.write_str("frame allocator not set up"),
             Self::Map(error) => write!(f, "cannot map the process: {error}"),
             Self::Sched(error) => write!(f, "cannot start the process: {error}"),
             Self::TooManyCapabilities => f.write_str("too many initial capabilities"),
+            Self::NoSuchProgram => f.write_str("no such program file"),
+            Self::Elf(error) => write!(f, "bad program file: {error}"),
         }
     }
 }
@@ -74,20 +86,103 @@ pub fn load(image: &[u8]) -> Result<AddressSpace, ProcessError> {
     let mut space = AddressSpace::new_user(frames).map_err(ProcessError::Map)?;
     let pages = image
         .chunks(FRAME_SIZE as usize)
-        .zip((USER_BASE..).step_by(FRAME_SIZE as usize))
-        .map(|(chunk, virt)| (virt, Flags::USER_CODE, chunk))
-        .chain(
-            (STACK_TOP - STACK_SIZE..STACK_TOP)
-                .step_by(FRAME_SIZE as usize)
-                .map(|virt| (virt, Flags::USER_DATA, &[][..])),
-        );
-    for (virt, flags, contents) in pages {
-        if let Err(error) = space.map_new_page(virt, flags, contents, frames) {
+        .zip((USER_BASE..).step_by(FRAME_SIZE as usize));
+    let map = || {
+        for (chunk, virt) in pages {
+            space.map_new_page(virt, Flags::USER_CODE, chunk, frames)?;
+        }
+        map_stack(&mut space, frames)
+    };
+    match map() {
+        Ok(()) => Ok(space),
+        Err(error) => {
             space.destroy(frames);
-            return Err(ProcessError::Map(error));
+            Err(ProcessError::Map(error))
         }
     }
-    Ok(space)
+}
+
+/// Maps the empty user stack below [`STACK_TOP`].
+fn map_stack(space: &mut AddressSpace, frames: &mut FrameAllocator<'_>) -> Result<(), MapError> {
+    for virt in (STACK_TOP - STACK_SIZE..STACK_TOP).step_by(FRAME_SIZE as usize) {
+        space.map_new_page(virt, Flags::USER_DATA, &[], frames)?;
+    }
+    Ok(())
+}
+
+/// User read-only data: no write, no execute.
+const USER_RODATA: Flags = Flags {
+    writable: false,
+    executable: false,
+    uncached: false,
+    user: true,
+};
+
+/// Builds a process address space from the ELF program at `path` on `fs`
+/// (drivers.md): the file is checked completely with `pharos-elf` before
+/// anything is allocated, then each segment page is filled from the file
+/// and the stack is mapped. Returns the space and the entry point. On
+/// failure everything allocated is freed again.
+pub fn load_elf(fs: &crate::fs::Fs, path: &[u8]) -> Result<(AddressSpace, u64), ProcessError> {
+    let file = fs.lookup(path).map_err(|_| ProcessError::NoSuchProgram)?;
+    let size = fs.size(file).map_err(|_| ProcessError::NoSuchProgram)?;
+    if size == 0 || size > MAX_PROGRAM {
+        return Err(ProcessError::BadImage);
+    }
+    // One page buffer on the heap (kernel stacks are 16 KiB), used first for
+    // the headers, then for each page's contents.
+    let mut page = alloc::vec![0u8; FRAME_SIZE as usize];
+    let head = fs
+        .read(file, 0, &mut page)
+        .map_err(|_| ProcessError::BadImage)?;
+    let program =
+        pharos_elf::parse(&page[..head], size, PROGRAM_RANGE).map_err(ProcessError::Elf)?;
+
+    let mut guard = mm::frames();
+    let frames = guard.as_mut().ok_or(ProcessError::NoFrameAllocator)?;
+    let mut space = AddressSpace::new_user(frames).map_err(ProcessError::Map)?;
+    let mut fill = |space: &mut AddressSpace, frames: &mut FrameAllocator<'_>| {
+        for segment in program.segments() {
+            let flags = match (segment.executable, segment.writable) {
+                (true, _) => Flags::USER_CODE,
+                (false, true) => Flags::USER_DATA,
+                (false, false) => USER_RODATA,
+            };
+            for virt in segment.pages().step_by(FRAME_SIZE as usize) {
+                page.fill(0);
+                if let Some((range, offset)) = segment.file_part(virt) {
+                    let want = range.len();
+                    let got = fs.read(file, offset, &mut page[range]);
+                    if got != Ok(want) {
+                        return Err(ProcessError::BadImage);
+                    }
+                }
+                space
+                    .map_new_page(virt, flags, &page, frames)
+                    .map_err(ProcessError::Map)?;
+            }
+        }
+        map_stack(space, frames).map_err(ProcessError::Map)
+    };
+    match fill(&mut space, frames) {
+        Ok(()) => Ok((space, program.entry)),
+        Err(error) => {
+            space.destroy(frames);
+            Err(error)
+        }
+    }
+}
+
+/// [`load_elf`] and [`start`] in one step: runs the program at `path` on
+/// `fs` with `arg` in `rdi` and `caps` under handles 1, 2, ...
+pub fn spawn_elf(
+    fs: &crate::fs::Fs,
+    path: &[u8],
+    arg: u64,
+    caps: Vec<Arc<Capability>>,
+) -> Result<TaskId, ProcessError> {
+    let (space, entry) = load_elf(fs, path)?;
+    start(space, entry - USER_BASE, arg, caps)
 }
 
 /// Kernel-side state of a process (its thread and address space belong to

@@ -11,8 +11,18 @@ use crate::Result;
 /// to `dir`, with `/` between components. Symbolic links and other special
 /// files are refused, so the image matches what a reviewer sees.
 pub fn pack(dir: &Path) -> Result<Vec<u8>> {
+    pack_with(dir, &[])
+}
+
+/// [`pack`] plus `extra` files given as `(path, contents)`.
+pub fn pack_with(dir: &Path, extra: &[(String, Vec<u8>)]) -> Result<Vec<u8>> {
     let mut builder = Builder::new();
     add_dir(&mut builder, dir, "")?;
+    for (path, data) in extra {
+        builder
+            .add(path.as_bytes(), data)
+            .map_err(|e| format!("{path}: {e}"))?;
+    }
     builder
         .build()
         .map_err(|e| format!("cannot build an image from {}: {e}", dir.display()))
@@ -166,9 +176,106 @@ pub fn corrupt_test_images() -> Vec<(&'static str, Vec<u8>)> {
         .collect()
 }
 
+/// Malformed copies of a program, named `bad/<problem>`, for the loader
+/// tests. Must match `kernel/tests/user_elf.rs`. `elf` must be a valid
+/// program whose first program header is a `PT_LOAD` and whose header
+/// table ends past byte 100.
+pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
+    let phoff = u64::from_le_bytes(elf[32..40].try_into().expect("8 bytes")) as usize;
+    let with = |at: usize, bytes: &[u8]| {
+        let mut f = elf.to_vec();
+        f[at..at + bytes.len()].copy_from_slice(bytes);
+        f
+    };
+    vec![
+        ("bad/magic", with(1, b"X")),
+        ("bad/class", with(4, &[1])),
+        ("bad/type", with(16, &3u16.to_le_bytes())),
+        ("bad/machine", with(18, &183u16.to_le_bytes())),
+        ("bad/entry", with(24, &0x10u64.to_le_bytes())),
+        ("bad/interp", with(phoff, &3u32.to_le_bytes())),
+        ("bad/wx", with(phoff + 4, &7u32.to_le_bytes())),
+        (
+            "bad/kernel",
+            with(phoff + 16, &0xffff_ffff_8000_0000u64.to_le_bytes()),
+        ),
+        ("bad/truncated", elf[..100].to_vec()),
+        ("bad/empty", Vec::new()),
+    ]
+}
+
+/// The filesystem image of programs the loader tests use (`programs`):
+/// `bin/hello` and every [`bad_programs`] copy of it.
+pub fn program_test_image(hello: &[u8]) -> Vec<u8> {
+    let mut b = Builder::new();
+    b.add(b"bin/hello", hello).expect("valid path");
+    for (path, bytes) in bad_programs(hello) {
+        b.add(path.as_bytes(), &bytes).expect("valid path");
+    }
+    b.build().expect("program test image fits")
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// The smallest valid program: one read + execute segment.
+    pub(crate) fn tiny_elf() -> Vec<u8> {
+        let mut f = vec![0u8; 0x1010];
+        f[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        f[16..18].copy_from_slice(&2u16.to_le_bytes());
+        f[18..20].copy_from_slice(&62u16.to_le_bytes());
+        f[20..24].copy_from_slice(&1u32.to_le_bytes());
+        f[24..32].copy_from_slice(&0x40_1000u64.to_le_bytes());
+        f[32..40].copy_from_slice(&64u64.to_le_bytes());
+        f[52..54].copy_from_slice(&64u16.to_le_bytes());
+        f[54..56].copy_from_slice(&56u16.to_le_bytes());
+        f[56..58].copy_from_slice(&1u16.to_le_bytes());
+        let p = &mut f[64..120];
+        p[0..4].copy_from_slice(&1u32.to_le_bytes());
+        p[4..8].copy_from_slice(&5u32.to_le_bytes());
+        p[8..16].copy_from_slice(&0x1000u64.to_le_bytes());
+        p[16..24].copy_from_slice(&0x40_1000u64.to_le_bytes());
+        p[32..40].copy_from_slice(&0x10u64.to_le_bytes());
+        p[40..48].copy_from_slice(&0x10u64.to_le_bytes());
+        f
+    }
+
+    #[test]
+    fn bad_programs_fail_with_the_expected_error() {
+        use pharos_elf::ElfError::*;
+        let check = |f: &[u8]| {
+            pharos_elf::parse(
+                &f[..f.len().min(4096)],
+                f.len() as u64,
+                0x40_0000..0x140_0000,
+            )
+        };
+        let good = tiny_elf();
+        assert!(check(&good).is_ok());
+        let expected = [
+            ("bad/magic", Some(BadMagic)),
+            ("bad/class", Some(BadIdent)),
+            ("bad/type", Some(NotExecutable)),
+            ("bad/machine", Some(WrongMachine)),
+            ("bad/entry", Some(BadEntry)),
+            ("bad/interp", Some(Unsupported { index: 0 })),
+            ("bad/wx", Some(WritableCode { index: 0 })),
+            ("bad/kernel", Some(BadSegment { index: 0 })),
+            ("bad/truncated", Some(Truncated)),
+            ("bad/empty", None), // refused by the kernel before parsing
+        ];
+        let bad = bad_programs(&good);
+        assert_eq!(bad.len(), expected.len());
+        for ((name, bytes), (want_name, want)) in bad.iter().zip(expected) {
+            assert_eq!(*name, want_name);
+            if let Some(want) = want {
+                assert_eq!(check(bytes).err(), Some(want), "{name}");
+            }
+        }
+        let image = Image::mount(&program_test_image(&good)[..]).map(|i| i.entries().count());
+        assert_eq!(image, Ok(11));
+    }
 
     #[test]
     fn test_images_mount_or_fail_as_expected() {

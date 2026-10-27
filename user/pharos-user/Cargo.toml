@@ -1,0 +1,19 @@
+[package]
+name = "pharos-user"
+description = "Pharos OS user-space library: safe system-call wrappers, program entry, and panic handling (D-008, drivers.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Like the kernel, this crate cannot inherit `unsafe_code = "forbid"`: the
+# `syscall` instruction and the entry stub need `unsafe`. It is denied here
+# and allowed only in `src/syscall.rs` (AGENTS.md section 5). Every unsafe
+# block must carry a `// SAFETY:` comment.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

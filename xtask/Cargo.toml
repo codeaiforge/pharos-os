@@ -11,4 +11,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+pharos-elf = { path = "../crates/pharos-elf" }
 pharos-fs = { path = "../crates/pharos-fs" }

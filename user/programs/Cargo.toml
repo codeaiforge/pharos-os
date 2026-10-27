@@ -1,0 +1,16 @@
+[package]
+name = "pharos-programs"
+description = "Pharos OS user programs, built for x86_64-unknown-none and stored in the boot filesystem (D-008, drivers.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pharos-user = { path = "../pharos-user" }
+
+# `unsafe` is denied (not forbidden) only so `pharos_user::entry!` can mark
+# its `no_mangle` attribute; programs themselves use none.
+[lints.rust]
+unsafe_code = "deny"

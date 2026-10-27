@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.9, #51). It follows [D-008](../project/decision-log.md#d-008-driver-strategy) (user-space drivers with device capabilities, virtio-blk only, MSI-X, no IOMMU yet) and [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries).
-- **Implementation:** **planned**: Rust user programs and the ELF loader (#52), PCI discovery (#53), device interrupts (#54), MMIO and DMA capabilities (#55), and the virtio-blk driver (#56).
+- **Implementation:** Rust user programs and the ELF loader are **implemented** (#52: `user/pharos-user`, `user/programs`, `crates/pharos-elf`, `process::load_elf` and `spawn_elf`; programs are in the boot filesystem as `bin/<name>`). **Planned:** PCI discovery (#53), device interrupts (#54), MMIO and DMA capabilities (#55), and the virtio-blk driver (#56).
 
 ## 2. Context
 

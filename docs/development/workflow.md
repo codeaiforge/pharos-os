@@ -33,8 +33,8 @@ This workflow works on any branch and does not depend on hosting. Rules in [AGEN
 | Test one package | `cargo test -p pharos-cli` |
 | Test by name | `cargo test -p pharos-cli doctor` |
 | Format | `cargo fmt --all` |
-| Lint host crates | `cargo clippy --workspace --exclude pharos-kernel --all-targets -- -D warnings` |
-| Build docs | `cargo doc --workspace --exclude pharos-kernel --no-deps --open` |
+| Lint host crates | `cargo clippy --workspace --exclude pharos-kernel --exclude pharos-programs --all-targets -- -D warnings` |
+| Build docs | `cargo doc --workspace --exclude pharos-kernel --exclude pharos-programs --no-deps --open` |
 | Same as CI | `scripts/check.sh` |
 
 ## Adding a package

@@ -10,14 +10,16 @@ cd "$(dirname "$0")/.."
 run() { printf '\n==> %s\n' "$*"; "$@"; }
 
 run cargo fmt --all -- --check
-# Host crates; the kernel targets bare metal (D-003).
-run cargo clippy --workspace --exclude pharos-kernel --all-targets --locked -- -D warnings
-run cargo build --workspace --exclude pharos-kernel --locked
-run cargo test --workspace --exclude pharos-kernel --locked
+# Host crates; the kernel and user programs target bare metal (D-003, D-008).
+run cargo clippy --workspace --exclude pharos-kernel --exclude pharos-programs --all-targets --locked -- -D warnings
+run cargo build --workspace --exclude pharos-kernel --exclude pharos-programs --locked
+run cargo test --workspace --exclude pharos-kernel --exclude pharos-programs --locked
 # Kernel: host-testable library logic, then the bare-metal target.
 run cargo test -p pharos-kernel --lib --locked
 run cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --test '*' --locked -- -D warnings
-run env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude pharos-kernel --no-deps --locked
+# User programs: bare-metal binaries, like the kernel (drivers.md).
+run cargo clippy -p pharos-programs --target x86_64-unknown-none --locked -- -D warnings
+run env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude pharos-kernel --exclude pharos-programs --no-deps --locked
 run env RUSTDOCFLAGS="-D warnings" cargo doc -p pharos-kernel --target x86_64-unknown-none --no-deps --locked
 run python3 scripts/check-links.py
 
@@ -25,8 +27,8 @@ run python3 scripts/check-links.py
 # Rust. Runs only if that toolchain is installed (rustup toolchain install
 # 1.85 --profile minimal); otherwise says so, because CI will still run it.
 if rustup run 1.85 rustc --version >/dev/null 2>&1; then
-    run cargo +1.85 build --workspace --exclude pharos-kernel --locked
-    run cargo +1.85 test --workspace --exclude pharos-kernel --locked
+    run cargo +1.85 build --workspace --exclude pharos-kernel --exclude pharos-programs --locked
+    run cargo +1.85 test --workspace --exclude pharos-kernel --exclude pharos-programs --locked
     run cargo +1.85 test -p pharos-kernel --lib --locked
 else
     printf '\n==> SKIPPED: Rust 1.85 not installed, so the CI msrv job was not repeated locally.\n'

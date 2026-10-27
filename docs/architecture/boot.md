@@ -91,7 +91,7 @@ Maintainers only, as a deliberate change:
 The kernel stays the `pharos-kernel` workspace member. In place since issue #9:
 
 - the root `Cargo.toml` sets `default-members` without the kernel;
-- host checks in CI, `scripts/check.sh`, and the docs use `--workspace --exclude pharos-kernel`;
+- host checks in CI, `scripts/check.sh`, and the docs use `--workspace --exclude pharos-kernel` (and, since M2.9, `--exclude pharos-programs`, the bare-metal user programs);
 - the kernel (library, binary, and test kernels) is linted with `cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --test '*' -- -D warnings`, and its library logic is unit-tested on the host with `cargo test -p pharos-kernel --lib`;
 - `rust-toolchain.toml` lists `targets = ["x86_64-unknown-none"]`, and `.cargo/config.toml` sets `relocation-model=static` for that target only.
 
