@@ -1,12 +1,13 @@
 //! x86-64 hardware layer: port I/O, the COM1 serial port and kernel
 //! console, interrupt control, QEMU exit signalling, halting, and (in
-//! submodules) the GDT, TSS, IDT, and exception handlers.
+//! submodules) the GDT, TSS, IDT, exception handlers, and the local APIC.
 //!
 //! All of the kernel's hardware `unsafe` code lives here and in submodules
 //! (D-004), behind safe functions. Each `unsafe` block states why it is sound.
 
 #![allow(unsafe_code)]
 
+pub mod apic;
 pub mod gdt;
 pub mod idt;
 
@@ -118,6 +119,22 @@ pub fn under_hypervisor() -> bool {
     // SAFETY: CPUID exists on every x86-64 CPU and has no side effects.
     let leaf1 = unsafe { core::arch::x86_64::__cpuid(1) };
     leaf1.ecx & (1 << 31) != 0
+}
+
+/// True if CPUID reports a local APIC (leaf 1, EDX bit 9).
+#[allow(unused_unsafe)] // see `under_hypervisor`
+pub fn cpu_has_apic() -> bool {
+    // SAFETY: CPUID exists on every x86-64 CPU and has no side effects.
+    let leaf1 = unsafe { core::arch::x86_64::__cpuid(1) };
+    leaf1.edx & (1 << 9) != 0
+}
+
+/// Halts the CPU until the next interrupt (`hlt`). With interrupts
+/// disabled, only an NMI wakes it.
+pub fn wait_for_interrupt() {
+    // SAFETY: `hlt` only pauses the CPU until an interrupt; it touches no
+    // memory.
+    unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
 }
 
 /// I/O port of QEMU's `isa-debug-exit` device, attached by `cargo xtask run`.

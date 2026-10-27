@@ -4,7 +4,8 @@ This directory will hold detailed design documents for individual subsystems. Th
 
 Current documents:
 
-- [Boot design](boot.md) — accepted boot flow, kernel entry contract, image layout, and build tool (implementation planned for M2.2).
+- [Boot design](boot.md) — accepted boot flow, kernel entry contract, image layout, and build tool (implemented in M2.2 and M2.3).
+- [Exceptions and interrupts](interrupts.md) — IDT, exception handling, the double-fault stack, and the local APIC timer (M2.4, D-006).
 - [Boot evaluation](boot-evaluation.md) — options and prototype evidence behind D-001 to D-003.
 
 ## When to write one

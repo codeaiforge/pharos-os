@@ -9,9 +9,10 @@
 //!
 //! Breakpoints (`int3`) are reported and execution continues. Every other
 //! exception is fatal: it is reported over serial, QEMU is told the run
-//! failed, and the CPU halts. Test kernels can install a fatal hook to turn an
-//! expected exception into a test result. Vectors 32–255 are not present yet,
-//! so an interrupt on them raises a general-protection fault. The double fault
+//! failed, and the CPU halts. Vector 32 (local APIC timer) and 255 (APIC
+//! spurious interrupt) go to the `apic` module. Test kernels can install a fatal hook to turn an
+//! expected exception into a test result. Other vectors from 33 to 254 are not
+//! present, so an interrupt on them raises a general-protection fault. The double fault
 //! runs on its own stack (TSS IST1), so a kernel stack overflow is reported.
 
 // The dispatcher and its helpers are reached only from the kernel-target
@@ -272,6 +273,14 @@ extern "C" fn dispatch(frame: &mut ExceptionFrame) {
         crate::kprintln!("PHAROS: breakpoint at {:#018x}, continuing", frame.rip - 1);
         return;
     }
+    if frame.vector == u64::from(super::apic::TIMER_VECTOR) {
+        super::apic::on_timer();
+        return;
+    }
+    if frame.vector == u64::from(super::apic::SPURIOUS_VECTOR) {
+        super::apic::on_spurious();
+        return;
+    }
     if let Some(hook) = fatal_hook() {
         hook(frame);
     }
@@ -287,6 +296,7 @@ extern "C" fn dispatch(frame: &mut ExceptionFrame) {
 #[cfg(target_os = "none")]
 mod entry {
     use super::{ExceptionFrame, dispatch, gate};
+    use crate::arch::x86_64::apic;
     use crate::arch::x86_64::gdt::{DOUBLE_FAULT_IST, KERNEL_CODE};
 
     // One stub per vector, then the common path. `.quad` builds a table of
@@ -313,7 +323,7 @@ mod entry {
         "pop rbp", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rbx", "pop rax",
         "add rsp, 16", // vector and error code
         "iretq",
-        ".irp n, 0,1,2,3,4,5,6,7,9,15,16,18,19,20,22,23,24,25,26,27,28,31",
+        ".irp n, 0,1,2,3,4,5,6,7,9,15,16,18,19,20,22,23,24,25,26,27,28,31,32,255",
         "pharos_isr_\\n: pharos_stub \\n, 0",
         ".endr",
         ".irp n, 8,10,11,12,13,14,17,21,29,30",
@@ -326,13 +336,22 @@ mod entry {
         ".irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31",
         ".quad pharos_isr_\\n",
         ".endr",
+        // Hardware interrupts: local APIC timer (32) and spurious (255).
+        ".global pharos_irq_table",
+        "pharos_irq_table:",
+        ".quad pharos_isr_32, pharos_isr_255",
         ".text",
         dispatch = sym dispatch,
     );
 
     unsafe extern "C" {
         static pharos_isr_table: [u64; 32];
+        static pharos_irq_table: [u64; 2];
     }
+
+    /// Vectors of the entries in `pharos_irq_table`; must match the assembly.
+    const IRQ_VECTORS: [u8; 2] = [apic::TIMER_VECTOR, apic::SPURIOUS_VECTOR];
+    const _: () = assert!(apic::TIMER_VECTOR == 32 && apic::SPURIOUS_VECTOR == 255);
 
     #[repr(C, align(16))]
     struct Idt([[u64; 2]; 256]);
@@ -361,6 +380,12 @@ mod entry {
             // SAFETY: the IDT is only written here, before `lidt` makes the
             // CPU read it, and with interrupts disabled (`init` runs early).
             unsafe { (*idt).0[vector] = gate(handler, KERNEL_CODE, ist) };
+        }
+        // SAFETY: `pharos_irq_table` is the immutable 2-entry table above.
+        let irq_handlers = unsafe { &pharos_irq_table };
+        for (&vector, &handler) in IRQ_VECTORS.iter().zip(irq_handlers) {
+            // SAFETY: as for the exception gates above.
+            unsafe { (*idt).0[usize::from(vector)] = gate(handler, KERNEL_CODE, 0) };
         }
         let pointer = IdtPointer {
             limit: (size_of::<Idt>() - 1) as u16,

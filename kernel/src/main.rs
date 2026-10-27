@@ -11,7 +11,7 @@
 use core::panic::PanicInfo;
 
 use pharos_kernel::arch::x86_64::{
-    _print_panic, QemuExit, gdt, halt, idt, qemu_exit, run_on_kernel_stack,
+    _print_panic, QemuExit, apic, gdt, halt, idt, qemu_exit, run_on_kernel_stack,
 };
 use pharos_kernel::boot_info::{firmware_name, mib, summarize};
 use pharos_kernel::kprintln;
@@ -68,6 +68,15 @@ extern "C" fn kernel_main() -> ! {
         mib(memory.usable_bytes),
         memory.usable_regions,
         mib(memory.reclaimable_bytes)
+    );
+
+    if let Err(error) = apic::init(hhdm.offset) {
+        fail(format_args!("local APIC setup failed: {error}"));
+    }
+    kprintln!(
+        "  local APIC: id {}, version {:#x}",
+        apic::id(),
+        apic::version() & 0xff
     );
 
     kprintln!("PHAROS: boot ok");

@@ -1,8 +1,8 @@
 # kernel (`pharos-kernel`)
 
-**Status: minimal kernel (M2.4 in progress).** Limine boots it on UEFI and BIOS. It loads its own GDT, TSS, and IDT, checks the boot protocol revision, reads the memory map and other boot information, reports them over the COM1 serial port, and halts. CPU exceptions are reported over serial.
+**Status: minimal kernel (M2.4 in progress).** Limine boots it on UEFI and BIOS. It switches to its own stack, loads its own GDT, TSS, and IDT, checks the boot protocol revision, reads the memory map and other boot information, maps and enables the local APIC, reports all of this over the COM1 serial port, and halts. CPU exceptions are reported over serial; test kernels receive local APIC timer interrupts.
 
-It has **no** hardware interrupts, memory management, scheduling, processes, system calls, or drivers beyond serial. `cargo xtask run` boots it in QEMU and checks the result: the kernel signals success or failure through QEMU's `isa-debug-exit` device, only when CPUID reports a hypervisor. CI runs the boot check and the test kernels on every push. Design: [docs/architecture/boot.md](../docs/architecture/boot.md).
+It has **no** device interrupts, memory management, scheduling, processes, system calls, or drivers beyond serial. `cargo xtask run` boots it in QEMU and checks the result: the kernel signals success or failure through QEMU's `isa-debug-exit` device, only when CPUID reports a hypervisor. CI runs the boot check and the test kernels on every push. Design: [docs/architecture/boot.md](../docs/architecture/boot.md).
 
 ## Layout
 
@@ -18,6 +18,7 @@ It has **no** hardware interrupts, memory management, scheduling, processes, sys
 | `src/arch/x86_64.rs` | Hardware layer: port I/O, COM1 serial and the kernel console behind `kprint!`/`kprintln!`, interrupt enable/disable and `without_interrupts`, QEMU exit signal, halt. All hardware `unsafe` code is here and in its submodules |
 | `src/arch/x86_64/gdt.rs` | The kernel's own GDT (null, kernel code, kernel data, TSS) and TSS with a 16 KiB double-fault stack (IST1); loaded by `gdt::init()` at the start of `kmain`. Descriptor encoding is unit-tested on the host |
 | `src/arch/x86_64/idt.rs` | IDT with `global_asm!` entry stubs for CPU exceptions 0–31, the exception dispatcher and serial report, and test helpers (breakpoint, page-fault probe, fatal hook). Frame layout, gate encoding, and report text are unit-tested on the host |
+| `src/arch/x86_64/apic.rs` | Local APIC (xAPIC): maps its register page into Limine's page tables using reserved page-table pages, enables it, runs the periodic timer (vector 32), and handles spurious interrupts (vector 255). Page-table index and entry encoding are unit-tested on the host |
 | `linker.ld` | Places the kernel at `0xffffffff80000000` and keeps the Limine request sections |
 | `build.rs` | Passes `linker.ld` to the binary when building for `x86_64-unknown-none` |
 
@@ -58,6 +59,10 @@ The console is **interrupt-safe**: it disables interrupts while holding the lock
 - **Test kernels** can install a fatal hook (`idt::set_fatal_hook`) to turn an expected exception into test results; all `TestRun` handles share one count, so the hook can finish the run.
 
 Vectors 32–255 are not present yet: an interrupt there raises a general-protection fault. The double fault runs on its own stack (TSS IST1), so a kernel stack overflow is reported as `#DF double fault` instead of a triple-fault reboot.
+
+## Interrupts
+
+The local APIC is the interrupt controller (D-006); the legacy PICs stay masked. `apic::init(hhdm_offset)` maps the APIC register page uncached at `HHDM + physical address` and enables the APIC; `kmain` calls it and prints the APIC ID and version. The main kernel never enables interrupts; the `apic_timer` test kernel starts the periodic timer, enables interrupts, and waits for 20 ticks. Design and limits: [docs/architecture/interrupts.md](../docs/architecture/interrupts.md).
 
 ## Segments and stacks
 

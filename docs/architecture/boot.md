@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** Accepted (2026-10-26), based on decisions [D-001, D-002, D-003](../project/decision-log.md#accepted-decisions-m21).
-- **Implementation:** Planned for [M2.2](../project/implementation-roadmap.md#m22--minimal-bootable-x86-64-kernel) and [M2.3](../project/implementation-roadmap.md#m23--early-serial-output-and-qemu-boot-validation). Nothing on `main` boots yet. A throwaway prototype validated this design ([evidence](boot-evaluation.md#prototype-evidence-3)).
+- **Implementation:** Implemented in [M2.2](../project/implementation-roadmap.md#m22--minimal-bootable-x86-64-kernel) and [M2.3](../project/implementation-roadmap.md#m23--early-serial-output-and-qemu-boot-validation); the kernel boots on UEFI and BIOS and CI checks it. A throwaway prototype validated this design first ([evidence](boot-evaluation.md#prototype-evidence-3)). Exceptions and interrupts: [interrupts.md](interrupts.md).
 
 ## 2. Context
 

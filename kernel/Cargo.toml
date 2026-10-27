@@ -21,6 +21,10 @@ undocumented_unsafe_blocks = "deny"
 # Test kernels (D-009): each file in tests/ is a no_main kernel booted in QEMU
 # by `cargo xtask runner`. List every test kernel here with harness = false.
 [[test]]
+name = "apic_timer"
+harness = false
+
+[[test]]
 name = "boot_info"
 harness = false
 
