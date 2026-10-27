@@ -93,7 +93,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p pharos-kernel --target x86_64-unknown-no
 python3 scripts/check-links.py
 ```
 
-Why the split: the kernel targets bare metal (`x86_64-unknown-none`, decision D-003), so it is excluded from host checks and linted for its own target. Its target-independent logic is unit-tested on the host through the library. CI's `msrv` job also builds and tests the host crates and the kernel library on Rust 1.85.
+Why the split: the kernel targets bare metal (`x86_64-unknown-none`, decision D-003), so it is excluded from host checks and linted for its own target. Its target-independent logic is unit-tested on the host through the library. CI's `msrv` job also builds and tests the host crates and the kernel library on Rust 1.85. `scripts/check.sh` repeats those three commands (`cargo +1.85 build`/`test`) when Rust 1.85 is installed (`rustup toolchain install 1.85 --profile minimal`), and says it skipped them otherwise. Newer language features, such as let chains (Rust 1.88), fail only there: four M2.7 commits passed every local check yet failed CI's `msrv` job for that reason, fixed in #42.
 
 ## Writing tests
 

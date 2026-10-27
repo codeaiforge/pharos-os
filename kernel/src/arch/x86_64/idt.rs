@@ -302,10 +302,11 @@ extern "C" fn dispatch(frame: &mut ExceptionFrame) {
         super::apic::on_spurious();
         return;
     }
-    if frame.cs & 3 == 3
-        && let Some(hook) = user_fault_hook()
-    {
-        hook(frame);
+    // (No let chains: the minimum supported Rust is 1.85.)
+    if frame.cs & 3 == 3 {
+        if let Some(hook) = user_fault_hook() {
+            hook(frame);
+        }
     }
     if let Some(hook) = fatal_hook() {
         hook(frame);

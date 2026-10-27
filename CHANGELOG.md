@@ -103,6 +103,10 @@ All notable changes to this project are documented here. The format is based on 
 - `pharos-kernel` is now `no_std` outside tests. It is still a placeholder and does not boot.
 - Contributor docs, the PR template, and CI use the new commands.
 
+### Fixed
+
+- The kernel builds again on the minimum supported Rust (1.85): two let chains (stable only since Rust 1.88) from #38 and #39 failed CI's `msrv` job on four commits. `scripts/check.sh` now repeats the `msrv` job's checks when Rust 1.85 is installed, and reports when it skips them.
+
 ### Security
 
 - Fixed a stale-TLB bug from #38: unmapping a kernel page (such as a freed task stack) while a process address space was active did not flush the TLB, so the freed frame could stay reachable. Unmapping from the kernel space now always flushes. A new `address_spaces` check fails without the fix.

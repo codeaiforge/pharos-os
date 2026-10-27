@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs the same checks as the CI `check` job (.github/workflows/ci.yml), in the
-# same order, and stops at the first failure.
+# same order, then the `msrv` job's checks if Rust 1.85 is installed, and stops
+# at the first failure.
 # Read-only apart from Cargo's target/ directory. No root, no network beyond
 # what Cargo itself needs. Usage: scripts/check.sh
 set -euo pipefail
@@ -19,5 +20,17 @@ run cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --te
 run env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude pharos-kernel --no-deps --locked
 run env RUSTDOCFLAGS="-D warnings" cargo doc -p pharos-kernel --target x86_64-unknown-none --no-deps --locked
 run python3 scripts/check-links.py
+
+# The CI `msrv` job: the same host builds and tests on the minimum supported
+# Rust. Runs only if that toolchain is installed (rustup toolchain install
+# 1.85 --profile minimal); otherwise says so, because CI will still run it.
+if rustup run 1.85 rustc --version >/dev/null 2>&1; then
+    run cargo +1.85 build --workspace --exclude pharos-kernel --locked
+    run cargo +1.85 test --workspace --exclude pharos-kernel --locked
+    run cargo +1.85 test -p pharos-kernel --lib --locked
+else
+    printf '\n==> SKIPPED: Rust 1.85 not installed, so the CI msrv job was not repeated locally.\n'
+    printf '    Install it with: rustup toolchain install 1.85 --profile minimal\n'
+fi
 
 printf '\nAll checks passed.\n'

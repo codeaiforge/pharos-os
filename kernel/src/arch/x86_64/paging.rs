@@ -345,9 +345,8 @@ impl AddressSpace {
         }
         let mut freed = 0;
         let mut free = |phys: u64, count: usize| {
-            if let Some(frame) = Frame::from_addr(phys)
-                && frames.free_contiguous(frame, count).is_ok()
-            {
+            let frame = Frame::from_addr(phys);
+            if frame.is_some_and(|frame| frames.free_contiguous(frame, count).is_ok()) {
                 freed += count;
             }
         };
