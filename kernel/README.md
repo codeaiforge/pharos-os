@@ -1,6 +1,6 @@
 # kernel (`pharos-kernel`)
 
-**Status: minimal kernel (M2.4 in progress).** Limine boots it on UEFI and BIOS. It switches to its own stack, loads its own GDT, TSS, and IDT, checks the boot protocol revision, reads the memory map and other boot information, maps and enables the local APIC, reports all of this over the COM1 serial port, and halts. CPU exceptions are reported over serial; test kernels receive local APIC timer interrupts.
+**Status: minimal kernel (M2.4 in progress).** Limine boots it on UEFI and BIOS. It switches to its own stack, loads its own GDT, TSS, and IDT, checks the boot protocol revision, reads the memory map and other boot information, builds the physical frame allocator, maps and enables the local APIC, reports all of this over the COM1 serial port, and halts. CPU exceptions are reported over serial; test kernels receive local APIC timer interrupts.
 
 It has **no** device interrupts, memory management, scheduling, processes, system calls, or drivers beyond serial. `cargo xtask run` boots it in QEMU and checks the result: the kernel signals success or failure through QEMU's `isa-debug-exit` device, only when CPUID reports a hypervisor. CI runs the boot check and the test kernels on every push. Design: [docs/architecture/boot.md](../docs/architecture/boot.md).
 
@@ -14,6 +14,10 @@ It has **no** device interrupts, memory management, scheduling, processes, syste
 | `src/boot_info.rs` | Hardware-independent interpretation of boot information (unit-tested on the host) |
 | `src/testing.rs` | Support for test kernels: `TestRun`, the `test_kernel!` macro, the test panic handler |
 | `tests/` | Test kernels (one `no_main` kernel per file), booted in QEMU by `cargo xtask test` |
+| `src/mm/bitmap.rs` | Bitmap range allocator shared by the frame allocator and (later) the heap: aligned runs, next fit, double-free detection. Safe Rust, unit-tested on the host |
+| `src/mm/frame.rs` | Physical frame allocator: one bitmap per usable region (at or above 1 MiB), bitmap storage reserved in the largest region. Safe Rust, unit-tested on the host |
+| `src/mm/raw.rs` | Raw memory (`unsafe` allowed, D-005): the bitmap storage slice from the direct map and `IrqMutex`, a lock that owns its data and disables interrupts while held |
+| `src/mm/mod.rs` | `mm::init_frames` (from the memory map) and `mm::frames()`, the global frame allocator |
 | `src/sync.rs` | `SpinLock`: a lock without `unsafe` for resources such as the serial port (unit-tested on the host, including with threads) |
 | `src/arch/x86_64.rs` | Hardware layer: port I/O, COM1 serial and the kernel console behind `kprint!`/`kprintln!`, interrupt enable/disable and `without_interrupts`, QEMU exit signal, halt. All hardware `unsafe` code is here and in its submodules |
 | `src/arch/x86_64/gdt.rs` | The kernel's own GDT (null, kernel code, kernel data, TSS) and TSS with a 16 KiB double-fault stack (IST1); loaded by `gdt::init()` at the start of `kmain`. Descriptor encoding is unit-tested on the host |
@@ -59,6 +63,10 @@ The console is **interrupt-safe**: it disables interrupts while holding the lock
 - **Test kernels** can install a fatal hook (`idt::set_fatal_hook`) to turn an expected exception into test results; all `TestRun` handles share one count, so the hook can finish the run.
 
 Vectors 32–255 are not present yet: an interrupt there raises a general-protection fault. The double fault runs on its own stack (TSS IST1), so a kernel stack overflow is reported as `#DF double fault` instead of a triple-fault reboot.
+
+## Memory
+
+`kmain` builds the physical frame allocator from Limine's memory map (`mm::init_frames`) and prints `frames: <free> free of <total>`. Only usable regions at or above 1 MiB are managed; bootloader-reclaimable memory joins later (#28). The bitmaps take a few frames at the start of the largest usable region. `mm::frames()` returns the allocator behind an `IrqMutex`, so it can be used with interrupts enabled. Page tables and the heap come next in M2.5 (D-005).
 
 ## Interrupts
 

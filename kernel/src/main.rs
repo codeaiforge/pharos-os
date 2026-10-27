@@ -16,6 +16,7 @@ use pharos_kernel::arch::x86_64::{
 use pharos_kernel::boot_info::{firmware_name, mib, summarize};
 use pharos_kernel::kprintln;
 use pharos_kernel::limine::BASE_REVISION;
+use pharos_kernel::mm;
 
 pharos_kernel::limine_requests!();
 
@@ -69,6 +70,19 @@ extern "C" fn kernel_main() -> ! {
         memory.usable_regions,
         mib(memory.reclaimable_bytes)
     );
+
+    match mm::init_frames(
+        hhdm.offset,
+        memmap.entries().map(|e| (e.base, e.length, e.kind)),
+    ) {
+        Ok(stats) => kprintln!(
+            "  frames:     {} free of {} ({} MiB free)",
+            stats.free,
+            stats.total,
+            mib(stats.free as u64 * mm::frame::FRAME_SIZE)
+        ),
+        Err(error) => fail(format_args!("frame allocator setup failed: {error}")),
+    }
 
     if let Err(error) = apic::init(hhdm.offset) {
         fail(format_args!("local APIC setup failed: {error}"));

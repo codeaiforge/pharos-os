@@ -37,6 +37,10 @@ name = "exceptions"
 harness = false
 
 [[test]]
+name = "frames"
+harness = false
+
+[[test]]
 name = "gdt"
 harness = false
 

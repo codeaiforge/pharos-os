@@ -6,8 +6,8 @@
 //! What it does today: start in the higher half, check the Limine protocol
 //! revision, read the memory map and other boot information, report them over
 //! the COM1 serial port, and halt. It runs on its own stack, loads its own
-//! GDT, TSS, and IDT, reports CPU exceptions, and drives the local APIC
-//! timer. It has **no** device interrupts, memory management, scheduling,
+//! GDT, TSS, and IDT, reports CPU exceptions, builds a physical frame
+//! allocator, and drives the local APIC timer. It has **no** device interrupts, memory management, scheduling,
 //! processes, or drivers beyond serial and the interrupt controller.
 //!
 //! This library holds the parts that do not depend on the entry point. Logic
@@ -23,6 +23,7 @@
 pub mod arch;
 pub mod boot_info;
 pub mod limine;
+pub mod mm;
 pub mod sync;
 #[cfg(target_arch = "x86_64")]
 pub mod testing;
