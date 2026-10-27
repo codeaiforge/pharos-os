@@ -20,7 +20,14 @@ The CLI is tested through a `run` function that writes to in-memory buffers, and
 
 ## Boot check (QEMU)
 
-The kernel's boot is checked with `cargo xtask run` (UEFI) and `cargo xtask run --bios`. A run passes only if QEMU exits with status 33, which the kernel produces after printing `PHAROS: boot ok`; boot errors and panics give status 35. This is a local, manual check for now: it is not part of `scripts/check.sh` or CI, and it has no timeout. Running it automatically in CI with a timeout is milestone M2.3, following decision D-009 (accepted).
+```sh
+cargo xtask test               # boot check under UEFI and BIOS, headless
+cargo xtask test --timeout 120 # longer limit per boot (default 60 s)
+```
+
+Each boot passes only if QEMU exits with status 33 **and** the serial log contains the line `PHAROS: boot ok`, within the time limit (decision D-009). A kernel that reports failure (status 35), exits without signalling, prints a different marker, or hangs fails the check; a hung QEMU is stopped at the limit. The command prints one line per firmware and, on failure, the last lines of the serial log. Full logs: `target/xtask/logs/boot-uefi.log` and `boot-bios.log`.
+
+Needs QEMU, OVMF, and xorriso, so it is not part of `scripts/check.sh`. Kernel test targets (#16) and the CI job (#17) are still to come in M2.3. For an interactive boot with serial on the terminal, use `cargo xtask run` (see [debugging.md](debugging.md)).
 
 ## Quality gates
 

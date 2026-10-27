@@ -12,8 +12,8 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
-use std::time::{Duration, SystemTime};
+use std::process::{Child, Command, ExitCode};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Pinned Limine release (D-001). To update the pin, follow
 /// "Updating the Limine pin" in docs/architecture/boot.md.
@@ -37,6 +37,13 @@ const OVMF_VARS: &str = "/usr/share/OVMF/OVMF_VARS_4M.fd";
 const QEMU_EXIT_SUCCESS: i32 = 33;
 const QEMU_EXIT_FAILURE: i32 = 35;
 
+/// Serial marker the kernel prints after a successful boot (D-009).
+const BOOT_MARKER: &str = "PHAROS: boot ok";
+/// Default time limit per headless boot under TCG (D-009).
+const DEFAULT_BOOT_TIMEOUT_SECS: u64 = 60;
+/// Log lines shown when a headless boot fails.
+const LOG_TAIL_LINES: usize = 40;
+
 const HELP: &str = "\
 cargo xtask - build tool for Pharos OS
 
@@ -51,10 +58,15 @@ COMMANDS:
                             output on this terminal. UEFI (OVMF) by default; --bios
                             uses SeaBIOS; --gdb waits for GDB on localhost:1234.
                             Succeeds only if the kernel reports success.
+    test [--timeout <SECS>] Build, make the image, and boot it headless under UEFI
+                            and BIOS. Each boot passes only if QEMU exits with the
+                            kernel's success status (33) and the serial log shows
+                            'PHAROS: boot ok' within the time limit (default 60 s).
+                            Logs: target/xtask/logs/.
     help                    Show this help message
 
 Outputs go to target/xtask/. Requires curl, sha256sum, tar (xz), cc, and xorriso;
-`run` also needs qemu-system-x86_64 and, for UEFI, OVMF.
+`run` and `test` also need qemu-system-x86_64 and, for UEFI, OVMF.
 ";
 
 type Result<T> = std::result::Result<T, String>;
@@ -65,6 +77,7 @@ enum Task {
     Build,
     Image { kernel: Option<PathBuf> },
     Run { bios: bool, gdb: bool },
+    Test { timeout: Duration },
 }
 
 fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
@@ -95,6 +108,23 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                 }
             }
             return Ok(Task::Run { bios, gdb });
+        }
+        Some("test") => {
+            let mut secs = DEFAULT_BOOT_TIMEOUT_SECS;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--timeout" => {
+                        let value = args.next().ok_or("--timeout needs a number of seconds")?;
+                        secs = value.parse().ok().filter(|&s| s > 0).ok_or(format!(
+                            "--timeout must be a positive number of seconds, got '{value}'"
+                        ))?;
+                    }
+                    other => return Err(format!("unexpected argument '{other}'")),
+                }
+            }
+            return Ok(Task::Test {
+                timeout: Duration::from_secs(secs),
+            });
         }
         Some(other) => return Err(format!("unknown command '{other}'")),
     };
@@ -135,6 +165,10 @@ impl Paths {
 
     fn image_dir(&self) -> PathBuf {
         self.target.join("xtask").join("image")
+    }
+
+    fn logs_dir(&self) -> PathBuf {
+        self.target.join("xtask").join("logs")
     }
 }
 
@@ -423,9 +457,10 @@ fn image(paths: &Paths, kernel: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// QEMU arguments for booting `iso`. UEFI uses OVMF with a writable copy of
+/// QEMU arguments for booting `iso`. `serial` is a QEMU character device
+/// such as `stdio` or `file:<path>`. UEFI uses OVMF with a writable copy of
 /// its variable store at `vars`.
-fn qemu_args(iso: &Path, vars: &Path, bios: bool, gdb: bool) -> Vec<OsString> {
+fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "-M",
         "q35",
@@ -433,8 +468,6 @@ fn qemu_args(iso: &Path, vars: &Path, bios: bool, gdb: bool) -> Vec<OsString> {
         "256M",
         "-display",
         "none",
-        "-serial",
-        "stdio",
         "-no-reboot",
         "-device",
         "isa-debug-exit,iobase=0xf4,iosize=0x04",
@@ -444,6 +477,8 @@ fn qemu_args(iso: &Path, vars: &Path, bios: bool, gdb: bool) -> Vec<OsString> {
     .map(OsString::from)
     .collect();
     args.push(iso.into());
+    args.push("-serial".into());
+    args.push(serial.into());
     if !bios {
         args.push("-drive".into());
         args.push(format!("if=pflash,format=raw,readonly=on,file={OVMF_CODE}").into());
@@ -475,20 +510,46 @@ fn interpret_qemu_status(code: Option<i32>) -> Result<()> {
     }
 }
 
+/// Name of a firmware choice, for messages and log file names.
+fn firmware_name(bios: bool) -> &'static str {
+    if bios { "bios" } else { "uefi" }
+}
+
+/// For UEFI, checks that OVMF is installed and writes a fresh copy of its
+/// variable store to `vars`. Nothing to do for BIOS.
+fn prepare_firmware(vars: &Path, bios: bool) -> Result<()> {
+    if bios {
+        return Ok(());
+    }
+    if !Path::new(OVMF_CODE).is_file() {
+        return Err(format!(
+            "UEFI firmware not found at {OVMF_CODE} (install with: sudo apt install ovmf), or use --bios"
+        ));
+    }
+    copy(Path::new(OVMF_VARS), vars)
+}
+
+fn qemu_command(args: Vec<OsString>) -> Command {
+    let mut cmd = Command::new("qemu-system-x86_64");
+    cmd.args(args);
+    cmd
+}
+
+fn qemu_error(e: io::Error) -> String {
+    if e.kind() == io::ErrorKind::NotFound {
+        "qemu-system-x86_64: not found (install with: sudo apt install qemu-system-x86)".to_owned()
+    } else {
+        format!("qemu-system-x86_64: {e}")
+    }
+}
+
 fn run_qemu(paths: &Paths, bios: bool, gdb: bool) -> Result<()> {
     build(paths)?;
     image(paths, None)?;
     let out = paths.image_dir();
     let iso = out.join("pharos.iso");
     let vars = out.join("ovmf-vars.fd");
-    if !bios {
-        if !Path::new(OVMF_CODE).is_file() {
-            return Err(format!(
-                "UEFI firmware not found at {OVMF_CODE} (install with: sudo apt install ovmf), or use --bios"
-            ));
-        }
-        copy(Path::new(OVMF_VARS), &vars)?;
-    }
+    prepare_firmware(&vars, bios)?;
     if gdb {
         let kernel = paths.kernel_elf();
         println!("QEMU is waiting for GDB. In another terminal run:");
@@ -502,19 +563,161 @@ fn run_qemu(paths: &Paths, bios: bool, gdb: bool) -> Result<()> {
         iso.display(),
         if bios { "SeaBIOS" } else { "OVMF (UEFI)" }
     );
-    let status = Command::new("qemu-system-x86_64")
-        .args(qemu_args(&iso, &vars, bios, gdb))
+    let status = qemu_command(qemu_args(&iso, &vars, OsStr::new("stdio"), bios, gdb))
         .status()
-        .map_err(|e| {
-            if e.kind() == io::ErrorKind::NotFound {
-                "qemu-system-x86_64: not found (install with: sudo apt install qemu-system-x86)"
-                    .to_owned()
-            } else {
-                format!("qemu-system-x86_64: {e}")
-            }
-        })?;
+        .map_err(qemu_error)?;
     interpret_qemu_status(status.code())?;
     println!("Kernel reported success (QEMU exit status {QEMU_EXIT_SUCCESS}).");
+    Ok(())
+}
+
+/// What a headless boot produced.
+struct BootRun {
+    /// QEMU's exit status; `None` if it timed out or was killed by a signal.
+    status: Option<i32>,
+    timed_out: bool,
+    log: String,
+    elapsed: Duration,
+}
+
+/// Waits for `child`, killing it after `timeout`.
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<(Option<i32>, bool)> {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().map_err(qemu_error)? {
+            return Ok((status.code(), false));
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok((None, true));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Boots `iso` without a terminal, with serial output written to `log`.
+fn boot_headless(
+    iso: &Path,
+    vars: &Path,
+    log: &Path,
+    bios: bool,
+    timeout: Duration,
+) -> Result<BootRun> {
+    prepare_firmware(vars, bios)?;
+    let _ = fs::remove_file(log);
+    let mut serial = OsString::from("file:");
+    serial.push(log);
+    let start = Instant::now();
+    let mut child = qemu_command(qemu_args(iso, vars, &serial, bios, false))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .map_err(qemu_error)?;
+    let (status, timed_out) = wait_with_timeout(&mut child, timeout)?;
+    let bytes = fs::read(log).unwrap_or_default();
+    Ok(BootRun {
+        status,
+        timed_out,
+        log: String::from_utf8_lossy(&bytes).into_owned(),
+        elapsed: start.elapsed(),
+    })
+}
+
+/// Decides whether a headless boot passed (D-009): QEMU exit status 33 and
+/// the serial marker, within the time limit.
+fn evaluate_boot(run: &BootRun, marker: &str, timeout: Duration) -> Result<()> {
+    let has_marker = run
+        .log
+        .lines()
+        .any(|line| line.trim_end_matches('\r').trim() == marker);
+    if run.timed_out {
+        return Err(format!(
+            "no result within {} s; the kernel may hang (QEMU was stopped)",
+            timeout.as_secs()
+        ));
+    }
+    match run.status {
+        Some(QEMU_EXIT_SUCCESS) if has_marker => Ok(()),
+        Some(QEMU_EXIT_SUCCESS) => Err(format!(
+            "QEMU exited with the success status, but the serial log lacks \"{marker}\""
+        )),
+        Some(QEMU_EXIT_FAILURE) => Err(format!(
+            "the kernel reported a failure (QEMU exit status {QEMU_EXIT_FAILURE})"
+        )),
+        Some(other) => Err(format!(
+            "QEMU exited with status {other} without a kernel signal"
+        )),
+        None => Err("QEMU was stopped by a signal".into()),
+    }
+}
+
+/// Removes terminal escape sequences and carriage returns, which firmware
+/// writes to the serial port, so logs are readable as plain text.
+fn clean_log(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    // Parameters, then one final byte in the range '@'..='~'.
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+            }
+            '\r' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The last `n` non-empty lines of a cleaned log.
+fn log_tail(text: &str, n: usize) -> Vec<String> {
+    let cleaned = clean_log(text);
+    let lines: Vec<&str> = cleaned.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(n)..]
+        .iter()
+        .map(|l| (*l).to_owned())
+        .collect()
+}
+
+/// `cargo xtask test`: headless boot check under UEFI and BIOS (D-009).
+fn test(paths: &Paths, timeout: Duration) -> Result<()> {
+    build(paths)?;
+    image(paths, None)?;
+    let iso = paths.image_dir().join("pharos.iso");
+    let logs = paths.logs_dir();
+    fs::create_dir_all(&logs).map_err(io_err("cannot create", &logs))?;
+
+    let mut failures = 0;
+    for bios in [false, true] {
+        let name = firmware_name(bios);
+        let log = logs.join(format!("boot-{name}.log"));
+        let vars = logs.join(format!("boot-{name}-ovmf-vars.fd"));
+        let run = boot_headless(&iso, &vars, &log, bios, timeout)?;
+        let secs = run.elapsed.as_secs_f32();
+        match evaluate_boot(&run, BOOT_MARKER, timeout) {
+            Ok(()) => println!("boot check ({name}): PASS in {secs:.1} s"),
+            Err(reason) => {
+                failures += 1;
+                println!("boot check ({name}): FAIL after {secs:.1} s: {reason}");
+                println!("  serial log ({}), last lines:", log.display());
+                for line in log_tail(&run.log, LOG_TAIL_LINES) {
+                    println!("  | {line}");
+                }
+            }
+        }
+    }
+    if failures > 0 {
+        return Err(format!("{failures} of 2 boot checks failed"));
+    }
+    println!("All boot checks passed.");
     Ok(())
 }
 
@@ -529,6 +732,7 @@ fn main() -> ExitCode {
             Task::Build => build(&paths),
             Task::Image { kernel } => image(&paths, kernel),
             Task::Run { bios, gdb } => run_qemu(&paths, bios, gdb),
+            Task::Test { timeout } => test(&paths, timeout),
         }
     });
     match result {
@@ -598,14 +802,85 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        let uefi = joined(qemu_args(iso, vars, false, false));
+        let stdio = OsStr::new("stdio");
+        let uefi = joined(qemu_args(iso, vars, stdio, false, false));
         assert!(uefi.contains("isa-debug-exit,iobase=0xf4,iosize=0x04"));
         assert!(uefi.contains("-cdrom pharos.iso"));
         assert!(uefi.contains(OVMF_CODE) && uefi.contains("file=vars.fd"));
         assert!(!uefi.contains(" -S"));
-        let bios = joined(qemu_args(iso, vars, true, true));
+        assert!(uefi.contains("-serial stdio"));
+        let bios = joined(qemu_args(
+            iso,
+            vars,
+            OsStr::new("file:boot.log"),
+            true,
+            true,
+        ));
+        assert!(bios.contains("-serial file:boot.log"));
         assert!(!bios.contains("pflash"));
         assert!(bios.ends_with("-s -S"));
+    }
+
+    #[test]
+    fn parses_test_timeout() {
+        assert_eq!(
+            parse(args(&["test"])),
+            Ok(Task::Test {
+                timeout: Duration::from_secs(DEFAULT_BOOT_TIMEOUT_SECS)
+            })
+        );
+        assert_eq!(
+            parse(args(&["test", "--timeout", "5"])),
+            Ok(Task::Test {
+                timeout: Duration::from_secs(5)
+            })
+        );
+        assert!(parse(args(&["test", "--timeout"])).is_err());
+        assert!(parse(args(&["test", "--timeout", "0"])).is_err());
+        assert!(parse(args(&["test", "--timeout", "soon"])).is_err());
+        assert!(parse(args(&["test", "--bios"])).is_err());
+    }
+
+    fn boot_run(status: Option<i32>, timed_out: bool, log: &str) -> BootRun {
+        BootRun {
+            status,
+            timed_out,
+            log: log.to_owned(),
+            elapsed: Duration::from_secs(1),
+        }
+    }
+
+    #[test]
+    fn boot_passes_only_with_status_and_marker() {
+        let t = Duration::from_secs(60);
+        let good = "\u{1b}[2JBdsDxe: starting\r\nPharos OS 0.1.0 kernel\r\nPHAROS: boot ok\r\n";
+        assert!(evaluate_boot(&boot_run(Some(33), false, good), BOOT_MARKER, t).is_ok());
+
+        let no_marker = evaluate_boot(&boot_run(Some(33), false, "Pharos OS\n"), BOOT_MARKER, t);
+        assert!(no_marker.unwrap_err().contains("lacks"));
+        let partial = evaluate_boot(
+            &boot_run(Some(33), false, "PHAROS: boot ok?\n"),
+            BOOT_MARKER,
+            t,
+        );
+        assert!(partial.is_err(), "marker must match a whole line");
+
+        let failed = evaluate_boot(&boot_run(Some(35), false, good), BOOT_MARKER, t);
+        assert!(failed.unwrap_err().contains("reported a failure"));
+        let other = evaluate_boot(&boot_run(Some(0), false, good), BOOT_MARKER, t);
+        assert!(other.unwrap_err().contains("without a kernel signal"));
+        let timeout = evaluate_boot(&boot_run(None, true, good), BOOT_MARKER, t);
+        assert!(timeout.unwrap_err().contains("no result within 60 s"));
+        assert!(evaluate_boot(&boot_run(None, false, good), BOOT_MARKER, t).is_err());
+    }
+
+    #[test]
+    fn cleans_firmware_noise_from_logs() {
+        let raw = "\u{1b}[2J\u{1b}[01;01H\u{1b}[=3hBdsDxe: loading\r\n\r\nPHAROS: boot ok\r\n";
+        assert_eq!(clean_log(raw), "BdsDxe: loading\n\nPHAROS: boot ok\n");
+        assert_eq!(log_tail(raw, 1), vec!["PHAROS: boot ok".to_owned()]);
+        assert_eq!(log_tail(raw, 10).len(), 2);
+        assert!(log_tail("", 5).is_empty());
     }
 
     #[test]

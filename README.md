@@ -56,7 +56,7 @@ cargo xtask run          # UEFI (OVMF)
 cargo xtask run --bios   # BIOS (SeaBIOS)
 ```
 
-The serial output ends with `PHAROS: boot ok`, and the command exits 0 only when the kernel reports success.
+The serial output ends with `PHAROS: boot ok`, and the command exits 0 only when the kernel reports success. `cargo xtask test` runs the same boot headless under both firmwares, with a time limit, and reports pass or fail for each.
 
 ## CLI usage
 

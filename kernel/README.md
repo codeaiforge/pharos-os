@@ -31,6 +31,7 @@ Boot it in QEMU (builds the kernel and image first):
 cargo xtask run          # UEFI (OVMF)
 cargo xtask run --bios   # BIOS (SeaBIOS)
 cargo xtask run --gdb    # wait for GDB; see docs/development/debugging.md
+cargo xtask test         # headless boot check, UEFI and BIOS, with a time limit
 ```
 
 The serial output ends with `PHAROS: boot ok`, and the command exits 0 only on the kernel's success signal (QEMU exit status 33). Boot failures and panics print `PHAROS: boot failed: ...` or `PHAROS: panic: ...`; QEMU then exits with status 35 and `cargo xtask run` fails.
