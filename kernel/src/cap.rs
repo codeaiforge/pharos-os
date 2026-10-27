@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::fs::Fs;
 use crate::ipc::Endpoint;
 use crate::mm::raw::IrqMutex;
 
@@ -27,6 +28,8 @@ pub const RECEIVE: Rights = 1 << 1;
 pub const GRANT: Rights = 1 << 2;
 /// Write to the debug console.
 pub const WRITE: Rights = 1 << 3;
+/// Open files (on a filesystem) or read them (on a file).
+pub const READ: Rights = 1 << 4;
 
 /// Largest number of handles a process can hold.
 // ponytail: fixed cap per process; make it a quota when processes need more.
@@ -39,6 +42,13 @@ pub enum Object {
     DebugConsole,
     /// An IPC endpoint.
     Endpoint(Arc<Endpoint>),
+    /// A mounted filesystem: with `READ`, opens files.
+    Filesystem(Arc<Fs>),
+    /// One file of a mounted filesystem: with `READ`, reads it.
+    File {
+        fs: Arc<Fs>,
+        file: pharos_fs::FileId,
+    },
 }
 
 impl fmt::Debug for Object {
@@ -46,6 +56,8 @@ impl fmt::Debug for Object {
         match self {
             Self::DebugConsole => f.write_str("DebugConsole"),
             Self::Endpoint(e) => write!(f, "Endpoint({:p})", Arc::as_ptr(e)),
+            Self::Filesystem(fs) => write!(f, "Filesystem({:p})", Arc::as_ptr(fs)),
+            Self::File { fs, file } => write!(f, "File({:p}, {file:?})", Arc::as_ptr(fs)),
         }
     }
 }
@@ -83,7 +95,14 @@ impl Capability {
     /// A child capability for the same object with this one's rights
     /// limited to `mask`, recorded in the derivation tree.
     pub fn derive(self: &Arc<Self>, mask: Rights) -> Arc<Self> {
-        let child = Self::new(self.object.clone(), self.rights & mask);
+        self.derive_object(self.object.clone(), mask)
+    }
+
+    /// A child capability for a different `object` reached through this
+    /// one (a file opened through a filesystem), with this one's rights
+    /// limited to `mask`. Revoking this capability revokes the child too.
+    pub fn derive_object(self: &Arc<Self>, object: Object, mask: Rights) -> Arc<Self> {
+        let child = Self::new(object, self.rights & mask);
         if self.is_revoked() {
             child.revoked.store(true, Ordering::Relaxed);
         }
@@ -296,6 +315,16 @@ mod tests {
             from_revoked.is_revoked(),
             "children of revoked capabilities are revoked"
         );
+    }
+
+    #[test]
+    fn derived_objects_follow_revocation() {
+        let parent = console(READ | GRANT | WRITE);
+        let other = parent.derive_object(Object::DebugConsole, READ | GRANT);
+        assert_eq!(other.rights(), READ | GRANT);
+        let grandchild = other.derive(READ);
+        assert_eq!(parent.revoke(), 2);
+        assert!(other.is_revoked() && grandchild.is_revoked());
     }
 
     #[test]

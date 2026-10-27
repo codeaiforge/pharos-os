@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.7, #37). It follows [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries) (capability-based microkernel), the [D-012 direction](../project/decision-log.md#d-012-agent-sandboxing-tool-permissions-and-network-isolation) (kernel-enforced capabilities), and [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism) (IPC model and system-call mechanism).
-- **Implementation:** per-process address spaces (#38) and ring 3 execution with user faults killing the process (#39) are **implemented** (`process::load`, `process::start`, `process::spawn`). So are the system-call entry and the calls `exit`, `yield`, `debug_write`, and `delete`, with capability tables (#40). So are IPC endpoints with `send` and `receive`, capability passing, and `revoke` (#41). Every M2.7 interface in this document is now implemented.
+- **Implementation:** per-process address spaces (#38) and ring 3 execution with user faults killing the process (#39) are **implemented** (`process::load`, `process::start`, `process::spawn`). So are the system-call entry and the calls `exit`, `yield`, `debug_write`, and `delete`, with capability tables (#40). So are IPC endpoints with `send` and `receive`, capability passing, and `revoke` (#41). Every M2.7 interface in this document is now implemented. M2.8 added file capabilities and the calls `open` and `read` (#48; design in [storage.md](storage.md#user-interface-capabilities-and-system-calls)).
 
 ## 2. Context
 
@@ -90,7 +90,8 @@ The prototype for D-004 showed that QEMU's default CPU under TCG, which CI uses,
 
 - **Capability:** a reference to a kernel object plus rights. Objects in M2.7:
   - **IPC endpoint**, with rights `SEND`, `RECEIVE`, and `GRANT`;
-  - **debug console**, with right `WRITE`.
+  - **debug console**, with right `WRITE`;
+  - since M2.8, **filesystem** (`READ` opens files) and **file** (`READ` reads it), both also with `GRANT` ([storage.md](storage.md)). `open` derives the file capability from the filesystem capability, so revoking reaches files opened through it.
 - **Capability table:** per process; handles are small integers indexing it. Handle 0 is never valid, and handles are meaningless in another process.
 - **Delegation:** a message may carry one capability, if the sender holds `GRANT` on it. The receiver gets a new handle with the same or fewer rights (the sender chooses).
 - **Revocation: derivation tree with lazy invalidation.**
@@ -128,6 +129,8 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 4 | `receive` | handle, buffer, max len | `len \| new_handle << 32` | endpoint, `RECEIVE` |
 | 5 | `delete` | handle | 0 | none (own handle) |
 | 6 | `revoke` | handle | revoked count | none (own handle) |
+| 7 | `open` (M2.8) | filesystem handle, path buffer, path len (≤ 104) | new file handle | filesystem, `READ` |
+| 8 | `read` (M2.8) | file handle, buffer, len (≤ 4096), file offset | bytes read (0 at end of file) | file, `READ` |
 
 Error codes (`rax`):
 
@@ -140,6 +143,7 @@ Error codes (`rax`):
 | 5 | `BAD_ADDRESS` | A buffer is outside user space, unmapped, or lacks access |
 | 6 | `TOO_LARGE` | A length exceeds the call's limit |
 | 7 | `NO_MEMORY` | The kernel could not allocate |
+| 8 | `NOT_FOUND` | No file with this path (M2.8) |
 
 ### Programs for tests
 

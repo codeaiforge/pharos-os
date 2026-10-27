@@ -20,10 +20,16 @@ pub mod number {
     pub const RECEIVE: u64 = 4;
     pub const DELETE: u64 = 5;
     pub const REVOKE: u64 = 6;
+    pub const OPEN: u64 = 7;
+    pub const READ: u64 = 8;
 }
 
 /// Largest buffer `debug_write` accepts (and the IPC message size).
 pub const MAX_MESSAGE: usize = 256;
+/// Largest path `open` accepts.
+pub const MAX_PATH: usize = pharos_fs::MAX_PATH;
+/// Largest buffer `read` accepts.
+pub const MAX_READ: usize = 4096;
 
 /// Error codes returned in `rax` (0 is success).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +42,7 @@ pub enum Error {
     BadAddress = 5,
     TooLarge = 6,
     NoMemory = 7,
+    NotFound = 8,
 }
 
 impl From<CapError> for Error {
@@ -87,17 +94,34 @@ pub enum Call {
     Revoke {
         handle: Handle,
     },
+    Open {
+        handle: Handle,
+        addr: u64,
+        len: usize,
+    },
+    Read {
+        handle: Handle,
+        addr: u64,
+        len: usize,
+        offset: u64,
+    },
 }
 
-/// Checks a user buffer argument: length first, then the address range.
-fn buffer(addr: u64, len: u64) -> Result<usize, Error> {
-    if len > MAX_MESSAGE as u64 {
+/// Checks a user buffer argument of at most `max` bytes: length first,
+/// then the address range.
+fn buffer_up_to(max: usize, addr: u64, len: u64) -> Result<usize, Error> {
+    if len > max as u64 {
         return Err(Error::TooLarge);
     }
     if !user_range_ok(addr, len) {
         return Err(Error::BadAddress);
     }
     Ok(len as usize)
+}
+
+/// A user buffer of at most [`MAX_MESSAGE`] bytes.
+fn buffer(addr: u64, len: u64) -> Result<usize, Error> {
+    buffer_up_to(MAX_MESSAGE, addr, len)
 }
 
 /// Decodes call `number` with `args` (`rdi`, `rsi`, `rdx`, `r10`, `r8`,
@@ -126,6 +150,17 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
         }),
         number::DELETE => Ok(Call::Delete { handle: args[0] }),
         number::REVOKE => Ok(Call::Revoke { handle: args[0] }),
+        number::OPEN => Ok(Call::Open {
+            handle: args[0],
+            addr: args[1],
+            len: buffer_up_to(MAX_PATH, args[1], args[2])?,
+        }),
+        number::READ => Ok(Call::Read {
+            handle: args[0],
+            addr: args[1],
+            len: buffer_up_to(MAX_READ, args[1], args[2])?,
+            offset: args[3],
+        }),
         _ => Err(Error::UnknownCall),
     }
 }
@@ -136,6 +171,7 @@ pub fn needed_rights(call: &Call) -> cap::Rights {
         Call::DebugWrite { .. } => cap::WRITE,
         Call::Send { .. } => cap::SEND,
         Call::Receive { .. } => cap::RECEIVE,
+        Call::Open { .. } | Call::Read { .. } => cap::READ,
         _ => 0,
     }
 }
@@ -253,6 +289,46 @@ mod kernel {
                 let cap = process.caps.lock().get(handle, 0)?;
                 Ok(cap.revoke() as u64)
             }
+            Call::Open { handle, addr, len } => {
+                let parent = process.caps.lock().get(handle, cap::READ)?;
+                let Object::Filesystem(fs) = parent.object() else {
+                    return Err(Error::MissingRight);
+                };
+                let mut path = [0u8; MAX_PATH];
+                sched::with_current_space(|space| space.read_user(addr, &mut path[..len]))
+                    .ok_or(Error::BadAddress)??;
+                let file = fs.lookup(&path[..len]).map_err(|_| Error::NotFound)?;
+                let object = Object::File {
+                    fs: fs.clone(),
+                    file,
+                };
+                let child = parent.derive_object(object, cap::READ | cap::GRANT);
+                Ok(process.caps.lock().insert(child)?)
+            }
+            Call::Read {
+                handle,
+                addr,
+                len,
+                offset,
+            } => {
+                let cap = process.caps.lock().get(handle, cap::READ)?;
+                let Object::File { fs, file } = cap.object() else {
+                    return Err(Error::MissingRight);
+                };
+                sched::with_current_space(|space| space.check_user(addr, len, true))
+                    .ok_or(Error::BadAddress)??;
+                // On the heap: kernel stacks are 16 KiB.
+                let mut buf = alloc::vec::Vec::new();
+                buf.try_reserve_exact(len).map_err(|_| Error::NoMemory)?;
+                buf.resize(len, 0);
+                // A RAM disk read of a validated range cannot fail.
+                let n = fs
+                    .read(*file, offset, &mut buf)
+                    .map_err(|_| Error::NotFound)?;
+                sched::with_current_space(|space| space.write_user(addr, &buf[..n]))
+                    .ok_or(Error::BadAddress)??;
+                Ok(n as u64)
+            }
         }
     }
 }
@@ -284,7 +360,30 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(7, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(9, [0; 6]), Err(Error::UnknownCall));
+        let open = |addr, len| decode(7, [1, addr, len, 0, 0, 0]);
+        assert_eq!(
+            open(0x40_0000, 104),
+            Ok(Call::Open {
+                handle: 1,
+                addr: 0x40_0000,
+                len: 104
+            })
+        );
+        assert_eq!(open(0x40_0000, 105), Err(Error::TooLarge));
+        assert_eq!(open(0xffff_ffff_8000_0000, 8), Err(Error::BadAddress));
+        let read = |addr, len, offset| decode(8, [2, addr, len, offset, 0, 0]);
+        assert_eq!(
+            read(0x40_0000, 4096, u64::MAX),
+            Ok(Call::Read {
+                handle: 2,
+                addr: 0x40_0000,
+                len: 4096,
+                offset: u64::MAX
+            })
+        );
+        assert_eq!(read(0x40_0000, 4097, 0), Err(Error::TooLarge));
+        assert_eq!(read(0, 8, 0), Err(Error::BadAddress));
         assert_eq!(
             decode(3, [1, 0x40_0000, 300, 0, 0, 0]),
             Err(Error::TooLarge),
@@ -348,8 +447,18 @@ mod tests {
                     assert!(len <= MAX_MESSAGE);
                     assert!(user_range_ok(addr, len as u64));
                 }
+                Ok(Call::Open { addr, len, .. }) => {
+                    accepted += 1;
+                    assert!(len <= MAX_PATH);
+                    assert!(user_range_ok(addr, len as u64));
+                }
+                Ok(Call::Read { addr, len, .. }) => {
+                    accepted += 1;
+                    assert!(len <= MAX_READ);
+                    assert!(user_range_ok(addr, len as u64));
+                }
                 Ok(_) => assert!(matches!(number, 0 | 1 | 5 | 6)),
-                Err(error) => assert!(error as u64 >= 1 && error as u64 <= 7),
+                Err(error) => assert!(error as u64 >= 1 && error as u64 <= 8),
             }
         }
         assert!(accepted > 0, "the generator must reach valid buffers");
