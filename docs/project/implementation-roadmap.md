@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.8 — Storage abstractions and filesystem.** Everything in Phases 2–5 is **planned, not implemented**.
+**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.9 — Hardware abstraction and selected drivers.** Everything in Phases 2–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -39,7 +39,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | Phase | Name | Status |
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
-| 2 | Core System | **Current** (M2.8) |
+| 2 | Core System | **Current** (M2.9) |
 | 3 | AI Agent Platform | Planned |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
@@ -246,7 +246,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.8 — Storage abstractions and filesystem
 
-**Status: Current.** D-007 accepted on 2026-10-27 (#43).
+**Status: Done** — gate passed 2026-10-27: the CI `qemu` job passed on `main` at `6ead5e8` ([run 40576869275](https://github.com/codeaiforge/pharos-os/actions/runs/40576869275)) with 25 test kernels, among them the storage kernels `ramdisk`, `fs`, and `files`: files built on the host are read back from a boot RAM disk, each of 12 corrupted images is rejected with its own error while the kernel keeps running, and processes read files only through capabilities. The image parser is fuzzed on the host with 100,000 mutated images. A parser that skipped the file checksum failed CI on a throwaway branch ([run 40577075436](https://github.com/codeaiforge/pharos-os/actions/runs/40577075436)): the `pharos-fs` host tests failed (also on Rust 1.85), and the `fs` test kernel failed at `fs-file-crc`. Every M2.8 commit passed CI on its first run, including the minimum supported Rust. Delivered: D-007 (#43), storage design (#44), image format crate and host tool (#45), RAM disk from Limine modules (#46), kernel filesystem (#47), file capabilities with `open` and `read` (#48), CI gate (#49). Writes stay out of scope (copy-on-write direction in D-007). Design: [storage.md](../architecture/storage.md).
 
 - **Objective and scope:** A block-device abstraction and a filesystem (per D-007), starting read-only.
 - **Deliverables:** Block device interface; initial RAM disk or virtio-blk support; filesystem implementation; host tool to build images.
@@ -260,7 +260,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.9 — Hardware abstraction and selected drivers
 
-**Status: Planned.**
+**Status: Current.** Needs D-008 (driver strategy) accepted first.
 
 - **Objective and scope:** A driver model (per D-008) and drivers for a small set of QEMU devices.
 - **Deliverables:** Device discovery (PCI/ACPI as needed); drivers such as virtio-blk, virtio-net, and a framebuffer or keyboard.
@@ -591,4 +591,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, and M2.7 passed their gates on 2026-10-27. The current milestone is **M2.8 — Storage abstractions and filesystem**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27. The current milestone is **M2.9 — Hardware abstraction and selected drivers**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

@@ -13,7 +13,7 @@ const PROJECT: &str = "Pharos OS";
 const ORGANIZATION: &str = "CodeAIForge";
 /// Comes from Cargo package metadata (workspace version), never hand-copied.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const STAGE: &str = "Phase 2 - Core System (M2.7 complete, M2.8 next)";
+const STAGE: &str = "Phase 2 - Core System (M2.8 complete, M2.9 next)";
 
 /// Command succeeded.
 const EXIT_OK: u8 = 0;
@@ -78,8 +78,14 @@ const COMPONENTS: &[(&str, &str)] = &[
         "implemented",
         "user processes in ring 3, system calls, IPC with capabilities",
     ),
-    ("planned", "device interrupts"),
-    ("planned", "storage, filesystem, drivers, networking"),
+    (
+        "implemented",
+        "read-only storage: RAM disk, checked filesystem image, file capabilities",
+    ),
+    (
+        "planned",
+        "device interrupts, drivers, writable storage, networking",
+    ),
     ("planned", "local AI inference and sandboxed agent platform"),
 ];
 
@@ -374,13 +380,13 @@ mod tests {
         // exceptions and timer interrupts by test kernels in CI (M2.4); memory
         // management by test kernels in CI (M2.5); timer and scheduling by test
         // kernels in CI (M2.6); processes, system calls, and IPC by test
-        // kernels in CI (M2.7).
+        // kernels in CI (M2.7); read-only storage by test kernels in CI (M2.8).
         let implemented: Vec<&str> = COMPONENTS
             .iter()
             .filter(|(status, _)| *status == "implemented")
             .map(|(_, what)| *what)
             .collect();
-        assert_eq!(implemented.len(), 9);
+        assert_eq!(implemented.len(), 10);
         assert!(implemented.iter().all(|what| {
             what.contains("workspace")
                 || what.contains("xtask")
@@ -391,6 +397,7 @@ mod tests {
                 || what.contains("memory management")
                 || what.contains("scheduling")
                 || what.contains("system calls")
+                || what.contains("storage")
         }));
         for (status, _) in COMPONENTS {
             assert!(["implemented", "placeholder", "planned"].contains(status));

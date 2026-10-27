@@ -7,7 +7,7 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 
 ## Status
 
-**Phase 2 — Core System.** M2.2 to M2.7 are done: a minimal kernel boots in QEMU on UEFI and BIOS with one command (`cargo xtask run`), reports CPU exceptions (including stack overflows) over serial, receives local APIC timer interrupts, and manages memory (a frame allocator, its own page tables with write protection, no-execute, and guard pages, reclaimed bootloader memory, and a heap for `alloc`), schedules kernel tasks preemptively on a calibrated 100 Hz timer, and runs user processes in ring 3, each in its own address space, with a small system-call interface and synchronous IPC that passes capabilities; CI boots it and runs kernel tests inside QEMU on every push. The current milestone is M2.8: storage and a filesystem. See the [implementation roadmap](docs/project/implementation-roadmap.md), the [boot design](docs/architecture/boot.md), [exceptions and interrupts](docs/architecture/interrupts.md), [memory management](docs/architecture/memory.md), [scheduling](docs/architecture/scheduling.md), and [system calls and IPC](docs/architecture/syscalls-ipc.md).
+**Phase 2 — Core System.** M2.2 to M2.8 are done: a minimal kernel boots in QEMU on UEFI and BIOS with one command (`cargo xtask run`), reports CPU exceptions (including stack overflows) over serial, receives local APIC timer interrupts, and manages memory (a frame allocator, its own page tables with write protection, no-execute, and guard pages, reclaimed bootloader memory, and a heap for `alloc`), schedules kernel tasks preemptively on a calibrated 100 Hz timer, and runs user processes in ring 3, each in its own address space, with a small system-call interface and synchronous IPC that passes capabilities, and lets processes read files from a checked, read-only filesystem image on a boot RAM disk through capabilities; CI boots it and runs kernel tests inside QEMU on every push. The current milestone is M2.9: hardware abstraction and drivers. See the [implementation roadmap](docs/project/implementation-roadmap.md), the [boot design](docs/architecture/boot.md), [exceptions and interrupts](docs/architecture/interrupts.md), [memory management](docs/architecture/memory.md), [scheduling](docs/architecture/scheduling.md), [system calls and IPC](docs/architecture/syscalls-ipc.md), and [storage](docs/architecture/storage.md).
 
 | Area | Status |
 | --- | --- |
@@ -19,7 +19,7 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 | Kernel tests inside QEMU (test kernels, run locally and in CI) | Implemented |
 | Memory management, exceptions and timer interrupts, preemptive scheduling, user processes, system calls, IPC with capabilities | Implemented |
 | Filesystem image format and host tool (`crates/pharos-fs`, `cargo xtask fs`) | Implemented |
-| Storage in the kernel (RAM disk, filesystem, file capabilities) | Planned (M2.8) |
+| Read-only storage in the kernel (RAM disk, filesystem, file capabilities) | Implemented |
 | Device interrupts, drivers, networking | Planned |
 | Local AI inference and agent platform | Planned |
 
@@ -70,7 +70,7 @@ pharos 0.1.0
 $ cargo run -q -p pharos-cli -- info
 Pharos OS 0.1.0
 Project of: CodeAIForge
-Stage:      Phase 2 - Core System (M2.7 complete, M2.8 next)
+Stage:      Phase 2 - Core System (M2.8 complete, M2.9 next)
 ...
 
 $ cargo run -q -p pharos-cli -- doctor
