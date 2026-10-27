@@ -15,7 +15,8 @@ It has **no** interrupt handling, memory management, scheduling, processes, syst
 | `src/testing.rs` | Support for test kernels: `TestRun`, the `test_kernel!` macro, the test panic handler |
 | `tests/` | Test kernels (one `no_main` kernel per file), booted in QEMU by `cargo xtask test` |
 | `src/sync.rs` | `SpinLock`: a lock without `unsafe` for resources such as the serial port (unit-tested on the host, including with threads) |
-| `src/arch/x86_64.rs` | Hardware layer: port I/O, COM1 serial and the kernel console behind `kprint!`/`kprintln!`, interrupt enable/disable and `without_interrupts`, QEMU exit signal, halt. All hardware `unsafe` code is here |
+| `src/arch/x86_64.rs` | Hardware layer: port I/O, COM1 serial and the kernel console behind `kprint!`/`kprintln!`, interrupt enable/disable and `without_interrupts`, QEMU exit signal, halt. All hardware `unsafe` code is here and in its submodules |
+| `src/arch/x86_64/gdt.rs` | The kernel's own GDT (null, kernel code, kernel data, TSS) and TSS with a 16 KiB double-fault stack (IST1); loaded by `gdt::init()` at the start of `kmain`. Descriptor encoding is unit-tested on the host |
 | `linker.ld` | Places the kernel at `0xffffffff80000000` and keeps the Limine request sections |
 | `build.rs` | Passes `linker.ld` to the binary when building for `x86_64-unknown-none` |
 
@@ -47,9 +48,13 @@ Use `kprint!` and `kprintln!` (exported by the library) for all output. They wri
 
 The console is **interrupt-safe**: it disables interrupts while holding the lock and then restores the previous state (`arch::x86_64::without_interrupts`), so an interrupt handler never waits for a holder it interrupted. A CPU exception can still hit while the lock is held (for example a page fault inside `kprintln!`), so fatal exception handlers, like the panic handler, print through `_print_panic`, which releases the lock first. The `interrupt_state` test kernel checks that printing keeps interrupts enabled or disabled as they were.
 
+## Segments and stacks
+
+`kmain` first loads the kernel's own GDT and TSS (`arch::x86_64::gdt::init`), so nothing depends on Limine's GDT in bootloader-reclaimable memory. The TSS gives the double-fault handler (M2.4) its own 16 KiB stack. Limitation: that stack is a static array without a guard page, so a double-fault handler that overflows it would overwrite neighbouring data; guard pages come with paging (M2.5). The kernel still runs on Limine's boot stack (at least 64 KiB, in bootloader-reclaimable memory) until it has its own.
+
 ## Rules for this crate
 
-- `unsafe` is denied by default (`Cargo.toml`). It is allowed only in `arch::x86_64` and `limine`, and every `unsafe` block needs a `// SAFETY:` comment; Clippy fails the build otherwise. `main.rs` uses only placement attributes (`link_section`, `no_mangle`).
+- `unsafe` is denied by default (`Cargo.toml`). It is allowed only in `arch::x86_64` (and its submodules) and `limine`, and every `unsafe` block needs a `// SAFETY:` comment; Clippy fails the build otherwise. `main.rs` uses only placement attributes (`link_section`, `no_mangle`).
 - Follow the [D-004 constraints](../docs/project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries) for early kernel code: hardware access only through the hardware layer; no drivers beyond serial, interrupt controller, and timer; no filesystem, network, or agent code.
 - Keep hardware-independent logic in host-testable modules with unit tests.
 - Do not describe anything here as implemented unless it is tested.

@@ -25,5 +25,9 @@ name = "boot_info"
 harness = false
 
 [[test]]
+name = "gdt"
+harness = false
+
+[[test]]
 name = "interrupt_state"
 harness = false

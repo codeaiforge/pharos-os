@@ -1,10 +1,13 @@
 //! x86-64 hardware layer: port I/O, the COM1 serial port and kernel
-//! console, QEMU exit signalling, and halting.
+//! console, interrupt control, QEMU exit signalling, halting, and (in
+//! submodules) the GDT and TSS.
 //!
-//! All of the kernel's hardware `unsafe` code lives here (D-004), behind safe
-//! functions. Each `unsafe` block states why it is sound.
+//! All of the kernel's hardware `unsafe` code lives here and in submodules
+//! (D-004), behind safe functions. Each `unsafe` block states why it is sound.
 
 #![allow(unsafe_code)]
+
+pub mod gdt;
 
 use core::arch::asm;
 use core::fmt::{self, Write};

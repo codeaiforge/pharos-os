@@ -25,7 +25,7 @@ firmware (UEFI: OVMF / BIOS: SeaBIOS)
 
 ### Kernel entry contract (Limine protocol, base revision 6)
 
-- **CPU state:** 64-bit long mode with paging, PAE, write protection, and NX (if available) enabled; interrupts disabled (`RFLAGS = 0x2`); no IDT, TSS, or LDT; legacy PIC IRQs masked; kernel segments mapped in the higher half. Limine's GDT lives in bootloader-reclaimable memory, so the kernel must load its own GDT, and set up an IDT, before reclaiming that memory or enabling interrupts (M2.4).
+- **CPU state:** 64-bit long mode with paging, PAE, write protection, and NX (if available) enabled; interrupts disabled (`RFLAGS = 0x2`); no IDT, TSS, or LDT; legacy PIC IRQs masked; kernel segments mapped in the higher half. Limine's GDT lives in bootloader-reclaimable memory, so the kernel loads its own GDT and TSS first thing in `kmain` (implemented, issue #20; `arch::x86_64::gdt`). It must still set up an IDT before enabling interrupts (M2.4) and leave Limine's boot stack before reclaiming that memory.
 - **Requests:** the kernel declares requests as statics in `.limine_requests` sections, between the start and end markers. Required in M2.2: base revision, memory map, HHDM. Bootloader info and firmware type are optional but useful for diagnostics.
 - **Revision check:** the kernel must verify that the base-revision tag's third value was set to 0. If not, it reports an error and halts, instead of running with a protocol it did not ask for.
 - **Responses:** read with volatile loads, because the bootloader writes them outside the compiler's view. A missing response is an error the kernel reports, not undefined behaviour.
@@ -92,7 +92,7 @@ The kernel stays the `pharos-kernel` workspace member. In place since issue #9:
 
 Editors: rust-analyzer's on-save check runs `scripts/ra-check.sh` (set in `.vscode/settings.json`), which mirrors the CI split. Its default `cargo clippy --workspace` would build the kernel for the host and report false errors. The hardware layer (`arch`) compiles on any x86-64 build so rust-analyzer can resolve it on an x86-64 host (#9).
 
-Since issue #11: `cargo xtask build` builds the kernel binary. The kernel crate has its own lint table instead of inheriting `unsafe_code = "forbid"` (P-001): `unsafe_code = "deny"`, allowed only in `arch::x86_64` and `limine`, plus Clippy's `undocumented_unsafe_blocks = "deny"`. The crate has a library (host-testable logic and the hardware layer) and a binary (entry point and Limine requests); `build.rs` passes `linker.ld` to the binary only when building for `x86_64-unknown-none`.
+Since issue #11: `cargo xtask build` builds the kernel binary. The kernel crate has its own lint table instead of inheriting `unsafe_code = "forbid"` (P-001): `unsafe_code = "deny"`, allowed only in `arch::x86_64` (and its submodules) and `limine`, plus Clippy's `undocumented_unsafe_blocks = "deny"`. The crate has a library (host-testable logic and the hardware layer) and a binary (entry point and Limine requests); `build.rs` passes `linker.ld` to the binary only when building for `x86_64-unknown-none`.
 
 ## 4. Security
 

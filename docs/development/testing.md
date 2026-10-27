@@ -14,7 +14,7 @@ cargo test -p pharos-kernel --lib   # kernel library logic
 | `pharos-cli` | `tools/pharos-cli/src/main.rs` | Command parsing and aliases, case sensitivity, missing/unknown/extra arguments, help content, version from Cargo metadata, `info` status labels, usage errors on stderr with exit 2, `doctor` results and exit codes for supported and unsupported hosts, `doctor` never claiming unbuilt capabilities |
 | `pharos-cli` | `tools/pharos-cli/tests/cli.rs` | End-to-end: runs the real binary and checks exit codes as the shell sees them, stdout/stderr separation, and that a non-UTF-8 argument is a usage error rather than a panic |
 | `xtask` | `xtask/src/main.rs` | Argument parsing, `sha256sum` output parsing, checksum comparison, pinned values, and that all outputs stay under `target/` |
-| `pharos-kernel` | `kernel/src/limine.rs`, `kernel/src/boot_info.rs`, `kernel/src/sync.rs`, `kernel/src/testing.rs`, `kernel/src/lib.rs` | Limine structure sizes match the specification, request IDs, base-revision check, firmware names, memory-map summary (including empty and overflowing maps), `SpinLock` locking, release, forced release, and mutual exclusion across 4 threads; the test-kernel verdict (no checks means failure). Run with `cargo test -p pharos-kernel --lib` |
+| `pharos-kernel` | `kernel/src/limine.rs`, `kernel/src/boot_info.rs`, `kernel/src/sync.rs`, `kernel/src/testing.rs`, `kernel/src/arch/x86_64/gdt.rs`, `kernel/src/lib.rs` | Limine structure sizes match the specification, request IDs, base-revision check, firmware names, memory-map summary (including empty and overflowing maps), `SpinLock` locking, release, forced release, and mutual exclusion across 4 threads; GDT and TSS descriptor encoding against reference values and the SDM layout; the test-kernel verdict (no checks means failure). Run with `cargo test -p pharos-kernel --lib` |
 
 The CLI is tested through a `run` function that writes to in-memory buffers, and `doctor` takes the OS and architecture as parameters, so tests are deterministic and do not depend on the machine running them.
 
@@ -47,6 +47,7 @@ A test kernel passes only if it ran at least one check, none failed, and it ende
 | Test kernel | Checks |
 | --- | --- |
 | `kernel/tests/boot_info.rs` | Base revision accepted; memory map present, non-empty, with usable memory and the kernel image; HHDM offset in the higher half; bootloader is Limine; firmware is 64-bit UEFI; the test kernel runs at its linked higher-half address |
+| `kernel/tests/gdt.rs` | Limine's GDT is active at entry; after `gdt::init()` (called twice, the second call harmless) the GDTR points at the kernel GDT, CS/SS/DS/TR hold the kernel selectors, and TSS IST1 is the 16-byte-aligned top of the double-fault stack |
 | `kernel/tests/interrupt_state.rs` | Interrupts are disabled at entry; printing and `without_interrupts` (also nested) restore the previous interrupt state, enabled or disabled; `enable_interrupts`/`disable_interrupts` set and clear IF |
 
 To add a test kernel:
