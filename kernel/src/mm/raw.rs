@@ -1,15 +1,18 @@
-//! Raw memory for the memory manager (decision D-005): direct-map slices and
-//! a lock that owns its data. One of the few modules where `unsafe` is
+//! Raw memory for the memory manager (decision D-005): direct-map slices, a
+//! lock that owns its data, and the global allocator glue for the heap. One of the few modules where `unsafe` is
 //! allowed (AGENTS.md); everything else in `mm` is safe Rust.
 
 #![allow(unsafe_code)]
 
+use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::x86_64::{disable_interrupts, enable_interrupts, interrupts_enabled};
 use crate::sync::{SpinGuard, SpinLock};
+
+use super::heap::{HEAP_BITMAP_WORDS, Heap};
 
 /// A spin lock that owns `T` and disables interrupts while held (restoring
 /// the previous state on release), so an interrupt handler never waits for a
@@ -95,3 +98,53 @@ pub(crate) fn bitmap_storage(hhdm: u64, phys: u64, words: usize) -> Option<&'sta
     // invalid bit patterns, so whatever the memory holds is a valid value.
     Some(unsafe { core::slice::from_raw_parts_mut((hhdm + phys) as *mut u64, words) })
 }
+
+/// The kernel heap, once [`crate::mm::init_heap`] has mapped its window.
+pub(crate) static HEAP: IrqMutex<Option<Heap<'static>>> = IrqMutex::new(None);
+
+static HEAP_BITMAP_TAKEN: AtomicBool = AtomicBool::new(false);
+static mut HEAP_BITMAP: [u64; HEAP_BITMAP_WORDS] = [0; HEAP_BITMAP_WORDS];
+
+/// The heap's bitmap storage (a kernel static). May be taken once; later
+/// calls return `None`.
+pub(crate) fn heap_bitmap_storage() -> Option<&'static mut [u64]> {
+    if HEAP_BITMAP_TAKEN.swap(true, Ordering::AcqRel) {
+        return None;
+    }
+    // SAFETY: the flag above hands out this static at most once, so the
+    // returned reference is the only one to it.
+    Some(unsafe {
+        core::slice::from_raw_parts_mut((&raw mut HEAP_BITMAP).cast::<u64>(), HEAP_BITMAP_WORDS)
+    })
+}
+
+/// Rust's global allocator in the kernel: forwards to the kernel heap.
+pub struct KernelAllocator;
+
+// SAFETY: `alloc` returns null or a block of at least `layout.size()` bytes
+// aligned to `layout.align()` inside the mapped heap window, not handed out
+// again until `dealloc`; the heap's bitmap guarantees blocks never overlap.
+// `IrqMutex` serializes access, also against interrupt handlers.
+unsafe impl GlobalAlloc for KernelAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        HEAP.lock()
+            .as_mut()
+            .and_then(|heap| heap.alloc(layout.size(), layout.align()))
+            .map_or(core::ptr::null_mut(), |addr| addr as *mut u8)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let result = HEAP
+            .lock()
+            .as_mut()
+            .map(|heap| heap.free(ptr as usize, layout.size()));
+        // A bad free means memory corruption already happened; stop.
+        if !matches!(result, Some(Ok(()))) {
+            panic!("kernel heap: invalid free of {ptr:p} ({result:?})");
+        }
+    }
+}
+
+#[cfg(target_os = "none")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: KernelAllocator = KernelAllocator;

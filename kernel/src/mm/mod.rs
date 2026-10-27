@@ -4,6 +4,7 @@
 
 pub mod bitmap;
 pub mod frame;
+pub mod heap;
 #[cfg(target_arch = "x86_64")]
 pub mod raw;
 
@@ -14,7 +15,7 @@ pub use global::*;
 mod global {
     use core::fmt;
 
-    use super::frame::{FrameAllocator, FrameStats, MAX_REGIONS, Span, plan_storage};
+    use super::frame::{FRAME_SIZE, FrameAllocator, FrameStats, MAX_REGIONS, Span, plan_storage};
     use super::raw::{IrqMutex, IrqMutexGuard, bitmap_storage};
     #[cfg(target_os = "none")]
     use crate::arch::x86_64::paging::KernelImage;
@@ -33,8 +34,10 @@ mod global {
         NoUsableMemory,
         /// `init_paging` or reclaim was called before `init_frames`.
         FramesNotReady,
-        /// Reclaim was called before the kernel's own page tables are active.
+        /// Reclaim or the heap was set up before the kernel's own page tables.
         PagingNotReady,
+        /// No frames left for the heap.
+        OutOfMemory,
         /// Building the kernel address space failed.
         Paging(MapError),
     }
@@ -47,9 +50,8 @@ mod global {
                     f.write_str("no usable memory region can hold the frame bitmaps")
                 }
                 Self::FramesNotReady => f.write_str("frame allocator not set up"),
-                Self::PagingNotReady => {
-                    f.write_str("bootloader page tables still active; cannot reclaim")
-                }
+                Self::PagingNotReady => f.write_str("kernel page tables not active yet"),
+                Self::OutOfMemory => f.write_str("out of physical memory"),
                 Self::Paging(error) => write!(f, "kernel page tables: {error}"),
             }
         }
@@ -115,6 +117,53 @@ mod global {
         }
         crate::limine::retire_responses();
         Ok(frames.release_pending())
+    }
+
+    /// Maps the heap window ([`super::heap::HEAP_BASE`], [`super::heap::HEAP_SIZE`])
+    /// with fresh frames and enables Rust's `alloc` in the kernel. Needs
+    /// the kernel's own page tables. Call once.
+    pub fn init_heap() -> Result<HeapStats, MmError> {
+        use super::heap::{HEAP_BASE, HEAP_SIZE, Heap};
+        use super::raw::{HEAP, heap_bitmap_storage};
+        use crate::arch::x86_64::paging::{Flags, PageSize};
+
+        let mut frames = FRAMES.lock();
+        let frames = frames.as_mut().ok_or(MmError::FramesNotReady)?;
+        if !paging::kernel_space_active() {
+            return Err(MmError::PagingNotReady);
+        }
+        let storage = heap_bitmap_storage().ok_or(MmError::AlreadyInitialized)?;
+        for offset in (0..HEAP_SIZE as u64).step_by(FRAME_SIZE as usize) {
+            let frame = frames.alloc().map_err(|_| MmError::OutOfMemory)?;
+            paging::map_kernel_page(
+                HEAP_BASE + offset,
+                frame.addr(),
+                PageSize::Size4K,
+                Flags::DATA,
+                frames,
+            )
+            .map_err(MmError::Paging)?;
+        }
+        *HEAP.lock() = Some(Heap::new(HEAP_BASE as usize, HEAP_SIZE, storage));
+        Ok(heap_stats())
+    }
+
+    /// Heap usage.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct HeapStats {
+        pub used: usize,
+        pub size: usize,
+    }
+
+    /// Current heap usage (zeros before [`init_heap`]).
+    pub fn heap_stats() -> HeapStats {
+        super::raw::HEAP
+            .lock()
+            .as_ref()
+            .map_or(HeapStats { used: 0, size: 0 }, |h| HeapStats {
+                used: h.used_bytes(),
+                size: h.size(),
+            })
     }
 
     /// The memory map as copied by [`init_frames`] (`None` before).

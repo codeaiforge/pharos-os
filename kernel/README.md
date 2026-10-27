@@ -16,7 +16,8 @@ It has **no** device interrupts, memory management, scheduling, processes, syste
 | `tests/` | Test kernels (one `no_main` kernel per file), booted in QEMU by `cargo xtask test` |
 | `src/mm/bitmap.rs` | Bitmap range allocator shared by the frame allocator and (later) the heap: aligned runs, next fit, double-free detection. Safe Rust, unit-tested on the host |
 | `src/mm/frame.rs` | Physical frame allocator: one bitmap per usable region (at or above 1 MiB), bitmap storage reserved in the largest region. Safe Rust, unit-tested on the host |
-| `src/mm/raw.rs` | Raw memory (`unsafe` allowed, D-005): the bitmap storage slice from the direct map and `IrqMutex`, a lock that owns its data and disables interrupts while held |
+| `src/mm/heap.rs` | Kernel heap allocator: the bitmap allocator over 16-byte units of a fixed 4 MiB window. Safe Rust, unit-tested on the host |
+| `src/mm/raw.rs` | Raw memory (`unsafe` allowed, D-005): the bitmap storage slices, the `#[global_allocator]` glue for the heap, and `IrqMutex`, a lock that owns its data and disables interrupts while held |
 | `src/mm/mod.rs` | `mm::init_frames` (from the memory map) and `mm::frames()`, the global frame allocator |
 | `src/sync.rs` | `SpinLock`: a lock without `unsafe` for resources such as the serial port (unit-tested on the host, including with threads) |
 | `src/arch/x86_64.rs` | Hardware layer: port I/O, COM1 serial and the kernel console behind `kprint!`/`kprintln!`, interrupt enable/disable and `without_interrupts`, QEMU exit signal, halt. All hardware `unsafe` code is here and in its submodules |
@@ -69,7 +70,7 @@ Vectors 32–255 are not present yet: an interrupt there raises a general-protec
 
 `kmain` builds the physical frame allocator from Limine's memory map (`mm::init_frames`) and prints `frames: <free> free of <total>`. Usable and bootloader-reclaimable regions at or above 1 MiB are managed; reclaimable frames stay reserved until the last step of `kmain`, which retires Limine's responses and frees them (`mm::reclaim_bootloader_memory`, `reclaimed:` line). The memory map is copied first (`mm::memory_map()`). The bitmaps take a few frames at the start of the largest usable region. `mm::frames()` returns the allocator behind an `IrqMutex`, so it can be used with interrupts enabled.
 
-It then builds the kernel's own page tables and switches to them (`mm::init_paging`): the direct map at Limine's offset, the kernel image with per-segment permissions (text read+execute, rodata read-only, data no-execute), and both stacks with unmapped guard pages. Test kernels that need this call `testing::init_memory`. The heap comes next in M2.5 (#29). Design: [docs/architecture/memory.md](../docs/architecture/memory.md).
+It then builds the kernel's own page tables and switches to them (`mm::init_paging`): the direct map at Limine's offset, the kernel image with per-segment permissions (text read+execute, rodata read-only, data no-execute), and both stacks with unmapped guard pages. Test kernels that need this call `testing::init_memory`. Last, it maps a 4 MiB kernel heap (`mm::init_heap`), which makes `alloc` (`Box`, `Vec`, `String`, `BTreeMap`) available in the kernel; allocation failure reaches the panic handler. Test kernels can catch an expected panic with `testing::set_panic_hook`. Design: [docs/architecture/memory.md](../docs/architecture/memory.md).
 
 ## Interrupts
 

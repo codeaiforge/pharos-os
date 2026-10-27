@@ -17,6 +17,8 @@
 
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 // Compiled on any x86-64 build (not only bare metal) so editors and host
 // builds can analyse it; it is only executed by the kernel.
 #[cfg(target_arch = "x86_64")]
@@ -137,8 +139,9 @@ macro_rules! test_kernel {
 
 /// Human-readable implementation status of this crate.
 pub const STATUS: &str = "minimal kernel: boots via Limine and reports boot information over \
-                          serial; handles CPU exceptions and local APIC timer interrupts; no \
-                          memory management, scheduling, or processes";
+                          serial; handles CPU exceptions and local APIC timer interrupts; manages \
+                          physical memory, its own page tables, and a heap; no scheduling or \
+                          processes";
 
 #[cfg(test)]
 mod tests {
@@ -147,6 +150,6 @@ mod tests {
     #[test]
     fn status_states_the_limits() {
         assert!(STATUS.contains("minimal"));
-        assert!(STATUS.contains("no memory management"));
+        assert!(STATUS.contains("no scheduling"));
     }
 }

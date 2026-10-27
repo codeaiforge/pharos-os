@@ -13,6 +13,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::arch::x86_64::{_print_panic, QemuExit, halt, qemu_exit};
 use crate::kprintln;
+use crate::mm::raw::IrqMutex;
 
 /// Final serial line of a passing test kernel. Must match `xtask`.
 pub const TESTS_OK_MARKER: &str = "PHAROS: tests ok";
@@ -100,8 +101,21 @@ pub fn passed(passed: usize, failed: usize) -> bool {
     passed > 0 && failed == 0
 }
 
-/// Panic handler body for test kernels: report and signal failure.
+/// Hook for test kernels that expect a panic (for example out of memory).
+static PANIC_HOOK: IrqMutex<Option<fn(&PanicInfo<'_>) -> !>> = IrqMutex::new(None);
+
+/// Routes the next panic to `hook` instead of failing the run.
+pub fn set_panic_hook(hook: fn(&PanicInfo<'_>) -> !) {
+    *PANIC_HOOK.lock() = Some(hook);
+}
+
+/// Panic handler body for test kernels: a hook if one is set, otherwise
+/// report and signal failure.
 pub fn test_panic(info: &PanicInfo<'_>) -> ! {
+    let hook = *PANIC_HOOK.lock();
+    if let Some(hook) = hook {
+        hook(info);
+    }
     _print_panic(format_args!("PHAROS: panic: {info}\n"));
     qemu_exit(QemuExit::Failure);
     halt()

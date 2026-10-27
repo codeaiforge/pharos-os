@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** Accepted with [D-005](../project/decision-log.md#d-005-memory-management-strategy) (2026-10-27).
-- **Implementation:** the frame allocator (#26), the kernel's own page tables with guard pages (#27), and reclaiming bootloader memory (#28) are **implemented**. The kernel heap (#29) is **planned** ([M2.5](../project/implementation-roadmap.md#m25--physical-and-virtual-memory-management)). This document is completed and reviewed at the M2.5 gate (#30).
+- **Implementation:** the frame allocator (#26), the kernel's own page tables with guard pages (#27), reclaiming bootloader memory (#28), and the kernel heap with `alloc` (#29) are **implemented** ([M2.5](../project/implementation-roadmap.md#m25--physical-and-virtual-memory-management)). This document is completed and reviewed at the M2.5 gate (#30).
 
 ## 2. Context
 
@@ -19,6 +19,14 @@ After the GDT and IDT, `kmain` (and test kernels through `testing::init_memory`)
 2. builds the kernel address space and switches CR3 to it (`mm::init_paging`);
 3. maps the local APIC registers through it (`apic::init`);
 4. after its last read of a Limine response, reclaims bootloader memory (`mm::reclaim_bootloader_memory`; `kmain` only, as its last step before `PHAROS: boot ok`).
+
+### Kernel heap (`mm::heap`, `mm::raw`)
+
+- A fixed 4 MiB window at `0xffffc00000000000`, mapped writable and no-execute with 1,024 fresh frames by `mm::init_heap` (after the switch to the kernel's own page tables; `kmain` calls it after reclaim).
+- The shared bitmap allocator over 16-byte units: every block is 16-byte aligned or more, larger alignments are honoured, and sizes come from the `Layout` on free, so allocated memory holds no headers. The bitmap (32 KiB) is a kernel static.
+- `mm::raw::KernelAllocator` is Rust's `#[global_allocator]` on the kernel target; it locks the heap with `IrqMutex`, so code may allocate with interrupts enabled. A free of something the heap did not hand out panics (memory is already corrupt at that point).
+- Out of memory: the allocator returns null and Rust's `alloc` calls the panic handler with `memory allocation of N bytes failed`.
+- `kmain` runs a smoke test (collect and sum a `Vec`) after setting up the heap, so the boot check covers `alloc` under UEFI and BIOS.
 
 ### Reclaiming bootloader memory
 
@@ -57,7 +65,7 @@ References to responses obtained before reclaim must not be used afterwards; thi
 | | Data and bss | Writable, no-execute |
 | | Kernel stack (64 KiB), guard page below | Writable, no-execute |
 | | Double-fault stack (16 KiB, IST1), guard page below | Writable, no-execute |
-| `0xffffc00000000000` | Kernel heap (planned, #29) | — |
+| `0xffffc00000000000` | Kernel heap (4 MiB) | Writable, no-execute |
 | `0xffffd00000000000` | Test page used by test kernels | — |
 
 The HHDM offset is Limine's (`0xffff800000000000` in QEMU), so addresses computed before the switch stay valid. The direct map uses 2 MiB pages where a region's virtual and physical addresses are 2 MiB-aligned and enough of the region remains, 4 KiB elsewhere; edge pages shared by neighbouring regions are mapped once. Segment boundaries come from `linker.ld` symbols; the kernel's physical base comes from Limine's executable-address response. Guard pages are gaps that `linker.ld` leaves between segments and that the kernel never maps.
@@ -73,8 +81,8 @@ In QEMU with 256 MiB the kernel tables take 19 frames under UEFI and 10 under BI
 
 ## 5. Testing
 
-- Host unit tests: bitmap and frame allocation (alignment, edges, double frees, exhaustion), page-table entry encoding, page splitting, and direct-map kinds.
-- Test kernels: `frames` (allocation, freeing, exhaustion), `reclaim` (reclaimed frame count, retired responses, every frame written afterwards with the copied memory map intact), `paging` (segment permissions, guard pages, direct map with 2 MiB pages, map/write/alias/unmap, page fault after unmap), `write_protect` (writing rodata faults with a protection-violation write), `no_execute` (executing data faults with an instruction-fetch error), and `double_fault` (stack overflow on the kernel's own tables). Each was checked once to fail when the property it tests is broken.
+- Host unit tests: heap allocation (rounding, alignment, coalescing, bad and double frees, exhaustion), bitmap and frame allocation (alignment, edges, double frees, exhaustion), page-table entry encoding, page splitting, and direct-map kinds.
+- Test kernels: `frames` (allocation, freeing, exhaustion), `reclaim` (reclaimed frame count, retired responses, every frame written afterwards with the copied memory map intact), `paging` (segment permissions, guard pages, direct map with 2 MiB pages, map/write/alias/unmap, page fault after unmap), `heap` (collections, 4 KiB alignment, a 20,000-operation fragmentation run with contents checked, usage back to zero, allocation with interrupts on), `heap_oom` (exhaustion reported by the panic handler), `write_protect` (writing rodata faults with a protection-violation write), `no_execute` (executing data faults with an instruction-fetch error), and `double_fault` (stack overflow on the kernel's own tables). Each was checked once to fail when the property it tests is broken.
 
 ## 6. Alternatives
 
@@ -83,6 +91,6 @@ See D-005: free-list and buddy frame allocators, extending Limine's page tables,
 ## 7. Open questions
 
 - Enforcing the end of Limine responses in the type system instead of by rule.
-- Heap size and growth (#29).
+- Heap growth beyond the fixed 4 MiB, and a faster search than a linear bitmap scan if profiling shows a need.
 - Freeing empty page tables when address spaces come and go (M2.7).
 - KASLR.

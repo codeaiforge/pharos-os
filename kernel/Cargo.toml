@@ -45,6 +45,14 @@ name = "gdt"
 harness = false
 
 [[test]]
+name = "heap"
+harness = false
+
+[[test]]
+name = "heap_oom"
+harness = false
+
+[[test]]
 name = "interrupt_state"
 harness = false
 

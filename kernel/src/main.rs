@@ -8,6 +8,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::panic::PanicInfo;
 
 use pharos_kernel::arch::x86_64::{
@@ -122,6 +124,21 @@ extern "C" fn kernel_main() -> ! {
         }
         Err(error) => fail(format_args!("reclaiming bootloader memory failed: {error}")),
     }
+
+    match mm::init_heap() {
+        Ok(stats) => kprintln!(
+            "  heap:       {} MiB at {:#x}",
+            mib(stats.size as u64),
+            mm::heap::HEAP_BASE
+        ),
+        Err(error) => fail(format_args!("heap setup failed: {error}")),
+    }
+    // Smoke test: `alloc` works in the kernel.
+    let numbers: alloc::vec::Vec<u64> = (1..=100).collect();
+    if numbers.iter().sum::<u64>() != 5050 || mm::heap_stats().used == 0 {
+        fail(format_args!("heap smoke test failed"));
+    }
+    drop(numbers);
 
     kprintln!("PHAROS: boot ok");
     qemu_exit(QemuExit::Success);
