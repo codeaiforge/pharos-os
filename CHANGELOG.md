@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- Driver design (`docs/architecture/drivers.md`, #51), approved by the maintainer: Rust user programs and a checked ELF loader, PCI discovery, device, interrupt, MMIO, and DMA capabilities with system calls 9–13 and error `IN_USE`, MSI-X delivery, and the virtio-blk driver subset. The threat model gains a drivers and devices section (planned mitigations and the no-IOMMU limit).
 - Accepted decision D-008 (#50): drivers run in user space with device, interrupt, MMIO, and DMA capabilities; virtio-blk is the only M2.9 driver; Rust user programs are loaded from the boot filesystem; PCI through configuration ports and MSI-X interrupts. No IOMMU yet, recorded as a limit.
 - File capabilities (#48): kernel objects `Filesystem` and `File`, a `READ` right, `Capability::derive_object`, and the system calls `open` (7) and `read` (8) with error `NOT_FOUND` (8). Paths and buffers go through the M2.7 user-copy checks; file capabilities pass over IPC and are revoked through the filesystem capability that opened them. New test kernel `files`.
 - Kernel filesystem (#47): `fs::mount` mounts a boot module with the shared parser, and the kernel mounts `root` at boot (a bad or missing image is logged, and the kernel keeps running). xtask builds a good test image and 12 corrupted ones, one per check. New test kernel `fs`: files read back, and each corrupted image is rejected with its exact error.

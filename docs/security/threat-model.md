@@ -71,6 +71,19 @@ Design: [storage.md](../architecture/storage.md) and [D-007](../project/decision
 | A process reads files it was not given | Files only through capabilities: a filesystem capability with `READ` opens files, file capabilities narrow rights, pass over IPC only with `GRANT`, and are revoked through the derivation tree |
 | An image is replaced or tampered with | **Limit:** CRC-32 detects corruption only; images are not authenticated until secure boot |
 
+### Drivers and devices (M2.9, planned)
+
+Design: [drivers.md](../architecture/drivers.md) and [D-008](../project/decision-log.md#d-008-driver-strategy). **Planned, not implemented:** the rows below become mitigations as #52–#56 land.
+
+| Threat | Planned mitigation |
+| --- | --- |
+| A malformed program file corrupts the kernel | One safe `no_std` ELF parser checks every header and segment before anything is allocated, and is fuzzed on the host |
+| A driver reaches memory or devices it was not given | Device capabilities only: MMIO mappings limited to its device's BARs, never RAM, other devices, or the MSI-X table; no configuration-space writes |
+| A driver injects interrupts | The kernel programs MSI-X; the table's pages are never mapped to drivers; handlers do no driver work |
+| A device DMAs into freed memory after its driver dies | Bus mastering is disabled and MSI-X masked when the device capability goes, before the driver's frames are freed |
+| A driver programs DMA to arbitrary memory | **Limit:** no IOMMU in M2.9; a driver is trusted with all memory through its device. Only the kernel starts drivers; the IOMMU is evaluated before real hardware |
+| A device returns bad values | The driver checks every ring index, descriptor ID, length, and status; the kernel bounds its capability-list walk |
+
 ### Known limitations
 
 - No automated secret scanning or dependency auditing is configured yet (nothing to audit today).
