@@ -570,7 +570,7 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26 and D-009 on 2026-10-27; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, and D-013 on 2026-10-27; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -579,14 +579,15 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-003 | Rust target, linker, build strategy | M2.1 | **Accepted:** `x86_64-unknown-none` on stable, linker script, `xtask`, ISO, kernel as workspace member |
 | D-004 | Kernel architecture and privilege boundaries | M2.1 (direction), M2.7 | **Direction:** capability-based microkernel; final decision open |
 | D-005 | Memory-management strategy | M2.5 | **Accepted:** bitmap frame allocator per region, own page tables, Limine's HHDM with 2 MiB pages, own bitmap heap, `unsafe` in `mm::raw` |
-| D-006 | Interrupt controller and timer | M2.4, M2.6 | **Accepted (controller):** local APIC (xAPIC), APIC timer first, PICs masked; timer choice open until M2.6 |
+| D-006 | Interrupt controller and timer | M2.4, M2.6 | **Accepted:** local APIC (xAPIC), PICs masked; APIC timer at 100 Hz calibrated against the PIT, TSC uptime clock |
 | D-007 | Filesystem and persistent storage | M2.8 | Crash consistency, simplicity, host tooling |
 | D-008 | Driver strategy | M2.9 | TCB size, DMA isolation, effort |
 | D-009 | QEMU automation and debugging | M2.3 | **Accepted:** status 33 + serial marker, 60 s timeout, test kernels via Cargo runner and `cargo xtask test` |
 | D-010 | Inference runtime, model formats, licensing | M3.1 | Licenses, memory safety, performance, portability |
 | D-011 | CPU/GPU support, memory/VRAM | M3.1, M3.2 | Hardware requirements, driver availability |
 | D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | No ambient authority, revocation, auditability |
+| D-013 | Scheduling model | M2.6 | **Accepted:** preemptive round-robin on one CPU, 10 ms slice, kernel threads on guarded stacks, no lock held across a switch |
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4 and M2.5 passed their gates on 2026-10-27. The current milestone is **M2.6 — Timers and scheduling**, which needs the timer part of decision D-006 first (open since M2.4; lean: the local APIC timer, calibrated against the PIT or HPET).
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4 and M2.5 passed their gates on 2026-10-27. The current milestone is **M2.6 — Timers and scheduling**, with the timer part of D-006 and the scheduling model D-013 accepted on 2026-10-27.

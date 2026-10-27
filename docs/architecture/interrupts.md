@@ -43,7 +43,7 @@ Fatal reports go through the panic print path, which releases the console lock f
 - **Mode:** xAPIC (memory-mapped registers). QEMU under TCG cannot provide x2APIC, and the legacy PIC cannot deliver past Limine's masked LINT0 (D-006 evidence).
 - **Mapping:** the 4 KiB register page (physical base from `IA32_APIC_BASE`, normally `0xfee00000`) is mapped at `HHDM + physical address`, uncached (PCD, PWT), writable, and no-execute when `EFER.NXE` is on. Since #27 it is an ordinary mapping in the kernel address space ([memory.md](memory.md)); the M2.4 stopgap that added it to Limine's page tables is gone.
 - **Setup:** task priority 0; software-enabled through the spurious-interrupt vector register with vector 255.
-- **Timer:** periodic mode on vector 32, divide by 16, initial count chosen by the caller. Not calibrated yet; M2.6 decides the scheduler timer.
+- **Timer:** periodic mode on vector 32, divide by 16, initial count chosen by the caller. Not calibrated yet; D-006 (timer part, accepted in M2.6) sets a 100 Hz tick calibrated against the PIT (#32).
 
 ### Console
 
@@ -73,6 +73,5 @@ Each was checked once to fail when the feature it tests is broken. The boot chec
 
 ## 7. Open questions
 
-- Timer source and calibration for the scheduler (D-006 timer part, M2.6).
 - IOAPIC and ACPI MADT parsing for device interrupts.
 - Per-CPU stacks and their guard pages (SMP). The kernel and double-fault stacks have guard pages since #27.

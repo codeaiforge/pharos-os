@@ -163,9 +163,9 @@ Accepted by the maintainer on 2026-10-26, based on the [boot evaluation](../arch
 
 ### D-006: Interrupt controller and timer design
 
-- **Status:** Accepted (controller part). The timer part stays Open until M2.6.
+- **Status:** Accepted (controller part in M2.4, timer part in M2.6)
 - **Needed by:** M2.4 (controller), M2.6 (timer)
-- **Date accepted:** 2026-10-27
+- **Date accepted:** 2026-10-27 (both parts)
 
 **Context.** M2.4 must receive one hardware interrupt, tested in QEMU under TCG (CI has no KVM). Limine (base revision 6) leaves the legacy PICs fully masked and the local APIC enabled in xAPIC mode with LINT0, LINT1, and the timer masked. Its higher-half direct map (HHDM) covers only memory-map regions, so the local APIC registers at `0xfee00000` are not mapped.
 
@@ -181,7 +181,13 @@ Accepted by the maintainer on 2026-10-26, based on the [boot evaluation](../arch
 4. x2APIC is not used for now: QEMU 8.2 under TCG cannot provide it. Revisit with SMP or a newer QEMU in CI.
 5. The IOAPIC (device interrupts such as the keyboard) comes later and needs ACPI MADT parsing; it is not part of M2.4.
 
-**Timer direction (Open, for M2.6).** Lean: local APIC timer, calibrated against the PIT (channel 2, polled, no interrupts) or the HPET; TSC-deadline where available.
+**Decision (timer, M2.6).**
+
+1. **Scheduler tick: the local APIC timer, periodic, 100 Hz** (10 ms). Tickless and one-shot modes wait until a need appears. 1000 Hz lost ticks under host load in the prototype (below) and costs more emulation time under TCG.
+2. **Calibration against PIT channel 2, polled** (gate on, speaker off, mode 0, no PIT interrupts), at boot with interrupts disabled. Five 10 ms runs; the **smallest** result counts, because a delay while the emulated CPU is descheduled can only inflate a run. The same runs calibrate the TSC.
+3. **Uptime clock: the TSC**, converted with the calibrated rate (nanosecond resolution). Counting ticks drifts when ticks are lost; the TSC kept real time in every run. Timer-driven deadlines (sleep, time slices) have tick resolution (10 ms).
+4. **Not used for now:** TSC-deadline mode and invariant-TSC checks (QEMU's default CPU under TCG reports neither), the HPET (needs ACPI table parsing, M2.9 or later). Real hardware without an invariant TSC may drift with CPU frequency changes; revisit with real-hardware testing.
+5. **Tests** expect timing only within wide bounds (for example a 100 ms sleep takes at least 100 ms and less than 1 s) and check ordering, not exact durations. No automatic retries.
 
 **Consequences.** M2.4 gains a small page-mapping helper in the hardware layer (page-table writes are `unsafe` and stay in `arch::x86_64`). Interrupt handlers send EOI through the mapped register page. No legacy PIC code. SMP later needs per-CPU local APIC setup and the IOAPIC.
 
@@ -191,6 +197,12 @@ Accepted by the maintainer on 2026-10-26, based on the [boot evaluation](../arch
 - **PIC + PIT, local APIC as Limine left it:** the PIT fires (PIC IRR bit 0 set) but no interrupt reaches the CPU, matching the masked LINT0 (`0x10700` read back later: ExtINT, masked).
 - **PIC + PIT, local APIC globally disabled through `IA32_APIC_BASE`:** still no interrupt; the run hung until the 60-second timeout. In QEMU, PIC interrupts still pass through the masked LINT0 entry. So the PIC needs local APIC register access as well and offers no shortcut.
 - **xAPIC timer with a self-made mapping:** mapping the register page into Limine's page tables (1–2 new page-table pages) made the registers readable (version `0x50014`); the periodic timer delivered 50 interrupts to a handler, with 0 spurious ones, under **UEFI (PASS) and BIOS (QEMU status 33)**.
+
+Timer prototype on 2026-10-27 (not committed), same QEMU, under UEFI and BIOS with matching results:
+
+- **CPUID** (default CPU, TCG): TSC present; no TSC-deadline, no invariant TSC; maximum leaf `0xd`, so no CPUID frequency leaves (`0x15`, `0x16`).
+- **Idle host:** eight 10 ms PIT calibrations gave 62,518–62,583 APIC ticks (divided by 16) per ms after a first warm-up run of 63,085: QEMU's 1 GHz APIC timer clock, spread under 1%. TSC about 3.696 GHz. Periodic timer at the calibrated rate: 100 ticks at 100 Hz took 1,000 ms by the TSC, 1,000 ticks at 1000 Hz took 1,000–1,002 ms; twenty 50 ms PIT waits took 1,000 ms.
+- **Host loaded** (40 busy loops on 20 cores): single calibrations read up to 29% high (80,495), the smallest of eight was correct (62,511). At 1000 Hz, 1,000 ticks took 1,216 ms by the TSC (ticks lost); at 100 Hz, 100 ticks took 1,000 ms; PIT waits stayed accurate (1,004 ms for 1 s).
 
 ## Accepted decisions (M2.5)
 
@@ -233,6 +245,36 @@ Accepted by the maintainer on 2026-10-26, based on the [boot evaluation](../arch
 - **CPU:** no 1 GiB pages (CPUID `0x80000001` EDX bit 26 clear); NX supported and enabled (`EFER = 0xd00`). Hence 2 MiB pages for the direct map.
 - **Out of memory:** with a global allocator that always fails, `Vec::with_capacity(64)` reached the kernel's panic handler with `memory allocation of 64 bytes failed` (QEMU status 35).
 - **HHDM offset** was `0xffff_8000_0000_0000` under UEFI and BIOS.
+
+## Accepted decisions (M2.6)
+
+### D-013: Scheduling model
+
+- **Status:** Accepted
+- **Needed by:** M2.6
+- **Date accepted:** 2026-10-27
+
+**Context.** M2.6 needs several kernel tasks running interleaved, preemptively, with a test that a busy task cannot starve others. The kernel has one CPU in use, a heap, a frame allocator, its own page tables, interrupt-safe locks (`IrqMutex`), and a periodic timer (D-006). D-004 constraint 5 asks that the scheduler stay generic over threads and not assume every thread runs in the kernel; constraint 6 limits global mutable state to documented singletons.
+
+**Options.** Cooperative only; preemptive round-robin; priority or fair-share scheduling. Context switch in `global_asm!` or with naked functions (stable since Rust 1.88, above the 1.85 minimum). Switching inside the interrupt handler or by deferring to a return path.
+
+**Evaluation criteria.** Meets the M2.6 acceptance criteria; little code and little `unsafe`; testable in QEMU under TCG; does not block user threads (M2.7) or SMP later.
+
+**Decision.**
+
+1. **Preemptive round-robin, one CPU, fixed time slice of one tick** (10 ms at 100 Hz). One ready queue, first in first out. No priorities until a need appears.
+2. **Task = kernel thread:** an ID, a state (ready, running, sleeping, exited), a saved stack pointer, and its own kernel stack. Stacks are 16 KiB in a dedicated virtual window (`0xffff_c800_0000_0000`), each with an unmapped guard page below, built from frame-allocator frames and returned on reap. The scheduler sees only the saved kernel context. A user thread (M2.7) will also run on its own kernel stack when it enters the kernel, so it fits without scheduler changes; address-space switching joins then.
+3. **Context switch:** a `global_asm!` routine in `arch::x86_64` pushes the callee-saved registers (`rbx`, `rbp`, `r12`–`r15`), stores the stack pointer, loads the next one, pops, and returns. The kernel is soft-float, so there is no FPU or SSE state. A new task starts in a small trampoline that enables interrupts, calls its entry function, and exits when it returns.
+4. **Preemption:** the timer handler sends EOI and then, when the slice is used up, switches tasks from inside the handler. The interrupted task's interrupt frame stays on its own stack until it is switched back in and returns with `iretq`. `yield_now`, `sleep`, and exit switch the same way with interrupts disabled.
+5. **Locking rules:** switches happen with interrupts disabled and **no lock held**. The scheduler takes its ready-queue lock (`IrqMutex`) to pick the next task, releases it, then switches. A debug check counts held `IrqMutex` guards and fails a switch while any is held. Interrupts stay disabled only inside lock sections and the switch itself.
+6. **Idle task:** runs only when nothing else is ready; it halts with interrupts enabled (`sti; hlt`).
+7. **Exit:** an exited task cannot free the stack it runs on; the next switch reaps it (stack frames back to the frame allocator, guard mapping removed).
+8. **Sleep:** a deadline in ticks; the timer tick moves due sleepers back to the ready queue (10 ms resolution).
+9. **The scheduler is a documented singleton** (one CPU) behind `IrqMutex`, allowed by D-004 constraint 6. Queue logic is safe Rust and host-tested; only the switch routine and stack mapping use `unsafe`, in the existing hardware layer.
+
+**Consequences.** Every task costs 16 KiB plus a 4 KiB virtual guard page. A task that disables interrupts for long blocks preemption; documented as a rule, not enforced. Holding a lock across a switch is caught only in debug builds. SMP needs per-CPU queues and a decision of its own. M2.7 adds address-space switching and the TSS ring-0 stack per task.
+
+**Evidence.** The D-006 timer prototype (100 Hz periodic ticks arrive at the calibrated rate even with the host loaded). The context-switch routine follows the System V AMD64 calling convention (callee-saved registers), so the switch is an ordinary function call on both sides.
 
 ## Open and proposed decisions
 
