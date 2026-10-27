@@ -455,18 +455,50 @@ Two system calls per direction plus two task switches and two address-space swit
 - Files are limited to what fits in the boot image and in memory until virtio-blk.
 - Moving the filesystem out of the kernel later changes the kernel side only; the capability interface processes use stays the same.
 
-## Open and proposed decisions
-
-Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
+## Accepted decisions (M2.9)
 
 ### D-008: Driver strategy
 
-- **Status:** Open
+- **Status:** Accepted
 - **Needed by:** M2.9
+- **Date accepted:** 2026-10-27
 
-**Options.** In-kernel drivers versus user-space drivers; initial device set limited to QEMU devices (serial, virtio-blk, virtio-net, framebuffer) before real hardware.
+**Context.**
+- D-004 puts drivers in user processes. The kernel provides address spaces, threads, IPC, capabilities, and interrupt delivery. D-004 names user-space driver support proving too complex as the trigger for a documented hybrid.
+- The kernel has ring 3 processes with capabilities and IPC (M2.7), and a read-only filesystem in the kernel (M2.8, a D-007 exception until program loading exists). User programs are small assembly test programs; there is no program loader.
+- QEMU 8.2 (local and CI) has modern virtio-blk with MSI-X and an emulated Intel IOMMU (`intel-iommu`).
+
+**Options.**
+- **Where drivers run:** in user space, per D-004; in the kernel for now; or a documented hybrid.
+- **Device set:** virtio-blk only, or also virtio-net, a framebuffer, or a keyboard.
+- **Discovery:** legacy PCI configuration through ports `0xCF8`/`0xCFC`, or PCIe ECAM through the ACPI MCFG table.
+- **Device interrupts:** MSI-X (devices write to the local APIC), or the IOAPIC with ACPI routing.
+- **DMA isolation:** an IOMMU now, or kernel-allocated pinned buffers with the IOMMU as a tracked limit.
 
 **Evaluation criteria.** TCB size; DMA isolation (IOMMU availability); performance; effort.
+
+**Decision.**
+
+1. **Drivers run in user space.** The kernel adds only what drivers need, each as a capability:
+   - a device (one PCI function);
+   - its interrupts;
+   - mappings of its MMIO BARs;
+   - DMA buffers.
+2. **virtio-blk is the only driver in M2.9:** the modern PCI transport over MMIO, read-only. Its gate test reads a disk image built on the host and mounts a `pharos-fs` image in user space with the same parser the kernel uses.
+3. **Rust user programs:** a `no_std` user crate and system-call library, and a kernel loader for static ELF64 executables, loaded from the boot filesystem. The ELF parser is safe Rust and fuzzed.
+4. **Discovery through PCI configuration ports** `0xCF8`/`0xCFC`, in the hardware layer. ECAM can follow when a device needs extended configuration space.
+5. **Device interrupts through MSI-X.** The interrupt handler only records the interrupt and wakes the driver's thread; driver code never runs in the handler. The IOAPIC waits for a device that needs it.
+6. **DMA through kernel-allocated, pinned buffers.** The driver learns their physical addresses. **No IOMMU in M2.9:** a driver can program its device to reach any physical memory. This is a recorded limit, to be evaluated before real-hardware use.
+
+**Consequences.**
+- The kernel gains a program loader, PCI enumeration, MSI-X, and new capability types and system calls. These are its new trusted code and attack surface; the M2.9 security review covers them.
+- Until there is an IOMMU, a driver process is effectively trusted with all memory through its device. Drivers stay small, and only the kernel starts them.
+- Rust user programs unlock moving the M2.8 filesystem out of the kernel later.
+- If user programs or device capabilities prove too large for M2.9, D-004's hybrid fallback applies: a documented, reviewed in-kernel driver.
+
+## Open and proposed decisions
+
+Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
 
 ### D-010: AI inference runtime, model formats, and licensing
 

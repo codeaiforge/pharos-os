@@ -260,7 +260,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.9 — Hardware abstraction and selected drivers
 
-**Status: Current.** Needs D-008 (driver strategy) accepted first.
+**Status: Current.** D-008 accepted on 2026-10-27 (#50).
 
 - **Objective and scope:** A driver model (per D-008) and drivers for a small set of QEMU devices.
 - **Deliverables:** Device discovery (PCI/ACPI as needed); drivers such as virtio-blk, virtio-net, and a framebuffer or keyboard.
@@ -570,7 +570,7 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, and D-007 on 2026-10-27; D-012 has a recorded direction; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-012 has a recorded direction; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -581,7 +581,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-005 | Memory-management strategy | M2.5 | **Accepted:** bitmap frame allocator per region, own page tables, Limine's HHDM with 2 MiB pages, own bitmap heap, `unsafe` in `mm::raw` |
 | D-006 | Interrupt controller and timer | M2.4, M2.6 | **Accepted:** local APIC (xAPIC), PICs masked; APIC timer at 100 Hz calibrated against the PIT, TSC uptime clock |
 | D-007 | Filesystem and persistent storage | M2.8 | **Accepted:** read-only RAM disk from a Limine module; small custom format with CRC-32 checksums, one safe `no_std` parser for kernel and host; in the kernel for now, files through capabilities only |
-| D-008 | Driver strategy | M2.9 | TCB size, DMA isolation, effort |
+| D-008 | Driver strategy | M2.9 | **Accepted:** user-space drivers with device, interrupt, MMIO, and DMA capabilities; virtio-blk only in M2.9; PCI through config ports, MSI-X; no IOMMU yet (tracked limit) |
 | D-009 | QEMU automation and debugging | M2.3 | **Accepted:** status 33 + serial marker, 60 s timeout, test kernels via Cargo runner and `cargo xtask test` |
 | D-010 | Inference runtime, model formats, licensing | M3.1 | Licenses, memory safety, performance, portability |
 | D-011 | CPU/GPU support, memory/VRAM | M3.1, M3.2 | Hardware requirements, driver availability |

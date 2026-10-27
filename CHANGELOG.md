@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- Accepted decision D-008 (#50): drivers run in user space with device, interrupt, MMIO, and DMA capabilities; virtio-blk is the only M2.9 driver; Rust user programs are loaded from the boot filesystem; PCI through configuration ports and MSI-X interrupts. No IOMMU yet, recorded as a limit.
 - File capabilities (#48): kernel objects `Filesystem` and `File`, a `READ` right, `Capability::derive_object`, and the system calls `open` (7) and `read` (8) with error `NOT_FOUND` (8). Paths and buffers go through the M2.7 user-copy checks; file capabilities pass over IPC and are revoked through the filesystem capability that opened them. New test kernel `files`.
 - Kernel filesystem (#47): `fs::mount` mounts a boot module with the shared parser, and the kernel mounts `root` at boot (a bad or missing image is logged, and the kernel keeps running). xtask builds a good test image and 12 corrupted ones, one per check. New test kernel `fs`: files read back, and each corrupted image is rejected with its exact error.
 - Read-only RAM disks from Limine modules (#46): the module request, `storage::record_modules` (copies module records before bootloader memory is reclaimed) and `storage::ram_disk`, whose slice `mm::raw::module_bytes` gives only for ranges inside "executable and modules" memory. The boot image carries `kernel/root/` as the filesystem module `root`; test images carry `pattern` and `odd`. New test kernel `ramdisk`. The boot log reports the RAM disk.
