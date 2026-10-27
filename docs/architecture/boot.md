@@ -89,6 +89,8 @@ The kernel stays the `pharos-kernel` workspace member. In place since issue #9:
 - the kernel is linted with `cargo clippy -p pharos-kernel --target x86_64-unknown-none -- -D warnings`, and its library logic is unit-tested on the host with `cargo test -p pharos-kernel --lib`;
 - `rust-toolchain.toml` lists `targets = ["x86_64-unknown-none"]`, and `.cargo/config.toml` sets `relocation-model=static` for that target only.
 
+Editors: rust-analyzer's on-save check runs `scripts/ra-check.sh` (set in `.vscode/settings.json`), which mirrors the CI split. Its default `cargo clippy --workspace` would build the kernel for the host and report false errors. The hardware layer (`arch`) compiles on any x86-64 build so rust-analyzer can resolve it on an x86-64 host (#9).
+
 Since issue #11: `cargo xtask build` builds the kernel binary. The kernel crate has its own lint table instead of inheriting `unsafe_code = "forbid"` (P-001): `unsafe_code = "deny"`, allowed only in `arch::x86_64` and `limine`, plus Clippy's `undocumented_unsafe_blocks = "deny"`. The crate has a library (host-testable logic and the hardware layer) and a binary (entry point and Limine requests); `build.rs` passes `linker.ld` to the binary only when building for `x86_64-unknown-none`.
 
 ## 4. Security
@@ -112,6 +114,5 @@ See the [boot evaluation](boot-evaluation.md#d-001--bootloader-and-boot-protocol
 
 ## 7. Open questions
 
-- rust-analyzer behaviour with a `no_std` workspace member (check in M2.2).
 - Exact QEMU automation and exit signalling for CI: decision D-009, needed by M2.3. The prototype's `isa-debug-exit` plus serial marker approach is the leading candidate.
 - Framebuffer use for early output: not needed until a later milestone; serial is the primary channel.

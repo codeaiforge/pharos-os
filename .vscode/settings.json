@@ -1,6 +1,8 @@
 {
   // Workspace-only settings; user-wide settings are not touched.
-  "rust-analyzer.check.command": "clippy",
+  // On-save check: host crates and the bare-metal kernel checked separately,
+  // as in CI (D-003). Plain `--workspace` gives false errors in kernel/.
+  "rust-analyzer.check.overrideCommand": ["scripts/ra-check.sh"],
   "[rust]": {
     "editor.formatOnSave": true,
     "editor.defaultFormatter": "rust-lang.rust-analyzer"

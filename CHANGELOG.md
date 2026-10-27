@@ -18,6 +18,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Changed
 
+- rust-analyzer's on-save check runs `scripts/ra-check.sh`, which checks host crates and the kernel separately, removing false editor errors in `kernel/src/main.rs`. The kernel's hardware layer now compiles on any x86-64 build so editors can resolve it.
 - Prepared the workspace for a bare-metal kernel (D-003): `default-members` excludes `pharos-kernel`; host checks use `--exclude pharos-kernel`; the kernel is linted for `x86_64-unknown-none` and its library tests run on the host; `rust-toolchain.toml` adds the `x86_64-unknown-none` target; `.cargo/config.toml` sets `relocation-model=static` for that target only.
 - `pharos-kernel` is now `no_std` outside tests. It is still a placeholder and does not boot.
 - Contributor docs, the PR template, and CI use the new commands.

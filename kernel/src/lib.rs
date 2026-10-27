@@ -10,12 +10,14 @@
 //!
 //! This library holds the parts that do not depend on the entry point. Logic
 //! that is independent of hardware is unit-tested on the host
-//! (`cargo test -p pharos-kernel --lib`); the hardware layer is compiled only
-//! for the bare-metal target. The entry point is in `main.rs`.
+//! (`cargo test -p pharos-kernel --lib`). The hardware layer compiles on any
+//! x86-64 build but only runs in the kernel. The entry point is in `main.rs`.
 
 #![cfg_attr(not(test), no_std)]
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+// Compiled on any x86-64 build (not only bare metal) so editors and host
+// builds can analyse it; it is only executed by the kernel.
+#[cfg(target_arch = "x86_64")]
 pub mod arch;
 pub mod boot_info;
 pub mod limine;
