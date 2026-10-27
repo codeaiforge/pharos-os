@@ -8,10 +8,12 @@ It has **no** interrupt handling, memory management, scheduling, processes, syst
 
 | Path | Contents |
 | --- | --- |
-| `src/main.rs` | Binary (`no_main`): the `kmain` entry point and the Limine request declarations |
+| `src/main.rs` | Binary (`no_main`): the `kmain` entry point; Limine requests declared with `limine_requests!` |
 | `src/lib.rs` | Library (`no_std`): crate overview and status |
 | `src/limine.rs` | Limine protocol structures (base revision 6), written from the 0BSD specification |
 | `src/boot_info.rs` | Hardware-independent interpretation of boot information (unit-tested on the host) |
+| `src/testing.rs` | Support for test kernels: `TestRun`, the `test_kernel!` macro, the test panic handler |
+| `tests/` | Test kernels (one `no_main` kernel per file), booted in QEMU by `cargo xtask test` |
 | `src/sync.rs` | `SpinLock`: a lock without `unsafe` for resources such as the serial port (unit-tested on the host, including with threads) |
 | `src/arch/x86_64.rs` | Hardware layer: port I/O, COM1 serial and the kernel console behind `kprint!`/`kprintln!`, QEMU exit signal, halt. All hardware `unsafe` code is here |
 | `linker.ld` | Places the kernel at `0xffffffff80000000` and keeps the Limine request sections |
@@ -21,7 +23,7 @@ It has **no** interrupt handling, memory management, scheduling, processes, syst
 
 ```sh
 cargo test -p pharos-kernel --lib                                        # host unit tests
-cargo clippy -p pharos-kernel --target x86_64-unknown-none -- -D warnings # lint for the real target
+cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --test '*' -- -D warnings  # lint for the real target, incl. test kernels
 cargo xtask build                                                         # kernel ELF
 cargo xtask image                                                         # target/xtask/image/pharos.iso
 ```
@@ -32,8 +34,10 @@ Boot it in QEMU (builds the kernel and image first):
 cargo xtask run          # UEFI (OVMF)
 cargo xtask run --bios   # BIOS (SeaBIOS)
 cargo xtask run --gdb    # wait for GDB; see docs/development/debugging.md
-cargo xtask test         # headless boot check, UEFI and BIOS, with a time limit
+cargo xtask test         # headless boot check (UEFI and BIOS) and the test kernels
 ```
+
+To add a kernel test, see [Kernel tests (QEMU)](../docs/development/testing.md#kernel-tests-qemu).
 
 The serial output ends with `PHAROS: boot ok`, and the command exits 0 only on the kernel's success signal (QEMU exit status 33). Boot failures and panics print `PHAROS: boot failed: ...` or `PHAROS: panic: ...`; QEMU then exits with status 35 and `cargo xtask run` fails.
 

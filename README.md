@@ -16,7 +16,7 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 | `cargo xtask` (kernel build, reproducible boot image, QEMU run) | Implemented |
 | Minimal x86-64 kernel: boots via Limine in QEMU (UEFI and BIOS), reports boot information over serial, halts | Implemented |
 | Automated QEMU boot check in CI (UEFI and BIOS, reproducible image) | Implemented |
-| Kernel tests inside QEMU | Planned (M2.3) |
+| Kernel tests inside QEMU (test kernels, run locally and in CI) | Implemented |
 | Memory management, interrupts, scheduling, processes, IPC | Planned |
 | Storage, drivers, networking | Planned |
 | Local AI inference and agent platform | Planned |

@@ -54,7 +54,8 @@ jobs:
         run: cargo test -p pharos-kernel --lib --locked
 
       - name: Clippy, kernel for x86_64-unknown-none (warnings are errors)
-        run: cargo clippy -p pharos-kernel --target x86_64-unknown-none --locked -- -D warnings
+        # Library, kernel binary, and test kernels (not the library's host unit tests).
+        run: cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --test '*' --locked -- -D warnings
 
       - name: Rustdoc (warnings are errors)
         run: |

@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- Kernel tests inside QEMU (D-009): test kernels in `kernel/tests/` (first: `boot_info`, 9 checks), the `test_kernel!` and `limine_requests!` macros, and `TestRun`. `cargo xtask runner` boots each test kernel under UEFI as Cargo's runner; `cargo xtask test` runs them after the boot check, so CI runs them too. Kernel Clippy now covers test kernels.
 - Kernel logging: `kprint!` and `kprintln!` write to one COM1 console behind a new `SpinLock` (no `unsafe`, unit-tested with threads). The panic handler releases the lock first, so a panic during printing is still reported. Not interrupt-safe yet (M2.4).
 - CI `qemu` job (Ubuntu 24.04): installs QEMU, OVMF, and xorriso on the runner, runs `cargo xtask test` (boot check under UEFI and BIOS), and checks that two image builds are byte-identical. No new actions, no artifacts. Verified on GitHub: passes on `main` (44 s) with the same image hash as a local build, and fails on a kernel that reports a boot failure.
 - `cargo xtask test [--timeout <SECS>]`: headless boot check under UEFI and BIOS. A boot passes only with QEMU exit status 33 and the `PHAROS: boot ok` line within the limit (60 s by default); hung boots are stopped. Serial logs go to `target/xtask/logs/`, and their end is printed on failure.

@@ -15,47 +15,7 @@ use pharos_kernel::boot_info::{firmware_name, mib, summarize};
 use pharos_kernel::kprintln;
 use pharos_kernel::limine::BASE_REVISION;
 
-/// Limine requests, placed between the start and end markers in the
-/// `.limine_requests*` sections (kept by `linker.ld`).
-///
-/// This module uses only `unsafe` *attributes* (`link_section`), which choose
-/// where data is placed; it contains no unsafe code.
-#[allow(unsafe_code)]
-mod requests {
-    use pharos_kernel::limine::{
-        BaseRevisionTag, BootloaderInfoResponse, FirmwareTypeResponse, HhdmResponse,
-        MemmapResponse, REQUESTS_END_MARKER, REQUESTS_START_MARKER, Request,
-        bootloader_info_request, firmware_type_request, hhdm_request, memmap_request,
-    };
-
-    #[used]
-    #[unsafe(link_section = ".limine_requests_start")]
-    static START: [u64; 4] = REQUESTS_START_MARKER;
-
-    #[used]
-    #[unsafe(link_section = ".limine_requests")]
-    pub static BASE_REVISION_TAG: BaseRevisionTag = BaseRevisionTag::new();
-
-    #[used]
-    #[unsafe(link_section = ".limine_requests")]
-    pub static BOOTLOADER_INFO: Request<BootloaderInfoResponse> = bootloader_info_request();
-
-    #[used]
-    #[unsafe(link_section = ".limine_requests")]
-    pub static FIRMWARE_TYPE: Request<FirmwareTypeResponse> = firmware_type_request();
-
-    #[used]
-    #[unsafe(link_section = ".limine_requests")]
-    pub static HHDM: Request<HhdmResponse> = hhdm_request();
-
-    #[used]
-    #[unsafe(link_section = ".limine_requests")]
-    pub static MEMMAP: Request<MemmapResponse> = memmap_request();
-
-    #[used]
-    #[unsafe(link_section = ".limine_requests_end")]
-    static END: [u64; 2] = REQUESTS_END_MARKER;
-}
+pharos_kernel::limine_requests!();
 
 /// Entry point named in `linker.ld`.
 #[allow(unsafe_code)] // `no_mangle` exports the symbol; the function is safe Rust.

@@ -7,3 +7,7 @@ xtask = "run --quiet --package xtask --"
 [target.x86_64-unknown-none]
 # The kernel is linked at fixed higher-half addresses; no position-independent code.
 rustflags = ["-C", "relocation-model=static"]
+# Test kernels (kernel/tests/) are booted in QEMU by xtask (D-009). Run them
+# with `cargo xtask test`; `cargo run` of the kernel is not supported (use
+# `cargo xtask run`).
+runner = ["cargo", "xtask", "runner"]

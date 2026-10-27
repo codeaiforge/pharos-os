@@ -64,8 +64,8 @@ A host Rust crate (`xtask/`, standard library only) run as `cargo xtask <command
 | `build` | Implemented (#10) | Build `pharos-kernel` for `x86_64-unknown-none` (release) |
 | `image [--kernel <ELF>]` | Implemented (#10) | Fetch and verify the pinned Limine release if needed, then assemble `target/xtask/image/pharos.iso`. Uses the built kernel unless `--kernel` is given |
 | `run [--bios] [--gdb]` | Implemented (#12) | Build, make the image, and boot it in QEMU (OVMF by default, SeaBIOS with `--bios`) with serial on the terminal and `isa-debug-exit` attached. Exits 0 only on the kernel's success signal. `--gdb` waits for GDB on `localhost:1234` |
-| `test [--timeout <SECS>]` | Boot check implemented (#14); kernel test targets planned (#16) | Boot check under UEFI and BIOS headless; pass = QEMU status 33 and the `PHAROS: boot ok` line, within 60 s per boot by default. Serial logs in `target/xtask/logs/`; the end of the log is printed on failure |
-| `runner <ELF>` | Planned (M2.3, D-009 accepted) | Cargo `runner` for `x86_64-unknown-none`: wrap one test kernel in an image and boot it headless under UEFI |
+| `test [--timeout <SECS>]` | Implemented (#14, #16) | Boot check under UEFI and BIOS headless (marker `PHAROS: boot ok`), then every test kernel through `cargo test -p pharos-kernel --target x86_64-unknown-none --test '*'` (marker `PHAROS: tests ok`). Pass = QEMU status 33 and the marker, within 60 s per boot by default. Serial logs in `target/xtask/logs/`; the end of the log is printed on failure |
+| `runner <ELF>` | Implemented (#16) | Cargo `runner` for `x86_64-unknown-none` (`.cargo/config.toml`): wrap one test kernel in its own image under `target/xtask/runner/<name>/` and boot it headless under UEFI. The time limit comes from `cargo xtask test --timeout` via `PHAROS_TEST_TIMEOUT` |
 
 `image` downloads `limine-binary.tar.xz` with `curl` into `target/xtask/limine-<version>/`, checks it with `sha256sum` against the SHA-256 pinned in `xtask/src/main.rs`, unpacks it with `tar`, and compiles the `limine` host tool with `cc`. A cached archive with the wrong hash, or a fresh download with the wrong hash, stops the build with an error; a bad download is deleted. The ISO also contains Limine's `LICENSE` (`boot/limine/LICENSE`) to meet its BSD-2-Clause notice requirement.
 
@@ -87,7 +87,7 @@ The kernel stays the `pharos-kernel` workspace member. In place since issue #9:
 
 - the root `Cargo.toml` sets `default-members` without the kernel;
 - host checks in CI, `scripts/check.sh`, and the docs use `--workspace --exclude pharos-kernel`;
-- the kernel is linted with `cargo clippy -p pharos-kernel --target x86_64-unknown-none -- -D warnings`, and its library logic is unit-tested on the host with `cargo test -p pharos-kernel --lib`;
+- the kernel (library, binary, and test kernels) is linted with `cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --test '*' -- -D warnings`, and its library logic is unit-tested on the host with `cargo test -p pharos-kernel --lib`;
 - `rust-toolchain.toml` lists `targets = ["x86_64-unknown-none"]`, and `.cargo/config.toml` sets `relocation-model=static` for that target only.
 
 Editors: rust-analyzer's on-save check runs `scripts/ra-check.sh` (set in `.vscode/settings.json`), which mirrors the CI split. Its default `cargo clippy --workspace` would build the kernel for the host and report false errors. The hardware layer (`arch`) compiles on any x86-64 build so rust-analyzer can resolve it on an x86-64 host (#9).

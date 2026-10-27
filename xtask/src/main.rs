@@ -39,6 +39,11 @@ const QEMU_EXIT_FAILURE: i32 = 35;
 
 /// Serial marker the kernel prints after a successful boot (D-009).
 const BOOT_MARKER: &str = "PHAROS: boot ok";
+/// Serial marker a passing test kernel prints last (D-009; must match
+/// `pharos_kernel::testing::TESTS_OK_MARKER`).
+const TESTS_MARKER: &str = "PHAROS: tests ok";
+/// Environment variable `test` uses to pass its time limit to `runner`.
+const TEST_TIMEOUT_ENV: &str = "PHAROS_TEST_TIMEOUT";
 /// Default time limit per headless boot under TCG (D-009).
 const DEFAULT_BOOT_TIMEOUT_SECS: u64 = 60;
 /// Log lines shown when a headless boot fails.
@@ -58,11 +63,14 @@ COMMANDS:
                             output on this terminal. UEFI (OVMF) by default; --bios
                             uses SeaBIOS; --gdb waits for GDB on localhost:1234.
                             Succeeds only if the kernel reports success.
-    test [--timeout <SECS>] Build, make the image, and boot it headless under UEFI
-                            and BIOS. Each boot passes only if QEMU exits with the
-                            kernel's success status (33) and the serial log shows
-                            'PHAROS: boot ok' within the time limit (default 60 s).
-                            Logs: target/xtask/logs/.
+    test [--timeout <SECS>] Boot check: build, make the image, and boot it headless
+                            under UEFI and BIOS. Then kernel tests: boot every test
+                            kernel in kernel/tests/ under UEFI. A boot passes only
+                            if QEMU exits with status 33 and the serial log shows
+                            the expected marker within the time limit (default
+                            60 s). Logs: target/xtask/logs/.
+    runner <ELF>            Boot one test kernel headless (used by Cargo as the
+                            runner for x86_64-unknown-none; see .cargo/config.toml).
     help                    Show this help message
 
 Outputs go to target/xtask/. Requires curl, sha256sum, tar (xz), cc, and xorriso;
@@ -78,6 +86,7 @@ enum Task {
     Image { kernel: Option<PathBuf> },
     Run { bios: bool, gdb: bool },
     Test { timeout: Duration },
+    Runner { elf: PathBuf },
 }
 
 fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
@@ -108,6 +117,19 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                 }
             }
             return Ok(Task::Run { bios, gdb });
+        }
+        Some("runner") => {
+            let elf = args
+                .next()
+                .ok_or("runner needs the path of a test kernel")?;
+            if let Some(extra) = args.next() {
+                return Err(format!(
+                    "unexpected argument '{extra}' (test kernels take no arguments)"
+                ));
+            }
+            return Ok(Task::Runner {
+                elf: PathBuf::from(elf),
+            });
         }
         Some("test") => {
             let mut secs = DEFAULT_BOOT_TIMEOUT_SECS;
@@ -169,6 +191,10 @@ impl Paths {
 
     fn logs_dir(&self) -> PathBuf {
         self.target.join("xtask").join("logs")
+    }
+
+    fn runner_dir(&self, name: &str) -> PathBuf {
+        self.target.join("xtask").join("runner").join(name)
     }
 }
 
@@ -388,7 +414,9 @@ fn build(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn image(paths: &Paths, kernel: Option<PathBuf>) -> Result<()> {
+/// Builds the ISO for `kernel` (default: the built kernel) in `out` and
+/// returns its path.
+fn image(paths: &Paths, kernel: Option<PathBuf>, out: &Path) -> Result<PathBuf> {
     let kernel = kernel.unwrap_or_else(|| paths.kernel_elf());
     if !kernel.is_file() {
         return Err(format!(
@@ -399,7 +427,6 @@ fn image(paths: &Paths, kernel: Option<PathBuf>) -> Result<()> {
     let epoch = source_date_epoch()?;
     let (limine, tool) = ensure_limine(paths)?;
 
-    let out = paths.image_dir();
     let root = out.join("iso-root");
     recreate_dir(&root)?;
     let boot = root.join("boot");
@@ -452,9 +479,15 @@ fn image(paths: &Paths, kernel: Option<PathBuf>) -> Result<()> {
         false,
     )?;
 
+    Ok(iso)
+}
+
+/// Builds the main image and prints its path and hash.
+fn main_image(paths: &Paths, kernel: Option<PathBuf>) -> Result<PathBuf> {
+    let iso = image(paths, kernel, &paths.image_dir())?;
     println!("Image: {}", iso.display());
     println!("SHA-256: {}", sha256(&iso)?);
-    Ok(())
+    Ok(iso)
 }
 
 /// QEMU arguments for booting `iso`. `serial` is a QEMU character device
@@ -545,9 +578,8 @@ fn qemu_error(e: io::Error) -> String {
 
 fn run_qemu(paths: &Paths, bios: bool, gdb: bool) -> Result<()> {
     build(paths)?;
-    image(paths, None)?;
+    let iso = main_image(paths, None)?;
     let out = paths.image_dir();
-    let iso = out.join("pharos.iso");
     let vars = out.join("ovmf-vars.fd");
     prepare_firmware(&vars, bios)?;
     if gdb {
@@ -687,11 +719,47 @@ fn log_tail(text: &str, n: usize) -> Vec<String> {
         .collect()
 }
 
-/// `cargo xtask test`: headless boot check under UEFI and BIOS (D-009).
+/// Prints why a headless boot failed and the end of its serial log.
+fn report_failure(label: &str, run: &BootRun, log: &Path, reason: &str) {
+    let secs = run.elapsed.as_secs_f32();
+    println!("{label}: FAIL after {secs:.1} s: {reason}");
+    println!("  serial log ({}), last lines:", log.display());
+    for line in log_tail(&run.log, LOG_TAIL_LINES) {
+        println!("  | {line}");
+    }
+}
+
+/// `cargo xtask test`: boot check under UEFI and BIOS, then the kernel tests
+/// (D-009). Both parts always run; the command fails if either fails.
 fn test(paths: &Paths, timeout: Duration) -> Result<()> {
+    let boot = boot_check(paths, timeout);
+    if let Err(e) = &boot {
+        println!("{e}");
+    }
+    println!("Kernel tests (cargo test -p {KERNEL_PACKAGE} --target {KERNEL_TARGET} --test '*'):");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let tests = run(
+        Command::new(cargo)
+            .current_dir(&paths.root)
+            .env(TEST_TIMEOUT_ENV, timeout.as_secs().to_string())
+            .args(["test", "--locked", "--package", KERNEL_PACKAGE])
+            .args(["--target", KERNEL_TARGET, "--test", "*"]),
+        true,
+    );
+    match (boot, tests) {
+        (Ok(()), Ok(_)) => {
+            println!("All boot checks and kernel tests passed.");
+            Ok(())
+        }
+        (Ok(()), Err(_)) => Err("kernel tests failed (see above)".into()),
+        (Err(_), Ok(_)) => Err("boot checks failed (see above)".into()),
+        (Err(_), Err(_)) => Err("boot checks and kernel tests failed (see above)".into()),
+    }
+}
+
+fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
     build(paths)?;
-    image(paths, None)?;
-    let iso = paths.image_dir().join("pharos.iso");
+    let iso = main_image(paths, None)?;
     let logs = paths.logs_dir();
     fs::create_dir_all(&logs).map_err(io_err("cannot create", &logs))?;
 
@@ -701,16 +769,12 @@ fn test(paths: &Paths, timeout: Duration) -> Result<()> {
         let log = logs.join(format!("boot-{name}.log"));
         let vars = logs.join(format!("boot-{name}-ovmf-vars.fd"));
         let run = boot_headless(&iso, &vars, &log, bios, timeout)?;
-        let secs = run.elapsed.as_secs_f32();
+        let label = format!("boot check ({name})");
         match evaluate_boot(&run, BOOT_MARKER, timeout) {
-            Ok(()) => println!("boot check ({name}): PASS in {secs:.1} s"),
+            Ok(()) => println!("{label}: PASS in {:.1} s", run.elapsed.as_secs_f32()),
             Err(reason) => {
                 failures += 1;
-                println!("boot check ({name}): FAIL after {secs:.1} s: {reason}");
-                println!("  serial log ({}), last lines:", log.display());
-                for line in log_tail(&run.log, LOG_TAIL_LINES) {
-                    println!("  | {line}");
-                }
+                report_failure(&label, &run, &log, &reason);
             }
         }
     }
@@ -719,6 +783,67 @@ fn test(paths: &Paths, timeout: Duration) -> Result<()> {
     }
     println!("All boot checks passed.");
     Ok(())
+}
+
+/// Test name from a Cargo test binary path such as
+/// `target/x86_64-unknown-none/debug/deps/boot_info-45a734add0c0d3ef`.
+fn test_name(elf: &Path) -> String {
+    let stem = elf
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "test".to_owned());
+    match stem.rsplit_once('-') {
+        Some((name, hash)) if !name.is_empty() && hash.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            name.to_owned()
+        }
+        _ => stem,
+    }
+}
+
+/// Time limit for `runner`, passed by `test` through `PHAROS_TEST_TIMEOUT`.
+fn runner_timeout(value: Option<&str>) -> Result<Duration> {
+    match value {
+        None => Ok(Duration::from_secs(DEFAULT_BOOT_TIMEOUT_SECS)),
+        Some(v) => v
+            .parse()
+            .ok()
+            .filter(|&s: &u64| s > 0)
+            .map(Duration::from_secs)
+            .ok_or(format!(
+                "{TEST_TIMEOUT_ENV} must be a positive number of seconds, got '{v}'"
+            )),
+    }
+}
+
+/// `cargo xtask runner <ELF>`: Cargo's runner for test kernels. Wraps one
+/// test kernel in its own image and boots it headless under UEFI (D-009).
+fn runner(paths: &Paths, elf: &Path) -> Result<()> {
+    let timeout = runner_timeout(env::var(TEST_TIMEOUT_ENV).ok().as_deref())?;
+    let name = test_name(elf);
+    let out = paths.runner_dir(&name);
+    fs::create_dir_all(&out).map_err(io_err("cannot create", &out))?;
+    let iso = image(paths, Some(elf.to_path_buf()), &out)?;
+    let logs = paths.logs_dir();
+    fs::create_dir_all(&logs).map_err(io_err("cannot create", &logs))?;
+    let log = logs.join(format!("test-{name}.log"));
+    let run = boot_headless(&iso, &out.join("ovmf-vars.fd"), &log, false, timeout)?;
+    let label = format!("test kernel {name} (uefi)");
+    match evaluate_boot(&run, TESTS_MARKER, timeout) {
+        Ok(()) => {
+            for line in clean_log(&run.log)
+                .lines()
+                .filter(|l| l.starts_with("PHAROS-TEST:"))
+            {
+                println!("  {line}");
+            }
+            println!("{label}: PASS in {:.1} s", run.elapsed.as_secs_f32());
+            Ok(())
+        }
+        Err(reason) => {
+            report_failure(&label, &run, &log, &reason);
+            Err(format!("{label} failed"))
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -730,9 +855,10 @@ fn main() -> ExitCode {
                 Ok(())
             }
             Task::Build => build(&paths),
-            Task::Image { kernel } => image(&paths, kernel),
+            Task::Image { kernel } => main_image(&paths, kernel).map(|_| ()),
             Task::Run { bios, gdb } => run_qemu(&paths, bios, gdb),
             Task::Test { timeout } => test(&paths, timeout),
+            Task::Runner { elf } => runner(&paths, &elf),
         }
     });
     match result {
@@ -839,6 +965,41 @@ mod tests {
         assert!(parse(args(&["test", "--timeout", "0"])).is_err());
         assert!(parse(args(&["test", "--timeout", "soon"])).is_err());
         assert!(parse(args(&["test", "--bios"])).is_err());
+    }
+
+    #[test]
+    fn parses_runner() {
+        assert_eq!(
+            parse(args(&["runner", "target/deps/boot_info-0123abcd"])),
+            Ok(Task::Runner {
+                elf: PathBuf::from("target/deps/boot_info-0123abcd")
+            })
+        );
+        assert!(parse(args(&["runner"])).is_err());
+        assert!(parse(args(&["runner", "k", "--nocapture"])).is_err());
+    }
+
+    #[test]
+    fn names_test_kernels() {
+        let name = |p: &str| test_name(Path::new(p));
+        assert_eq!(
+            name("target/x86_64-unknown-none/debug/deps/boot_info-45a734add0c0d3ef"),
+            "boot_info"
+        );
+        assert_eq!(name("deps/memory-map-0f"), "memory-map");
+        assert_eq!(name("deps/plain"), "plain");
+        assert_eq!(name("deps/ends-with-word"), "ends-with-word");
+    }
+
+    #[test]
+    fn runner_timeout_from_environment() {
+        assert_eq!(
+            runner_timeout(None),
+            Ok(Duration::from_secs(DEFAULT_BOOT_TIMEOUT_SECS))
+        );
+        assert_eq!(runner_timeout(Some("15")), Ok(Duration::from_secs(15)));
+        assert!(runner_timeout(Some("0")).is_err());
+        assert!(runner_timeout(Some("later")).is_err());
     }
 
     fn boot_run(status: Option<i32>, timed_out: bool, log: &str) -> BootRun {

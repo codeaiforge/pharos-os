@@ -14,7 +14,7 @@ cargo test -p pharos-kernel --lib   # kernel library logic
 | `pharos-cli` | `tools/pharos-cli/src/main.rs` | Command parsing and aliases, case sensitivity, missing/unknown/extra arguments, help content, version from Cargo metadata, `info` status labels, usage errors on stderr with exit 2, `doctor` results and exit codes for supported and unsupported hosts, `doctor` never claiming unbuilt capabilities |
 | `pharos-cli` | `tools/pharos-cli/tests/cli.rs` | End-to-end: runs the real binary and checks exit codes as the shell sees them, stdout/stderr separation, and that a non-UTF-8 argument is a usage error rather than a panic |
 | `xtask` | `xtask/src/main.rs` | Argument parsing, `sha256sum` output parsing, checksum comparison, pinned values, and that all outputs stay under `target/` |
-| `pharos-kernel` | `kernel/src/limine.rs`, `kernel/src/boot_info.rs`, `kernel/src/sync.rs`, `kernel/src/lib.rs` | Limine structure sizes match the specification, request IDs, base-revision check, firmware names, memory-map summary (including empty and overflowing maps), `SpinLock` locking, release, forced release, and mutual exclusion across 4 threads. Run with `cargo test -p pharos-kernel --lib` |
+| `pharos-kernel` | `kernel/src/limine.rs`, `kernel/src/boot_info.rs`, `kernel/src/sync.rs`, `kernel/src/testing.rs`, `kernel/src/lib.rs` | Limine structure sizes match the specification, request IDs, base-revision check, firmware names, memory-map summary (including empty and overflowing maps), `SpinLock` locking, release, forced release, and mutual exclusion across 4 threads; the test-kernel verdict (no checks means failure). Run with `cargo test -p pharos-kernel --lib` |
 
 The CLI is tested through a `run` function that writes to in-memory buffers, and `doctor` takes the OS and architecture as parameters, so tests are deterministic and do not depend on the machine running them.
 
@@ -27,7 +27,33 @@ cargo xtask test --timeout 120 # longer limit per boot (default 60 s)
 
 Each boot passes only if QEMU exits with status 33 **and** the serial log contains the line `PHAROS: boot ok`, within the time limit (decision D-009). A kernel that reports failure (status 35), exits without signalling, prints a different marker, or hangs fails the check; a hung QEMU is stopped at the limit. The command prints one line per firmware and, on failure, the last lines of the serial log. Full logs: `target/xtask/logs/boot-uefi.log` and `boot-bios.log`.
 
-Needs QEMU, OVMF, and xorriso, so it is not part of `scripts/check.sh`. CI runs it in the `qemu` job on every push to `main` and on manual runs (Ubuntu 24.04 runner), followed by a check that two image builds are byte-identical. First runs on 2026-10-27: the job took 44 s (20 s installing packages, boot checks 3.2 s UEFI and 0.4 s BIOS), and the CI image hash matched the local build (`51bc0a7f…`). A branch whose kernel reports a boot failure made the job fail at "Boot check", with the kernel's reason in the job output ([run 40473362173](https://github.com/codeaiforge/pharos-os/actions/runs/40473362173)). Kernel test targets (#16) are still to come in M2.3. For an interactive boot with serial on the terminal, use `cargo xtask run` (see [debugging.md](debugging.md)).
+Needs QEMU, OVMF, and xorriso, so it is not part of `scripts/check.sh`. CI runs it in the `qemu` job on every push to `main` and on manual runs (Ubuntu 24.04 runner), followed by a check that two image builds are byte-identical. First runs on 2026-10-27: the job took 44 s (20 s installing packages, boot checks 3.2 s UEFI and 0.4 s BIOS), and the CI image hash matched the local build (`51bc0a7f…`). A branch whose kernel reports a boot failure made the job fail at "Boot check", with the kernel's reason in the job output ([run 40473362173](https://github.com/codeaiforge/pharos-os/actions/runs/40473362173)). After the boot check, `cargo xtask test` runs the kernel tests (next section); CI runs both. For an interactive boot with serial on the terminal, use `cargo xtask run` (see [debugging.md](debugging.md)).
+
+## Kernel tests (QEMU)
+
+Code that needs real hardware state (boot information, CPU, later memory and interrupts) is tested inside QEMU by **test kernels**: small `no_main` kernels in `kernel/tests/`, each booted on its own (decision D-009). `cargo xtask test` runs them after the boot check, through `cargo test -p pharos-kernel --target x86_64-unknown-none --test '*'`; Cargo hands each test binary to `cargo xtask runner`, which boots it headless under UEFI.
+
+Output, for each test kernel:
+
+```text
+  PHAROS-TEST: memory map present ... ok
+  ...
+  PHAROS-TEST: 9 passed, 0 failed
+test kernel boot_info (uefi): PASS in 2.2 s
+```
+
+A test kernel passes only if it ran at least one check, none failed, and it ended with `PHAROS: tests ok` and QEMU status 33 within the time limit. A failed check, a panic, a hang, or a test kernel with no checks fails the run.
+
+| Test kernel | Checks |
+| --- | --- |
+| `kernel/tests/boot_info.rs` | Base revision accepted; memory map present, non-empty, with usable memory and the kernel image; HHDM offset in the higher half; bootloader is Limine; firmware is 64-bit UEFI; the test kernel runs at its linked higher-half address |
+
+To add a test kernel:
+
+1. Create `kernel/tests/<name>.rs` with `#![no_std]`, `#![no_main]`, `pharos_kernel::test_kernel!(run);`, and `fn run(t: &mut TestRun)` calling `t.check("description", condition)` for each check. The Limine responses are available as `requests::MEMMAP` and so on.
+2. Add a `[[test]]` entry with `name = "<name>"` and `harness = false` to `kernel/Cargo.toml`.
+3. Run `cargo xtask test`. Each test kernel costs about two seconds under UEFI, so group related checks.
+
 
 ## Quality gates
 
@@ -39,7 +65,7 @@ cargo clippy --workspace --exclude pharos-kernel --all-targets --locked -- -D wa
 cargo build --workspace --exclude pharos-kernel --locked
 cargo test --workspace --exclude pharos-kernel --locked
 cargo test -p pharos-kernel --lib --locked
-cargo clippy -p pharos-kernel --target x86_64-unknown-none --locked -- -D warnings
+cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --test '*' --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude pharos-kernel --no-deps --locked
 RUSTDOCFLAGS="-D warnings" cargo doc -p pharos-kernel --target x86_64-unknown-none --no-deps --locked
 python3 scripts/check-links.py

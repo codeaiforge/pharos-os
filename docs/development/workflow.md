@@ -24,7 +24,8 @@ This workflow works on any branch and does not depend on hosting. Rules in [AGEN
 | --- | --- |
 | Build host crates | `cargo build` |
 | Fast type check | `cargo check` |
-| Check the kernel | `cargo clippy -p pharos-kernel --target x86_64-unknown-none -- -D warnings` |
+| Check the kernel | `cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --test '*' -- -D warnings` |
+| Run boot check and kernel tests | `cargo xtask test` (needs QEMU, OVMF, xorriso) |
 | Test kernel library logic | `cargo test -p pharos-kernel --lib` |
 | Run the CLI | `cargo run -p pharos-cli -- <command>` |
 | Build the kernel | `cargo xtask build` |

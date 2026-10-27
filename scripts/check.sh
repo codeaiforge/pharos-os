@@ -15,7 +15,7 @@ run cargo build --workspace --exclude pharos-kernel --locked
 run cargo test --workspace --exclude pharos-kernel --locked
 # Kernel: host-testable library logic, then the bare-metal target.
 run cargo test -p pharos-kernel --lib --locked
-run cargo clippy -p pharos-kernel --target x86_64-unknown-none --locked -- -D warnings
+run cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --test '*' --locked -- -D warnings
 run env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude pharos-kernel --no-deps --locked
 run env RUSTDOCFLAGS="-D warnings" cargo doc -p pharos-kernel --target x86_64-unknown-none --no-deps --locked
 run python3 scripts/check-links.py

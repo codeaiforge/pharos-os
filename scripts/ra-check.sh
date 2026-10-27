@@ -8,6 +8,6 @@ cd "$(dirname "$0")/.."
 status=0
 cargo clippy --workspace --exclude pharos-kernel --all-targets \
     --message-format=json-diagnostic-rendered-ansi "$@" || status=$?
-cargo clippy -p pharos-kernel --target x86_64-unknown-none \
+cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --test '*' \
     --message-format=json-diagnostic-rendered-ansi "$@" || status=$?
 exit "$status"
