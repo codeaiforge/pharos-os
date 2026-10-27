@@ -47,6 +47,7 @@ A test kernel passes only if it ran at least one check, none failed, and it ende
 | Test kernel | Checks |
 | --- | --- |
 | `kernel/tests/boot_info.rs` | Base revision accepted; memory map present, non-empty, with usable memory and the kernel image; HHDM offset in the higher half; bootloader is Limine; firmware is 64-bit UEFI; the test kernel runs at its linked higher-half address |
+| `kernel/tests/double_fault.rs` | The test kernel runs on the kernel stack; unbounded recursion hits the guard page and is reported as a double fault: vector 8, error code 0, the handler runs on the IST1 stack, and the faulting RSP is at the bottom of the kernel stack (checked from a fatal hook; the run ends with QEMU status 33) |
 | `kernel/tests/exceptions.rs` | The IDT is loaded; two breakpoints are handled and execution continues; registers survive a breakpoint; a read of the unmapped probe page raises a page fault with vector 14, CR2 equal to the probe address, error code 0 (not present, read, kernel), RIP in the kernel, and the kernel CS (checked from a fatal hook) |
 | `kernel/tests/gdt.rs` | Limine's GDT is active at entry; after `gdt::init()` (called twice, the second call harmless) the GDTR points at the kernel GDT, CS/SS/DS/TR hold the kernel selectors, and TSS IST1 is the 16-byte-aligned top of the double-fault stack |
 | `kernel/tests/interrupt_state.rs` | Interrupts are disabled at entry; printing and `without_interrupts` (also nested) restore the previous interrupt state, enabled or disabled; `enable_interrupts`/`disable_interrupts` set and clear IF |

@@ -221,6 +221,57 @@ pub fn _print_panic(args: fmt::Arguments<'_>) {
     _print(args);
 }
 
+/// Size of the kernel stack.
+pub const KERNEL_STACK_SIZE: usize = 64 * 1024;
+
+#[repr(C, align(4096))]
+struct KernelStack([u8; KERNEL_STACK_SIZE]);
+
+/// The kernel stack. `linker.ld` places it in its own segment after an
+/// unmapped guard page, so an overflow raises a page fault (and, since the
+/// fault cannot push its frame, a double fault on the IST stack).
+// SAFETY: `.kernel_stack` is a NOLOAD section in `linker.ld` reserved for
+// this one static; placing it there has no other effect.
+#[unsafe(link_section = ".kernel_stack")]
+static mut KERNEL_STACK: KernelStack = KernelStack([0; KERNEL_STACK_SIZE]);
+
+/// Bounds of the kernel stack, `(bottom, top)`. The guard page is the page
+/// below `bottom`.
+pub fn kernel_stack_bounds() -> (u64, u64) {
+    let bottom = (&raw const KERNEL_STACK) as u64;
+    (bottom, bottom + KERNEL_STACK_SIZE as u64)
+}
+
+/// Current stack pointer (RSP).
+pub fn stack_pointer() -> u64 {
+    let rsp: u64;
+    // SAFETY: copying RSP into a register has no side effects.
+    unsafe { asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+    rsp
+}
+
+/// Leaves the bootloader's stack: switches to the empty kernel stack and
+/// calls `entry`, which must never return. Call once, first thing in the
+/// entry point; anything on the old stack is abandoned.
+pub fn run_on_kernel_stack(entry: extern "C" fn() -> !) -> ! {
+    let (_, top) = kernel_stack_bounds();
+    // SAFETY: the kernel stack is reserved for this use, unused until now,
+    // and its top is 4096-byte aligned, so RSP is 16-byte aligned at the
+    // call as the System V ABI requires. RBP is cleared to end frame-pointer
+    // chains. `entry` never returns, so nothing uses the abandoned stack.
+    unsafe {
+        asm!(
+            "mov rsp, {top}",
+            "xor ebp, ebp",
+            "call {entry}",
+            "ud2",
+            top = in(reg) top,
+            entry = in(reg) entry,
+            options(noreturn),
+        )
+    }
+}
+
 /// Stops the CPU permanently, with interrupts disabled.
 pub fn halt() -> ! {
     loop {

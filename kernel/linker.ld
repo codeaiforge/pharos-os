@@ -9,6 +9,7 @@ PHDRS
     text            PT_LOAD FLAGS(5); /* RX */
     rodata          PT_LOAD FLAGS(4); /* R  */
     data            PT_LOAD FLAGS(6); /* RW */
+    stack           PT_LOAD FLAGS(6); /* RW: kernel stack, after a guard gap */
 }
 
 SECTIONS
@@ -32,6 +33,13 @@ SECTIONS
     . = ALIGN(CONSTANT(MAXPAGESIZE));
     .data : { *(.data .data.*) } :data
     .bss : { *(.bss .bss.*) *(COMMON) } :data
+
+    /* Guard page: one page that no segment covers, so Limine leaves it
+       unmapped. A kernel stack overflow faults here instead of silently
+       overwriting .bss. */
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
+    . += CONSTANT(MAXPAGESIZE);
+    .kernel_stack (NOLOAD) : { *(.kernel_stack) } :stack
 
     /DISCARD/ : { *(.eh_frame*) *(.note .note.*) }
 }

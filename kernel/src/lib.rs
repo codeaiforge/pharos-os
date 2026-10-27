@@ -111,6 +111,10 @@ macro_rules! test_kernel {
         #[allow(unsafe_code)] // `no_mangle` exports the symbol; the function is safe Rust.
         #[unsafe(no_mangle)]
         extern "C" fn kmain() -> ! {
+            $crate::arch::x86_64::run_on_kernel_stack(test_main)
+        }
+
+        extern "C" fn test_main() -> ! {
             let mut run = $crate::testing::TestRun::new();
             $run(&mut run);
             run.finish()

@@ -11,7 +11,8 @@
 //! exception is fatal: it is reported over serial, QEMU is told the run
 //! failed, and the CPU halts. Test kernels can install a fatal hook to turn an
 //! expected exception into a test result. Vectors 32–255 are not present yet,
-//! so an interrupt on them raises a general-protection fault.
+//! so an interrupt on them raises a general-protection fault. The double fault
+//! runs on its own stack (TSS IST1), so a kernel stack overflow is reported.
 
 // The dispatcher and its helpers are reached only from the kernel-target
 // entry stubs; host builds compile them for unit tests of the pure parts.
@@ -286,7 +287,7 @@ extern "C" fn dispatch(frame: &mut ExceptionFrame) {
 #[cfg(target_os = "none")]
 mod entry {
     use super::{ExceptionFrame, dispatch, gate};
-    use crate::arch::x86_64::gdt::KERNEL_CODE;
+    use crate::arch::x86_64::gdt::{DOUBLE_FAULT_IST, KERNEL_CODE};
 
     // One stub per vector, then the common path. `.quad` builds a table of
     // stub addresses; it needs the static relocation model, which only the
@@ -350,9 +351,16 @@ mod entry {
         // assembly above; it is immutable.
         let handlers = unsafe { &pharos_isr_table };
         for (vector, &handler) in handlers.iter().enumerate() {
+            // The double fault gets its own stack, so a stack overflow is
+            // reported instead of escalating to a triple fault.
+            let ist = if vector == super::DOUBLE_FAULT as usize {
+                DOUBLE_FAULT_IST
+            } else {
+                0
+            };
             // SAFETY: the IDT is only written here, before `lidt` makes the
             // CPU read it, and with interrupts disabled (`init` runs early).
-            unsafe { (*idt).0[vector] = gate(handler, KERNEL_CODE, 0) };
+            unsafe { (*idt).0[vector] = gate(handler, KERNEL_CODE, ist) };
         }
         let pointer = IdtPointer {
             limit: (size_of::<Idt>() - 1) as u16,

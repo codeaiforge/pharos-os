@@ -57,11 +57,15 @@ The console is **interrupt-safe**: it disables interrupts while holding the lock
 - **Any other exception:** fatal. It prints `PHAROS: exception: ` followed by the mnemonic, name, vector, error code (decoded for page faults), CR2 for page faults, and the saved registers, through the panic print path; then it signals failure to QEMU and halts.
 - **Test kernels** can install a fatal hook (`idt::set_fatal_hook`) to turn an expected exception into test results; all `TestRun` handles share one count, so the hook can finish the run.
 
-Vectors 32–255 are not present yet: an interrupt there raises a general-protection fault. The double fault runs on the current stack until it gets its IST stack (#22).
+Vectors 32–255 are not present yet: an interrupt there raises a general-protection fault. The double fault runs on its own stack (TSS IST1), so a kernel stack overflow is reported as `#DF double fault` instead of a triple-fault reboot.
 
 ## Segments and stacks
 
-`kmain` first loads the kernel's own GDT and TSS (`arch::x86_64::gdt::init`), so nothing depends on Limine's GDT in bootloader-reclaimable memory. The TSS gives the double-fault handler (M2.4) its own 16 KiB stack. Limitation: that stack is a static array without a guard page, so a double-fault handler that overflows it would overwrite neighbouring data; guard pages come with paging (M2.5). The kernel still runs on Limine's boot stack (at least 64 KiB, in bootloader-reclaimable memory) until it has its own.
+`kmain` first leaves Limine's boot stack (in bootloader-reclaimable memory) for the 64 KiB kernel stack (`arch::x86_64::run_on_kernel_stack`); test kernels do the same through `test_kernel!`. `linker.ld` puts the kernel stack in its own segment after a gap that no segment covers, so Limine leaves at least one page below the stack unmapped. That page is the guard page: an overflow raises a page fault, which cannot push its frame onto the full stack, so the CPU raises a double fault.
+
+The kernel then loads its own GDT and TSS (`arch::x86_64::gdt::init`), so nothing depends on Limine's GDT. The TSS gives the double-fault handler its own 16 KiB stack (IST1).
+
+Limitations: the double-fault stack has no guard page, so a handler that overflows it would overwrite neighbouring data. A single stack frame larger than the guard gap could skip over it. Proper guard pages for all stacks come with paging (M2.5).
 
 ## Rules for this crate
 

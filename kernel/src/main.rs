@@ -1,4 +1,4 @@
-//! Pharos OS kernel entry point (M2.2).
+//! Pharos OS kernel entry point.
 //!
 //! Limine loads this binary at `0xffffffff80000000` and jumps to [`kmain`] in
 //! 64-bit mode (see `docs/architecture/boot.md`). The kernel reports what the
@@ -10,7 +10,9 @@
 
 use core::panic::PanicInfo;
 
-use pharos_kernel::arch::x86_64::{_print_panic, QemuExit, gdt, halt, idt, qemu_exit};
+use pharos_kernel::arch::x86_64::{
+    _print_panic, QemuExit, gdt, halt, idt, qemu_exit, run_on_kernel_stack,
+};
 use pharos_kernel::boot_info::{firmware_name, mib, summarize};
 use pharos_kernel::kprintln;
 use pharos_kernel::limine::BASE_REVISION;
@@ -21,6 +23,11 @@ pharos_kernel::limine_requests!();
 #[allow(unsafe_code)] // `no_mangle` exports the symbol; the function is safe Rust.
 #[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
+    run_on_kernel_stack(kernel_main)
+}
+
+/// The kernel proper, on the kernel stack (with its guard page).
+extern "C" fn kernel_main() -> ! {
     gdt::init();
     idt::init();
     kprintln!("Pharos OS {} kernel", env!("CARGO_PKG_VERSION"));
