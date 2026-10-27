@@ -36,12 +36,14 @@
 | Vulnerabilities disclosed publicly before a fix | GitHub private vulnerability reporting is enabled; [SECURITY.md](../../SECURITY.md) directs reporters to it. |
 | A tampered Limine download ends up in boot images | `xtask` downloads a pinned release over HTTPS, checks a SHA-256 committed in the repository, and deletes any download that does not match; whoever updates the pin also verifies the maintainer's GPG signature ([boot.md](../architecture/boot.md#updating-the-limine-pin)). |
 | The QEMU exit signal reaches real hardware | The kernel writes to the debug-exit port only when CPUID reports a hypervisor. AGENTS.md forbids real-hardware boots without authorization. |
+| A kernel fault silently corrupts state or reboots the machine without a trace | Every CPU exception is reported over serial and halts the kernel (only breakpoints continue); the double fault runs on its own stack, and the kernel stack has an unmapped guard page, so a stack overflow is reported instead of overwriting memory or triple-faulting ([interrupts.md](../architecture/interrupts.md)). The only page-table change before M2.5 maps the local APIC register page at a fixed address and refuses to replace an existing mapping. Each path has a QEMU test. |
 | Secrets committed by mistake | `.gitignore` covers `.env`, `*.pem`, `*.key`; AGENTS.md forbids secrets; PR template asks for confirmation. |
 | An AI assistant performs unwanted Git or system changes | AGENTS.md forbids commits, pushes, history rewrites, and privileged commands without explicit authorization. |
 
 ### Known limitations
 
 - No automated secret scanning or dependency auditing is configured yet (nothing to audit today).
+- The kernel runs only in ring 0 (no user mode yet), so these protections guard against kernel bugs, not against untrusted code. The double-fault stack has no guard page, and one stack frame larger than the guard gap could skip it; real guard pages come with paging (M2.5).
 
 ## Part 2 — Planned system (Phases 2–5)
 

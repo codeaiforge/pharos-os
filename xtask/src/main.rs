@@ -59,9 +59,12 @@ COMMANDS:
     build                   Build the kernel for x86_64-unknown-none (release)
     image [--kernel <ELF>]  Build a hybrid BIOS/UEFI ISO with the pinned Limine
                             release. Uses the built kernel unless --kernel is given.
-    run [--bios] [--gdb]    Build, make the image, and boot it in QEMU with serial
+    run [--bios] [--gdb] [--kernel <ELF>]
+                            Build, make the image, and boot it in QEMU with serial
                             output on this terminal. UEFI (OVMF) by default; --bios
-                            uses SeaBIOS; --gdb waits for GDB on localhost:1234.
+                            uses SeaBIOS; --gdb waits for GDB on localhost:1234;
+                            --kernel boots the given ELF (for example a test
+                            kernel) instead of building the kernel.
                             Succeeds only if the kernel reports success.
     test [--timeout <SECS>] Boot check: build, make the image, and boot it headless
                             under UEFI and BIOS. Then kernel tests: boot every test
@@ -83,10 +86,20 @@ type Result<T> = std::result::Result<T, String>;
 enum Task {
     Help,
     Build,
-    Image { kernel: Option<PathBuf> },
-    Run { bios: bool, gdb: bool },
-    Test { timeout: Duration },
-    Runner { elf: PathBuf },
+    Image {
+        kernel: Option<PathBuf>,
+    },
+    Run {
+        bios: bool,
+        gdb: bool,
+        kernel: Option<PathBuf>,
+    },
+    Test {
+        timeout: Duration,
+    },
+    Runner {
+        elf: PathBuf,
+    },
 }
 
 fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
@@ -108,15 +121,19 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
             return Ok(Task::Image { kernel });
         }
         Some("run") => {
-            let (mut bios, mut gdb) = (false, false);
-            for arg in args {
+            let (mut bios, mut gdb, mut kernel) = (false, false, None);
+            while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--bios" => bios = true,
                     "--gdb" => gdb = true,
+                    "--kernel" => {
+                        let path = args.next().ok_or("--kernel needs a path")?;
+                        kernel = Some(PathBuf::from(path));
+                    }
                     other => return Err(format!("unexpected argument '{other}'")),
                 }
             }
-            return Ok(Task::Run { bios, gdb });
+            return Ok(Task::Run { bios, gdb, kernel });
         }
         Some("runner") => {
             let elf = args
@@ -576,18 +593,23 @@ fn qemu_error(e: io::Error) -> String {
     }
 }
 
-fn run_qemu(paths: &Paths, bios: bool, gdb: bool) -> Result<()> {
-    build(paths)?;
-    let iso = main_image(paths, None)?;
+fn run_qemu(paths: &Paths, bios: bool, gdb: bool, kernel: Option<PathBuf>) -> Result<()> {
+    let elf = match kernel {
+        Some(elf) => elf,
+        None => {
+            build(paths)?;
+            paths.kernel_elf()
+        }
+    };
+    let iso = main_image(paths, Some(elf.clone()))?;
     let out = paths.image_dir();
     let vars = out.join("ovmf-vars.fd");
     prepare_firmware(&vars, bios)?;
     if gdb {
-        let kernel = paths.kernel_elf();
         println!("QEMU is waiting for GDB. In another terminal run:");
         println!(
             "  gdb {} -ex 'target remote localhost:1234' -ex 'break kmain' -ex continue",
-            kernel.display()
+            elf.display()
         );
     }
     println!(
@@ -856,7 +878,7 @@ fn main() -> ExitCode {
             }
             Task::Build => build(&paths),
             Task::Image { kernel } => main_image(&paths, kernel).map(|_| ()),
-            Task::Run { bios, gdb } => run_qemu(&paths, bios, gdb),
+            Task::Run { bios, gdb, kernel } => run_qemu(&paths, bios, gdb, kernel),
             Task::Test { timeout } => test(&paths, timeout),
             Task::Runner { elf } => runner(&paths, &elf),
         }
@@ -907,16 +929,27 @@ mod tests {
             parse(args(&["run"])),
             Ok(Task::Run {
                 bios: false,
-                gdb: false
+                gdb: false,
+                kernel: None
             })
         );
         assert_eq!(
             parse(args(&["run", "--gdb", "--bios"])),
             Ok(Task::Run {
                 bios: true,
-                gdb: true
+                gdb: true,
+                kernel: None
             })
         );
+        assert_eq!(
+            parse(args(&["run", "--kernel", "t.elf", "--gdb"])),
+            Ok(Task::Run {
+                bios: false,
+                gdb: true,
+                kernel: Some(PathBuf::from("t.elf"))
+            })
+        );
+        assert!(parse(args(&["run", "--kernel"])).is_err());
     }
 
     #[test]
