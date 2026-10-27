@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.6 — Timers and scheduling.** Everything in Phases 2–5 is **planned, not implemented**.
+**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.7 — Processes, privilege boundaries, system calls, and IPC.** Everything in Phases 2–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -39,7 +39,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | Phase | Name | Status |
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
-| 2 | Core System | **Current** (M2.6) |
+| 2 | Core System | **Current** (M2.7) |
 | 3 | AI Agent Platform | Planned |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
@@ -218,7 +218,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.6 — Timers and scheduling
 
-**Status: Current.**
+**Status: Done** — gate passed 2026-10-27: the CI `qemu` job passed on `main` with the scheduling tests (`6d6eee2`, [run 40530704211](https://github.com/codeaiforge/pharos-os/actions/runs/40530704211)). That run had 16 test kernels, among them `timer`, `tasks`, `task_overflow`, and `preemption`; the last shows that a task spinning forever cannot starve the others. Every M2.6 commit passed CI on its first run, with no retries. A scheduler with preemption deliberately removed failed CI on a throwaway branch ([run 40532363163](https://github.com/codeaiforge/pharos-os/actions/runs/40532363163)): its host unit tests failed, and the `preemption` test kernel hung until the time limit. Delivered: D-006 timer part and D-013 (#31), timer calibration and kernel clock (#32), tasks and context switching (#33), preemption, idle task, and sleep (#34), tracing docs and CI gate (#35). Design: [scheduling.md](../architecture/scheduling.md).
 
 - **Objective and scope:** A periodic or one-shot timer (per D-006) and a scheduler for kernel tasks.
 - **Deliverables:** Timer driver; task abstraction; context switching; scheduler.
@@ -232,7 +232,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.7 — Processes, privilege boundaries, system calls, and IPC
 
-**Status: Planned.**
+**Status: Current.** Needs D-004 Accepted and a D-012 direction first.
 
 - **Objective and scope:** User-mode processes in separate address spaces, a minimal system-call interface, and IPC. This is the foundation for isolating services and agents.
 - **Deliverables:** Ring 3 execution; per-process address spaces; syscall entry; IPC primitive; `docs/architecture/syscalls-ipc.md`; capability direction from D-012 reflected in the interface.
@@ -590,4 +590,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4 and M2.5 passed their gates on 2026-10-27. The current milestone is **M2.6 — Timers and scheduling**, with the timer part of D-006 and the scheduling model D-013 accepted on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, and M2.6 passed their gates on 2026-10-27. The current milestone is **M2.7 — Processes, privilege boundaries, system calls, and IPC**. It first needs the final D-004 decision (kernel architecture, open since the M2.1 direction) and a D-012 direction (agent sandboxing and capabilities).

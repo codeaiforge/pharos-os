@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- M2.6 complete: the scheduling tests pass in CI ([run 40530704211](https://github.com/codeaiforge/pharos-os/actions/runs/40530704211), 16 test kernels), and a scheduler with preemption removed failed CI ([run 40532363163](https://github.com/codeaiforge/pharos-os/actions/runs/40532363163)). The roadmap marks M2.6 Done and M2.7 Current. `pharos info` reports the new stage and lists the timer and preemptive scheduling as implemented. The architecture overview describes the kernel as of M2.6. The threat model covers starvation, per-task stack overflow, and corrupted task state.
 - Preemptive scheduling (D-013, #34).
   - `sched::enable_preemption` creates an idle task, installs the scheduler as the local APIC tick handler (new `apic::set_tick_handler`, called after EOI), starts the 100 Hz tick, and enables interrupts. Each tick wakes due sleepers and switches to the next ready task from inside the interrupt handler (one-tick slice).
   - `sched::sleep` (whole ticks plus one; a host-tested `SleepQueue`) and `sched::set_trace` for serial tracing of switches (debugging guide).

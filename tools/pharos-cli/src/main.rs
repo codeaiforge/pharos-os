@@ -13,7 +13,7 @@ const PROJECT: &str = "Pharos OS";
 const ORGANIZATION: &str = "CodeAIForge";
 /// Comes from Cargo package metadata (workspace version), never hand-copied.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const STAGE: &str = "Phase 2 - Core System (M2.5 complete, M2.6 next)";
+const STAGE: &str = "Phase 2 - Core System (M2.6 complete, M2.7 next)";
 
 /// Command succeeded.
 const EXIT_OK: u8 = 0;
@@ -65,12 +65,19 @@ const COMPONENTS: &[(&str, &str)] = &[
         "implemented",
         "kernel memory management: frame allocator, own page tables, heap",
     ),
+    (
+        "implemented",
+        "calibrated timer and preemptive scheduling of kernel tasks",
+    ),
     ("implemented", "QEMU boot check in CI (UEFI and BIOS)"),
     (
         "implemented",
         "kernel tests inside QEMU (test kernels in kernel/tests/)",
     ),
-    ("planned", "scheduling, device interrupts, processes, IPC"),
+    (
+        "planned",
+        "device interrupts, user processes, system calls, IPC",
+    ),
     ("planned", "storage, filesystem, drivers, networking"),
     ("planned", "local AI inference and sandboxed agent platform"),
 ];
@@ -364,13 +371,14 @@ mod tests {
         // Update this list only when a component exists and is tested. The
         // kernel is verified with `cargo xtask run` on UEFI and BIOS (M2.2);
         // exceptions and timer interrupts by test kernels in CI (M2.4); memory
-        // management by test kernels in CI (M2.5).
+        // management by test kernels in CI (M2.5); timer and scheduling by test
+        // kernels in CI (M2.6).
         let implemented: Vec<&str> = COMPONENTS
             .iter()
             .filter(|(status, _)| *status == "implemented")
             .map(|(_, what)| *what)
             .collect();
-        assert_eq!(implemented.len(), 7);
+        assert_eq!(implemented.len(), 8);
         assert!(implemented.iter().all(|what| {
             what.contains("workspace")
                 || what.contains("xtask")
@@ -379,6 +387,7 @@ mod tests {
                 || what.contains("kernel tests")
                 || what.contains("exception")
                 || what.contains("memory management")
+                || what.contains("scheduling")
         }));
         for (status, _) in COMPONENTS {
             assert!(["implemented", "placeholder", "planned"].contains(status));
