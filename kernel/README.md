@@ -12,7 +12,8 @@ It has **no** interrupt handling, memory management, scheduling, processes, syst
 | `src/lib.rs` | Library (`no_std`): crate overview and status |
 | `src/limine.rs` | Limine protocol structures (base revision 6), written from the 0BSD specification |
 | `src/boot_info.rs` | Hardware-independent interpretation of boot information (unit-tested on the host) |
-| `src/arch/x86_64.rs` | Hardware layer: port I/O, COM1 serial, halt. All hardware `unsafe` code is here |
+| `src/sync.rs` | `SpinLock`: a lock without `unsafe` for resources such as the serial port (unit-tested on the host, including with threads) |
+| `src/arch/x86_64.rs` | Hardware layer: port I/O, COM1 serial and the kernel console behind `kprint!`/`kprintln!`, QEMU exit signal, halt. All hardware `unsafe` code is here |
 | `linker.ld` | Places the kernel at `0xffffffff80000000` and keeps the Limine request sections |
 | `build.rs` | Passes `linker.ld` to the binary when building for `x86_64-unknown-none` |
 
@@ -35,6 +36,12 @@ cargo xtask test         # headless boot check, UEFI and BIOS, with a time limit
 ```
 
 The serial output ends with `PHAROS: boot ok`, and the command exits 0 only on the kernel's success signal (QEMU exit status 33). Boot failures and panics print `PHAROS: boot failed: ...` or `PHAROS: panic: ...`; QEMU then exits with status 35 and `cargo xtask run` fails.
+
+## Printing
+
+Use `kprint!` and `kprintln!` (exported by the library) for all output. They write to COM1 through one console behind a `SpinLock`, so lines from different code paths do not interleave; COM1 is configured on first use. The panic handler releases the lock before printing, so a panic inside a `kprintln!` still reports itself (the interrupted line may be cut short).
+
+The console is **not interrupt-safe** yet: an interrupt handler that prints while the interrupted code holds the lock would spin forever. Interrupt support (M2.4) must disable interrupts while the console lock is held, or give handlers a separate path.
 
 ## Rules for this crate
 

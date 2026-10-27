@@ -1,4 +1,5 @@
-//! x86-64 hardware layer: port I/O, the COM1 serial port, and halting.
+//! x86-64 hardware layer: port I/O, the COM1 serial port and kernel
+//! console, QEMU exit signalling, and halting.
 //!
 //! All of the kernel's hardware `unsafe` code lives here (D-004), behind safe
 //! functions. Each `unsafe` block states why it is sound.
@@ -6,7 +7,10 @@
 #![allow(unsafe_code)]
 
 use core::arch::asm;
-use core::fmt;
+use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::sync::SpinLock;
 
 /// Writes a byte to an I/O port.
 ///
@@ -133,6 +137,37 @@ pub fn qemu_exit(status: QemuExit) {
         // memory.
         unsafe { outb(QEMU_DEBUG_EXIT, status as u8) };
     }
+}
+
+/// Serializes console output so lines from different code paths do not mix.
+static CONSOLE_LOCK: SpinLock = SpinLock::new();
+/// Whether COM1 has been configured. Only changed while holding the lock.
+static CONSOLE_READY: AtomicBool = AtomicBool::new(false);
+
+/// Writes formatted text to the kernel console (COM1). Used by `kprint!` and
+/// `kprintln!`; configures COM1 on first use.
+#[doc(hidden)]
+pub fn _print(args: fmt::Arguments<'_>) {
+    let _guard = CONSOLE_LOCK.lock();
+    let mut serial = if CONSOLE_READY.load(Ordering::Acquire) {
+        Serial { base: COM1 }
+    } else {
+        let serial = Serial::com1();
+        CONSOLE_READY.store(true, Ordering::Release);
+        serial
+    };
+    // Writing to the UART cannot fail.
+    let _ = serial.write_fmt(args);
+}
+
+/// Console output for the panic handler. If the panic happened while the
+/// console lock was held (for example inside a `kprintln!`), the holder will
+/// never resume on this single CPU, so the lock is released first; the
+/// interrupted line may be cut short.
+#[doc(hidden)]
+pub fn _print_panic(args: fmt::Arguments<'_>) {
+    CONSOLE_LOCK.force_unlock();
+    _print(args);
 }
 
 /// Stops the CPU permanently, with interrupts disabled.

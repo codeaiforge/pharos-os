@@ -21,6 +21,28 @@
 pub mod arch;
 pub mod boot_info;
 pub mod limine;
+pub mod sync;
+
+/// Prints to the kernel console (COM1), like `print!`.
+#[cfg(target_arch = "x86_64")]
+#[macro_export]
+macro_rules! kprint {
+    ($($arg:tt)*) => {
+        $crate::arch::x86_64::_print(format_args!($($arg)*))
+    };
+}
+
+/// Prints a line to the kernel console (COM1), like `println!`.
+#[cfg(target_arch = "x86_64")]
+#[macro_export]
+macro_rules! kprintln {
+    () => {
+        $crate::kprint!("\n")
+    };
+    ($($arg:tt)*) => {
+        $crate::arch::x86_64::_print(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
 
 /// Human-readable implementation status of this crate.
 pub const STATUS: &str = "minimal kernel: boots via Limine and reports boot information over \

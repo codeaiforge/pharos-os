@@ -10,7 +10,7 @@ Cargo workspace (stable Rust, edition 2024)
 ├── xtask              binary `xtask` (host): builds the kernel and the boot ISO, std only
 └── kernel             `pharos-kernel` for x86_64-unknown-none:
                        ├── library (no_std): Limine protocol structures, boot-info logic,
-                       │                     x86-64 hardware layer (serial, halt)
+                       │                     SpinLock, x86-64 hardware layer (console, halt)
                        └── binary (no_main): entry point, Limine requests
 ```
 
