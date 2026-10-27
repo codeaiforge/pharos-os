@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- Accepted decision D-009 (QEMU automation): pass = QEMU status 33 and a serial marker, 60-second timeout, logs printed on failure, boot check on UEFI and BIOS, test kernels on stable Rust through Cargo's runner and `cargo xtask test`, ISO reproducibility check in CI. Prototyped before acceptance.
 - `cargo xtask run [--bios] [--gdb]`: builds the kernel and image and boots it in QEMU (OVMF or SeaBIOS) with serial on the terminal; succeeds only when the kernel signals success (QEMU exit status 33). `--gdb` waits for GDB on `localhost:1234`.
 - The kernel signals success or failure (boot errors, panics) through QEMU's `isa-debug-exit` device, only when CPUID reports a hypervisor.
 - GDB workflow for breaking into the kernel, verified and documented in `docs/development/debugging.md`.

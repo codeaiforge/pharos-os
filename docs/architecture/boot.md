@@ -64,7 +64,8 @@ A host Rust crate (`xtask/`, standard library only) run as `cargo xtask <command
 | `build` | Implemented (#10) | Build `pharos-kernel` for `x86_64-unknown-none` (release) |
 | `image [--kernel <ELF>]` | Implemented (#10) | Fetch and verify the pinned Limine release if needed, then assemble `target/xtask/image/pharos.iso`. Uses the built kernel unless `--kernel` is given |
 | `run [--bios] [--gdb]` | Implemented (#12) | Build, make the image, and boot it in QEMU (OVMF by default, SeaBIOS with `--bios`) with serial on the terminal and `isa-debug-exit` attached. Exits 0 only on the kernel's success signal. `--gdb` waits for GDB on `localhost:1234` |
-| `test` | Planned (M2.3, D-009) | Boot under UEFI and BIOS headless and report pass/fail |
+| `test` | Planned (M2.3, D-009 accepted) | Boot check under UEFI and BIOS headless, then all kernel test targets; pass = QEMU status 33 and the serial marker, 60 s timeout per boot |
+| `runner <ELF>` | Planned (M2.3, D-009 accepted) | Cargo `runner` for `x86_64-unknown-none`: wrap one test kernel in an image and boot it headless under UEFI |
 
 `image` downloads `limine-binary.tar.xz` with `curl` into `target/xtask/limine-<version>/`, checks it with `sha256sum` against the SHA-256 pinned in `xtask/src/main.rs`, unpacks it with `tar`, and compiles the `limine` host tool with `cc`. A cached archive with the wrong hash, or a fresh download with the wrong hash, stops the build with an error; a bad download is deleted. The ISO also contains Limine's `LICENSE` (`boot/limine/LICENSE`) to meet its BSD-2-Clause notice requirement.
 
@@ -104,8 +105,8 @@ Since issue #11: `cargo xtask build` builds the kernel binary. The kernel crate 
 ## 5. Testing
 
 - **M2.2 (done):** `cargo xtask run` and `cargo xtask run --bios` boot the kernel, which signals success through `isa-debug-exit` (QEMU exit status 33) or failure (35). The kernel writes to that port only when CPUID reports a hypervisor, so real hardware never sees it.
-- **M2.3:** `cargo xtask test` runs both boots headless in CI with a timeout and requires both the exit status and a serial marker. OVMF writes its own output to serial first, so tests search for the marker. A deliberately failing kernel must make the test fail.
-- **Reproducibility:** CI builds the ISO twice and compares SHA-256 hashes (planned; added with the image step).
+- **M2.3 (D-009 accepted):** `cargo xtask test` runs the boot check headless under UEFI and BIOS, then every test kernel in `kernel/tests/` under UEFI. A boot passes only with QEMU status 33 and its serial marker (`PHAROS: boot ok` or `PHAROS: tests ok`), within 60 seconds. OVMF writes its own output to serial first, so the marker is searched for, not matched against the whole log. Logs go to `target/xtask/logs/`, and their end is printed on failure.
+- **Reproducibility:** CI builds the ISO twice and compares SHA-256 hashes (D-009).
 - **Host checks:** remain `cargo fmt`, Clippy, and tests with `--exclude pharos-kernel`.
 
 ## 6. Alternatives

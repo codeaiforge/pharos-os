@@ -176,7 +176,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.3 — Early serial output and QEMU boot validation
 
-**Status: Current.** Serial output already exists (M2.2); the remaining work is the automated harness and CI job (D-009).
+**Status: Current.** Serial output already exists (M2.2) and D-009 is accepted; the remaining work is the `xtask test` harness, logging macros, kernel tests, and the CI job.
 
 - **Objective and scope:** Serial (COM1) output and an automated QEMU test harness that runs in CI.
 - **Deliverables:** Serial driver; logging macros; QEMU harness (per D-009) with timeout and serial capture; CI job running it headless.
@@ -570,7 +570,7 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26 and D-009 on 2026-10-27; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -582,7 +582,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-006 | Interrupt controller and timer | M2.4, M2.6 | QEMU/hardware support, SMP readiness |
 | D-007 | Filesystem and persistent storage | M2.8 | Crash consistency, simplicity, host tooling |
 | D-008 | Driver strategy | M2.9 | TCB size, DMA isolation, effort |
-| D-009 | QEMU automation and debugging | M2.3 | Deterministic results, headless CI, no root |
+| D-009 | QEMU automation and debugging | M2.3 | **Accepted:** status 33 + serial marker, 60 s timeout, test kernels via Cargo runner and `cargo xtask test` |
 | D-010 | Inference runtime, model formats, licensing | M3.1 | Licenses, memory safety, performance, portability |
 | D-011 | CPU/GPU support, memory/VRAM | M3.1, M3.2 | Hardware requirements, driver availability |
 | D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | No ambient authority, revocation, auditability |

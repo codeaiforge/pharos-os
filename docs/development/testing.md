@@ -20,7 +20,7 @@ The CLI is tested through a `run` function that writes to in-memory buffers, and
 
 ## Boot check (QEMU)
 
-The kernel's boot is checked with `cargo xtask run` (UEFI) and `cargo xtask run --bios`. A run passes only if QEMU exits with status 33, which the kernel produces after printing `PHAROS: boot ok`; boot errors and panics give status 35. This is a local, manual check for now: it is not part of `scripts/check.sh` or CI, and it has no timeout. Running it automatically in CI with a timeout is milestone M2.3 (decision D-009).
+The kernel's boot is checked with `cargo xtask run` (UEFI) and `cargo xtask run --bios`. A run passes only if QEMU exits with status 33, which the kernel produces after printing `PHAROS: boot ok`; boot errors and panics give status 35. This is a local, manual check for now: it is not part of `scripts/check.sh` or CI, and it has no timeout. Running it automatically in CI with a timeout is milestone M2.3, following decision D-009 (accepted).
 
 ## Quality gates
 
@@ -52,7 +52,7 @@ Why the split: the kernel targets bare metal (`x86_64-unknown-none`, decision D-
 | Layer | Starts | Approach |
 | --- | --- | --- |
 | Host unit tests for target-independent kernel logic | M2.5 | Keep allocators and parsers in host-testable modules; consider Miri |
-| QEMU boot test | M2.3 | Boot headless with a timeout; pass when a serial marker appears or QEMU exits with a known code (D-009) |
+| QEMU boot test and kernel tests | M2.3 | `cargo xtask test`: boot check under UEFI and BIOS, then `harness = false` test kernels through Cargo's runner; pass = QEMU status 33 **and** the serial marker, 60 s timeout, logs printed on failure (D-009, accepted) |
 | QEMU kernel tests | M2.4 onward | In-kernel test runner reporting over serial |
 | Isolation and fuzz tests | M2.7 | Attempt forbidden memory access and invalid syscalls; fuzz syscall argument handling |
 | Agent adversarial tests | M3.4 | Capability bypass attempts, prompt-injection suites, resource exhaustion |
