@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.7, #37). It follows [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries) (capability-based microkernel), the [D-012 direction](../project/decision-log.md#d-012-agent-sandboxing-tool-permissions-and-network-isolation) (kernel-enforced capabilities), and [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism) (IPC model and system-call mechanism).
-- **Implementation:** **planned**: per-process address spaces (#38), ring 3 execution (#39), system calls (#40), and IPC (#41).
+- **Implementation:** per-process address spaces are **implemented** (#38). Ring 3 execution (#39), system calls (#40), and IPC (#41) are **planned**.
 
 ## 2. Context
 

@@ -87,3 +87,7 @@ harness = false
 [[test]]
 name = "preemption"
 harness = false
+
+[[test]]
+name = "address_spaces"
+harness = false

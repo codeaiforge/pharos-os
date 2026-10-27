@@ -43,6 +43,11 @@ impl<T> IrqMutex<T> {
         }
     }
 
+    /// Consumes the mutex and returns the value.
+    pub fn into_inner(self) -> T {
+        self.value.into_inner()
+    }
+
     pub fn lock(&self) -> IrqMutexGuard<'_, T> {
         let interrupts_were_enabled = interrupts_enabled();
         disable_interrupts();

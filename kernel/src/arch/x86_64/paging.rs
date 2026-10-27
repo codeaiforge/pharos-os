@@ -12,7 +12,13 @@
 //! - the kernel image at its link address, per segment: requests and GOT
 //!   writable, text read+execute, rodata read-only, data/bss writable;
 //! - the kernel stack and the double-fault stack, each with the page below
-//!   left unmapped as a guard page.
+//!   left unmapped as a guard page;
+//! - a page-directory-pointer table behind every kernel-half PML4 entry
+//!   (256–511), so those entries never change after boot.
+//!
+//! Process address spaces ([`AddressSpace::new_user`], issue #38) copy the
+//! kernel-half PML4 entries, so they share every kernel mapping, and own
+//! only their user half (below [`USER_END`]).
 //!
 //! Page-table and CR3 writes are `unsafe` and stay in this module.
 
@@ -23,7 +29,7 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::mm::frame::{FRAME_SIZE, FrameAllocator};
+use crate::mm::frame::{FRAME_SIZE, Frame, FrameAllocator};
 use crate::mm::raw::IrqMutex;
 
 /// Bytes in a 2 MiB page.
@@ -32,6 +38,7 @@ pub const HUGE_PAGE: u64 = 2 * 1024 * 1024;
 // Page-table entry bits (Intel SDM vol. 3A, section 5.5).
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
+const USER: u64 = 1 << 2;
 const WRITE_THROUGH: u64 = 1 << 3;
 const CACHE_DISABLE: u64 = 1 << 4;
 const HUGE: u64 = 1 << 7;
@@ -57,13 +64,20 @@ impl PageSize {
     }
 }
 
-/// Access rights of a mapping. Every mapping is readable and kernel-only.
+/// End of the user half (exclusive): the lower canonical half.
+pub const USER_END: u64 = 0x0000_8000_0000_0000;
+/// First kernel-half PML4 entry.
+const KERNEL_HALF: usize = 256;
+
+/// Access rights of a mapping. Every mapping is readable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flags {
     pub writable: bool,
     pub executable: bool,
     /// Caching disabled (for MMIO).
     pub uncached: bool,
+    /// Accessible from user mode (ring 3). Only in process address spaces.
+    pub user: bool,
 }
 
 impl Flags {
@@ -71,21 +85,39 @@ impl Flags {
         writable: true,
         executable: false,
         uncached: false,
+        user: false,
     };
     pub const READ_ONLY: Flags = Flags {
         writable: false,
         executable: false,
         uncached: false,
+        user: false,
     };
     pub const CODE: Flags = Flags {
         writable: false,
         executable: true,
         uncached: false,
+        user: false,
     };
     pub const MMIO: Flags = Flags {
         writable: true,
         executable: false,
         uncached: true,
+        user: false,
+    };
+    /// User data: read + write, no-execute.
+    pub const USER_DATA: Flags = Flags {
+        writable: true,
+        executable: false,
+        uncached: false,
+        user: true,
+    };
+    /// User code: read + execute.
+    pub const USER_CODE: Flags = Flags {
+        writable: false,
+        executable: true,
+        uncached: false,
+        user: true,
     };
 
     fn from_entry(entry: u64) -> Flags {
@@ -93,6 +125,7 @@ impl Flags {
             writable: entry & WRITABLE != 0,
             executable: entry & NO_EXECUTE == 0,
             uncached: entry & CACHE_DISABLE != 0,
+            user: entry & USER != 0,
         }
     }
 }
@@ -117,6 +150,9 @@ pub const fn leaf_entry(phys: u64, flags: Flags, size: PageSize, nx: bool) -> u6
     if flags.uncached {
         entry |= CACHE_DISABLE | WRITE_THROUGH;
     }
+    if flags.user {
+        entry |= USER;
+    }
     if matches!(size, PageSize::Size2M) {
         entry |= HUGE;
     }
@@ -127,9 +163,10 @@ pub const fn leaf_entry(phys: u64, flags: Flags, size: PageSize, nx: bool) -> u6
 }
 
 /// Entry pointing at a lower-level table. Permissions are enforced at the
-/// leaf, so table entries allow everything.
+/// leaf, so table entries allow everything, including user access: a page
+/// is user-accessible only if its leaf entry says so.
 pub const fn table_entry(phys: u64) -> u64 {
-    (phys & ADDRESS_MASK) | PRESENT | WRITABLE
+    (phys & ADDRESS_MASK) | PRESENT | WRITABLE | USER
 }
 
 /// Splits `len` bytes (a multiple of 4 KiB) from `virt`/`phys` into pages:
@@ -167,6 +204,9 @@ pub enum MapError {
     NotMapped,
     /// The kernel address space does not exist yet.
     NotInitialized,
+    /// A process address space may map only its user half, and the kernel
+    /// address space has no user pages.
+    WrongHalf,
 }
 
 impl core::fmt::Display for MapError {
@@ -178,6 +218,7 @@ impl core::fmt::Display for MapError {
             Self::OutOfMemory => "out of frames for page tables",
             Self::NotMapped => "address not mapped",
             Self::NotInitialized => "kernel address space not built yet",
+            Self::WrongHalf => "address or access not allowed in this address space",
         })
     }
 }
@@ -233,23 +274,103 @@ pub fn active_root() -> u64 {
     read_cr3() & ADDRESS_MASK
 }
 
-/// A page-table tree. The kernel has one; later address spaces will share
-/// its upper half (PML4 entries 256–511).
+/// A page-table tree: the kernel address space, or a process address space
+/// that shares the kernel half and owns its user half.
 pub struct AddressSpace {
     root: u64,
+    user: bool,
+}
+
+/// Loads `root` into CR3. Only for the kernel root and roots of live
+/// process address spaces (see `context`).
+pub(super) fn load_root(root: u64) {
+    // SAFETY: callers pass the kernel root or the root of a process address
+    // space that is alive; both map the whole kernel half (code, data,
+    // stacks, direct map), so execution continues unchanged. Writing CR3
+    // flushes non-global translations of the old space.
+    unsafe { asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags)) };
 }
 
 impl AddressSpace {
-    /// An empty address space.
-    pub fn new(frames: &mut FrameAllocator<'_>) -> Result<Self, MapError> {
+    /// An empty kernel-kind address space (only for the kernel's own).
+    fn new_kernel(frames: &mut FrameAllocator<'_>) -> Result<Self, MapError> {
         Ok(Self {
             root: alloc_table(frames)?,
+            user: false,
         })
+    }
+
+    /// A process address space: an empty user half and the kernel half of
+    /// the kernel address space (shared, never changed after boot).
+    pub fn new_user(frames: &mut FrameAllocator<'_>) -> Result<Self, MapError> {
+        let kernel = kernel_root().ok_or(MapError::NotInitialized)?;
+        let root = alloc_table(frames)?;
+        for index in KERNEL_HALF..512 {
+            write_entry(root, index, read_entry(kernel, index));
+        }
+        Ok(Self { root, user: true })
+    }
+
+    /// Frees every frame of the user half: mapped pages and page tables,
+    /// then the root. Returns the number of frames freed. The kernel half
+    /// is shared and stays. Pages mapped into a process address space
+    /// belong to it. Must not be active; does nothing for the kernel space.
+    pub fn destroy(self, frames: &mut FrameAllocator<'_>) -> usize {
+        assert!(!self.is_active(), "destroying the active address space");
+        if !self.user {
+            return 0;
+        }
+        let mut freed = 0;
+        let mut free = |phys: u64, count: usize| {
+            if let Some(frame) = Frame::from_addr(phys)
+                && frames.free_contiguous(frame, count).is_ok()
+            {
+                freed += count;
+            }
+        };
+        for i4 in 0..KERNEL_HALF {
+            let pdpt = read_entry(self.root, i4);
+            if pdpt & PRESENT == 0 {
+                continue;
+            }
+            for i3 in 0..512 {
+                let pd = read_entry(pdpt & ADDRESS_MASK, i3);
+                if pd & PRESENT == 0 {
+                    continue;
+                }
+                for i2 in 0..512 {
+                    let pt = read_entry(pd & ADDRESS_MASK, i2);
+                    if pt & PRESENT == 0 {
+                        continue;
+                    }
+                    if pt & HUGE != 0 {
+                        free(pt & ADDRESS_MASK, 512);
+                        continue;
+                    }
+                    for i1 in 0..512 {
+                        let page = read_entry(pt & ADDRESS_MASK, i1);
+                        if page & PRESENT != 0 {
+                            free(page & ADDRESS_MASK, 1);
+                        }
+                    }
+                    free(pt & ADDRESS_MASK, 1);
+                }
+                free(pd & ADDRESS_MASK, 1);
+            }
+            free(pdpt & ADDRESS_MASK, 1);
+        }
+        free(self.root, 1);
+        freed
     }
 
     /// Physical address of the root table (the CR3 value).
     pub fn root(&self) -> u64 {
         self.root
+    }
+
+    /// True for a process address space, false for the kernel's.
+    pub fn is_user(&self) -> bool {
+        self.user
     }
 
     fn is_active(&self) -> bool {
@@ -267,6 +388,11 @@ impl AddressSpace {
     ) -> Result<(), MapError> {
         if virt % size.bytes() != 0 || phys % size.bytes() != 0 {
             return Err(MapError::Misaligned);
+        }
+        // A process must not touch the shared kernel half; the kernel space
+        // has no user pages.
+        if (self.user && virt >= USER_END) || (!self.user && flags.user) {
+            return Err(MapError::WrongHalf);
         }
         let levels = match size {
             PageSize::Size4K => 3,
@@ -301,6 +427,9 @@ impl AddressSpace {
     // ponytail: empty intermediate tables are never freed; free them when
     // address spaces come and go (M2.7).
     pub fn unmap(&mut self, virt: u64) -> Result<u64, MapError> {
+        if self.user && virt >= USER_END {
+            return Err(MapError::WrongHalf);
+        }
         let indexes = table_indexes(virt);
         let mut table = self.root;
         for (level, &index) in indexes.iter().enumerate() {
@@ -432,7 +561,7 @@ pub fn init_kernel_space(
     }
     HHDM.store(hhdm, Ordering::Relaxed);
     NX.store(super::rdmsr(IA32_EFER) & EFER_NXE != 0, Ordering::Relaxed);
-    let mut space = AddressSpace::new(frames)?;
+    let mut space = AddressSpace::new_kernel(frames)?;
 
     for (base, length, kind) in entries {
         let Some(flags) = direct_map_flags(kind) else {
@@ -460,6 +589,15 @@ pub fn init_kernel_space(
     for (start, end, flags) in segments.into_iter().chain(stacks) {
         let len = end.next_multiple_of(FRAME_SIZE) - start;
         space.map_range(start, phys(start), len, flags, frames)?;
+    }
+
+    // Process address spaces copy the kernel-half PML4 entries, so every
+    // one must exist now and never change (1 MiB of tables).
+    for index in KERNEL_HALF..512 {
+        if read_entry(space.root, index) & PRESENT == 0 {
+            let table = alloc_table(frames)?;
+            write_entry(space.root, index, table_entry(table) & !USER);
+        }
     }
 
     // SAFETY: the new tables map everything the kernel uses from here on:
@@ -513,6 +651,26 @@ pub fn kernel_root() -> Option<u64> {
 }
 
 // ---- Test helpers -------------------------------------------------------
+
+/// User-half address that address-space tests map (as a kernel-only page,
+/// so the kernel may read it even with SMAP on).
+pub const USER_TEST_PAGE: u64 = 0x0000_0000_1000_0000;
+
+/// Reads the first byte of [`USER_TEST_PAGE`] through the active address
+/// space, or `None` if it is not mapped there.
+pub fn read_user_test_page() -> Option<u8> {
+    let active = AddressSpace {
+        root: active_root(),
+        user: true,
+    };
+    let translation = active.translate(USER_TEST_PAGE)?;
+    if translation.flags.user {
+        return None; // the kernel does not read user pages directly
+    }
+    // SAFETY: the active tables map `USER_TEST_PAGE` (checked just above) as
+    // a kernel page; a one-byte read changes nothing.
+    Some(unsafe { (USER_TEST_PAGE as *const u8).read_volatile() })
+}
 
 /// Virtual page reserved for tests of mapping and unmapping (outside the
 /// direct map and the planned heap window).
@@ -647,7 +805,18 @@ mod tests {
         assert_eq!(no_nx & NO_EXECUTE, 0, "NX bit reserved without EFER.NXE");
         assert_eq!(Flags::from_entry(data), Flags::DATA);
         assert_eq!(Flags::from_entry(code), Flags::CODE);
-        assert_eq!(table_entry(0x1234_5fff), 0x1234_5000 | PRESENT | WRITABLE);
+        assert_eq!(
+            table_entry(0x1234_5fff),
+            0x1234_5000 | PRESENT | WRITABLE | USER,
+            "tables allow everything; the leaf decides"
+        );
+        assert_eq!(code & USER, 0, "kernel leaves are never user-accessible");
+        let user_data = leaf_entry(0x5000, Flags::USER_DATA, PageSize::Size4K, true);
+        assert_eq!(user_data, 0x5000 | PRESENT | WRITABLE | USER | NO_EXECUTE);
+        let user_code = leaf_entry(0x6000, Flags::USER_CODE, PageSize::Size4K, true);
+        assert_eq!(user_code, 0x6000 | PRESENT | USER, "W^X: read + execute");
+        assert_eq!(Flags::from_entry(user_data), Flags::USER_DATA);
+        assert_eq!(Flags::from_entry(user_code), Flags::USER_CODE);
     }
 
     #[test]

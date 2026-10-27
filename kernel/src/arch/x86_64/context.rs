@@ -18,8 +18,9 @@ use core::arch::global_asm;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::paging::{self, Flags, MapError, PageSize};
+use super::paging::{self, AddressSpace, Flags, MapError, PageSize};
 use crate::mm::frame::{FRAME_SIZE, Frame};
+use crate::mm::raw::{IrqMutex, IrqMutexGuard};
 
 /// Start of the virtual window for task stacks (D-013).
 pub const STACK_WINDOW: u64 = 0xffff_c800_0000_0000;
@@ -121,7 +122,8 @@ impl Drop for KernelStack {
     }
 }
 
-/// A kernel thread's saved execution state.
+/// A thread's saved execution state, and the process address space it runs
+/// in (none for kernel threads, which use the kernel address space).
 pub struct Context {
     /// Saved stack pointer while not running.
     rsp: AtomicU64,
@@ -129,6 +131,10 @@ pub struct Context {
     exited: AtomicBool,
     /// `None` for the boot context, which runs on the kernel stack.
     stack: Option<KernelStack>,
+    /// Process address space, destroyed with the context (issue #38).
+    space: Option<IrqMutex<AddressSpace>>,
+    /// Root table of `space`; 0 for the kernel address space.
+    root: u64,
 }
 
 /// Set once the boot context has been handed out.
@@ -188,12 +194,34 @@ impl Context {
             running: AtomicBool::new(true),
             exited: AtomicBool::new(false),
             stack: None,
+            space: None,
+            root: 0,
         }))
     }
 
     /// A context that, when first switched to, runs `start` on `stack` with
     /// interrupts enabled.
     pub fn new(stack: KernelStack, start: extern "C" fn() -> !) -> Arc<Self> {
+        Self::build(stack, start, None)
+    }
+
+    /// Like [`Context::new`], but the thread runs in the process address
+    /// space `space`, which the context owns and destroys when dropped.
+    /// Panics if `space` is the kernel address space.
+    pub fn with_space(
+        stack: KernelStack,
+        start: extern "C" fn() -> !,
+        space: AddressSpace,
+    ) -> Arc<Self> {
+        assert!(space.is_user(), "a context needs a process address space");
+        Self::build(stack, start, Some(space))
+    }
+
+    fn build(
+        stack: KernelStack,
+        start: extern "C" fn() -> !,
+        space: Option<AddressSpace>,
+    ) -> Arc<Self> {
         let (_, top) = stack.bounds();
         let frame = [
             0,                                          // r15
@@ -215,7 +243,14 @@ impl Context {
             running: AtomicBool::new(false),
             exited: AtomicBool::new(false),
             stack: Some(stack),
+            root: space.as_ref().map_or(0, AddressSpace::root),
+            space: space.map(IrqMutex::new),
         })
+    }
+
+    /// The process address space, locked; `None` for kernel threads.
+    pub fn space(&self) -> Option<IrqMutexGuard<'_, AddressSpace>> {
+        self.space.as_ref().map(IrqMutex::lock)
     }
 
     /// `(bottom, top)` of this context's own stack (`None` for the boot
@@ -234,6 +269,13 @@ impl Drop for Context {
     fn drop(&mut self) {
         // Unmapping the stack we run on would fault at once.
         assert!(!self.is_running(), "dropping the running context");
+        // Not running, so not active either: a switch away from this
+        // context loaded another root.
+        if let Some(space) = self.space.take() {
+            if let Some(frames) = crate::mm::frames().as_mut() {
+                space.into_inner().destroy(frames);
+            }
+        }
     }
 }
 
@@ -261,6 +303,15 @@ fn do_switch(from: Arc<Context>, to: Arc<Context>) {
     to.running.store(true, Ordering::Relaxed);
     let save = from.rsp.as_ptr();
     let next = to.rsp.load(Ordering::Relaxed);
+    // Kernel threads run on the kernel root; process threads on their own.
+    // Both map the kernel half, so execution continues on `from`'s stack.
+    let root = match to.root {
+        0 => paging::kernel_root().unwrap_or(0),
+        root => root,
+    };
+    if root != 0 && root != paging::active_root() {
+        paging::load_root(root);
+    }
     // Other references keep both contexts alive (checked), and nothing else
     // runs until the switch completes (interrupts are disabled, one CPU).
     drop(from);

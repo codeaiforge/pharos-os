@@ -24,6 +24,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 
 use crate::arch::x86_64::context::{self, Context, KernelStack, StackError};
+use crate::arch::x86_64::paging::AddressSpace;
 use crate::arch::x86_64::{
     apic, disable_interrupts, enable_interrupts, wait_for_interrupt, without_interrupts,
 };
@@ -231,13 +232,17 @@ pub fn init() -> Result<(), SchedError> {
     Ok(())
 }
 
-/// A new task with its own stack, not yet queued.
-fn new_task(entry: Entry) -> Result<Arc<Task>, SchedError> {
+/// A new task with its own stack, not yet queued; it runs in `space` if
+/// given, else in the kernel address space.
+fn new_task(entry: Entry, space: Option<AddressSpace>) -> Result<Arc<Task>, SchedError> {
     if SCHEDULER.lock().is_none() {
         return Err(SchedError::NotInitialized);
     }
     let stack = KernelStack::new().map_err(SchedError::Stack)?;
-    let context = Context::new(stack, task_start);
+    let context = match space {
+        Some(space) => Context::with_space(stack, task_start, space),
+        None => Context::new(stack, task_start),
+    };
     let mut scheduler = SCHEDULER.lock();
     let scheduler = scheduler.as_mut().ok_or(SchedError::NotInitialized)?;
     let id = scheduler.next_id;
@@ -252,7 +257,20 @@ fn new_task(entry: Entry) -> Result<Arc<Task>, SchedError> {
 /// Creates a task that runs `entry` on its own 16 KiB stack, and queues it
 /// behind the ready tasks. It exits when `entry` returns.
 pub fn spawn(entry: impl FnOnce() + Send + 'static) -> Result<TaskId, SchedError> {
-    let task = new_task(Box::new(entry))?;
+    queue(new_task(Box::new(entry), None)?)
+}
+
+/// Like [`spawn`], but the task runs in the process address space `space`
+/// (CR3 switches with it). The task owns `space`; it is destroyed, with all
+/// its user pages, when the task is reaped.
+pub fn spawn_in(
+    space: AddressSpace,
+    entry: impl FnOnce() + Send + 'static,
+) -> Result<TaskId, SchedError> {
+    queue(new_task(Box::new(entry), Some(space))?)
+}
+
+fn queue(task: Arc<Task>) -> Result<TaskId, SchedError> {
     let id = task.id;
     let mut scheduler = SCHEDULER.lock();
     let scheduler = scheduler.as_mut().ok_or(SchedError::NotInitialized)?;
@@ -265,12 +283,15 @@ pub fn spawn(entry: impl FnOnce() + Send + 'static) -> Result<TaskId, SchedError
 /// tick, and enables interrupts: from then on a task that does not yield
 /// is preempted after one tick. Needs `time::init`.
 pub fn enable_preemption() -> Result<(), SchedError> {
-    let idle = new_task(Box::new(|| {
-        // Runs with interrupts enabled; halts until the next interrupt.
-        loop {
-            wait_for_interrupt();
-        }
-    }))?;
+    let idle = new_task(
+        Box::new(|| {
+            // Runs with interrupts enabled; halts until the next interrupt.
+            loop {
+                wait_for_interrupt();
+            }
+        }),
+        None,
+    )?;
     SCHEDULER
         .lock()
         .as_mut()

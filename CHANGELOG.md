@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- Process address spaces (#38).
+  - `AddressSpace::new_user` shares the kernel half, and the kernel pre-creates every kernel-half PML4 table at boot (1 MiB) so the shared entries never change.
+  - Page mappings gain a user flag (`Flags::USER_DATA` and `Flags::USER_CODE`, with W^X), and `MapError::WrongHalf` keeps processes out of the kernel half and user pages out of the kernel space.
+  - `destroy` frees a process space's pages, tables, and root.
+  - `sched::spawn_in` runs a task in a process space: the context owns the space, CR3 switches with the task, and the space is freed when the task is reaped.
+  - New test kernel `address_spaces` (15 checks), checked to fail without the CR3 switch, without freeing pages, without the wrong-half check, or without the pre-created tables.
 - System-call and IPC design (`docs/architecture/syscalls-ipc.md`, #37), approved by the maintainer, and accepted decision D-014.
   - Processes with one thread each, an address-space layout with W^X, and `syscall`/`sysret` with register arguments.
   - The kernel never dereferences user addresses: it copies through the direct map after validating each buffer. SMEP/SMAP are enabled where available.

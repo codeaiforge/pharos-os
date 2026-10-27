@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** Accepted with [D-005](../project/decision-log.md#d-005-memory-management-strategy) (2026-10-27).
-- **Implementation:** the frame allocator (#26), the kernel's own page tables with guard pages (#27), reclaiming bootloader memory (#28), and the kernel heap with `alloc` (#29) are **implemented** ([M2.5](../project/implementation-roadmap.md#m25--physical-and-virtual-memory-management)). Reviewed and approved by the maintainer on 2026-10-27 (M2.5 gate).
+- **Implementation:** the frame allocator (#26), the kernel's own page tables with guard pages (#27), reclaiming bootloader memory (#28), and the kernel heap with `alloc` (#29) are **implemented** ([M2.5](../project/implementation-roadmap.md#m25--physical-and-virtual-memory-management)), and so are process address spaces (M2.7, #38). Reviewed and approved by the maintainer on 2026-10-27 (M2.5 gate).
 
 ## 2. Context
 
@@ -47,9 +47,17 @@ References to responses obtained before reclaim must not be used afterwards; thi
 
 ### Page tables (`arch::x86_64::paging`)
 
-- `AddressSpace` owns a 4-level tree; table frames come from the frame allocator and are zeroed through the direct map. It maps 4 KiB and 2 MiB pages, unmaps (with `invlpg` when active), and translates. Permissions live in leaf entries; table entries allow everything.
+- `AddressSpace` owns a 4-level tree; table frames come from the frame allocator and are zeroed through the direct map. It maps 4 KiB and 2 MiB pages, unmaps (with `invlpg` when active), and translates. Permissions live in leaf entries, including the user bit; table entries allow everything.
 - NX bits are set only when `EFER.NXE` is on.
 - Lock order: the frame allocator first, then the kernel address space.
+
+### Process address spaces (M2.7, #38)
+
+- `AddressSpace::new_user` creates an empty user half (below `0x0000800000000000`) and copies the kernel-half PML4 entries (256–511) of the kernel address space, so every kernel mapping is shared.
+- To keep the copies valid, the kernel creates a table behind every kernel-half PML4 entry at boot. Those entries never change afterwards (1 MiB of tables).
+- **Mapping rules (`MapError::WrongHalf`):** a process space maps only its user half; the kernel space never maps user pages. User pages use `Flags::USER_DATA` (read + write, no-execute) or `Flags::USER_CODE` (read + execute).
+- **Ownership:** every frame mapped into a process space belongs to it. `destroy` frees those frames, then the user half's page tables and the root (never the shared kernel half), and refuses to run while the space is active.
+- **Tasks:** `sched::spawn_in(space, closure)` runs a task in a process space. Its context owns the space, destroys it when the task is reaped, and the switch loads its root into CR3; kernel tasks run on the kernel root ([scheduling.md](scheduling.md)).
 
 ### Kernel address space
 
@@ -66,12 +74,13 @@ References to responses obtained before reclaim must not be used afterwards; thi
 | | Kernel stack (64 KiB), guard page below | Writable, no-execute |
 | | Double-fault stack (16 KiB, IST1), guard page below | Writable, no-execute |
 | `0xffffc00000000000` | Kernel heap (4 MiB) | Writable, no-execute |
+| `0x0` – `0x7fffffffffff` | User half: empty in the kernel address space; private in each process address space ([syscalls-ipc.md](syscalls-ipc.md#address-space-layout-per-process)) | Process pages only |
 | `0xffffc80000000000` | Task stacks: 64 slots of 32 KiB, each a 16 KiB stack above an unmapped 16 KiB guard area ([scheduling.md](scheduling.md)) | Writable, no-execute |
 | `0xffffd00000000000` | Test page used by test kernels | — |
 
 The HHDM offset is Limine's (`0xffff800000000000` in QEMU), so addresses computed before the switch stay valid. The direct map uses 2 MiB pages where a region's virtual and physical addresses are 2 MiB-aligned and enough of the region remains, 4 KiB elsewhere; edge pages shared by neighbouring regions are mapped once. Segment boundaries come from `linker.ld` symbols; the kernel's physical base comes from Limine's executable-address response. Guard pages are gaps that `linker.ld` leaves between segments and that the kernel never maps.
 
-In QEMU with 256 MiB the kernel tables take 19 frames under UEFI and 10 under BIOS.
+In QEMU with 256 MiB the kernel tables take 273 frames under UEFI and 264 under BIOS. Of these, 254 are the tables pre-created behind kernel-half PML4 entries; before #38 the counts were 19 and 10.
 
 ## 4. Security
 
@@ -93,5 +102,5 @@ See D-005: free-list and buddy frame allocators, extending Limine's page tables,
 
 - Enforcing the end of Limine responses in the type system instead of by rule.
 - Heap growth beyond the fixed 4 MiB, and a faster search than a linear bitmap scan if profiling shows a need.
-- Freeing empty page tables when address spaces come and go (M2.7).
+- Freeing empty page tables in the kernel address space (process spaces free all of theirs on `destroy`).
 - KASLR.
