@@ -59,7 +59,7 @@ To add a test kernel:
 2. Add a `[[test]]` entry with `name = "<name>"` and `harness = false` to `kernel/Cargo.toml`.
 3. Run `cargo xtask test`. Each test kernel costs about two seconds under UEFI, so group related checks.
 
-In CI the first run with kernel tests (2026-10-27, [run 40476613340](https://github.com/codeaiforge/pharos-os/actions/runs/40476613340)) took 9 s for the boot check and the `boot_info` test kernel. The job itself took 555 s that time because Ubuntu's package mirror delivered the QEMU packages at 44 kB/s (8.5 minutes); the earlier run took 44 s in total. If slow mirrors keep recurring, consider caching the packages; the job's 20-minute limit covers occasional slowness.
+In CI the first run with kernel tests (2026-10-27, [run 40476613340](https://github.com/codeaiforge/pharos-os/actions/runs/40476613340)) took 9 s for the boot check and the `boot_info` test kernel. The job itself took 555 s that time because Ubuntu's package mirror delivered the QEMU packages at 44 kB/s (8.5 minutes); the earlier run took 44 s in total. If slow mirrors keep recurring, consider caching the packages; the job's 20-minute limit covers occasional slowness. At the end of M2.4 (2026-10-27, [run 40507039495](https://github.com/codeaiforge/pharos-os/actions/runs/40507039495)) the job took 97 s: 16 s for packages, 71 s for the boot check and six test kernels (about 3 s each in CI), and the reproducibility check.
 
 
 ## Quality gates
@@ -93,7 +93,7 @@ Why the split: the kernel targets bare metal (`x86_64-unknown-none`, decision D-
 | --- | --- | --- |
 | Host unit tests for target-independent kernel logic | M2.5 | Keep allocators and parsers in host-testable modules; consider Miri |
 | QEMU boot test and kernel tests | M2.3 | `cargo xtask test`: boot check under UEFI and BIOS, then `harness = false` test kernels through Cargo's runner; pass = QEMU status 33 **and** the serial marker, 60 s timeout, logs printed on failure (D-009, accepted) |
-| QEMU kernel tests | M2.4 onward | In-kernel test runner reporting over serial |
+| QEMU kernel tests | M2.3 onward | One test kernel per subsystem in `kernel/tests/`; M2.4 added interrupt state, GDT, exceptions, double fault, and APIC timer tests |
 | Isolation and fuzz tests | M2.7 | Attempt forbidden memory access and invalid syscalls; fuzz syscall argument handling |
 | Agent adversarial tests | M3.4 | Capability bypass attempts, prompt-injection suites, resource exhaustion |
 | Release matrix | M5.1 | Firmware, memory sizes, CPU models; long-running stability |

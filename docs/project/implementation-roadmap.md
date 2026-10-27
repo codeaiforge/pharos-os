@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.4 — Exceptions, interrupts, and debugging.** Everything in Phases 2–5 is **planned, not implemented**.
+**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.5 — Physical and virtual memory management.** Everything in Phases 2–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -39,7 +39,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | Phase | Name | Status |
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
-| 2 | Core System | **Current** (M2.4) |
+| 2 | Core System | **Current** (M2.5) |
 | 3 | AI Agent Platform | Planned |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
@@ -190,7 +190,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.4 — Exceptions, interrupts, and debugging
 
-**Status: Current.**
+**Status: Done** — gate passed 2026-10-27: the CI `qemu` job passed on `main` with the exception tests (`6f1ad22`, [run 40507039495](https://github.com/codeaiforge/pharos-os/actions/runs/40507039495)): six test kernels, 41 checks, including breakpoint, page fault, double fault from a stack overflow, and the local APIC timer. A deliberately broken double-fault stack failed CI on a throwaway branch ([run 40507832079](https://github.com/codeaiforge/pharos-os/actions/runs/40507832079)). Delivered: D-006 (#18), interrupt-safe console (#19), GDT and TSS (#20), IDT and exception handlers (#21), double fault on IST1 with a guarded kernel stack (#22), local APIC timer (#23), debugging docs and CI gate (#24). Design: [interrupts.md](../architecture/interrupts.md).
 
 - **Objective and scope:** IDT, CPU exception handlers, double-fault handling on a separate stack, interrupt controller setup (per D-006), and debugging support.
 - **Deliverables:** Exception handlers that log diagnostic state over serial; interrupt controller driver; GDB workflow in [debugging.md](../development/debugging.md).
@@ -204,7 +204,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.5 — Physical and virtual memory management
 
-**Status: Planned.**
+**Status: Current.**
 
 - **Objective and scope:** Physical frame allocation from the boot memory map, page-table management, and a kernel heap.
 - **Deliverables:** Frame allocator; page mapper; heap allocator enabling `alloc`; `docs/architecture/memory.md`.
@@ -589,4 +589,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. The current milestone is **M2.4 — Exceptions, interrupts, and debugging**. D-006 (interrupt controller) is accepted and the console is interrupt-safe; the next steps are the kernel's own GDT and TSS, the IDT and exception handlers, and the local APIC timer.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4 passed its gate on 2026-10-27. The current milestone is **M2.5 — Physical and virtual memory management**, which needs decision D-005 (memory-management strategy) first. It also takes over the temporary local APIC mapping from M2.4 and adds guard pages for all kernel stacks ([interrupts.md](../architecture/interrupts.md#7-open-questions)).

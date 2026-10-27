@@ -33,6 +33,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Changed
 
+- M2.4 (exceptions, interrupts, debugging) is done: CI runs six test kernels covering breakpoints, page faults, stack-overflow double faults, and the local APIC timer, and a deliberately broken double-fault stack failed CI. M2.5 (memory management) is current. `pharos info` shows the new stage and lists exception handling and timer interrupts as implemented.
 - M2.3 (QEMU boot validation) is done: CI boots the kernel and runs kernel tests on every push; the CI image hash matched a local build. M2.4 (exceptions and interrupts) is current. `pharos info` shows the new stage.
 - `pharos info` reports the minimal kernel and `cargo xtask` as implemented and CI boot tests as planned; the stage is Phase 2 (M2.2). `pharos doctor` points to `cargo xtask run` for the QEMU check.
 - M2.2 (minimal bootable kernel) is done; M2.3 (automated QEMU boot tests) is current.

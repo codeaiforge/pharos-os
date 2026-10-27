@@ -13,7 +13,7 @@ const PROJECT: &str = "Pharos OS";
 const ORGANIZATION: &str = "CodeAIForge";
 /// Comes from Cargo package metadata (workspace version), never hand-copied.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const STAGE: &str = "Phase 2 - Core System (M2.3 complete, M2.4 next)";
+const STAGE: &str = "Phase 2 - Core System (M2.4 complete, M2.5 next)";
 
 /// Command succeeded.
 const EXIT_OK: u8 = 0;
@@ -57,6 +57,10 @@ const COMPONENTS: &[(&str, &str)] = &[
         "minimal x86-64 kernel: boots in QEMU via Limine (UEFI and BIOS), \
          reports boot information over serial, then halts",
     ),
+    (
+        "implemented",
+        "CPU exception handling (incl. stack overflow) and local APIC timer interrupts",
+    ),
     ("implemented", "QEMU boot check in CI (UEFI and BIOS)"),
     (
         "implemented",
@@ -64,7 +68,7 @@ const COMPONENTS: &[(&str, &str)] = &[
     ),
     (
         "planned",
-        "memory management, interrupts, scheduling, processes, IPC",
+        "memory management, device interrupts, scheduling, processes, IPC",
     ),
     ("planned", "storage, filesystem, drivers, networking"),
     ("planned", "local AI inference and sandboxed agent platform"),
@@ -357,19 +361,21 @@ mod tests {
     #[test]
     fn only_workspace_and_cli_are_labeled_implemented() {
         // Update this list only when a component exists and is tested. The
-        // kernel is verified with `cargo xtask run` on UEFI and BIOS (M2.2).
+        // kernel is verified with `cargo xtask run` on UEFI and BIOS (M2.2);
+        // exceptions and timer interrupts by test kernels in CI (M2.4).
         let implemented: Vec<&str> = COMPONENTS
             .iter()
             .filter(|(status, _)| *status == "implemented")
             .map(|(_, what)| *what)
             .collect();
-        assert_eq!(implemented.len(), 5);
+        assert_eq!(implemented.len(), 6);
         assert!(implemented.iter().all(|what| {
             what.contains("workspace")
                 || what.contains("xtask")
                 || what.contains("minimal")
                 || what.contains("CI")
                 || what.contains("kernel tests")
+                || what.contains("exception")
         }));
         for (status, _) in COMPONENTS {
             assert!(["implemented", "placeholder", "planned"].contains(status));
