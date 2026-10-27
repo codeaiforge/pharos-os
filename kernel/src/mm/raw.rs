@@ -7,12 +7,21 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::{disable_interrupts, enable_interrupts, interrupts_enabled};
 use crate::sync::{SpinGuard, SpinLock};
 
 use super::heap::{HEAP_BITMAP_WORDS, Heap};
+
+/// `IrqMutex` guards currently held (one CPU). The scheduler refuses to
+/// switch tasks while any is held (D-013).
+static HELD: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of [`IrqMutex`] guards currently held.
+pub fn irq_locks_held() -> usize {
+    HELD.load(Ordering::Relaxed)
+}
 
 /// A spin lock that owns `T` and disables interrupts while held (restoring
 /// the previous state on release), so an interrupt handler never waits for a
@@ -38,6 +47,7 @@ impl<T> IrqMutex<T> {
         let interrupts_were_enabled = interrupts_enabled();
         disable_interrupts();
         let guard = self.lock.lock();
+        HELD.fetch_add(1, Ordering::Relaxed);
         IrqMutexGuard {
             mutex: self,
             guard: Some(guard),
@@ -74,6 +84,7 @@ impl<T> Drop for IrqMutexGuard<'_, T> {
         // Release the spin lock first, then restore interrupts, so no
         // interrupt can arrive while this CPU still holds the lock.
         drop(self.guard.take());
+        HELD.fetch_sub(1, Ordering::Relaxed);
         if self.interrupts_were_enabled {
             enable_interrupts();
         }

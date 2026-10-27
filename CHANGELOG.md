@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- Kernel tasks and cooperative switching (D-013, #33).
+  - `sched` provides `init`, `spawn(closure)`, `yield_now`, and `exit`, with a round-robin `RunQueue` that is host-tested and generic over the thread type.
+  - `arch::x86_64::context` gives each task a 16 KiB stack with a 16 KiB unmapped guard area (window at `0xffffc80000000000`, up to 64 stacks). It switches tasks with a `global_asm!` routine behind a safe `switch`, which checks its preconditions at run time.
+  - Exited tasks are freed by the next scheduling call.
+  - `IrqMutex` now counts held guards, and switching while one is held panics.
+  - New test kernels `tasks` (18 checks) and `task_overflow` (5), checked to fail when a register is lost in the switch, the guard area is mapped, or exited tasks are not freed.
+  - New design document `docs/architecture/scheduling.md`.
 - Timer calibration and a kernel clock (D-006 timer part, #32). The new `time` module calibrates the local APIC timer and the TSC against polled PIT channel 2, taking the smallest of five 10 ms runs, and rejects implausible rates with a boot error. It also provides `time::uptime()` (from the TSC), `time::delay()`, and `time::start_tick()` (100 Hz). PIT and TSC helpers live in the hardware layer. `kmain` prints a `timer:` line (UEFI and BIOS). The new `timer` test kernel (9 checks) passed with every host core busy and was checked to fail with a wrong tick period or TSC rate. Host unit tests cover the calibration logic.
 - Accepted the timer part of D-006 and decision D-013 (scheduling model), #31. Timer: the local APIC timer ticks at 100 Hz, calibrated at boot against PIT channel 2 (the smallest of five 10 ms runs), and uptime comes from the TSC. Scheduler: preemptive round-robin on one CPU with a 10 ms slice; kernel threads run on 16 KiB stacks with guard pages; tasks switch through a `global_asm!` routine, also from inside the timer interrupt; no lock may be held across a switch. A prototype under QEMU TCG showed calibration within 1% when the host is idle. With the host loaded, single runs read up to 29% high, and at 1000 Hz ticks were lost.
 - Debugging guide: inspecting the kernel's page tables with GDB and QEMU's monitor (`info mem`, raw entries through the direct map), verified on a test kernel. The threat model covers allocator bugs.

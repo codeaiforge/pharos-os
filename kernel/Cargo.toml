@@ -75,3 +75,11 @@ harness = false
 [[test]]
 name = "timer"
 harness = false
+
+[[test]]
+name = "tasks"
+harness = false
+
+[[test]]
+name = "task_overflow"
+harness = false

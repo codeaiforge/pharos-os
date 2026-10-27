@@ -76,6 +76,10 @@ It then builds the kernel's own page tables and switches to them (`mm::init_pagi
 
 The local APIC is the interrupt controller (D-006); the legacy PICs stay masked. `apic::init(hhdm_offset)` maps the APIC register page uncached at `HHDM + physical address` and enables the APIC; `kmain` calls it and prints the APIC ID and version. `time::init()` then calibrates the APIC timer and the TSC against PIT channel 2 (the smallest of five 10 ms runs; D-006) and prints the `timer:` line; `time::uptime()` reads the TSC, `time::delay()` busy-waits, and `time::start_tick()` starts the 100 Hz tick. The main kernel never enables interrupts; the `apic_timer` test kernel starts the periodic timer, enables interrupts, and waits for 20 ticks. Design and limits: [docs/architecture/interrupts.md](../docs/architecture/interrupts.md).
 
+## Tasks
+
+`sched::init()` makes the running code task 0; `sched::spawn(closure)` starts a kernel task on its own 16 KiB stack with an unmapped guard area (`arch::x86_64::context`); `sched::yield_now()` switches round-robin and `sched::exit()` ends a task, whose stack is freed by the next scheduling call. No lock may be held across a switch (checked). Switching is cooperative until the timer preempts tasks (#34); the main kernel does not start tasks yet. Design: [docs/architecture/scheduling.md](../docs/architecture/scheduling.md).
+
 ## Segments and stacks
 
 `kmain` first leaves Limine's boot stack (in bootloader-reclaimable memory) for the 64 KiB kernel stack (`arch::x86_64::run_on_kernel_stack`); test kernels do the same through `test_kernel!`. `linker.ld` puts the kernel stack in its own segment after a gap that no segment covers, so Limine leaves at least one page below the stack unmapped. That page is the guard page: an overflow raises a page fault, which cannot push its frame onto the full stack, so the CPU raises a double fault.

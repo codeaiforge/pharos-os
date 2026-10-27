@@ -7,6 +7,7 @@ Current documents:
 - [Boot design](boot.md) — accepted boot flow, kernel entry contract, image layout, and build tool (implemented in M2.2 and M2.3).
 - [Memory management](memory.md) — frame allocator, the kernel's own page tables, and the kernel address space (M2.5, D-005).
 - [Exceptions and interrupts](interrupts.md) — IDT, exception handling, the double-fault stack, and the local APIC timer (M2.4, D-006).
+- [Scheduling](scheduling.md) — kernel tasks, their stacks, the context switch, and locking rules (M2.6, D-013).
 - [Boot evaluation](boot-evaluation.md) — options and prototype evidence behind D-001 to D-003.
 
 ## When to write one
@@ -27,6 +28,7 @@ docs/architecture/
 ├── boot.md            boot flow and boot protocol usage
 ├── memory.md          physical/virtual memory management
 ├── interrupts.md      exceptions, interrupts, timers
+├── scheduling.md      tasks, context switching, scheduler
 ├── syscalls-ipc.md    system-call interface and IPC
 ├── capabilities.md    capability model and agent permissions
 └── inference.md       inference service and its isolation
