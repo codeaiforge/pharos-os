@@ -1,6 +1,7 @@
 //! x86-64 hardware layer: port I/O, the COM1 serial port and kernel
 //! console, interrupt control, QEMU exit signalling, halting, and (in
-//! submodules) the GDT, TSS, IDT, exception handlers, and the local APIC.
+//! submodules) the GDT, TSS, IDT, exception handlers, page tables, and the
+//! local APIC.
 //!
 //! All of the kernel's hardware `unsafe` code lives here and in submodules
 //! (D-004), behind safe functions. Each `unsafe` block states why it is sound.
@@ -10,6 +11,7 @@
 pub mod apic;
 pub mod gdt;
 pub mod idt;
+pub mod paging;
 
 use core::arch::asm;
 use core::fmt::{self, Write};
@@ -119,6 +121,17 @@ pub fn under_hypervisor() -> bool {
     // SAFETY: CPUID exists on every x86-64 CPU and has no side effects.
     let leaf1 = unsafe { core::arch::x86_64::__cpuid(1) };
     leaf1.ecx & (1 << 31) != 0
+}
+
+/// Reads a model-specific register.
+pub(crate) fn rdmsr(msr: u32) -> u64 {
+    let (lo, hi): (u32, u32);
+    // SAFETY: callers read architectural MSRs that exist on every x86-64 CPU
+    // (IA32_APIC_BASE, IA32_EFER); reading them has no side effects.
+    unsafe {
+        asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags))
+    };
+    u64::from(hi) << 32 | u64::from(lo)
 }
 
 /// True if CPUID reports a local APIC (leaf 1, EDX bit 9).

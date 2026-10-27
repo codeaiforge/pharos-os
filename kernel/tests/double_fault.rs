@@ -1,12 +1,13 @@
 //! Test kernel: a kernel stack overflow hits the guard page and is reported
-//! as a double fault on its own stack, not a triple-fault reboot (issue #22).
+//! as a double fault on its own stack, not a triple-fault reboot (issue #22),
+//! with the kernel's own page tables and guard pages active (issue #27).
 //! Runs under UEFI (D-009).
 
 #![no_std]
 #![no_main]
 
 use pharos_kernel::arch::x86_64::{gdt, idt, kernel_stack_bounds, stack_pointer};
-use pharos_kernel::testing::TestRun;
+use pharos_kernel::testing::{self, TestRun};
 
 pharos_kernel::test_kernel!(run);
 
@@ -15,6 +16,15 @@ const PAGE: u64 = 4096;
 fn run(t: &mut TestRun) {
     gdt::init();
     idt::init();
+    let memory = testing::init_memory(
+        requests::HHDM.response(),
+        requests::MEMMAP.response(),
+        requests::EXECUTABLE_ADDRESS.response(),
+    );
+    t.check("frame allocator and kernel page tables set up", memory);
+    if !memory {
+        return;
+    }
     let (bottom, top) = kernel_stack_bounds();
     let sp = stack_pointer();
     t.check("running on the kernel stack", sp > bottom && sp <= top);

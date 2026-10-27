@@ -47,3 +47,15 @@ harness = false
 [[test]]
 name = "interrupt_state"
 harness = false
+
+[[test]]
+name = "no_execute"
+harness = false
+
+[[test]]
+name = "paging"
+harness = false
+
+[[test]]
+name = "write_protect"
+harness = false

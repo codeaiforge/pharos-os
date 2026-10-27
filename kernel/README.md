@@ -22,7 +22,8 @@ It has **no** device interrupts, memory management, scheduling, processes, syste
 | `src/arch/x86_64.rs` | Hardware layer: port I/O, COM1 serial and the kernel console behind `kprint!`/`kprintln!`, interrupt enable/disable and `without_interrupts`, QEMU exit signal, halt. All hardware `unsafe` code is here and in its submodules |
 | `src/arch/x86_64/gdt.rs` | The kernel's own GDT (null, kernel code, kernel data, TSS) and TSS with a 16 KiB double-fault stack (IST1); loaded by `gdt::init()` at the start of `kmain`. Descriptor encoding is unit-tested on the host |
 | `src/arch/x86_64/idt.rs` | IDT with `global_asm!` entry stubs for CPU exceptions 0–31, the exception dispatcher and serial report, and test helpers (breakpoint, page-fault probe, fatal hook). Frame layout, gate encoding, and report text are unit-tested on the host |
-| `src/arch/x86_64/apic.rs` | Local APIC (xAPIC): maps its register page into Limine's page tables using reserved page-table pages, enables it, runs the periodic timer (vector 32), and handles spurious interrupts (vector 255). Page-table index and entry encoding are unit-tested on the host |
+| `src/arch/x86_64/apic.rs` | Local APIC (xAPIC): maps its register page into the kernel address space, enables it, runs the periodic timer (vector 32), and handles spurious interrupts (vector 255) |
+| `src/arch/x86_64/paging.rs` | The kernel's own page tables: `AddressSpace` (map, unmap, translate; 4 KiB and 2 MiB pages), the kernel address-space builder (direct map, per-segment permissions, stacks with guard pages), and test probes. Entry encoding and page splitting are unit-tested on the host |
 | `linker.ld` | Places the kernel at `0xffffffff80000000` and keeps the Limine request sections |
 | `build.rs` | Passes `linker.ld` to the binary when building for `x86_64-unknown-none` |
 
@@ -66,7 +67,9 @@ Vectors 32–255 are not present yet: an interrupt there raises a general-protec
 
 ## Memory
 
-`kmain` builds the physical frame allocator from Limine's memory map (`mm::init_frames`) and prints `frames: <free> free of <total>`. Only usable regions at or above 1 MiB are managed; bootloader-reclaimable memory joins later (#28). The bitmaps take a few frames at the start of the largest usable region. `mm::frames()` returns the allocator behind an `IrqMutex`, so it can be used with interrupts enabled. Page tables and the heap come next in M2.5 (D-005).
+`kmain` builds the physical frame allocator from Limine's memory map (`mm::init_frames`) and prints `frames: <free> free of <total>`. Only usable regions at or above 1 MiB are managed; bootloader-reclaimable memory joins later (#28). The bitmaps take a few frames at the start of the largest usable region. `mm::frames()` returns the allocator behind an `IrqMutex`, so it can be used with interrupts enabled.
+
+It then builds the kernel's own page tables and switches to them (`mm::init_paging`): the direct map at Limine's offset, the kernel image with per-segment permissions (text read+execute, rodata read-only, data no-execute), and both stacks with unmapped guard pages. Test kernels that need this call `testing::init_memory`. The heap comes next in M2.5 (#29). Design: [docs/architecture/memory.md](../docs/architecture/memory.md).
 
 ## Interrupts
 
@@ -78,7 +81,7 @@ The local APIC is the interrupt controller (D-006); the legacy PICs stay masked.
 
 The kernel then loads its own GDT and TSS (`arch::x86_64::gdt::init`), so nothing depends on Limine's GDT. The TSS gives the double-fault handler its own 16 KiB stack (IST1).
 
-Limitations: the double-fault stack has no guard page, so a handler that overflows it would overwrite neighbouring data. A single stack frame larger than the guard gap could skip over it. Proper guard pages for all stacks come with paging (M2.5).
+The double-fault stack sits in its own segment after a second gap, so it has a guard page too. Both guard pages stay unmapped in the kernel's own page tables. Limitation: a single stack frame larger than a guard page could skip over it.
 
 ## Rules for this crate
 

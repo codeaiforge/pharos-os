@@ -79,11 +79,14 @@ impl Tss {
     }
 }
 
-#[repr(C, align(16))]
+#[repr(C, align(4096))]
 struct Stack([u8; DOUBLE_FAULT_STACK_SIZE]);
 
-// ponytail: static stack without a guard page; an overflowing double-fault
-// handler would overwrite the next static. Add a guard page with M2.5 paging.
+/// `linker.ld` places this in its own segment after an unmapped guard page,
+/// like the kernel stack.
+// SAFETY: `.double_fault_stack` is a NOLOAD section in `linker.ld` reserved
+// for this one static; placing it there has no other effect.
+#[unsafe(link_section = ".double_fault_stack")]
 static mut DOUBLE_FAULT_STACK: Stack = Stack([0; DOUBLE_FAULT_STACK_SIZE]);
 static mut TSS_SEGMENT: Tss = Tss::new();
 static mut GDT: [u64; 5] = [0; 5];

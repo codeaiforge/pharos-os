@@ -16,6 +16,9 @@ mod global {
 
     use super::frame::{FrameAllocator, FrameStats, MAX_REGIONS, Span, plan_storage};
     use super::raw::{IrqMutex, IrqMutexGuard, bitmap_storage};
+    use crate::arch::x86_64::paging::MapError;
+    #[cfg(target_os = "none")]
+    use crate::arch::x86_64::paging::{self, KernelImage};
     use crate::limine::MEMMAP_USABLE;
 
     static FRAMES: IrqMutex<Option<FrameAllocator<'static>>> = IrqMutex::new(None);
@@ -26,14 +29,22 @@ mod global {
         AlreadyInitialized,
         /// No usable region can hold the frame bitmaps.
         NoUsableMemory,
+        /// `init_paging` was called before `init_frames`.
+        FramesNotReady,
+        /// Building the kernel address space failed.
+        Paging(MapError),
     }
 
     impl fmt::Display for MmError {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str(match self {
-                Self::AlreadyInitialized => "memory manager already initialized",
-                Self::NoUsableMemory => "no usable memory region can hold the frame bitmaps",
-            })
+            match self {
+                Self::AlreadyInitialized => f.write_str("memory manager already initialized"),
+                Self::NoUsableMemory => {
+                    f.write_str("no usable memory region can hold the frame bitmaps")
+                }
+                Self::FramesNotReady => f.write_str("frame allocator not set up"),
+                Self::Paging(error) => write!(f, "kernel page tables: {error}"),
+            }
         }
     }
 
@@ -70,6 +81,21 @@ mod global {
         let stats = allocator.stats();
         *frames = Some(allocator);
         Ok(stats)
+    }
+
+    /// Builds the kernel's own page tables and switches to them (D-005).
+    /// Needs [`init_frames`] first. Returns the frames the page tables took.
+    #[cfg(target_os = "none")]
+    pub fn init_paging(
+        hhdm: u64,
+        entries: impl Iterator<Item = (u64, u64, u64)>,
+        image: KernelImage,
+    ) -> Result<usize, MmError> {
+        let mut frames = FRAMES.lock();
+        let frames = frames.as_mut().ok_or(MmError::FramesNotReady)?;
+        let before = frames.stats().free;
+        paging::init_kernel_space(hhdm, entries, image, frames).map_err(MmError::Paging)?;
+        Ok(before - frames.stats().free)
     }
 
     /// The frame allocator, locked (interrupts disabled while held). `None`

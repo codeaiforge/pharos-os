@@ -7,7 +7,7 @@
 //! revision, read the memory map and other boot information, report them over
 //! the COM1 serial port, and halt. It runs on its own stack, loads its own
 //! GDT, TSS, and IDT, reports CPU exceptions, builds a physical frame
-//! allocator, and drives the local APIC timer. It has **no** device interrupts, memory management, scheduling,
+//! allocator, runs on its own page tables, and drives the local APIC timer. It has **no** device interrupts, memory management, scheduling,
 //! processes, or drivers beyond serial and the interrupt controller.
 //!
 //! This library holds the parts that do not depend on the entry point. Logic
@@ -64,9 +64,10 @@ macro_rules! limine_requests {
         #[allow(unsafe_code)]
         mod requests {
             use $crate::limine::{
-                BaseRevisionTag, BootloaderInfoResponse, FirmwareTypeResponse, HhdmResponse,
-                MemmapResponse, REQUESTS_END_MARKER, REQUESTS_START_MARKER, Request,
-                bootloader_info_request, firmware_type_request, hhdm_request, memmap_request,
+                BaseRevisionTag, BootloaderInfoResponse, ExecutableAddressResponse,
+                FirmwareTypeResponse, HhdmResponse, MemmapResponse, REQUESTS_END_MARKER,
+                REQUESTS_START_MARKER, Request, bootloader_info_request,
+                executable_address_request, firmware_type_request, hhdm_request, memmap_request,
             };
 
             #[used]
@@ -92,6 +93,11 @@ macro_rules! limine_requests {
             #[used]
             #[unsafe(link_section = ".limine_requests")]
             pub static MEMMAP: Request<MemmapResponse> = memmap_request();
+
+            #[used]
+            #[unsafe(link_section = ".limine_requests")]
+            pub static EXECUTABLE_ADDRESS: Request<ExecutableAddressResponse> =
+                executable_address_request();
 
             #[used]
             #[unsafe(link_section = ".limine_requests_end")]

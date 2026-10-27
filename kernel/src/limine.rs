@@ -182,8 +182,15 @@ pub struct MemmapEntry {
 
 /// Memory map entry types ("Memory Map Feature").
 pub const MEMMAP_USABLE: u64 = 0;
+pub const MEMMAP_RESERVED: u64 = 1;
+pub const MEMMAP_ACPI_RECLAIMABLE: u64 = 2;
+pub const MEMMAP_ACPI_NVS: u64 = 3;
+pub const MEMMAP_BAD_MEMORY: u64 = 4;
 pub const MEMMAP_BOOTLOADER_RECLAIMABLE: u64 = 5;
 pub const MEMMAP_EXECUTABLE_AND_MODULES: u64 = 6;
+pub const MEMMAP_FRAMEBUFFER: u64 = 7;
+/// Reserved, but mapped by the bootloader (base revision 4 and later).
+pub const MEMMAP_RESERVED_MAPPED: u64 = 8;
 
 /// "Memory Map Feature".
 #[repr(C)]
@@ -210,6 +217,19 @@ pub const fn memmap_request() -> Request<MemmapResponse> {
     Request::new([0x67cf3d9d378a806f, 0xe304acdfc50c3c62])
 }
 
+/// "Executable Address Feature": where the kernel image was loaded.
+#[repr(C)]
+pub struct ExecutableAddressResponse {
+    revision: u64,
+    pub physical_base: u64,
+    pub virtual_base: u64,
+}
+
+/// A request for [`ExecutableAddressResponse`].
+pub const fn executable_address_request() -> Request<ExecutableAddressResponse> {
+    Request::new([0x71ba76863cc55f63, 0xb2644a48c516a487])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +245,7 @@ mod tests {
         assert_eq!(size_of::<HhdmResponse>(), 16);
         assert_eq!(size_of::<FirmwareTypeResponse>(), 16);
         assert_eq!(size_of::<BootloaderInfoResponse>(), 24);
+        assert_eq!(size_of::<ExecutableAddressResponse>(), 24);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use pharos_kernel::arch::x86_64::{
     apic, disable_interrupts, enable_interrupts, gdt, idt, wait_for_interrupt,
 };
 use pharos_kernel::kprintln;
-use pharos_kernel::testing::TestRun;
+use pharos_kernel::testing::{self, TestRun};
 
 pharos_kernel::test_kernel!(run);
 
@@ -20,6 +20,15 @@ const MAX_WAKEUPS: u64 = 10_000;
 fn run(t: &mut TestRun) {
     gdt::init();
     idt::init();
+    let memory = testing::init_memory(
+        requests::HHDM.response(),
+        requests::MEMMAP.response(),
+        requests::EXECUTABLE_ADDRESS.response(),
+    );
+    t.check("frame allocator and kernel page tables set up", memory);
+    if !memory {
+        return;
+    }
     let Some(hhdm) = requests::HHDM.response() else {
         t.check("HHDM response present", false);
         return;

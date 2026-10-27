@@ -11,7 +11,7 @@
 use core::panic::PanicInfo;
 
 use pharos_kernel::arch::x86_64::{
-    _print_panic, QemuExit, apic, gdt, halt, idt, qemu_exit, run_on_kernel_stack,
+    _print_panic, QemuExit, apic, gdt, halt, idt, paging, qemu_exit, run_on_kernel_stack,
 };
 use pharos_kernel::boot_info::{firmware_name, mib, summarize};
 use pharos_kernel::kprintln;
@@ -82,6 +82,22 @@ extern "C" fn kernel_main() -> ! {
             mib(stats.free as u64 * mm::frame::FRAME_SIZE)
         ),
         Err(error) => fail(format_args!("frame allocator setup failed: {error}")),
+    }
+
+    let Some(image) = requests::EXECUTABLE_ADDRESS.response() else {
+        fail(format_args!("no executable address from the bootloader"));
+    };
+    let image = paging::KernelImage {
+        physical_base: image.physical_base,
+        virtual_base: image.virtual_base,
+    };
+    match mm::init_paging(
+        hhdm.offset,
+        memmap.entries().map(|e| (e.base, e.length, e.kind)),
+        image,
+    ) {
+        Ok(tables) => kprintln!("  paging:     kernel page tables active ({tables} table frames)"),
+        Err(error) => fail(format_args!("paging setup failed: {error}")),
     }
 
     if let Err(error) = apic::init(hhdm.offset) {

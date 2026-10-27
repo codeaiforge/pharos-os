@@ -15,10 +15,11 @@ The kernel must report CPU exceptions instead of rebooting, survive a stack over
 
 `kmain` (and every test kernel, through `test_kernel!`) runs in this order:
 
-1. Switch from Limine's boot stack to the 64 KiB kernel stack, which has an unmapped guard page below it (`linker.ld`).
+1. Switch from Limine's boot stack to the 64 KiB kernel stack, which has an unmapped guard page below it (`linker.ld`; kept unmapped by the kernel's own page tables).
 2. Load the kernel's GDT and TSS (`arch::x86_64::gdt`). TSS IST1 is a 16 KiB double-fault stack.
 3. Load the IDT (`arch::x86_64::idt`).
-4. Map and enable the local APIC (`arch::x86_64::apic::init`).
+4. Build the frame allocator and the kernel's own page tables ([memory.md](memory.md)).
+5. Map and enable the local APIC (`arch::x86_64::apic::init`).
 
 The main kernel then reports boot information and halts with interrupts still disabled. Only test kernels enable interrupts so far.
 
@@ -40,7 +41,7 @@ Fatal reports go through the panic print path, which releases the console lock f
 ### Local APIC
 
 - **Mode:** xAPIC (memory-mapped registers). QEMU under TCG cannot provide x2APIC, and the legacy PIC cannot deliver past Limine's masked LINT0 (D-006 evidence).
-- **Mapping:** the 4 KiB register page (physical base from `IA32_APIC_BASE`, normally `0xfee00000`) is mapped at `HHDM + physical address`, uncached (PCD, PWT), writable, and no-execute when `EFER.NXE` is on. The mapping is added to Limine's page tables using up to three page-table pages reserved in the kernel image; their physical addresses come from a page-table walk. M2.5 takes this mapping over when it builds its own tables.
+- **Mapping:** the 4 KiB register page (physical base from `IA32_APIC_BASE`, normally `0xfee00000`) is mapped at `HHDM + physical address`, uncached (PCD, PWT), writable, and no-execute when `EFER.NXE` is on. Since #27 it is an ordinary mapping in the kernel address space ([memory.md](memory.md)); the M2.4 stopgap that added it to Limine's page tables is gone.
 - **Setup:** task priority 0; software-enabled through the spurious-interrupt vector register with vector 255.
 - **Timer:** periodic mode on vector 32, divide by 16, initial count chosen by the caller. Not calibrated yet; M2.6 decides the scheduler timer.
 
@@ -74,4 +75,4 @@ Each was checked once to fail when the feature it tests is broken. The boot chec
 
 - Timer source and calibration for the scheduler (D-006 timer part, M2.6).
 - IOAPIC and ACPI MADT parsing for device interrupts.
-- Guard pages for the double-fault stack and per-CPU stacks (M2.5, SMP).
+- Per-CPU stacks and their guard pages (SMP). The kernel and double-fault stacks have guard pages since #27.

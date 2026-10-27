@@ -65,6 +65,35 @@ impl Default for TestRun {
     }
 }
 
+/// Sets up the frame allocator and the kernel's own page tables from the
+/// Limine responses, as `kmain` does. Prints the reason and returns false on
+/// failure. For test kernels that need memory management.
+#[cfg(target_os = "none")]
+pub fn init_memory(
+    hhdm: Option<&crate::limine::HhdmResponse>,
+    memmap: Option<&crate::limine::MemmapResponse>,
+    image: Option<&crate::limine::ExecutableAddressResponse>,
+) -> bool {
+    use crate::arch::x86_64::paging::KernelImage;
+    use crate::mm;
+
+    let (Some(hhdm), Some(memmap), Some(image)) = (hhdm, memmap, image) else {
+        kprintln!("init_memory: a Limine response is missing");
+        return false;
+    };
+    let entries = || memmap.entries().map(|e| (e.base, e.length, e.kind));
+    let image = KernelImage {
+        physical_base: image.physical_base,
+        virtual_base: image.virtual_base,
+    };
+    let result = mm::init_frames(hhdm.offset, entries())
+        .and_then(|_| mm::init_paging(hhdm.offset, entries(), image));
+    if let Err(error) = &result {
+        kprintln!("init_memory: {error}");
+    }
+    result.is_ok()
+}
+
 /// A test kernel passes only if it ran at least one check and none failed,
 /// so an empty test kernel cannot pass by accident.
 pub fn passed(passed: usize, failed: usize) -> bool {
