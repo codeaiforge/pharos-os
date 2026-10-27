@@ -4,7 +4,8 @@
 //! pinned, checksum-verified Limine release. Unlike the read-only `pharos`
 //! CLI, this tool runs external programs (`cargo`, `curl`, `sha256sum`, `tar`,
 //! `cc`, `xorriso`, `qemu-system-x86_64`). It writes only under the
-//! workspace's `target/` directory and never needs root. Design: `docs/architecture/boot.md`.
+//! workspace's `target/` directory (except `fs build`, which writes the
+//! image path it is given) and never needs root. Design: `docs/architecture/boot.md`.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -14,6 +15,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode};
 use std::time::{Duration, Instant, SystemTime};
+
+mod fs_image;
 
 /// Pinned Limine release (D-001). To update the pin, follow
 /// "Updating the Limine pin" in docs/architecture/boot.md.
@@ -72,6 +75,10 @@ COMMANDS:
                             if QEMU exits with status 33 and the serial log shows
                             the expected marker within the time limit (default
                             60 s). Logs: target/xtask/logs/.
+    fs build <DIR> <IMAGE>  Pack the regular files under DIR into a Pharos
+                            filesystem image (docs/architecture/storage.md).
+    fs ls <IMAGE>           Check an image with the kernel's parser and list
+                            its files (size, CRC-32, path).
     runner <ELF>            Boot one test kernel headless (used by Cargo as the
                             runner for x86_64-unknown-none; see .cargo/config.toml).
     help                    Show this help message
@@ -99,6 +106,13 @@ enum Task {
     },
     Runner {
         elf: PathBuf,
+    },
+    FsBuild {
+        dir: PathBuf,
+        image: PathBuf,
+    },
+    FsLs {
+        image: PathBuf,
     },
 }
 
@@ -165,6 +179,25 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                 timeout: Duration::from_secs(secs),
             });
         }
+        Some("fs") => match args.next().as_deref() {
+            Some("build") => {
+                let dir = args
+                    .next()
+                    .ok_or("fs build needs a directory and an image path")?;
+                let image = args.next().ok_or("fs build needs an image path")?;
+                Task::FsBuild {
+                    dir: PathBuf::from(dir),
+                    image: PathBuf::from(image),
+                }
+            }
+            Some("ls") => {
+                let image = args.next().ok_or("fs ls needs an image path")?;
+                Task::FsLs {
+                    image: PathBuf::from(image),
+                }
+            }
+            _ => return Err("fs needs 'build <DIR> <IMAGE>' or 'ls <IMAGE>'".to_owned()),
+        },
         Some(other) => return Err(format!("unknown command '{other}'")),
     };
     match args.next() {
@@ -881,6 +914,8 @@ fn main() -> ExitCode {
             Task::Run { bios, gdb, kernel } => run_qemu(&paths, bios, gdb, kernel),
             Task::Test { timeout } => test(&paths, timeout),
             Task::Runner { elf } => runner(&paths, &elf),
+            Task::FsBuild { dir, image } => fs_image::build(&dir, &image),
+            Task::FsLs { image } => fs_image::ls(&image),
         }
     });
     match result {
@@ -912,6 +947,19 @@ mod tests {
                 kernel: Some(PathBuf::from("k.elf"))
             })
         );
+        assert_eq!(
+            parse(args(&["fs", "build", "root", "x.fs"])),
+            Ok(Task::FsBuild {
+                dir: PathBuf::from("root"),
+                image: PathBuf::from("x.fs")
+            })
+        );
+        assert_eq!(
+            parse(args(&["fs", "ls", "x.fs"])),
+            Ok(Task::FsLs {
+                image: PathBuf::from("x.fs")
+            })
+        );
     }
 
     #[test]
@@ -921,6 +969,10 @@ mod tests {
         assert!(parse(args(&["image", "--kernel"])).is_err());
         assert!(parse(args(&["image", "--iso"])).is_err());
         assert!(parse(args(&["run", "--uefi"])).is_err());
+        assert!(parse(args(&["fs"])).is_err());
+        assert!(parse(args(&["fs", "build", "dir"])).is_err());
+        assert!(parse(args(&["fs", "ls"])).is_err());
+        assert!(parse(args(&["fs", "ls", "a", "b"])).is_err());
     }
 
     #[test]

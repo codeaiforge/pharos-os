@@ -7,9 +7,16 @@ name = "pharos-cli"
 version = "0.1.0"
 
 [[package]]
+name = "pharos-fs"
+version = "0.1.0"
+
+[[package]]
 name = "pharos-kernel"
 version = "0.1.0"
 
 [[package]]
 name = "xtask"
 version = "0.1.0"
+dependencies = [
+ "pharos-fs",
+]

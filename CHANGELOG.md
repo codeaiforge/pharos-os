@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- Filesystem image format version 1 (#45): new crate `crates/pharos-fs` (`no_std`, no dependencies, `unsafe` forbidden) with a reproducible builder, a parser that checks the header, directory, paths, ranges, and every CRC-32 before use, and a `BlockDevice` trait; `cargo xtask fs build <dir> <image>` and `cargo xtask fs ls <image>`. Tested with one case per corruption type and 100,000 mutated images.
 - Storage design (`docs/architecture/storage.md`, #44), approved by the maintainer: block-device trait, read-only image format version 1 with CRC-32 checksums, validation order, kernel interface, file capabilities with `open` and `read` system calls, and the host tool. The threat model lists storage images as untrusted input.
 - Accepted decision D-007 (#43): M2.8 storage is a read-only RAM disk loaded as a Limine module, in a small custom format with CRC-32 checksums, parsed by one safe `no_std` crate shared by the kernel and the host tool. Processes reach files only through capabilities; writes will use copy-on-write.
 - M2.7 security review (`docs/security/review-m2.7-kernel-user-boundary.md`, #42) of the kernel/user boundary, covering every system call, user-memory path, entry path, and `unsafe` block added in M2.7. Fixes from it:
@@ -115,6 +116,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- README status table listed memory management, interrupts, scheduling, processes, and IPC as planned after they were implemented.
 - The kernel builds again on the minimum supported Rust (1.85): two let chains (stable only since Rust 1.88) from #38 and #39 failed CI's `msrv` job on four commits. `scripts/check.sh` now repeats the `msrv` job's checks when Rust 1.85 is installed, and reports when it skips them.
 
 ### Security

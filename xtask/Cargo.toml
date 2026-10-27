@@ -9,3 +9,6 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+pharos-fs = { path = "../crates/pharos-fs" }

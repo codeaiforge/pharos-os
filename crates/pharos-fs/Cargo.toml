@@ -1,0 +1,11 @@
+[package]
+name = "pharos-fs"
+description = "Pharos OS read-only filesystem image format: builder, validating parser, and block-device trait (D-007, storage.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

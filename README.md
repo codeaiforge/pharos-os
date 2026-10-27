@@ -13,12 +13,14 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 | --- | --- |
 | Rust workspace, formatting, linting, tests, CI config | Implemented |
 | `pharos` host-side CLI (`help`, `version`, `info`, `doctor`) | Implemented |
-| `cargo xtask` (kernel build, reproducible boot image, QEMU run) | Implemented |
+| `cargo xtask` (kernel build, reproducible boot image, QEMU run, filesystem images) | Implemented |
 | Minimal x86-64 kernel: boots via Limine in QEMU (UEFI and BIOS), reports boot information over serial, halts | Implemented |
 | Automated QEMU boot check in CI (UEFI and BIOS, reproducible image) | Implemented |
 | Kernel tests inside QEMU (test kernels, run locally and in CI) | Implemented |
-| Memory management, interrupts, scheduling, processes, IPC | Planned |
-| Storage, drivers, networking | Planned |
+| Memory management, exceptions and timer interrupts, preemptive scheduling, user processes, system calls, IPC with capabilities | Implemented |
+| Filesystem image format and host tool (`crates/pharos-fs`, `cargo xtask fs`) | Implemented |
+| Storage in the kernel (RAM disk, filesystem, file capabilities) | Planned (M2.8) |
+| Device interrupts, drivers, networking | Planned |
 | Local AI inference and agent platform | Planned |
 
 ## Vision
@@ -93,6 +95,7 @@ This runs the same checks as CI ([.github/workflows/ci.yml](.github/workflows/ci
 | Path | Purpose |
 | --- | --- |
 | `kernel/` | The minimal `no_std` kernel ([kernel/README.md](kernel/README.md)) |
+| `crates/pharos-fs/` | Filesystem image format: builder, validating parser, block-device trait, shared by the kernel and `cargo xtask` ([storage design](docs/architecture/storage.md)) |
 | `tools/pharos-cli/` | The `pharos` host-side development CLI |
 | `xtask/` | `cargo xtask`: builds the kernel and boot image ([boot design](docs/architecture/boot.md#build-tool-xtask)) |
 | `docs/` | Project, development, architecture, and security docs ([index](docs/README.md)) |

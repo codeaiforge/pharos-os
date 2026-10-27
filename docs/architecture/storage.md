@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.8, #44). It follows [D-007](../project/decision-log.md#d-007-filesystem-and-persistent-storage) (read-only RAM disk, custom checked format, files through capabilities).
-- **Implementation:** **planned**. The image format and host tool (#45), the RAM disk (#46), the kernel filesystem (#47), and file capabilities (#48) are separate issues.
+- **Implementation:** the image format, parser, and host tool are **implemented** (#45: `crates/pharos-fs`, `cargo xtask fs build` and `fs ls`). The RAM disk (#46), the kernel filesystem (#47), and file capabilities (#48) are **planned**.
 
 ## 2. Context
 
