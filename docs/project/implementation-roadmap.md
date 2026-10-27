@@ -232,7 +232,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.7 — Processes, privilege boundaries, system calls, and IPC
 
-**Status: Current.** Needs D-004 Accepted and a D-012 direction first.
+**Status: Current.** D-004 accepted and the D-012 direction recorded on 2026-10-27 (#36).
 
 - **Objective and scope:** User-mode processes in separate address spaces, a minimal system-call interface, and IPC. This is the foundation for isolating services and agents.
 - **Deliverables:** Ring 3 execution; per-process address spaces; syscall entry; IPC primitive; `docs/architecture/syscalls-ipc.md`; capability direction from D-012 reflected in the interface.
@@ -570,14 +570,14 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, and D-013 on 2026-10-27; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, and D-004 on 2026-10-27; D-012 has a recorded direction; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
 | D-001 | Bootloader and boot protocol | M2.1 | **Accepted:** Limine, Limine protocol, own protocol structures |
 | D-002 | BIOS and/or UEFI | M2.1 | **Accepted:** UEFI primary, BIOS secondary |
 | D-003 | Rust target, linker, build strategy | M2.1 | **Accepted:** `x86_64-unknown-none` on stable, linker script, `xtask`, ISO, kernel as workspace member |
-| D-004 | Kernel architecture and privilege boundaries | M2.1 (direction), M2.7 | **Direction:** capability-based microkernel; final decision open |
+| D-004 | Kernel architecture and privilege boundaries | M2.1 (direction), M2.7 | **Accepted:** capability-based microkernel, `unsafe` in a small hardware layer; IPC round trip ≤ 2 µs (KVM) |
 | D-005 | Memory-management strategy | M2.5 | **Accepted:** bitmap frame allocator per region, own page tables, Limine's HHDM with 2 MiB pages, own bitmap heap, `unsafe` in `mm::raw` |
 | D-006 | Interrupt controller and timer | M2.4, M2.6 | **Accepted:** local APIC (xAPIC), PICs masked; APIC timer at 100 Hz calibrated against the PIT, TSC uptime clock |
 | D-007 | Filesystem and persistent storage | M2.8 | Crash consistency, simplicity, host tooling |
@@ -585,9 +585,9 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-009 | QEMU automation and debugging | M2.3 | **Accepted:** status 33 + serial marker, 60 s timeout, test kernels via Cargo runner and `cargo xtask test` |
 | D-010 | Inference runtime, model formats, licensing | M3.1 | Licenses, memory safety, performance, portability |
 | D-011 | CPU/GPU support, memory/VRAM | M3.1, M3.2 | Hardware requirements, driver availability |
-| D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | No ambient authority, revocation, auditability |
+| D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | **Direction:** kernel-enforced capabilities (per-process handle tables, rights, grant over IPC, revocation), policy in user space; final at M3.4 |
 | D-013 | Scheduling model | M2.6 | **Accepted:** preemptive round-robin on one CPU, 10 ms slice, kernel threads on guarded stacks, no lock held across a switch |
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, and M2.6 passed their gates on 2026-10-27. The current milestone is **M2.7 — Processes, privilege boundaries, system calls, and IPC**. It first needs the final D-004 decision (kernel architecture, open since the M2.1 direction) and a D-012 direction (agent sandboxing and capabilities).
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, and M2.6 passed their gates on 2026-10-27. The current milestone is **M2.7 — Processes, privilege boundaries, system calls, and IPC**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

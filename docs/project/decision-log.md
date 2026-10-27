@@ -276,14 +276,13 @@ Timer prototype on 2026-10-27 (not committed), same QEMU, under UEFI and BIOS wi
 
 **Evidence.** The D-006 timer prototype (100 Hz periodic ticks arrive at the calibrated rate even with the host loaded). The context-switch routine follows the System V AMD64 calling convention (callee-saved registers), so the switch is an ordinary function call on both sides.
 
-## Open and proposed decisions
-
-Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
+## Accepted decisions (M2.7)
 
 ### D-004: Kernel architecture and privilege boundaries
 
-- **Status:** Open — initial direction recorded 2026-10-26 (M2.1). The final decision is due before M2.7.
+- **Status:** Accepted (final decision, issue #36); initial direction recorded 2026-10-26 (M2.1)
 - **Needed by:** initial direction at M2.1; final before M2.7
+- **Date accepted:** 2026-10-27
 
 **Options.**
 
@@ -320,6 +319,54 @@ Known costs: IPC overhead on hot paths (notably moving large model data to and f
 5. Keep the scheduler generic over threads; do not assume all threads run in the kernel.
 6. Avoid kernel-wide mutable global state, except documented singletons in the hardware layer; pass explicit handles where practical.
 7. No filesystem, network-stack, or agent-related code in the kernel before D-004 is final.
+
+**Decision (final, M2.7).** Confirm the direction: **a capability-based microkernel, with `unsafe` confined to a small hardware layer inside it.**
+
+1. **In the kernel:**
+   - address spaces;
+   - threads and scheduling (D-013);
+   - IPC;
+   - capabilities;
+   - interrupt delivery (to user-space drivers from M2.9);
+   - the timer (D-006);
+   - the interrupt controller;
+   - the serial debug console.
+
+   Nothing else: drivers, filesystems, networking, inference, and agents run as user processes (constraints 2 and 7 stay in force).
+2. **`unsafe` boundary:** only `arch::x86_64`, `limine`, and `mm::raw` may use `unsafe` (AGENTS.md). User-mode entry, system calls, and page-table changes for processes join the hardware layer; process, IPC, and capability logic is safe Rust.
+3. **IPC budget**, judged on the development machine with QEMU and KVM (`-cpu host`), release build. QEMU under TCG is for correctness only: its timings do not reflect hardware.
+   - **Message round trip:** call and reply between two user processes with a small message must take **at most 2 µs**.
+   - **Shared memory:** granting a 1 MiB region to another process must take **at most 100 µs**.
+   - M2.7 (#41) measures the message round trip. The shared-memory path is measured when it exists (inference, M3.x).
+   - Missing either budget is the evidence that reopens this decision (see above).
+4. **Still open by design:** the user-space driver model (D-008, M2.9) remains the other trigger for revisiting.
+
+**Consequences.** M2.7 builds processes, system calls, and IPC as the main kernel interface and designs them in `syscalls-ipc.md` (#37). Large data (models, buffers) must move through shared-memory capabilities, not message copies. Debugging spans processes. Constraints 1–7 now apply as rules for all kernel code, not only M2.2–M2.6.
+
+**Evidence (final decision).** Prototype test kernel on 2026-10-27 (not committed). It added user segments, user pages, `syscall`/`sysret` and `int 0x80` entry, and ring 3 entry, and ran in QEMU 8.2.2 on an Intel Core i9-10900K. Round trips are averages over 100,000 calls; the task switch over 20,000 round trips:
+
+| Measurement | KVM, `-cpu host`, release | TCG, default CPU, release |
+| --- | --- | --- |
+| `syscall`/`sysret`, empty handler | 18 ns | 74 ns |
+| `syscall`/`sysret` with stack switch, caller-saved registers saved, Rust call | 21 ns | 134 ns |
+| `int 0x80`/`iretq` | 138 ns | 397 ns |
+| Kernel task switch round trip (two `yield_now`) | 145 ns | 1,275 ns |
+
+Estimate for one IPC round trip:
+- two system calls (about 40 ns);
+- two task switches (about 150 ns);
+- two address-space switches, unmeasured: a CR3 write without PCID flushes the TLB, assumed a few hundred ns each;
+- copying a small message.
+
+That is under 1 µs, half the budget.
+
+- **User data access:** a ring 3 read of kernel data faulted with error code `0x5` (user mode, protection violation) and `CS = 0x33`, and the kernel continued into its fault handler. UEFI and BIOS behaved the same.
+- **SMEP and SMAP:** QEMU's default CPU under TCG (used by CI) reports neither. `-cpu max` under TCG and `-cpu host` under KVM report both. Limine leaves CR4 at `0x20`, so neither is enabled.
+- **Timing under TCG is noisy:** the debug build's empty `syscall` measured faster (43 ns) than the release build.
+
+## Open and proposed decisions
+
+Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
 
 ### D-007: Filesystem and persistent storage
 
@@ -361,9 +408,29 @@ Known costs: IPC overhead on hot paths (notably moving large model data to and f
 
 ### D-012: Agent sandboxing, tool permissions, and network isolation
 
-- **Status:** Open
+- **Status:** Open — direction recorded 2026-10-27 (M2.7, issue #36); final at M3.4
 - **Needed by:** direction by M2.7 (so syscalls/IPC support it); final at M3.4
 
 **Options.** Kernel-enforced capabilities; user-space policy service; combination. Permission prompts versus pre-declared manifests. Default-deny networking with per-destination grants.
 
 **Evaluation criteria.** No ambient authority; revocation; auditability; usability of permission prompts; resistance to prompt injection leading to privilege escalation.
+
+**Direction (recorded 2026-10-27, M2.7).** The kernel enforces capabilities; user space decides policy.
+
+1. **Mechanism in the kernel:**
+   - Each process has a capability table, and user code names capabilities by handle (an index into its own table, meaningless in another process).
+   - A capability is a reference to a kernel object (at first an IPC endpoint; later memory regions, processes, interrupts) plus a set of rights (for example send, receive, map, grant).
+   - Every system call that touches an object takes a handle and checks its rights.
+2. **No ambient authority:** a process starts with only the capabilities its creator gives it. There are no global names or default access.
+3. **Delegation:** capabilities move between processes only inside IPC messages, and only with the grant right. The sender can pass on the same or fewer rights.
+4. **Revocation:** the holder of the original capability can revoke everything derived from it. M2.7 (#37) chooses how: a derivation tree as in seL4, or revocable indirection objects. Revocation must not depend on the receivers' cooperation.
+5. **Policy in user space:** a policy service (the agent runtime, M3.x) decides what each agent gets and records an audit log. Permission prompts versus manifests, and network rules, are decided at M3.4.
+6. **M2.7 implements:**
+   - capability tables;
+   - endpoint capabilities with send and receive rights;
+   - passing a capability in a message;
+   - deleting a handle;
+   - revocation as designed in #37.
+
+   Memory, process, and interrupt capabilities follow with their milestones.
+

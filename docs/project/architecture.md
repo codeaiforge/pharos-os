@@ -65,7 +65,7 @@ Agents start with no authority. The user or a policy grants specific capabilitie
 
 ### Kernel style
 
-The final kernel style is **not decided** (decision D-004, due before M2.7). The **initial direction** (recorded at M2.1) is a **capability-based microkernel**: the kernel keeps address spaces, threads and scheduling, IPC, capabilities, and interrupt delivery, while drivers, filesystems, networking, and AI services run in user space. Inside the kernel, `unsafe` code is confined to a small hardware layer. The direction, the evidence that would change it, and the constraints it places on early kernel code are in the [decision log](decision-log.md#d-004-kernel-architecture-and-privilege-boundaries).
+The kernel style is decided (decision D-004, accepted 2026-10-27): a **capability-based microkernel**. The kernel keeps address spaces, threads and scheduling, IPC, capabilities, and interrupt delivery, while drivers, filesystems, networking, and AI services run in user space. Inside the kernel, `unsafe` code is confined to a small hardware layer. The decision, its IPC budget, the evidence that would reopen it, and the constraints it places on kernel code are in the [decision log](decision-log.md#d-004-kernel-architecture-and-privilege-boundaries).
 
 ## Keeping this document accurate
 

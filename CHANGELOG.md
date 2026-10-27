@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- Accepted D-004 as final and recorded the D-012 direction (#36).
+  - D-004: the kernel is a capability-based microkernel, with `unsafe` confined to a small hardware layer. It keeps only address spaces, threads and scheduling, IPC, capabilities, interrupt delivery, the timer, the interrupt controller, and the debug console. The IPC budget, measured under KVM with a release build: a message round trip of at most 2 µs and a 1 MiB shared-memory grant of at most 100 µs.
+  - D-012 direction: the kernel enforces capabilities (per-process handle tables, rights, passing capabilities over IPC with a grant right, revocation by the original holder) and user space decides policy. The final decision is due at M3.4.
+  - A ring 3 prototype measured a `syscall`/`sysret` round trip of 18–21 ns and `int 0x80` at 138 ns under KVM. It confirmed that user code reading kernel memory faults, and that QEMU's default CPU under TCG has no SMEP or SMAP.
 - M2.6 complete: the scheduling tests pass in CI ([run 40530704211](https://github.com/codeaiforge/pharos-os/actions/runs/40530704211), 16 test kernels), and a scheduler with preemption removed failed CI ([run 40532363163](https://github.com/codeaiforge/pharos-os/actions/runs/40532363163)). The roadmap marks M2.6 Done and M2.7 Current. `pharos info` reports the new stage and lists the timer and preemptive scheduling as implemented. The architecture overview describes the kernel as of M2.6. The threat model covers starvation, per-task stack overflow, and corrupted task state.
 - Preemptive scheduling (D-013, #34).
   - `sched::enable_preemption` creates an idle task, installs the scheduler as the local APIC tick handler (new `apic::set_tick_handler`, called after EOI), starts the 100 Hz tick, and enables interrupts. Each tick wakes due sleepers and switches to the next ready task from inside the interrupt handler (one-tick slice).
