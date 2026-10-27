@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.5 — Physical and virtual memory management.** Everything in Phases 2–5 is **planned, not implemented**.
+**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.6 — Timers and scheduling.** Everything in Phases 2–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -39,7 +39,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | Phase | Name | Status |
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
-| 2 | Core System | **Current** (M2.5) |
+| 2 | Core System | **Current** (M2.6) |
 | 3 | AI Agent Platform | Planned |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
@@ -204,7 +204,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.5 — Physical and virtual memory management
 
-**Status: Current.**
+**Status: Done** — gate passed 2026-10-27: the CI `qemu` job passed on `main` with the memory tests (`850c165`, [run 40516480215](https://github.com/codeaiforge/pharos-os/actions/runs/40516480215)): 13 test kernels, including frames, paging, write protection, no-execute, reclaim, heap, and heap exhaustion; the maintainer reviewed and approved [memory.md](../architecture/memory.md). Read-only data deliberately mapped writable failed CI on a throwaway branch ([run 40516617148](https://github.com/codeaiforge/pharos-os/actions/runs/40516617148)). Delivered: D-005 (#25), frame allocator (#26), the kernel's own page tables with guard pages (#27), reclaim of bootloader memory (#28), kernel heap and `alloc` (#29), page-table debugging docs and CI gate (#30).
 
 - **Objective and scope:** Physical frame allocation from the boot memory map, page-table management, and a kernel heap.
 - **Deliverables:** Frame allocator; page mapper; heap allocator enabling `alloc`; `docs/architecture/memory.md`.
@@ -218,7 +218,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.6 — Timers and scheduling
 
-**Status: Planned.**
+**Status: Current.**
 
 - **Objective and scope:** A periodic or one-shot timer (per D-006) and a scheduler for kernel tasks.
 - **Deliverables:** Timer driver; task abstraction; context switching; scheduler.
@@ -589,4 +589,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4 passed its gate on 2026-10-27. The current milestone is **M2.5 — Physical and virtual memory management**, with decision D-005 (memory-management strategy) accepted. It also takes over the temporary local APIC mapping from M2.4 and adds guard pages for all kernel stacks ([interrupts.md](../architecture/interrupts.md#7-open-questions)).
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4 and M2.5 passed their gates on 2026-10-27. The current milestone is **M2.6 — Timers and scheduling**, which needs the timer part of decision D-006 first (open since M2.4; lean: the local APIC timer, calibrated against the PIT or HPET).

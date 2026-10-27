@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** Accepted with [D-005](../project/decision-log.md#d-005-memory-management-strategy) (2026-10-27).
-- **Implementation:** the frame allocator (#26), the kernel's own page tables with guard pages (#27), reclaiming bootloader memory (#28), and the kernel heap with `alloc` (#29) are **implemented** ([M2.5](../project/implementation-roadmap.md#m25--physical-and-virtual-memory-management)). This document is complete for M2.5; the maintainer's review is part of the M2.5 gate (#30).
+- **Implementation:** the frame allocator (#26), the kernel's own page tables with guard pages (#27), reclaiming bootloader memory (#28), and the kernel heap with `alloc` (#29) are **implemented** ([M2.5](../project/implementation-roadmap.md#m25--physical-and-virtual-memory-management)). Reviewed and approved by the maintainer on 2026-10-27 (M2.5 gate).
 
 ## 2. Context
 
