@@ -144,8 +144,8 @@ macro_rules! test_kernel {
 /// Human-readable implementation status of this crate.
 pub const STATUS: &str = "minimal kernel: boots via Limine and reports boot information over \
                           serial; handles CPU exceptions and local APIC timer interrupts with a calibrated clock; manages \
-                          physical memory, its own page tables, and a heap; no scheduling or \
-                          processes";
+                          physical memory, its own page tables, and a heap; schedules kernel tasks \
+                          preemptively; no user processes";
 
 #[cfg(test)]
 mod tests {
@@ -154,6 +154,6 @@ mod tests {
     #[test]
     fn status_states_the_limits() {
         assert!(STATUS.contains("minimal"));
-        assert!(STATUS.contains("no scheduling"));
+        assert!(STATUS.contains("no user processes"));
     }
 }

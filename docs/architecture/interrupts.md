@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** Accepted with [D-006](../project/decision-log.md#d-006-interrupt-controller-and-timer-design) (controller part, 2026-10-27).
-- **Implementation:** CPU exceptions, the double-fault stack, and the local APIC timer are **implemented** ([M2.4](../project/implementation-roadmap.md#m24--exceptions-interrupts-and-debugging), issues #19–#23), and so are timer calibration and the kernel clock (M2.6, #32). Scheduling on the tick (M2.6), device interrupts (IOAPIC), and SMP are **planned**.
+- **Implementation:** CPU exceptions, the double-fault stack, and the local APIC timer are **implemented** ([M2.4](../project/implementation-roadmap.md#m24--exceptions-interrupts-and-debugging), issues #19–#23), and so are timer calibration and the kernel clock (M2.6, #32), and preemptive scheduling on the tick ([scheduling.md](scheduling.md), #34). Device interrupts (IOAPIC) and SMP are **planned**.
 
 ## 2. Context
 
@@ -22,7 +22,7 @@ The kernel must report CPU exceptions instead of rebooting, survive a stack over
 5. Map and enable the local APIC (`arch::x86_64::apic::init`).
 6. Calibrate the APIC timer and the TSC against the PIT (`time::init`, about 50 ms).
 
-The main kernel then reports boot information and halts with interrupts still disabled. Only test kernels enable interrupts so far.
+The main kernel then reports boot information and halts with interrupts still disabled. Only test kernels enable interrupts so far (directly, or through `sched::enable_preemption`).
 
 ### Exception and interrupt entry
 
@@ -33,7 +33,7 @@ All IDT entries are 64-bit interrupt gates (interrupts disabled on entry) using 
 | 3 | Breakpoint (`int3`) | Report, continue |
 | 8 | Double fault | Runs on IST1; fatal report |
 | 0–31 (others) | CPU exceptions | Fatal: report vector, decoded error code, CR2 for page faults, registers; signal failure to QEMU; halt |
-| 32 | Local APIC timer | Count the tick, send EOI |
+| 32 | Local APIC timer | Count the tick, send EOI, then call the tick handler (the scheduler, once preemption is enabled), which may switch tasks |
 | 255 | Local APIC spurious interrupt | Count it, no EOI |
 | 33–254 | Not present | Arriving there raises a general-protection fault (fatal) |
 

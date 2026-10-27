@@ -164,6 +164,33 @@ Triple fault
 
 A page fault (`0xe`), a second page fault while delivering it (which becomes a double fault, `0x8`), and a page fault while delivering the double fault. The lines before them give `RIP`, `CR2`, and the registers at each step. Do not commit `qemu.log`.
 
+### Trace task switches
+
+`sched::set_trace(true)` prints every task switch over serial, with the scheduler's tick count. Task 0 is the boot thread; with preemption enabled, the idle task is the first task created by `sched::enable_preemption`. The `preemption` test kernel turns tracing on while three tasks sleep 50, 10, and 30 ms and task 0 sleeps 100 ms. Boot that test kernel to see the trace:
+
+```sh
+cargo test -p pharos-kernel --target x86_64-unknown-none --test preemption --no-run
+cargo xtask run --kernel target/x86_64-unknown-none/debug/deps/preemption-<hash>
+```
+
+Verified on 2026-10-27 (UEFI and BIOS, identical output):
+
+```text
+sched: tick 0: task 0 -> task 2
+sched: tick 0: task 2 -> task 3
+sched: tick 0: task 3 -> task 4
+sched: tick 0: task 4 -> task 1
+sched: tick 2: task 1 -> task 3
+sched: tick 2: task 3 exited -> task 1
+sched: tick 4: task 1 -> task 4
+sched: tick 4: task 4 exited -> task 1
+sched: tick 6: task 1 -> task 2
+sched: tick 6: task 2 exited -> task 1
+sched: tick 11: task 1 -> task 0
+```
+
+Each task goes to sleep in turn and the idle task (1) runs. The 10 ms sleeper (3) wakes at tick 2, the 30 ms one (4) at tick 4, the 50 ms one (2) at tick 6, and task 0 at tick 11. A sleep waits one extra tick, so it never ends early. Tracing prints from the timer interrupt, so a trace left on while tasks are busy slows them down noticeably.
+
 ### Useful QEMU options
 
 `cargo xtask run` already uses `-serial stdio`, `-display none`, `-no-reboot`, `isa-debug-exit`, and (with `--gdb`) `-s -S`; `--kernel <ELF>` boots another kernel, such as a test kernel. Other options for manual runs:

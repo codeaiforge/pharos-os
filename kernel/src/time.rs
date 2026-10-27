@@ -128,11 +128,15 @@ pub fn init() -> Result<Calibration, CalibrationError> {
     Ok(calibration)
 }
 
-/// Starts the periodic tick at [`TICK_HZ`]. Does nothing before [`init`].
-pub fn start_tick() {
+/// Starts the periodic tick at [`TICK_HZ`]. Returns false (and does
+/// nothing) before [`init`].
+pub fn start_tick() -> bool {
     match TICK_COUNT.load(Ordering::Relaxed) {
-        0 => {}
-        count => apic::start_timer(count),
+        0 => false,
+        count => {
+            apic::start_timer(count);
+            true
+        }
     }
 }
 

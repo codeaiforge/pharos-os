@@ -83,3 +83,7 @@ harness = false
 [[test]]
 name = "task_overflow"
 harness = false
+
+[[test]]
+name = "preemption"
+harness = false

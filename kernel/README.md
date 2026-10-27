@@ -78,7 +78,7 @@ The local APIC is the interrupt controller (D-006); the legacy PICs stay masked.
 
 ## Tasks
 
-`sched::init()` makes the running code task 0; `sched::spawn(closure)` starts a kernel task on its own 16 KiB stack with an unmapped guard area (`arch::x86_64::context`); `sched::yield_now()` switches round-robin and `sched::exit()` ends a task, whose stack is freed by the next scheduling call. No lock may be held across a switch (checked). Switching is cooperative until the timer preempts tasks (#34); the main kernel does not start tasks yet. Design: [docs/architecture/scheduling.md](../docs/architecture/scheduling.md).
+`sched::init()` makes the running code task 0; `sched::spawn(closure)` starts a kernel task on its own 16 KiB stack with an unmapped guard area (`arch::x86_64::context`); `sched::yield_now()` switches round-robin and `sched::exit()` ends a task, whose stack is freed by the next scheduling call. `sched::sleep()` blocks a task for whole ticks. After `sched::enable_preemption()` the 100 Hz timer tick preempts a task after one tick (10 ms), and an idle task halts when nothing is ready; `sched::set_trace(true)` prints switches. No lock may be held across a switch (checked). The main kernel does not start tasks yet. Design: [docs/architecture/scheduling.md](../docs/architecture/scheduling.md).
 
 ## Segments and stacks
 

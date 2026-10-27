@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- Preemptive scheduling (D-013, #34).
+  - `sched::enable_preemption` creates an idle task, installs the scheduler as the local APIC tick handler (new `apic::set_tick_handler`, called after EOI), starts the 100 Hz tick, and enables interrupts. Each tick wakes due sleepers and switches to the next ready task from inside the interrupt handler (one-tick slice).
+  - `sched::sleep` (whole ticks plus one; a host-tested `SleepQueue`) and `sched::set_trace` for serial tracing of switches (debugging guide).
+  - `time::start_tick` now reports whether the timer was calibrated.
+  - New test kernel `preemption` (12 checks): sleepers wake in deadline order, and a task spinning forever cannot starve the others. It passed with every host core busy and was checked to fail with unsorted sleepers or no time slice.
 - Kernel tasks and cooperative switching (D-013, #33).
   - `sched` provides `init`, `spawn(closure)`, `yield_now`, and `exit`, with a round-robin `RunQueue` that is host-tested and generic over the thread type.
   - `arch::x86_64::context` gives each task a 16 KiB stack with a 16 KiB unmapped guard area (window at `0xffffc80000000000`, up to 64 stacks). It switches tasks with a `global_asm!` routine behind a safe `switch`, which checks its preconditions at run time.

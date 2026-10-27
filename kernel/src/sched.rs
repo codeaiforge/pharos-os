@@ -1,34 +1,56 @@
-//! Kernel task scheduler (D-013): round-robin on one CPU. Issue #33 adds
-//! tasks and cooperative switching (`yield_now`, exit); preemption by the
-//! timer follows in #34.
+//! Kernel task scheduler (D-013): preemptive round-robin on one CPU with a
+//! one-tick time slice (10 ms at 100 Hz). Tasks switch on `yield_now`,
+//! `sleep`, exit, and, once [`enable_preemption`] has run, on every timer
+//! tick. An idle task runs only when nothing else is ready.
 //!
 //! Rules (D-013): switches happen with interrupts disabled and no
 //! `IrqMutex` held (checked); the scheduler lock is released before the
-//! switch. An exited task cannot free the stack it runs on, so the next
+//! switch. A tick switches tasks from inside the timer interrupt handler:
+//! the interrupted task's interrupt frame stays on its own stack until it
+//! runs again. An exited task cannot free the stack it runs on, so the next
 //! scheduling call reaps it. Lock order: scheduler, then frame allocator,
 //! then kernel address space.
 //!
 //! The scheduler is a documented singleton (one CPU; D-004 constraint 6).
-//! Queue logic ([`RunQueue`]) is generic over what a thread is (D-004
-//! constraint 5) and host-tested.
+//! Queue logic ([`RunQueue`], [`SleepQueue`]) is generic over what a thread
+//! is (D-004 constraint 5) and host-tested.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::time::Duration;
 
 use crate::arch::x86_64::context::{self, Context, KernelStack, StackError};
-use crate::arch::x86_64::{disable_interrupts, without_interrupts};
+use crate::arch::x86_64::{
+    apic, disable_interrupts, enable_interrupts, wait_for_interrupt, without_interrupts,
+};
+use crate::kprintln;
 use crate::mm::raw::{IrqMutex, irq_locks_held};
+use crate::time;
 
 /// Task identifier; the boot thread is 0.
 pub type TaskId = u64;
 
-/// Round-robin order: the running thread and a first-in first-out ready
-/// queue.
+/// How the running thread leaves the CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leave {
+    /// It stays runnable (a yield or a used-up time slice).
+    Yield,
+    /// It stops being runnable (sleep or exit).
+    Block,
+}
+
+/// Round-robin order: the running thread, a first-in first-out ready
+/// queue, and an optional idle thread that runs only when nothing else is
+/// ready and is never queued.
 pub struct RunQueue<T> {
     current: T,
     ready: VecDeque<T>,
+    idle: Option<T>,
+    idle_running: bool,
 }
 
 impl<T: Clone> RunQueue<T> {
@@ -37,6 +59,8 @@ impl<T: Clone> RunQueue<T> {
         Self {
             current,
             ready: VecDeque::new(),
+            idle: None,
+            idle_running: false,
         }
     }
 
@@ -50,22 +74,89 @@ impl<T: Clone> RunQueue<T> {
         self.ready.push_back(thread);
     }
 
-    /// Threads waiting to run.
+    /// Threads waiting to run (not counting the idle thread).
     pub fn ready_len(&self) -> usize {
         self.ready.len()
     }
 
-    /// Makes the first ready thread current. The previous one goes to the
-    /// back of the queue if `requeue` (a yield), or leaves the queue (an
-    /// exit). Returns `(previous, next)`, or `None` if nothing else is ready
-    /// (the current thread keeps running).
-    pub fn rotate(&mut self, requeue: bool) -> Option<(T, T)> {
-        let next = self.ready.pop_front()?;
+    /// Sets the idle thread.
+    pub fn set_idle(&mut self, idle: T) {
+        self.idle = Some(idle);
+    }
+
+    /// True if an idle thread is set.
+    pub fn has_idle(&self) -> bool {
+        self.idle.is_some()
+    }
+
+    /// True while the idle thread is the running one.
+    pub fn idle_running(&self) -> bool {
+        self.idle_running
+    }
+
+    /// Makes the first ready thread current, or the idle thread if nothing
+    /// is ready and the current thread blocks. A yielding thread goes to
+    /// the back of the queue (the idle thread never does). Returns
+    /// `(previous, next)`, or `None` if the current thread keeps running
+    /// (nothing ready on a yield, or a block with no idle thread).
+    pub fn rotate(&mut self, leave: Leave) -> Option<(T, T)> {
+        let (next, next_is_idle) = match self.ready.pop_front() {
+            Some(next) => (next, false),
+            None if leave == Leave::Block && !self.idle_running => (self.idle.clone()?, true),
+            None => return None,
+        };
         let previous = core::mem::replace(&mut self.current, next.clone());
-        if requeue {
+        if leave == Leave::Yield && !self.idle_running {
             self.ready.push_back(previous.clone());
         }
+        self.idle_running = next_is_idle;
         Some((previous, next))
+    }
+}
+
+/// Sleeping threads ordered by wake-up tick; equal deadlines wake in the
+/// order they went to sleep.
+pub struct SleepQueue<T> {
+    // ponytail: sorted Vec, O(n) insert; a heap if many tasks sleep at once.
+    sleepers: Vec<(u64, T)>,
+}
+
+impl<T> SleepQueue<T> {
+    /// An empty queue.
+    pub const fn new() -> Self {
+        Self {
+            sleepers: Vec::new(),
+        }
+    }
+
+    /// Adds `thread`, to wake at tick `deadline`.
+    pub fn insert(&mut self, deadline: u64, thread: T) {
+        let at = self.sleepers.partition_point(|(d, _)| *d <= deadline);
+        self.sleepers.insert(at, (deadline, thread));
+    }
+
+    /// Removes the next thread whose deadline is at or before `now`.
+    pub fn pop_due(&mut self, now: u64) -> Option<T> {
+        match self.sleepers.first() {
+            Some((deadline, _)) if *deadline <= now => Some(self.sleepers.remove(0).1),
+            _ => None,
+        }
+    }
+
+    /// Threads sleeping.
+    pub fn len(&self) -> usize {
+        self.sleepers.len()
+    }
+
+    /// True if no thread sleeps.
+    pub fn is_empty(&self) -> bool {
+        self.sleepers.is_empty()
+    }
+}
+
+impl<T> Default for SleepQueue<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -78,6 +169,8 @@ pub enum SchedError {
     NotInitialized,
     /// No stack for a new task.
     Stack(StackError),
+    /// The timer is not calibrated (`time::init`), so it cannot tick.
+    NoTimer,
 }
 
 impl fmt::Display for SchedError {
@@ -86,6 +179,7 @@ impl fmt::Display for SchedError {
             Self::AlreadyInitialized => f.write_str("scheduler already initialized"),
             Self::NotInitialized => f.write_str("scheduler not initialized"),
             Self::Stack(error) => write!(f, "cannot create a task stack: {error}"),
+            Self::NoTimer => f.write_str("timer not calibrated (call time::init first)"),
         }
     }
 }
@@ -101,13 +195,18 @@ struct Task {
 
 struct Scheduler {
     queue: RunQueue<Arc<Task>>,
+    sleepers: SleepQueue<Arc<Task>>,
     /// The last exited task, freed by the next scheduling call.
     exited: Option<Arc<Task>>,
     next_id: TaskId,
     live: usize,
+    /// Timer ticks seen by the scheduler.
+    ticks: u64,
 }
 
 static SCHEDULER: IrqMutex<Option<Scheduler>> = IrqMutex::new(None);
+/// Print every task switch over serial (see the debugging guide).
+static TRACE: AtomicBool = AtomicBool::new(false);
 
 /// Makes the running code (on the kernel stack) task 0. Needs the heap.
 pub fn init() -> Result<(), SchedError> {
@@ -123,16 +222,17 @@ pub fn init() -> Result<(), SchedError> {
     });
     *scheduler = Some(Scheduler {
         queue: RunQueue::new(boot),
+        sleepers: SleepQueue::new(),
         exited: None,
         next_id: 1,
         live: 1,
+        ticks: 0,
     });
     Ok(())
 }
 
-/// Creates a task that runs `entry` on its own 16 KiB stack, and queues it
-/// behind the ready tasks. It exits when `entry` returns.
-pub fn spawn(entry: impl FnOnce() + Send + 'static) -> Result<TaskId, SchedError> {
+/// A new task with its own stack, not yet queued.
+fn new_task(entry: Entry) -> Result<Arc<Task>, SchedError> {
     if SCHEDULER.lock().is_none() {
         return Err(SchedError::NotInitialized);
     }
@@ -142,13 +242,47 @@ pub fn spawn(entry: impl FnOnce() + Send + 'static) -> Result<TaskId, SchedError
     let scheduler = scheduler.as_mut().ok_or(SchedError::NotInitialized)?;
     let id = scheduler.next_id;
     scheduler.next_id += 1;
-    scheduler.live += 1;
-    scheduler.queue.push(Arc::new(Task {
+    Ok(Arc::new(Task {
         id,
         context,
-        entry: IrqMutex::new(Some(Box::new(entry))),
-    }));
+        entry: IrqMutex::new(Some(entry)),
+    }))
+}
+
+/// Creates a task that runs `entry` on its own 16 KiB stack, and queues it
+/// behind the ready tasks. It exits when `entry` returns.
+pub fn spawn(entry: impl FnOnce() + Send + 'static) -> Result<TaskId, SchedError> {
+    let task = new_task(Box::new(entry))?;
+    let id = task.id;
+    let mut scheduler = SCHEDULER.lock();
+    let scheduler = scheduler.as_mut().ok_or(SchedError::NotInitialized)?;
+    scheduler.live += 1;
+    scheduler.queue.push(task);
     Ok(id)
+}
+
+/// Creates the idle task, installs the tick handler, starts the 100 Hz
+/// tick, and enables interrupts: from then on a task that does not yield
+/// is preempted after one tick. Needs `time::init`.
+pub fn enable_preemption() -> Result<(), SchedError> {
+    let idle = new_task(Box::new(|| {
+        // Runs with interrupts enabled; halts until the next interrupt.
+        loop {
+            wait_for_interrupt();
+        }
+    }))?;
+    SCHEDULER
+        .lock()
+        .as_mut()
+        .ok_or(SchedError::NotInitialized)?
+        .queue
+        .set_idle(idle);
+    apic::set_tick_handler(on_tick);
+    if !time::start_tick() {
+        return Err(SchedError::NoTimer);
+    }
+    enable_interrupts();
+    Ok(())
 }
 
 /// ID of the running task (`None` before [`init`]).
@@ -156,32 +290,54 @@ pub fn current_id() -> Option<TaskId> {
     SCHEDULER.lock().as_ref().map(|s| s.queue.current().id)
 }
 
-/// Tasks that have not exited, including the running one.
+/// Tasks that have not exited, including the running one (not the idle
+/// task).
 pub fn live_tasks() -> usize {
     SCHEDULER.lock().as_ref().map_or(0, |s| s.live)
 }
 
-/// Picks the next task. Reaps the previously exited task first. Returns
-/// the contexts to switch between, or `None` if nothing else is ready.
-fn pick_next(requeue: bool) -> Option<(Arc<Context>, Arc<Context>)> {
+/// Timer ticks the scheduler has handled.
+pub fn ticks() -> u64 {
+    SCHEDULER.lock().as_ref().map_or(0, |s| s.ticks)
+}
+
+/// Turns tracing of task switches over serial on or off.
+pub fn set_trace(on: bool) {
+    TRACE.store(on, Ordering::Relaxed);
+}
+
+/// A switch decided by [`pick_next`].
+struct Switch {
+    from: Arc<Context>,
+    to: Arc<Context>,
+    trace: (TaskId, TaskId, u64),
+}
+
+/// Runs `before` on the scheduler state, reaps the previously exited task,
+/// and picks the next task. Returns the switch to make, or `None` if the
+/// current task keeps running.
+fn pick_next(leave: Leave, before: impl FnOnce(&mut Scheduler)) -> Option<Switch> {
     // Declared before the guard, so it is dropped (stack unmapped, frames
     // freed) after the scheduler lock is released.
     let reaped;
     let mut guard = SCHEDULER.lock();
     let scheduler = guard.as_mut()?;
+    // Reap first: `before` may record the task that is exiting now.
     reaped = scheduler.exited.take();
-    let (previous, next) = scheduler.queue.rotate(requeue)?;
-    if !requeue {
-        scheduler.live -= 1;
-        scheduler.exited = Some(previous.clone());
-    }
-    let contexts = (previous.context.clone(), next.context.clone());
+    before(scheduler);
+    let (previous, next) = scheduler.queue.rotate(leave)?;
+    let switch = Switch {
+        from: previous.context.clone(),
+        to: next.context.clone(),
+        trace: (previous.id, next.id, scheduler.ticks),
+    };
     drop(guard);
     drop(reaped);
-    Some(contexts)
+    Some(switch)
 }
 
-/// No lock may be held across a switch (D-013).
+/// No lock may be held across a switch (D-013). Checked on every call
+/// that may switch, even when it turns out not to.
 fn check_no_locks() {
     assert_eq!(
         irq_locks_held(),
@@ -190,25 +346,86 @@ fn check_no_locks() {
     );
 }
 
+/// Checks the switch rules, traces, and switches.
+fn run_switch(switch: Switch) {
+    check_no_locks();
+    if TRACE.load(Ordering::Relaxed) {
+        let (from, to, tick) = switch.trace;
+        kprintln!("sched: tick {tick}: task {from} -> task {to}");
+    }
+    context::switch(switch.from, switch.to);
+}
+
 /// Lets the next ready task run; returns when this task is scheduled again
 /// (at once if no other task is ready).
 pub fn yield_now() {
     without_interrupts(|| {
         check_no_locks();
-        if let Some((from, to)) = pick_next(true) {
-            context::switch(from, to);
+        if let Some(switch) = pick_next(Leave::Yield, |_| {}) {
+            run_switch(switch);
         }
     });
 }
 
-/// Ends the running task. Panics if no other task is ready.
+/// Sleeps for at least `duration`, rounded up to whole ticks (10 ms).
+/// Before [`enable_preemption`] there is no tick to wake the task, so it
+/// busy-waits instead.
+pub fn sleep(duration: Duration) {
+    let period = Duration::from_secs(1) / time::TICK_HZ;
+    let ticks = duration.as_nanos().div_ceil(period.as_nanos()) as u64;
+    without_interrupts(|| {
+        check_no_locks();
+        let preemptive = SCHEDULER
+            .lock()
+            .as_ref()
+            .is_some_and(|s| s.queue.has_idle());
+        if !preemptive {
+            time::delay(duration);
+            return;
+        }
+        let switch = pick_next(Leave::Block, |s| {
+            // The next tick may be moments away, so wait one more to make
+            // sure at least `duration` passes.
+            let deadline = s.ticks + ticks + 1;
+            let current = s.queue.current().clone();
+            s.sleepers.insert(deadline, current);
+        });
+        if let Some(switch) = switch {
+            run_switch(switch);
+        }
+    });
+}
+
+/// Ends the running task. Panics if nothing else can run (no ready task
+/// and no idle task).
 pub fn exit() -> ! {
     disable_interrupts();
     check_no_locks();
-    let Some((from, to)) = pick_next(false) else {
+    let Some(switch) = pick_next(Leave::Block, |s| {
+        s.live -= 1;
+        s.exited = Some(s.queue.current().clone());
+    }) else {
         panic!("the last ready task exited");
     };
-    context::exit_to(from, to)
+    if TRACE.load(Ordering::Relaxed) {
+        let (from, to, tick) = switch.trace;
+        kprintln!("sched: tick {tick}: task {from} exited -> task {to}");
+    }
+    context::exit_to(switch.from, switch.to)
+}
+
+/// Timer tick (interrupt context, interrupts disabled): wakes due sleepers
+/// and ends the running task's time slice.
+fn on_tick() {
+    let switch = pick_next(Leave::Yield, |s| {
+        s.ticks += 1;
+        while let Some(task) = s.sleepers.pop_due(s.ticks) {
+            s.queue.push(task);
+        }
+    });
+    if let Some(switch) = switch {
+        run_switch(switch);
+    }
 }
 
 /// First function of every spawned task (called by the trampoline with
@@ -224,7 +441,7 @@ extern "C" fn task_start() -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::RunQueue;
+    use super::{Leave, RunQueue, SleepQueue};
 
     #[test]
     fn yields_rotate_in_order() {
@@ -234,7 +451,7 @@ mod tests {
         }
         let mut order = Vec::new();
         for _ in 0..8 {
-            let (previous, next) = q.rotate(true).unwrap();
+            let (previous, next) = q.rotate(Leave::Yield).unwrap();
             assert_eq!(previous, *order.last().unwrap_or(&'m'));
             order.push(next);
         }
@@ -243,23 +460,54 @@ mod tests {
     }
 
     #[test]
-    fn exit_leaves_the_queue() {
+    fn blocking_leaves_the_queue() {
         let mut q = RunQueue::new('m');
         q.push('a');
         q.push('b');
-        assert_eq!(q.rotate(true), Some(('m', 'a')));
-        assert_eq!(q.rotate(false), Some(('a', 'b')), "a exits");
-        assert_eq!(q.rotate(true), Some(('b', 'm')));
-        assert_eq!(q.rotate(true), Some(('m', 'b')), "a is gone");
+        assert_eq!(q.rotate(Leave::Yield), Some(('m', 'a')));
+        assert_eq!(q.rotate(Leave::Block), Some(('a', 'b')), "a blocks");
+        assert_eq!(q.rotate(Leave::Yield), Some(('b', 'm')));
+        assert_eq!(q.rotate(Leave::Yield), Some(('m', 'b')), "a is gone");
         assert_eq!(*q.current(), 'b');
     }
 
     #[test]
-    fn alone_keeps_running() {
+    fn alone_keeps_running_without_idle() {
         let mut q = RunQueue::new('m');
-        assert_eq!(q.rotate(true), None);
-        assert_eq!(q.rotate(false), None);
+        assert_eq!(q.rotate(Leave::Yield), None);
+        assert_eq!(q.rotate(Leave::Block), None);
         assert_eq!(*q.current(), 'm');
-        assert_eq!(q.ready_len(), 0);
+    }
+
+    #[test]
+    fn idle_runs_only_when_nothing_is_ready() {
+        let mut q = RunQueue::new('m');
+        q.set_idle('i');
+        assert_eq!(q.rotate(Leave::Yield), None, "a yield never picks idle");
+        assert_eq!(q.rotate(Leave::Block), Some(('m', 'i')), "m sleeps");
+        assert!(q.idle_running());
+        assert_eq!(q.rotate(Leave::Yield), None, "idle keeps running");
+        assert_eq!(q.rotate(Leave::Block), None, "idle never blocks");
+        q.push('m'); // m wakes
+        assert_eq!(q.rotate(Leave::Yield), Some(('i', 'm')));
+        assert!(!q.idle_running());
+        assert_eq!(q.ready_len(), 0, "idle is never queued");
+    }
+
+    #[test]
+    fn sleepers_wake_in_deadline_order() {
+        let mut s = SleepQueue::new();
+        s.insert(50, 'a');
+        s.insert(10, 'b');
+        s.insert(30, 'c');
+        s.insert(30, 'd');
+        assert_eq!(s.pop_due(9), None);
+        assert_eq!(s.pop_due(10), Some('b'));
+        assert_eq!(s.pop_due(40), Some('c'));
+        assert_eq!(s.pop_due(40), Some('d'), "equal deadlines keep their order");
+        assert_eq!(s.pop_due(40), None);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.pop_due(u64::MAX), Some('a'));
+        assert!(s.is_empty());
     }
 }
