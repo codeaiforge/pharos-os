@@ -62,6 +62,9 @@ COMMANDS:
     build                   Build the kernel for x86_64-unknown-none (release)
     image [--kernel <ELF>]  Build a hybrid BIOS/UEFI ISO with the pinned Limine
                             release. Uses the built kernel unless --kernel is given.
+                            Adds kernel/root/ as the filesystem module `root`;
+                            with --kernel (a test kernel), the test modules
+                            instead (also for `run --kernel`).
     run [--bios] [--gdb] [--kernel <ELF>]
                             Build, make the image, and boot it in QEMU with serial
                             output on this terminal. UEFI (OVMF) by default; --bios
@@ -464,9 +467,53 @@ fn build(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Builds the ISO for `kernel` (default: the built kernel) in `out` and
-/// returns its path.
-fn image(paths: &Paths, kernel: Option<PathBuf>, out: &Path) -> Result<PathBuf> {
+/// A boot module: its name (Limine's `module_string`) and contents.
+type Module = (&'static str, Vec<u8>);
+
+/// Modules for the kernel: the filesystem image `root`, packed from
+/// `kernel/root/` (storage.md).
+fn kernel_modules(paths: &Paths) -> Result<Vec<Module>> {
+    Ok(vec![(
+        "root",
+        fs_image::pack(&paths.root.join("kernel").join("root"))?,
+    )])
+}
+
+/// Modules for test kernels, with contents the test kernels know. Must
+/// match `kernel/tests/ramdisk.rs`.
+fn test_modules() -> Vec<Module> {
+    let pattern = |len: usize| (0..len).map(|i| ((i * 7) ^ (i >> 9)) as u8).collect();
+    vec![("pattern", pattern(41 * 512)), ("odd", pattern(1000))]
+}
+
+/// Modules for an image: the kernel's own, or the test modules when a
+/// kernel ELF (normally a test kernel) is given.
+fn modules_for(paths: &Paths, kernel: &Option<PathBuf>) -> Result<Vec<Module>> {
+    match kernel {
+        None => kernel_modules(paths),
+        Some(_) => Ok(test_modules()),
+    }
+}
+
+/// `limine.conf` with a `module_path` and `module_string` per module.
+fn limine_conf(modules: &[Module]) -> String {
+    let mut conf = LIMINE_CONF.to_owned();
+    for (name, _) in modules {
+        conf.push_str(&format!(
+            "    module_path: boot():/boot/modules/{name}\n    module_string: {name}\n"
+        ));
+    }
+    conf
+}
+
+/// Builds the ISO for `kernel` (default: the built kernel) with `modules`
+/// in `out` and returns its path.
+fn image(
+    paths: &Paths,
+    kernel: Option<PathBuf>,
+    modules: &[Module],
+    out: &Path,
+) -> Result<PathBuf> {
     let kernel = kernel.unwrap_or_else(|| paths.kernel_elf());
     if !kernel.is_file() {
         return Err(format!(
@@ -486,7 +533,13 @@ fn image(paths: &Paths, kernel: Option<PathBuf>, out: &Path) -> Result<PathBuf> 
         fs::create_dir_all(dir).map_err(io_err("cannot create", dir))?;
     }
     copy(&kernel, &boot.join("kernel"))?;
-    fs::write(boot_limine.join("limine.conf"), LIMINE_CONF)
+    let module_dir = boot.join("modules");
+    fs::create_dir_all(&module_dir).map_err(io_err("cannot create", &module_dir))?;
+    for (name, bytes) in modules {
+        let path = module_dir.join(name);
+        fs::write(&path, bytes).map_err(io_err("cannot write", &path))?;
+    }
+    fs::write(boot_limine.join("limine.conf"), limine_conf(modules))
         .map_err(io_err("cannot write", &boot_limine))?;
     for name in [
         "limine-bios.sys",
@@ -534,7 +587,8 @@ fn image(paths: &Paths, kernel: Option<PathBuf>, out: &Path) -> Result<PathBuf> 
 
 /// Builds the main image and prints its path and hash.
 fn main_image(paths: &Paths, kernel: Option<PathBuf>) -> Result<PathBuf> {
-    let iso = image(paths, kernel, &paths.image_dir())?;
+    let modules = modules_for(paths, &kernel)?;
+    let iso = image(paths, kernel, &modules, &paths.image_dir())?;
     println!("Image: {}", iso.display());
     println!("SHA-256: {}", sha256(&iso)?);
     Ok(iso)
@@ -627,6 +681,7 @@ fn qemu_error(e: io::Error) -> String {
 }
 
 fn run_qemu(paths: &Paths, bios: bool, gdb: bool, kernel: Option<PathBuf>) -> Result<()> {
+    let modules = modules_for(paths, &kernel)?;
     let elf = match kernel {
         Some(elf) => elf,
         None => {
@@ -634,7 +689,7 @@ fn run_qemu(paths: &Paths, bios: bool, gdb: bool, kernel: Option<PathBuf>) -> Re
             paths.kernel_elf()
         }
     };
-    let iso = main_image(paths, Some(elf.clone()))?;
+    let iso = image(paths, Some(elf.clone()), &modules, &paths.image_dir())?;
     let out = paths.image_dir();
     let vars = out.join("ovmf-vars.fd");
     prepare_firmware(&vars, bios)?;
@@ -877,7 +932,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     let name = test_name(elf);
     let out = paths.runner_dir(&name);
     fs::create_dir_all(&out).map_err(io_err("cannot create", &out))?;
-    let iso = image(paths, Some(elf.to_path_buf()), &out)?;
+    let iso = image(paths, Some(elf.to_path_buf()), &test_modules(), &out)?;
     let logs = paths.logs_dir();
     fs::create_dir_all(&logs).map_err(io_err("cannot create", &logs))?;
     let log = logs.join(format!("test-{name}.log"));
@@ -933,6 +988,34 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn limine_conf_lists_each_module() {
+        let modules = [("root", vec![1]), ("odd", vec![])];
+        let conf = limine_conf(&modules);
+        assert!(conf.starts_with(LIMINE_CONF));
+        assert!(conf.ends_with(
+            "    module_path: boot():/boot/modules/root\n    module_string: root\n\
+             \x20   module_path: boot():/boot/modules/odd\n    module_string: odd\n"
+        ));
+    }
+
+    #[test]
+    fn test_modules_match_the_ramdisk_test() {
+        let m = test_modules();
+        assert_eq!(
+            m.iter().map(|(n, b)| (*n, b.len())).collect::<Vec<_>>(),
+            [("pattern", 20992), ("odd", 1000)]
+        );
+        assert_eq!(m[0].1[513], ((513 * 7) ^ 1) as u8);
+    }
+
+    #[test]
+    fn kernel_root_packs() {
+        let modules = kernel_modules(&Paths::new()).unwrap();
+        let image = pharos_fs::Image::mount(&modules[0].1[..]).unwrap();
+        assert!(image.lookup(b"etc/motd").is_ok());
     }
 
     #[test]

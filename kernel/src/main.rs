@@ -19,6 +19,7 @@ use pharos_kernel::boot_info::{firmware_name, mib, summarize};
 use pharos_kernel::kprintln;
 use pharos_kernel::limine::BASE_REVISION;
 use pharos_kernel::mm;
+use pharos_kernel::storage;
 use pharos_kernel::time;
 
 pharos_kernel::limine_requests!();
@@ -121,6 +122,10 @@ extern "C" fn kernel_main() -> ! {
         Err(error) => fail(format_args!("timer calibration failed: {error}")),
     }
 
+    // Module records live in kernel memory; Limine's list does not survive
+    // the reclaim below.
+    let (modules, skipped) = storage::record_modules(requests::MODULES.response(), hhdm.offset);
+
     // Last step that may touch bootloader memory is done: `memmap`, `hhdm`,
     // and the other Limine responses must not be used after this.
     match mm::reclaim_bootloader_memory() {
@@ -143,6 +148,14 @@ extern "C" fn kernel_main() -> ! {
         ),
         Err(error) => fail(format_args!("heap setup failed: {error}")),
     }
+    match storage::ram_disk("root") {
+        Some(disk) => kprintln!(
+            "  storage:    RAM disk 'root', {} bytes ({modules} modules, {skipped} skipped)",
+            disk.len()
+        ),
+        None => kprintln!("  storage:    none ({modules} modules, {skipped} skipped)"),
+    }
+
     // Smoke test: `alloc` works in the kernel.
     let numbers: alloc::vec::Vec<u64> = (1..=100).collect();
     if numbers.iter().sum::<u64>() != 5050 || mm::heap_stats().used == 0 {

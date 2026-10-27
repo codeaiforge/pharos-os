@@ -121,6 +121,32 @@ pub(crate) fn bitmap_storage(hhdm: u64, phys: u64, words: usize) -> Option<&'sta
     Some(unsafe { core::slice::from_raw_parts_mut((hhdm + phys) as *mut u64, words) })
 }
 
+/// The bytes of a boot module: `len` bytes at physical `phys`, read-only,
+/// through the direct map. `None` unless the kernel's own page tables are
+/// active and the whole range lies inside one "executable and modules"
+/// region of the memory map (checked here, so any caller is safe).
+#[cfg(target_os = "none")]
+pub(crate) fn module_bytes(phys: u64, len: u64) -> Option<&'static [u8]> {
+    use crate::arch::x86_64::paging;
+    if !paging::kernel_space_active() {
+        return None;
+    }
+    let inside = super::memory_map()
+        .as_ref()
+        .is_some_and(|map| crate::storage::inside_module_region(map.tuples(), phys, len));
+    if !inside {
+        return None;
+    }
+    let len = usize::try_from(len).ok()?;
+    // SAFETY: the range lies inside an "executable and modules" region
+    // (checked above). The kernel's direct map maps those regions
+    // read-only for the kernel's lifetime (`paging::direct_map_flags`), the
+    // frame allocator never manages them, and Limine gives each module its
+    // pages exclusively, so the bytes stay valid and unchanged, and only
+    // shared references exist.
+    Some(unsafe { core::slice::from_raw_parts((paging::hhdm() + phys) as *const u8, len) })
+}
+
 /// The kernel heap, once [`crate::mm::init_heap`] has mapped its window.
 pub(crate) static HEAP: IrqMutex<Option<Heap<'static>>> = IrqMutex::new(None);
 

@@ -18,6 +18,11 @@ unsafe_op_in_unsafe_fn = "deny"
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
 
+# In-workspace only: the filesystem image format, shared with `cargo xtask`
+# (D-007). `no_std`, no dependencies of its own, `unsafe` forbidden.
+[dependencies]
+pharos-fs = { path = "../crates/pharos-fs" }
+
 # Test kernels (D-009): each file in tests/ is a no_main kernel booted in QEMU
 # by `cargo xtask runner`. List every test kernel here with harness = false.
 [[test]]
@@ -62,6 +67,10 @@ harness = false
 
 [[test]]
 name = "paging"
+harness = false
+
+[[test]]
+name = "ramdisk"
 harness = false
 
 [[test]]

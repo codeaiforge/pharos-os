@@ -836,6 +836,13 @@ pub fn translate_kernel(virt: u64) -> Option<Translation> {
 }
 
 /// True once CR3 holds the kernel address space (Limine's tables unused).
+/// The direct map's base (Limine's HHDM offset), once the kernel address
+/// space is built; 0 before.
+pub fn hhdm() -> u64 {
+    HHDM.load(Ordering::Relaxed)
+}
+
+/// True once the kernel's own page tables are active.
 pub fn kernel_space_active() -> bool {
     kernel_root() == Some(active_root())
 }

@@ -1,14 +1,16 @@
 //! # pharos-kernel
 //!
-//! The Pharos OS kernel, at milestone M2.2: a minimal `no_std` x86-64 kernel
-//! that Limine boots on UEFI and BIOS. Design: `docs/architecture/boot.md`.
+//! The Pharos OS kernel: a minimal `no_std` x86-64 microkernel that Limine
+//! boots on UEFI and BIOS. Designs are in `docs/architecture/`.
 //!
 //! What it does today: start in the higher half, check the Limine protocol
-//! revision, read the memory map and other boot information, report them over
-//! the COM1 serial port, and halt. It runs on its own stack, loads its own
-//! GDT, TSS, and IDT, reports CPU exceptions, builds a physical frame
-//! allocator, runs on its own page tables, and drives the local APIC timer. It has **no** device interrupts, memory management, scheduling,
-//! processes, or drivers beyond serial and the interrupt controller.
+//! revision, and report boot information over the COM1 serial port. It runs
+//! on its own stack, GDT, TSS, IDT, and page tables, reports CPU exceptions,
+//! manages physical memory and a heap, drives the calibrated local APIC
+//! timer, schedules tasks preemptively, and runs user processes in ring 3
+//! with system calls, capabilities, and IPC. Boot modules become read-only
+//! RAM disks. It has **no** device interrupts or drivers beyond serial and
+//! the interrupt controller, and no filesystem yet.
 //!
 //! This library holds the parts that do not depend on the entry point. Logic
 //! that is independent of hardware is unit-tested on the host
@@ -34,6 +36,7 @@ pub mod mm;
 pub mod process;
 #[cfg(target_arch = "x86_64")]
 pub mod sched;
+pub mod storage;
 pub mod sync;
 #[cfg(target_arch = "x86_64")]
 pub mod syscall;
@@ -65,8 +68,9 @@ macro_rules! kprintln {
 
 /// Declares the kernel's Limine requests as a module named `requests` in the
 /// calling crate: the base-revision tag plus bootloader info, firmware type,
-/// HHDM, and memory map requests, between the start and end markers in the
-/// `.limine_requests*` sections (kept by `linker.ld`).
+/// HHDM, memory map, executable address, and module requests, between the
+/// start and end markers in the `.limine_requests*` sections (kept by
+/// `linker.ld`).
 ///
 /// Used by the kernel binary and by every test kernel. The statics must be
 /// defined in the binary itself; statics in this library could be dropped by
@@ -79,9 +83,10 @@ macro_rules! limine_requests {
         mod requests {
             use $crate::limine::{
                 BaseRevisionTag, BootloaderInfoResponse, ExecutableAddressResponse,
-                FirmwareTypeResponse, HhdmResponse, MemmapResponse, REQUESTS_END_MARKER,
-                REQUESTS_START_MARKER, Request, bootloader_info_request,
+                FirmwareTypeResponse, HhdmResponse, MemmapResponse, ModuleResponse,
+                REQUESTS_END_MARKER, REQUESTS_START_MARKER, Request, bootloader_info_request,
                 executable_address_request, firmware_type_request, hhdm_request, memmap_request,
+                module_request,
             };
 
             #[used]
@@ -112,6 +117,10 @@ macro_rules! limine_requests {
             #[unsafe(link_section = ".limine_requests")]
             pub static EXECUTABLE_ADDRESS: Request<ExecutableAddressResponse> =
                 executable_address_request();
+
+            #[used]
+            #[unsafe(link_section = ".limine_requests")]
+            pub static MODULES: Request<ModuleResponse> = module_request();
 
             #[used]
             #[unsafe(link_section = ".limine_requests_end")]
@@ -151,9 +160,11 @@ macro_rules! test_kernel {
 
 /// Human-readable implementation status of this crate.
 pub const STATUS: &str = "minimal kernel: boots via Limine and reports boot information over \
-                          serial; handles CPU exceptions and local APIC timer interrupts with a calibrated clock; manages \
-                          physical memory, its own page tables, and a heap; schedules kernel tasks \
-                          preemptively; no user processes";
+                          serial; handles CPU exceptions and local APIC timer interrupts with a \
+                          calibrated clock; manages physical memory, its own page tables, and a \
+                          heap; schedules tasks preemptively; runs user processes with system \
+                          calls, capabilities, and IPC; read-only RAM disks from boot modules; \
+                          no device drivers";
 
 #[cfg(test)]
 mod tests {
@@ -162,6 +173,6 @@ mod tests {
     #[test]
     fn status_states_the_limits() {
         assert!(STATUS.contains("minimal"));
-        assert!(STATUS.contains("no user processes"));
+        assert!(STATUS.contains("no device drivers"));
     }
 }

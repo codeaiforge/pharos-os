@@ -247,6 +247,71 @@ pub const fn executable_address_request() -> Request<ExecutableAddressResponse> 
     Request::new([0x71ba76863cc55f63, 0xb2644a48c516a487])
 }
 
+/// "File Structure": a file the bootloader loaded, such as a module.
+#[repr(C)]
+pub struct File {
+    revision: u64,
+    address: *const u8,
+    /// Size in bytes.
+    pub size: u64,
+    path: *const c_char,
+    string: *const c_char,
+    media_type: u32,
+    unused: u32,
+    tftp_ipv4: [u8; 4],
+    tftp_port: u32,
+    partition_index: u32,
+    mbr_disk_id: u32,
+    gpt_disk_uuid: [u8; 16],
+    gpt_part_uuid: [u8; 16],
+    part_uuid: [u8; 16],
+}
+
+impl File {
+    /// Where the file is, as a direct-map (HHDM) address, at least 4 KiB
+    /// aligned. The file has every 4 KiB page it covers to itself.
+    pub fn address(&self) -> u64 {
+        self.address as u64
+    }
+
+    /// The path within the boot volume, with a leading slash.
+    pub fn path(&self) -> Option<&'static str> {
+        boot_str(self.path)
+    }
+
+    /// The string from the configuration (`module_string`).
+    pub fn string(&self) -> Option<&'static str> {
+        boot_str(self.string)
+    }
+}
+
+/// "Module Feature" response. Absent when no modules were loaded.
+#[repr(C)]
+pub struct ModuleResponse {
+    revision: u64,
+    module_count: u64,
+    modules: *const *const File,
+}
+
+impl ModuleResponse {
+    /// The modules, in configuration order.
+    pub fn modules(&self) -> impl Iterator<Item = &'static File> + '_ {
+        (0..self.module_count as usize).map(move |i| {
+            // SAFETY: the protocol guarantees `modules` points to
+            // `module_count` valid file pointers, valid and unmodified
+            // until bootloader-reclaimable memory is reused (responses are
+            // retired before that).
+            unsafe { &**self.modules.add(i) }
+        })
+    }
+}
+
+/// A request for [`ModuleResponse`] (request revision 0: modules from the
+/// configuration only, no internal modules).
+pub const fn module_request() -> Request<ModuleResponse> {
+    Request::new([0x3e7e279702be32af, 0xca1c4f3bd1280cee])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +328,18 @@ mod tests {
         assert_eq!(size_of::<FirmwareTypeResponse>(), 16);
         assert_eq!(size_of::<BootloaderInfoResponse>(), 24);
         assert_eq!(size_of::<ExecutableAddressResponse>(), 24);
+        // 5 x u64 + 6 x u32 + 3 UUIDs of 16 bytes.
+        assert_eq!(size_of::<File>(), 112);
+        assert_eq!(core::mem::offset_of!(File, string), 32);
+        assert_eq!(core::mem::offset_of!(File, gpt_disk_uuid), 64);
+        assert_eq!(size_of::<ModuleResponse>(), 24);
+    }
+
+    #[test]
+    fn module_request_id() {
+        let request = module_request();
+        assert_eq!(&request.id[2..], &[0x3e7e279702be32af, 0xca1c4f3bd1280cee]);
+        assert_eq!(request.revision, 0);
     }
 
     #[test]

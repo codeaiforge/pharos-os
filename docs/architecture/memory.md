@@ -68,7 +68,7 @@ References to responses obtained before reclaim must not be used afterwards; thi
 | Range | Maps | Access |
 | --- | --- | --- |
 | `HHDM + phys` | Usable, bootloader-reclaimable, ACPI reclaimable and NVS, reserved-mapped regions | Writable, no-execute |
-| `HHDM + phys` | Executable and modules (the kernel image's physical frames) | Read-only, no-execute |
+| `HHDM + phys` | Executable and modules (the kernel image's physical frames, and boot modules used as RAM disks; never given to the frame allocator) | Read-only, no-execute |
 | `HHDM + phys` | Framebuffer | Writable, no-execute, uncached |
 | `HHDM + 0xfee00000` (usually) | Local APIC registers | Writable, no-execute, uncached |
 | `0xffffffff80000000`… | Limine requests and GOT | Writable, no-execute |

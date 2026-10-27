@@ -18,6 +18,7 @@ firmware (UEFI: OVMF / BIOS: SeaBIOS)
   └─ Limine (pinned release; BOOTX64.EFI or limine-bios.sys)
        ├─ reads boot/limine/limine.conf
        ├─ loads boot/kernel (ELF) at 0xffffffff80000000
+       ├─ loads each module in boot/modules/ (M2.8: the filesystem image `root`)
        ├─ answers the kernel's Limine requests (memory map, HHDM, ...)
        └─ jumps to the kernel entry point in 64-bit long mode
             └─ kernel: set up serial, read boot info, continue initialization
@@ -46,12 +47,16 @@ A hybrid BIOS/UEFI ISO:
 
 ```text
 boot/kernel                     kernel ELF
-boot/limine/limine.conf         one entry: protocol limine, path boot():/boot/kernel
+boot/limine/limine.conf         one entry: protocol limine, path boot():/boot/kernel,
+                                plus module_path/module_string per module
+boot/modules/root               filesystem image packed from kernel/root/ (storage.md)
 boot/limine/limine-bios.sys     Limine BIOS stage
 boot/limine/limine-bios-cd.bin  BIOS El Torito image
 boot/limine/limine-uefi-cd.bin  UEFI El Torito image
 EFI/BOOT/BOOTX64.EFI            Limine UEFI application
 ```
+
+Test-kernel images (`cargo xtask runner`, and `image`/`run --kernel`) carry the test modules instead of `root`: `pattern` and `odd`, with contents the test kernels know. The kernel records the modules before bootloader memory is reclaimed, since Limine's module list lives there ([storage.md](storage.md)).
 
 Built with `xorriso -as mkisofs` (BIOS and EFI El Torito entries, protective MBR), then `limine bios-install`. File timestamps are set to a fixed `SOURCE_DATE_EPOCH` before `xorriso` runs, so images are byte-identical across builds.
 
