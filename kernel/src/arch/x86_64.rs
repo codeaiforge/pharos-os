@@ -101,6 +101,40 @@ impl fmt::Write for Serial {
     }
 }
 
+/// True if CPUID reports a hypervisor (CPUID leaf 1, ECX bit 31). Physical
+/// CPUs leave this bit clear.
+// `__cpuid` is a safe function in recent Rust but `unsafe` in Rust 1.85, the
+// minimum supported version, so the block is kept and the warning allowed.
+#[allow(unused_unsafe)]
+pub fn under_hypervisor() -> bool {
+    // SAFETY: CPUID exists on every x86-64 CPU and has no side effects.
+    let leaf1 = unsafe { core::arch::x86_64::__cpuid(1) };
+    leaf1.ecx & (1 << 31) != 0
+}
+
+/// I/O port of QEMU's `isa-debug-exit` device, attached by `cargo xtask run`.
+const QEMU_DEBUG_EXIT: u16 = 0xf4;
+
+/// Result reported to QEMU. QEMU exits with status `(value << 1) | 1`.
+#[derive(Clone, Copy)]
+pub enum QemuExit {
+    /// QEMU exit status 33.
+    Success = 0x10,
+    /// QEMU exit status 35.
+    Failure = 0x11,
+}
+
+/// Asks QEMU to exit with `status`. Only acts under a hypervisor, so real
+/// hardware never sees the write; returns if QEMU did not exit.
+pub fn qemu_exit(status: QemuExit) {
+    if under_hypervisor() {
+        // SAFETY: under a hypervisor, port 0xf4 is QEMU's debug-exit device
+        // or an unassigned port whose writes are ignored; neither touches
+        // memory.
+        unsafe { outb(QEMU_DEBUG_EXIT, status as u8) };
+    }
+}
+
 /// Stops the CPU permanently, with interrupts disabled.
 pub fn halt() -> ! {
     loop {

@@ -2,7 +2,8 @@
 //!
 //! Limine loads this binary at `0xffffffff80000000` and jumps to [`kmain`] in
 //! 64-bit mode (see `docs/architecture/boot.md`). The kernel reports what the
-//! bootloader handed over on COM1, then halts.
+//! bootloader handed over on COM1, signals the result to QEMU (only when
+//! running under a hypervisor), then halts.
 
 #![no_std]
 #![no_main]
@@ -10,7 +11,7 @@
 use core::fmt::Write;
 use core::panic::PanicInfo;
 
-use pharos_kernel::arch::x86_64::{Serial, halt};
+use pharos_kernel::arch::x86_64::{QemuExit, Serial, halt, qemu_exit};
 use pharos_kernel::boot_info::{firmware_name, mib, summarize};
 use pharos_kernel::limine::BASE_REVISION;
 
@@ -114,12 +115,14 @@ extern "C" fn kmain() -> ! {
     );
 
     let _ = writeln!(serial, "PHAROS: boot ok");
+    qemu_exit(QemuExit::Success);
     halt()
 }
 
 /// Reports a fatal boot error and halts.
 fn fail(serial: &mut Serial, message: core::fmt::Arguments<'_>) -> ! {
     let _ = writeln!(serial, "PHAROS: boot failed: {message}");
+    qemu_exit(QemuExit::Failure);
     halt()
 }
 
@@ -127,5 +130,6 @@ fn fail(serial: &mut Serial, message: core::fmt::Arguments<'_>) -> ! {
 fn panic(info: &PanicInfo<'_>) -> ! {
     let mut serial = Serial::com1();
     let _ = writeln!(serial, "PHAROS: panic: {info}");
+    qemu_exit(QemuExit::Failure);
     halt()
 }

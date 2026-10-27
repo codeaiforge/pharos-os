@@ -13,7 +13,7 @@ const PROJECT: &str = "Pharos OS";
 const ORGANIZATION: &str = "CodeAIForge";
 /// Comes from Cargo package metadata (workspace version), never hand-copied.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const STAGE: &str = "Phase 1 - Foundation (repository scaffold)";
+const STAGE: &str = "Phase 2 - Core System (minimal kernel, M2.2)";
 
 /// Command succeeded.
 const EXIT_OK: u8 = 0;
@@ -49,10 +49,15 @@ EXIT STATUS:
 const COMPONENTS: &[(&str, &str)] = &[
     ("implemented", "host-side Rust workspace and `pharos` CLI"),
     (
-        "placeholder",
-        "kernel crate (host-side library only; does not boot)",
+        "implemented",
+        "`cargo xtask`: kernel build, reproducible boot image, QEMU run",
     ),
-    ("planned", "bootable x86-64 kernel with QEMU serial output"),
+    (
+        "implemented",
+        "minimal x86-64 kernel: boots in QEMU via Limine (UEFI and BIOS), \
+         reports boot information over serial, then halts",
+    ),
+    ("planned", "automated QEMU boot tests in CI"),
     (
         "planned",
         "memory management, interrupts, scheduling, processes, IPC",
@@ -157,7 +162,7 @@ fn doctor_checks(os: &str, arch: &str) -> Vec<Check> {
         Check {
             name: "QEMU boot",
             status: Status::Skip,
-            detail: "not checked: no bootable kernel exists yet".to_owned(),
+            detail: "not checked by doctor (read-only); run `cargo xtask run`".to_owned(),
         },
         Check {
             name: "AI inference",
@@ -188,7 +193,7 @@ fn write_info(out: &mut dyn Write) -> io::Result<()> {
     writeln!(out)?;
     writeln!(
         out,
-        "Pharos OS is not a bootable or production-ready operating system."
+        "Pharos OS is not a usable or production-ready operating system yet."
     )
 }
 
@@ -340,19 +345,24 @@ mod tests {
         assert!(out.contains(PROJECT));
         assert!(out.contains(VERSION));
         assert!(out.contains(STAGE));
-        assert!(out.contains("[placeholder] kernel crate"));
-        assert!(out.contains("not a bootable or production-ready"));
+        assert!(out.contains("[implemented] minimal x86-64 kernel"));
+        assert!(out.contains("[planned]     automated QEMU boot tests"));
+        assert!(out.contains("not a usable or production-ready"));
     }
 
     #[test]
     fn only_workspace_and_cli_are_labeled_implemented() {
-        // Update this list only when a component exists and is tested.
+        // Update this list only when a component exists and is tested. The
+        // kernel is verified with `cargo xtask run` on UEFI and BIOS (M2.2).
         let implemented: Vec<&str> = COMPONENTS
             .iter()
             .filter(|(status, _)| *status == "implemented")
             .map(|(_, what)| *what)
             .collect();
-        assert_eq!(implemented, ["host-side Rust workspace and `pharos` CLI"]);
+        assert_eq!(implemented.len(), 3);
+        assert!(implemented.iter().all(|what| {
+            what.contains("workspace") || what.contains("xtask") || what.contains("minimal")
+        }));
         for (status, _) in COMPONENTS {
             assert!(["implemented", "placeholder", "planned"].contains(status));
         }

@@ -3,11 +3,11 @@
 //! Builds the kernel and assembles a reproducible hybrid BIOS/UEFI ISO with a
 //! pinned, checksum-verified Limine release. Unlike the read-only `pharos`
 //! CLI, this tool runs external programs (`cargo`, `curl`, `sha256sum`, `tar`,
-//! `cc`, `xorriso`). It writes only under the workspace's `target/` directory
-//! and never needs root. Design: `docs/architecture/boot.md`.
+//! `cc`, `xorriso`, `qemu-system-x86_64`). It writes only under the
+//! workspace's `target/` directory and never needs root. Design: `docs/architecture/boot.md`.
 
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -29,6 +29,14 @@ const KERNEL_TARGET: &str = "x86_64-unknown-none";
 const KERNEL_PACKAGE: &str = "pharos-kernel";
 const LIMINE_CONF: &str = include_str!("../limine.conf");
 
+/// UEFI firmware for QEMU (Ubuntu/Mint package `ovmf`).
+const OVMF_CODE: &str = "/usr/share/OVMF/OVMF_CODE_4M.fd";
+const OVMF_VARS: &str = "/usr/share/OVMF/OVMF_VARS_4M.fd";
+/// QEMU exit statuses the kernel produces through `isa-debug-exit`
+/// (`(value << 1) | 1` for 0x10 and 0x11; see `arch::x86_64::QemuExit`).
+const QEMU_EXIT_SUCCESS: i32 = 33;
+const QEMU_EXIT_FAILURE: i32 = 35;
+
 const HELP: &str = "\
 cargo xtask - build tool for Pharos OS
 
@@ -39,9 +47,14 @@ COMMANDS:
     build                   Build the kernel for x86_64-unknown-none (release)
     image [--kernel <ELF>]  Build a hybrid BIOS/UEFI ISO with the pinned Limine
                             release. Uses the built kernel unless --kernel is given.
+    run [--bios] [--gdb]    Build, make the image, and boot it in QEMU with serial
+                            output on this terminal. UEFI (OVMF) by default; --bios
+                            uses SeaBIOS; --gdb waits for GDB on localhost:1234.
+                            Succeeds only if the kernel reports success.
     help                    Show this help message
 
-Outputs go to target/xtask/. Requires curl, sha256sum, tar (xz), cc, and xorriso.
+Outputs go to target/xtask/. Requires curl, sha256sum, tar (xz), cc, and xorriso;
+`run` also needs qemu-system-x86_64 and, for UEFI, OVMF.
 ";
 
 type Result<T> = std::result::Result<T, String>;
@@ -51,6 +64,7 @@ enum Task {
     Help,
     Build,
     Image { kernel: Option<PathBuf> },
+    Run { bios: bool, gdb: bool },
 }
 
 fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
@@ -70,6 +84,17 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                 }
             }
             return Ok(Task::Image { kernel });
+        }
+        Some("run") => {
+            let (mut bios, mut gdb) = (false, false);
+            for arg in args {
+                match arg.as_str() {
+                    "--bios" => bios = true,
+                    "--gdb" => gdb = true,
+                    other => return Err(format!("unexpected argument '{other}'")),
+                }
+            }
+            return Ok(Task::Run { bios, gdb });
         }
         Some(other) => return Err(format!("unknown command '{other}'")),
     };
@@ -398,6 +423,101 @@ fn image(paths: &Paths, kernel: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// QEMU arguments for booting `iso`. UEFI uses OVMF with a writable copy of
+/// its variable store at `vars`.
+fn qemu_args(iso: &Path, vars: &Path, bios: bool, gdb: bool) -> Vec<OsString> {
+    let mut args: Vec<OsString> = [
+        "-M",
+        "q35",
+        "-m",
+        "256M",
+        "-display",
+        "none",
+        "-serial",
+        "stdio",
+        "-no-reboot",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-cdrom",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
+    args.push(iso.into());
+    if !bios {
+        args.push("-drive".into());
+        args.push(format!("if=pflash,format=raw,readonly=on,file={OVMF_CODE}").into());
+        let mut vars_drive = OsString::from("if=pflash,format=raw,file=");
+        vars_drive.push(vars);
+        args.push("-drive".into());
+        args.push(vars_drive);
+    }
+    if gdb {
+        // -s: GDB server on localhost:1234; -S: wait for GDB before starting.
+        args.push("-s".into());
+        args.push("-S".into());
+    }
+    args
+}
+
+/// Turns QEMU's exit status into a result. Only the kernel's success signal
+/// counts as success.
+fn interpret_qemu_status(code: Option<i32>) -> Result<()> {
+    match code {
+        Some(QEMU_EXIT_SUCCESS) => Ok(()),
+        Some(QEMU_EXIT_FAILURE) => Err(format!(
+            "the kernel reported a failure (QEMU exit status {QEMU_EXIT_FAILURE}); see the serial output above"
+        )),
+        Some(other) => Err(format!(
+            "QEMU exited with status {other} without a kernel signal; the kernel may have crashed or QEMU failed to start"
+        )),
+        None => Err("QEMU was stopped by a signal before the kernel reported a result".into()),
+    }
+}
+
+fn run_qemu(paths: &Paths, bios: bool, gdb: bool) -> Result<()> {
+    build(paths)?;
+    image(paths, None)?;
+    let out = paths.image_dir();
+    let iso = out.join("pharos.iso");
+    let vars = out.join("ovmf-vars.fd");
+    if !bios {
+        if !Path::new(OVMF_CODE).is_file() {
+            return Err(format!(
+                "UEFI firmware not found at {OVMF_CODE} (install with: sudo apt install ovmf), or use --bios"
+            ));
+        }
+        copy(Path::new(OVMF_VARS), &vars)?;
+    }
+    if gdb {
+        let kernel = paths.kernel_elf();
+        println!("QEMU is waiting for GDB. In another terminal run:");
+        println!(
+            "  gdb {} -ex 'target remote localhost:1234' -ex 'break kmain' -ex continue",
+            kernel.display()
+        );
+    }
+    println!(
+        "Booting {} with {} (serial output follows; stop with Ctrl+C)",
+        iso.display(),
+        if bios { "SeaBIOS" } else { "OVMF (UEFI)" }
+    );
+    let status = Command::new("qemu-system-x86_64")
+        .args(qemu_args(&iso, &vars, bios, gdb))
+        .status()
+        .map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                "qemu-system-x86_64: not found (install with: sudo apt install qemu-system-x86)"
+                    .to_owned()
+            } else {
+                format!("qemu-system-x86_64: {e}")
+            }
+        })?;
+    interpret_qemu_status(status.code())?;
+    println!("Kernel reported success (QEMU exit status {QEMU_EXIT_SUCCESS}).");
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let result = parse(env::args().skip(1)).and_then(|task| {
         let paths = Paths::new();
@@ -408,6 +528,7 @@ fn main() -> ExitCode {
             }
             Task::Build => build(&paths),
             Task::Image { kernel } => image(&paths, kernel),
+            Task::Run { bios, gdb } => run_qemu(&paths, bios, gdb),
         }
     });
     match result {
@@ -447,6 +568,61 @@ mod tests {
         assert!(parse(args(&["build", "--fast"])).is_err());
         assert!(parse(args(&["image", "--kernel"])).is_err());
         assert!(parse(args(&["image", "--iso"])).is_err());
+        assert!(parse(args(&["run", "--uefi"])).is_err());
+    }
+
+    #[test]
+    fn parses_run_flags() {
+        assert_eq!(
+            parse(args(&["run"])),
+            Ok(Task::Run {
+                bios: false,
+                gdb: false
+            })
+        );
+        assert_eq!(
+            parse(args(&["run", "--gdb", "--bios"])),
+            Ok(Task::Run {
+                bios: true,
+                gdb: true
+            })
+        );
+    }
+
+    #[test]
+    fn qemu_args_match_the_firmware_and_debug_options() {
+        let (iso, vars) = (Path::new("pharos.iso"), Path::new("vars.fd"));
+        let joined = |a: Vec<OsString>| {
+            a.iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let uefi = joined(qemu_args(iso, vars, false, false));
+        assert!(uefi.contains("isa-debug-exit,iobase=0xf4,iosize=0x04"));
+        assert!(uefi.contains("-cdrom pharos.iso"));
+        assert!(uefi.contains(OVMF_CODE) && uefi.contains("file=vars.fd"));
+        assert!(!uefi.contains(" -S"));
+        let bios = joined(qemu_args(iso, vars, true, true));
+        assert!(!bios.contains("pflash"));
+        assert!(bios.ends_with("-s -S"));
+    }
+
+    #[test]
+    fn only_the_kernel_success_signal_counts() {
+        assert!(interpret_qemu_status(Some(33)).is_ok());
+        assert!(
+            interpret_qemu_status(Some(35))
+                .unwrap_err()
+                .contains("reported a failure")
+        );
+        assert!(
+            interpret_qemu_status(Some(0))
+                .unwrap_err()
+                .contains("without a kernel signal")
+        );
+        assert!(interpret_qemu_status(Some(1)).is_err());
+        assert!(interpret_qemu_status(None).is_err());
     }
 
     #[test]
