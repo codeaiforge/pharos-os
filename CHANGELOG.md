@@ -99,6 +99,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Changed
 
+- M2.7 (processes, system calls, IPC) is done: CI runs 22 test kernels, including the isolation kernels `address_spaces`, `user_mode`, `syscalls`, `ipc`, and `hardening`; a kernel with every page user-accessible failed CI; the maintainer approved the security review of the kernel/user boundary. M2.8 (storage and filesystem) is current. `pharos info` shows the new stage and lists user processes, system calls, and IPC as implemented.
 - CI's `qemu` job caches the QEMU, OVMF, and xorriso packages (`actions/cache` v6.1.0, pinned by commit), keyed on the runner image version, and installs from the cache without contacting the slow Ubuntu mirror. A miss or a failed cached install falls back to the mirror.
 - M2.5 (memory management) is done: CI runs 13 test kernels, including frames, paging, write protection, no-execute, reclaim, and the heap; read-only data mapped writable failed CI; the maintainer approved `docs/architecture/memory.md`. M2.6 (timers and scheduling) is current. `pharos info` shows the new stage and lists kernel memory management as implemented.
 - M2.4 (exceptions, interrupts, debugging) is done: CI runs six test kernels covering breakpoints, page faults, stack-overflow double faults, and the local APIC timer, and a deliberately broken double-fault stack failed CI. M2.5 (memory management) is current. `pharos info` shows the new stage and lists exception handling and timer interrupts as implemented.

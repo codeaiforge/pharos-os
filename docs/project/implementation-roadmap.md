@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.7 — Processes, privilege boundaries, system calls, and IPC.** Everything in Phases 2–5 is **planned, not implemented**.
+**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.8 — Storage abstractions and filesystem.** Everything in Phases 2–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -39,7 +39,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | Phase | Name | Status |
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
-| 2 | Core System | **Current** (M2.7) |
+| 2 | Core System | **Current** (M2.8) |
 | 3 | AI Agent Platform | Planned |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
@@ -232,7 +232,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.7 — Processes, privilege boundaries, system calls, and IPC
 
-**Status: Current.** D-004 accepted and the D-012 direction recorded on 2026-10-27 (#36).
+**Status: Done** — gate passed 2026-10-27: the CI `qemu` job passed on `main` at `a7e806b` ([run 40564446336](https://github.com/codeaiforge/pharos-os/actions/runs/40564446336)) with 22 test kernels, among them the isolation kernels `address_spaces`, `user_mode`, `syscalls`, `ipc`, and `hardening`: user processes that try to read, write, or jump into kernel memory or another process's memory are killed, invalid system-call arguments are rejected (and `syscall::decode` is fuzzed with 200,000 random calls), and two processes exchange messages and capabilities over IPC. A kernel that made every page user-accessible failed CI on a throwaway branch ([run 40566069746](https://github.com/codeaiforge/pharos-os/actions/runs/40566069746)): the host unit test `paging::tests::leaf_entries` failed, and so did two `address_spaces` checks in QEMU. The maintainer approved the [security review](../security/review-m2.7-kernel-user-boundary.md) of the kernel/user boundary; its findings F1–F5 are fixed. The minimum supported Rust (1.85) build broke on four commits during M2.7 (let chains) and was fixed in `12cc012`. Delivered: D-004 final and D-012 direction (#36), D-014 and the syscalls-ipc design (#37), per-process address spaces (#38), ring 3 execution (#39), system calls and capabilities (#40), IPC with capability passing and revocation (#41), security review and CI gate (#42). Design: [syscalls-ipc.md](../architecture/syscalls-ipc.md).
 
 - **Objective and scope:** User-mode processes in separate address spaces, a minimal system-call interface, and IPC. This is the foundation for isolating services and agents.
 - **Deliverables:** Ring 3 execution; per-process address spaces; syscall entry; IPC primitive; `docs/architecture/syscalls-ipc.md`; capability direction from D-012 reflected in the interface.
@@ -246,7 +246,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.8 — Storage abstractions and filesystem
 
-**Status: Planned.**
+**Status: Current.** Needs D-007 (filesystem and persistent storage) accepted first.
 
 - **Objective and scope:** A block-device abstraction and a filesystem (per D-007), starting read-only.
 - **Deliverables:** Block device interface; initial RAM disk or virtio-blk support; filesystem implementation; host tool to build images.
@@ -591,4 +591,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, and M2.6 passed their gates on 2026-10-27. The current milestone is **M2.7 — Processes, privilege boundaries, system calls, and IPC**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, and M2.7 passed their gates on 2026-10-27. The current milestone is **M2.8 — Storage abstractions and filesystem**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
