@@ -95,3 +95,7 @@ harness = false
 [[test]]
 name = "user_mode"
 harness = false
+
+[[test]]
+name = "syscalls"
+harness = false

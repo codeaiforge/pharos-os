@@ -6,14 +6,20 @@
 //! [`STACK_TOP`] (read + write, no-execute). [`start`] runs it as a
 //! scheduler task that enters user mode. A CPU exception in user mode kills
 //! the process and the kernel continues ([`init`] installs the handler).
-//! System calls and capabilities follow in #40 and #41.
+//!
+//! Each process has a capability table ([`Process::caps`]); [`start`] fills
+//! it with the initial capabilities, under handles 1, 2, ... in order.
+//! System calls (#40) reach the calling process through [`current`].
 
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::arch::x86_64::context;
 use crate::arch::x86_64::idt::{self, ExceptionFrame, Report};
 use crate::arch::x86_64::paging::{AddressSpace, Flags, MapError};
+use crate::arch::x86_64::{context, without_interrupts};
+use crate::cap::{CapTable, Capability};
 use crate::kprintln;
 use crate::mm::{self, frame::FRAME_SIZE, raw::IrqMutex};
 use crate::sched::{self, SchedError, TaskId};
@@ -40,6 +46,8 @@ pub enum ProcessError {
     Map(MapError),
     /// The scheduler could not start the thread.
     Sched(SchedError),
+    /// More initial capabilities than a table holds.
+    TooManyCapabilities,
 }
 
 impl fmt::Display for ProcessError {
@@ -50,6 +58,7 @@ impl fmt::Display for ProcessError {
             Self::NoFrameAllocator => f.write_str("frame allocator not set up"),
             Self::Map(error) => write!(f, "cannot map the process: {error}"),
             Self::Sched(error) => write!(f, "cannot start the process: {error}"),
+            Self::TooManyCapabilities => f.write_str("too many initial capabilities"),
         }
     }
 }
@@ -81,22 +90,123 @@ pub fn load(image: &[u8]) -> Result<AddressSpace, ProcessError> {
     Ok(space)
 }
 
+/// Kernel-side state of a process (its thread and address space belong to
+/// the scheduler task).
+pub struct Process {
+    /// The process's capabilities.
+    pub caps: IrqMutex<CapTable>,
+}
+
+/// Live processes by task ID (one thread each).
+static PROCESSES: IrqMutex<BTreeMap<TaskId, Arc<Process>>> = IrqMutex::new(BTreeMap::new());
+
 /// Runs the process in `space` (from [`load`], possibly with more pages
 /// mapped) as a new thread entering user mode at `USER_BASE + entry`, with
-/// `arg` in `rdi`. The thread owns `space`.
-pub fn start(space: AddressSpace, entry: u64, arg: u64) -> Result<TaskId, ProcessError> {
+/// `arg` in `rdi` and `caps` under handles 1, 2, ... The thread owns
+/// `space`.
+pub fn start(
+    space: AddressSpace,
+    entry: u64,
+    arg: u64,
+    caps: Vec<Arc<Capability>>,
+) -> Result<TaskId, ProcessError> {
     if space.translate(USER_BASE.saturating_add(entry)).is_none() {
         return Err(ProcessError::BadEntry);
     }
-    sched::spawn_in(space, move || {
-        context::enter_user(USER_BASE + entry, STACK_TOP, arg)
+    let mut table = CapTable::new();
+    for cap in caps {
+        table
+            .insert(cap)
+            .map_err(|_| ProcessError::TooManyCapabilities)?;
+    }
+    let process = Arc::new(Process {
+        caps: IrqMutex::new(table),
+    });
+    // Register the process before its thread can run (no preemption here).
+    without_interrupts(|| {
+        let id = sched::spawn_in(space, move || {
+            context::enter_user(USER_BASE + entry, STACK_TOP, arg)
+        })
+        .map_err(ProcessError::Sched)?;
+        PROCESSES.lock().insert(id, process);
+        Ok(id)
     })
-    .map_err(ProcessError::Sched)
 }
 
 /// [`load`] and [`start`] in one step.
-pub fn spawn(image: &[u8], entry: u64, arg: u64) -> Result<TaskId, ProcessError> {
-    start(load(image)?, entry, arg)
+pub fn spawn(
+    image: &[u8],
+    entry: u64,
+    arg: u64,
+    caps: Vec<Arc<Capability>>,
+) -> Result<TaskId, ProcessError> {
+    start(load(image)?, entry, arg, caps)
+}
+
+/// The calling process, or `None` for kernel tasks.
+pub fn current() -> Option<Arc<Process>> {
+    let id = sched::current_id()?;
+    PROCESSES.lock().get(&id).cloned()
+}
+
+/// Live processes.
+pub fn count() -> usize {
+    PROCESSES.lock().len()
+}
+
+/// Ends the calling process: forgets its state and ends its thread (the
+/// address space is freed when the thread is reaped).
+fn end_current() -> ! {
+    if let Some(id) = sched::current_id() {
+        PROCESSES.lock().remove(&id);
+    }
+    sched::exit()
+}
+
+/// A process that ended with the `exit` system call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Exit {
+    pub task: TaskId,
+    pub code: u64,
+}
+
+// ponytail: exits, kills, and debug output are kept in full for tests and
+// reports; cap or ring-buffer them when processes come and go in numbers.
+static EXITS: IrqMutex<Vec<Exit>> = IrqMutex::new(Vec::new());
+static DEBUG_OUTPUT: IrqMutex<Vec<(TaskId, Vec<u8>)>> = IrqMutex::new(Vec::new());
+
+/// The `exit` system call: records the code and ends the process.
+pub(crate) fn exit_current(code: u64) -> ! {
+    let task = sched::current_id().unwrap_or(0);
+    EXITS.lock().push(Exit { task, code });
+    end_current()
+}
+
+/// Processes that exited so far, oldest first.
+pub fn exits() -> Vec<Exit> {
+    EXITS.lock().clone()
+}
+
+/// The `debug_write` system call's output: prints `bytes` (non-printable
+/// bytes as `?`) prefixed with the process ID, and records them.
+pub(crate) fn debug_write(bytes: &[u8]) {
+    let task = sched::current_id().unwrap_or(0);
+    let mut text = [0u8; crate::syscall::MAX_MESSAGE];
+    for (out, &b) in text.iter_mut().zip(bytes) {
+        *out = if b.is_ascii_graphic() || b == b' ' {
+            b
+        } else {
+            b'?'
+        };
+    }
+    let text = core::str::from_utf8(&text[..bytes.len()]).unwrap_or("");
+    kprintln!("process {task}: {text}");
+    DEBUG_OUTPUT.lock().push((task, bytes.to_vec()));
+}
+
+/// Everything processes wrote with `debug_write`, oldest first.
+pub fn debug_output() -> Vec<(TaskId, Vec<u8>)> {
+    DEBUG_OUTPUT.lock().clone()
 }
 
 /// A process killed by a CPU exception in user mode.
@@ -111,13 +221,14 @@ pub struct Kill {
     pub cr2: u64,
 }
 
-/// ponytail: every kill is kept; cap or ring-buffer it when processes come
-/// and go in large numbers.
 static KILLS: IrqMutex<Vec<Kill>> = IrqMutex::new(Vec::new());
 
-/// Installs the user-fault handler. Call once, after `sched::init`.
+/// Installs the user-fault handler and the system-call entry. Call once,
+/// after `sched::init`.
 pub fn init() {
     idt::set_user_fault_handler(on_user_fault);
+    #[cfg(target_os = "none")]
+    crate::arch::x86_64::syscall::init(crate::syscall::handle);
 }
 
 /// Processes killed so far, oldest first.
@@ -140,5 +251,5 @@ fn on_user_fault(frame: &ExceptionFrame) -> ! {
         cs: frame.cs,
         cr2,
     });
-    sched::exit()
+    end_current()
 }

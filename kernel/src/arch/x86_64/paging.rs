@@ -66,8 +66,25 @@ impl PageSize {
 
 /// End of the user half (exclusive): the lower canonical half.
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
+/// The last user page, never mapped: a `syscall` at its very end would
+/// return to the first non-canonical address.
+pub const LAST_USER_PAGE: u64 = USER_END - FRAME_SIZE;
 /// First kernel-half PML4 entry.
 const KERNEL_HALF: usize = 256;
+
+/// Largest user copy in pages (a 4 KiB buffer may span two pages; IPC
+/// messages are at most 256 bytes).
+const MAX_COPY_PAGES: usize = 2;
+
+/// True if `[addr, addr + len)` is a non-empty-or-empty range inside the
+/// user half that a process may name in a system call: at or above the
+/// first page, below the never-mapped last page, without overflow.
+pub const fn user_range_ok(addr: u64, len: u64) -> bool {
+    match addr.checked_add(len) {
+        Some(end) => addr >= FRAME_SIZE && end <= LAST_USER_PAGE,
+        None => false,
+    }
+}
 
 /// Access rights of a mapping. Every mapping is readable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,6 +224,9 @@ pub enum MapError {
     /// A process address space may map only its user half, and the kernel
     /// address space has no user pages.
     WrongHalf,
+    /// The page is mapped but not user-accessible, or not writable for a
+    /// write.
+    AccessDenied,
 }
 
 impl core::fmt::Display for MapError {
@@ -219,6 +239,7 @@ impl core::fmt::Display for MapError {
             Self::NotMapped => "address not mapped",
             Self::NotInitialized => "kernel address space not built yet",
             Self::WrongHalf => "address or access not allowed in this address space",
+            Self::AccessDenied => "page not accessible from user mode for this access",
         })
     }
 }
@@ -389,9 +410,10 @@ impl AddressSpace {
         if virt % size.bytes() != 0 || phys % size.bytes() != 0 {
             return Err(MapError::Misaligned);
         }
-        // A process must not touch the shared kernel half; the kernel space
-        // has no user pages.
-        if (self.user && virt >= USER_END) || (!self.user && flags.user) {
+        // A process must not touch the shared kernel half or the last user
+        // page (syscalls-ipc.md: the `sysret` hazard); the kernel space has
+        // no user pages.
+        if (self.user && virt >= LAST_USER_PAGE) || (!self.user && flags.user) {
             return Err(MapError::WrongHalf);
         }
         let levels = match size {
@@ -447,6 +469,76 @@ impl AddressSpace {
             return Err(error);
         }
         Ok(phys)
+    }
+
+    /// Copies `buf.len()` bytes from user address `virt` of this process
+    /// address space into `buf`, through the direct map: every page must be
+    /// present and user-accessible. The kernel never dereferences the user
+    /// address itself (syscalls-ipc.md).
+    pub fn read_user(&self, virt: u64, buf: &mut [u8]) -> Result<(), MapError> {
+        self.user_chunks(virt, buf.len(), false, |phys, at, len| {
+            // SAFETY: `phys..phys + len` lies in one user page of this space
+            // (checked by `user_chunks`), which the direct map covers; the
+            // destination is a distinct kernel buffer.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    (HHDM.load(Ordering::Relaxed) + phys) as *const u8,
+                    buf[at..].as_mut_ptr(),
+                    len,
+                )
+            };
+        })
+    }
+
+    /// Copies `bytes` to user address `virt` of this process address space,
+    /// through the direct map: every page must be present, user-accessible,
+    /// and writable.
+    pub fn write_user(&mut self, virt: u64, bytes: &[u8]) -> Result<(), MapError> {
+        self.user_chunks(virt, bytes.len(), true, |phys, at, len| {
+            // SAFETY: as in `read_user`; the page is a writable user page
+            // owned by this space, and `&mut self` excludes other users of it
+            // in the kernel (user code may write it too, but plain bytes have
+            // no invalid values).
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    bytes[at..].as_ptr(),
+                    (HHDM.load(Ordering::Relaxed) + phys) as *mut u8,
+                    len,
+                )
+            };
+        })
+    }
+
+    /// Checks `[virt, virt + len)` page by page and calls `copy(phys,
+    /// offset, len)` for each piece, only after every page passed.
+    fn user_chunks(
+        &self,
+        virt: u64,
+        len: usize,
+        write: bool,
+        mut copy: impl FnMut(u64, usize, usize),
+    ) -> Result<(), MapError> {
+        if !self.user || !user_range_ok(virt, len as u64) {
+            return Err(MapError::WrongHalf);
+        }
+        let mut pieces = [(0u64, 0usize, 0usize); MAX_COPY_PAGES];
+        let mut count = 0;
+        let mut at = 0;
+        while at < len {
+            let addr = virt + at as u64;
+            let piece = (FRAME_SIZE - addr % FRAME_SIZE).min((len - at) as u64) as usize;
+            let t = self.translate(addr).ok_or(MapError::NotMapped)?;
+            if !t.flags.user || (write && !t.flags.writable) {
+                return Err(MapError::AccessDenied);
+            }
+            *pieces.get_mut(count).ok_or(MapError::WrongHalf)? = (t.phys, at, piece);
+            count += 1;
+            at += piece;
+        }
+        for &(phys, at, piece) in &pieces[..count] {
+            copy(phys, at, piece);
+        }
+        Ok(())
     }
 
     /// Unmaps the page at `virt` and returns its physical address. Empty
@@ -893,6 +985,47 @@ mod tests {
         assert_eq!(user_code, 0x6000 | PRESENT | USER, "W^X: read + execute");
         assert_eq!(Flags::from_entry(user_data), Flags::USER_DATA);
         assert_eq!(Flags::from_entry(user_code), Flags::USER_CODE);
+    }
+
+    #[test]
+    fn user_ranges() {
+        assert!(user_range_ok(0x40_0000, 256));
+        assert!(user_range_ok(0x1000, 0), "empty range at the first page");
+        assert!(!user_range_ok(0, 8), "null page");
+        assert!(!user_range_ok(0xfff, 8), "below the first page");
+        assert!(
+            user_range_ok(LAST_USER_PAGE - 8, 8),
+            "ends at the last page"
+        );
+        assert!(
+            !user_range_ok(LAST_USER_PAGE - 8, 9),
+            "reaches the last page"
+        );
+        assert!(!user_range_ok(0xffff_ffff_8000_0000, 8), "kernel half");
+        assert!(!user_range_ok(u64::MAX - 4, 16), "overflow");
+    }
+
+    #[test]
+    fn user_ranges_randomized() {
+        // xorshift: deterministic, no dependencies.
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..100_000 {
+            let (addr, len) = (next() >> (next() % 64), next() >> (next() % 64));
+            if user_range_ok(addr, len) {
+                // Accepted ranges never touch the null page, the last user
+                // page, or the kernel half, and never wrap.
+                let end = addr + len;
+                assert!(addr >= 0x1000 && end <= LAST_USER_PAGE && end >= addr);
+            } else {
+                assert!(addr < 0x1000 || addr.checked_add(len).is_none_or(|e| e > LAST_USER_PAGE));
+            }
+        }
     }
 
     #[test]

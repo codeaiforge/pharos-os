@@ -230,6 +230,8 @@ pub fn set_kernel_stack(top: u64) {
     // the CPU reads `rsp0` only on a privilege change, which cannot happen
     // during this write. The field is packed, hence `write_unaligned`.
     unsafe { (&raw mut (*tss).rsp[0]).write_unaligned(top) };
+    // The system-call entry switches to the same stack.
+    super::syscall::KERNEL_STACK_TOP.store(top, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// The TSS ring-0 stack pointer (see [`set_kernel_stack`]).

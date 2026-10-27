@@ -13,6 +13,7 @@ pub mod context;
 pub mod gdt;
 pub mod idt;
 pub mod paging;
+pub mod syscall;
 pub mod user_programs;
 
 use core::arch::asm;

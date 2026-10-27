@@ -24,6 +24,7 @@ extern crate alloc;
 #[cfg(target_arch = "x86_64")]
 pub mod arch;
 pub mod boot_info;
+pub mod cap;
 pub mod limine;
 pub mod mm;
 #[cfg(target_arch = "x86_64")]
@@ -31,6 +32,8 @@ pub mod process;
 #[cfg(target_arch = "x86_64")]
 pub mod sched;
 pub mod sync;
+#[cfg(target_arch = "x86_64")]
+pub mod syscall;
 #[cfg(target_arch = "x86_64")]
 pub mod testing;
 #[cfg(target_arch = "x86_64")]

@@ -311,6 +311,17 @@ pub fn current_id() -> Option<TaskId> {
     SCHEDULER.lock().as_ref().map(|s| s.queue.current().id)
 }
 
+/// Runs `f` on the running task's process address space, locked; `None`
+/// for kernel tasks.
+pub fn with_current_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
+    let task = SCHEDULER
+        .lock()
+        .as_ref()
+        .map(|s| s.queue.current().clone())?;
+    let mut space = task.context.space()?;
+    Some(f(&mut space))
+}
+
 /// Tasks that have not exited, including the running one (not the idle
 /// task).
 pub fn live_tasks() -> usize {

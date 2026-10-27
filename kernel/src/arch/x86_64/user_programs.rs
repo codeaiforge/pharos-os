@@ -73,4 +73,47 @@ programs! {
     WriteCr3, pharos_up_cr3, pharos_up_cr3_end,
         "Loads `rdi` into CR3 (privileged).",
         "mov cr3, rdi";
+    SyscallTable, pharos_up_table, pharos_up_table_end,
+        "Runs the system calls in the table at `rdi`, then exits with code \
+         `0x600d`. Table: a count, then entries of ten 8-byte words: `rax`, \
+         `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` going in; status (`rax`), \
+         value (`rdx`), and 1 if `rdi`, `rsi`, `r10`, `r8`, `r9`, and `rsp` \
+         survived (else 0) coming out.",
+        "mov rbx, rdi
+         mov r12, [rbx]
+         lea r13, [rbx + 8]
+         mov r15, rsp
+     2:  test r12, r12
+         jz 4f
+         mov rax, [r13]
+         mov rdi, [r13 + 8]
+         mov rsi, [r13 + 16]
+         mov rdx, [r13 + 24]
+         mov r10, [r13 + 32]
+         mov r8, [r13 + 40]
+         mov r9, [r13 + 48]
+         syscall
+         mov [r13 + 56], rax
+         mov [r13 + 64], rdx
+         mov r14, 1
+         cmp rdi, [r13 + 8]
+         jne 3f
+         cmp rsi, [r13 + 16]
+         jne 3f
+         cmp r10, [r13 + 32]
+         jne 3f
+         cmp r8, [r13 + 40]
+         jne 3f
+         cmp r9, [r13 + 48]
+         jne 3f
+         cmp rsp, r15
+         je 5f
+     3:  xor r14, r14
+     5:  mov [r13 + 72], r14
+         add r13, 80
+         dec r12
+         jmp 2b
+     4:  xor eax, eax
+         mov edi, 0x600d
+         syscall";
 }

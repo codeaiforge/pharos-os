@@ -83,15 +83,15 @@ Everything below is **planned**; none of it is implemented.
 
 ### Kernel/user boundary (designed for M2.7)
 
-Designed in [syscalls-ipc.md](../architecture/syscalls-ipc.md) and [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism). Rows marked **(tested)** are implemented and covered by QEMU tests (#38, #39); the rest are still planned. Refined when M2.7 closes.
+Designed in [syscalls-ipc.md](../architecture/syscalls-ipc.md) and [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism). Rows marked **(tested)** are implemented and covered by QEMU tests (#38–#40); the rest are still planned. Refined when M2.7 closes.
 
 | Threat | Planned mitigation |
 | --- | --- |
 | A process reads or writes kernel memory | **(tested)** Kernel pages never have the user bit; SMEP/SMAP on where available. The `user_mode` test kernel has processes read and write kernel data and jump into kernel code; each is killed with the expected page fault |
 | A process reaches another process's memory | **(tested)** Separate user halves per process; the kernel decides all user mappings. A process reading a page only another process maps is killed (not-present fault) |
-| A malicious system-call argument corrupts the kernel | Every argument checked; the kernel never dereferences user addresses and copies through the direct map after validating range, mapping, and access; unknown calls return errors; randomized host tests of validation |
-| `sysret` to a non-canonical address faults in ring 0 (CVE-2012-0217) | The last user page is never mapped; the return address is checked before `sysret` |
-| A process uses an object it was not given | Capabilities only, per-process handle tables, rights checked on every call, delegation only with `GRANT`, revocation through the derivation tree |
+| A malicious system-call argument corrupts the kernel | **(tested)** Every argument is checked, and the kernel never dereferences user addresses: it copies through the direct map after validating range, mapping, and access. Unknown calls return errors. The `syscalls` test kernel passes kernel, unmapped, page-crossing, overflowing, and oversized buffers, unknown numbers, and bad handles. `syscall::decode` is fuzzed on the host with 200,000 random calls |
+| `sysret` to a non-canonical address faults in ring 0 (CVE-2012-0217) | **(tested)** The last user page is never mapped, and the return address is checked before `sysret` (falling back to `iretq`). A `syscall` at the very end of the page below returns, then faults in user mode, killing only the process. This passed under TCG and under KVM on an Intel CPU |
+| A process uses an object it was not given | Capabilities only, with per-process handle tables and rights checked on every call (**tested**: handle 0, unknown and deleted handles, and missing rights are rejected). Delegation only with `GRANT`, and revocation through the derivation tree (planned, #41) |
 | A process exhausts kernel memory through IPC | Synchronous IPC: one 256-byte buffer and one wait per thread; process creation is kernel-only |
 | A process crashes the kernel with a fault or a privileged instruction | **(tested)** Exceptions from user mode kill the process, not the kernel; `cli`, `hlt`, and `mov cr3` in user mode are killed with general-protection faults, and the other processes keep running |
 | Speculative execution leaks kernel memory (Meltdown class) | Not mitigated in M2.7 (no KPTI); revisit before real-hardware use |

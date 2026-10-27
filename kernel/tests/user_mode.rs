@@ -6,6 +6,10 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 use core::time::Duration;
 
 use pharos_kernel::arch::x86_64::context::{MAX_STACKS, SLOT_SIZE, STACK_WINDOW};
@@ -68,7 +72,7 @@ fn run(t: &mut TestRun) {
                     .ok()
             })
             .ok_or(process::ProcessError::NoFrameAllocator)?;
-        process::start(space, 0, COUNTER_PAGE).map(|id| (id, counter))
+        process::start(space, 0, COUNTER_PAGE, Vec::new()).map(|id| (id, counter))
     });
     t.check("spinning process started", spinner.is_ok());
     let Ok((spinner_id, counter)) = spinner else {
@@ -110,7 +114,7 @@ fn run(t: &mut TestRun) {
     let mut ids = [0; 7];
     let mut started = true;
     for (slot, (program, arg, _)) in ids.iter_mut().zip(attempts) {
-        match process::spawn(program.bytes(), 0, arg) {
+        match process::spawn(program.bytes(), 0, arg, Vec::new()) {
             Ok(id) => *slot = id,
             Err(_) => started = false,
         }

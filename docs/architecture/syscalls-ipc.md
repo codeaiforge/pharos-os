@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.7, #37). It follows [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries) (capability-based microkernel), the [D-012 direction](../project/decision-log.md#d-012-agent-sandboxing-tool-permissions-and-network-isolation) (kernel-enforced capabilities), and [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism) (IPC model and system-call mechanism).
-- **Implementation:** per-process address spaces (#38) and ring 3 execution with user faults killing the process (#39) are **implemented** (`process::load`, `process::start`, `process::spawn`). System calls (#40) and IPC (#41) are **planned**.
+- **Implementation:** per-process address spaces (#38) and ring 3 execution with user faults killing the process (#39) are **implemented** (`process::load`, `process::start`, `process::spawn`). So are the system-call entry and the calls `exit`, `yield`, `debug_write`, and `delete`, with capability tables (#40). IPC (`send`, `receive`) and `revoke` are **planned** (#41); until then they return `UNKNOWN_CALL`.
 
 ## 2. Context
 
@@ -81,7 +81,8 @@ The prototype for D-004 showed that QEMU's default CPU under TCG, which CI uses,
   1. Check `addr + len` without overflow, inside `[0x1000, 0x7ffffffff000)`, and `len` within the call's limit.
   2. Translate each page in the process's address space; the page must be present and user-accessible (and writable for writes into it).
   3. Copy page by page between the frame's direct-map address and a kernel buffer.
-- **Implementation:** safe functions over the address-space translation and `mm::raw` slices; host-tested for range checks, with a randomized test of the validation.
+- **Implementation:** `AddressSpace::read_user` and `write_user` in the hardware layer. They check the range (`user_range_ok`), then every page (present, user, and writable for writes), before copying anything through the direct map. Host tests cover the range checks, including a randomized test. Stateless argument checks are in `syscall::decode`, fuzzed on the host with 200,000 random calls.
+- **Check order:** call number, length, address range (`decode`); then handle and rights (the capability table); then the pages (`read_user`).
 - With one CPU and interrupts disabled during system calls, no other thread can change the mappings between the check and the copy. SMP must revisit this.
 - **SMEP and SMAP** are enabled at boot when CPUID reports them, as defence in depth: the kernel then cannot execute or touch user pages by accident. The design does not rely on them, because CI's default QEMU CPU lacks them. A local check runs the test kernels with `-cpu max`.
 
@@ -113,6 +114,8 @@ The prototype for D-004 showed that QEMU's default CPU under TCG, which CI uses,
 - **Not in M2.7:** a combined `call` (send and wait for a reply) and one-shot reply capabilities. They can be added later to save system calls on the round trip if the D-004 budget needs it.
 
 ### System calls in M2.7
+
+The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per-process state (the capability table) is `process::Process`. Process address spaces refuse to map the last user page (`paging::LAST_USER_PAGE`).
 
 | No. | Call | Arguments | Result (`rdx`) | Capability needed |
 | --- | --- | --- | --- | --- |

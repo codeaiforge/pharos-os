@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- System calls (D-014, #40).
+  - The `syscall`/`sysret` entry (`arch::x86_64::syscall`) runs on the thread's kernel stack with interrupts disabled. Its return address is checked before `sysret`, with an `iretq` fallback, and process address spaces refuse the last user page (CVE-2012-0217).
+  - `syscall::decode` performs the stateless checks and is fuzzed on the host. The handler checks capabilities in the per-process `cap::CapTable`, and `AddressSpace::read_user`/`write_user` copy through the direct map after checking range, presence, and access.
+  - Calls: `exit`, `yield`, `debug_write` (needs a debug-console capability with `WRITE`), and `delete`, with documented error codes.
+  - `process::start` takes the initial capabilities.
+  - New test kernel `syscalls` (28 checks), also passing with SMEP/SMAP and under KVM. It was checked to fail when `rdi` is not restored, when rights are ignored, or when the last user page can be mapped.
 - User code in ring 3 (#39).
   - The GDT gains user data and code segments in `sysret` order, and every task switch loads TSS `rsp0` with the thread's kernel stack.
   - `context::enter_user` enters ring 3 with every other register cleared and interrupts on.
