@@ -3,7 +3,7 @@
 - **Scope:** everything M2.7 added between user processes and the kernel: the system-call entry and every system call, every path that reads or writes user memory, the ring 3 entry and exit paths, interrupts and exceptions from user mode, capabilities and IPC, and every `unsafe` block added in M2.7 (since commit `8b4aeb4`, the M2.6 gate).
 - **Design under review:** [syscalls-ipc.md](../architecture/syscalls-ipc.md), D-004, the D-012 direction, D-014.
 - **Date:** 2026-10-27, issue #42. Reviewer: AI-assisted (Claude Code), with code reading and a test for each claim; findings fixed in the same issue.
-- **Status:** **awaiting maintainer approval.**
+- **Status:** **approved** by the maintainer on 2026-10-27 (M2.7 gate, #42).
 
 ## Method
 
@@ -94,4 +94,4 @@ All `unsafe` stays in the allowed modules (AGENTS.md) and has a `// SAFETY:` com
 
 ## Approval
 
-Pending: the maintainer approves, or asks for changes, as part of the M2.7 gate (#42).
+Approved by the maintainer on 2026-10-27, as part of the M2.7 gate (#42). The accepted limits above are tracked as open questions in [syscalls-ipc.md](../architecture/syscalls-ipc.md) and as limits in the [threat model](threat-model.md).
