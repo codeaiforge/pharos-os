@@ -29,7 +29,7 @@ cargo xtask run          # UEFI (OVMF)
 cargo xtask run --bios   # BIOS (SeaBIOS)
 ```
 
-Serial output (COM1) appears on the terminal. The last kernel line is `PHAROS: boot ok`, `PHAROS: boot failed: <reason>`, or `PHAROS: panic: <message>`. The command exits 0 only if the kernel signalled success (QEMU exit status 33); failures exit with status 35. Any other exit means the kernel never signalled, for example after a triple fault (QEMU runs with `-no-reboot`). Under UEFI, OVMF prints its own boot messages before the kernel starts.
+Serial output (COM1) appears on the terminal. The last kernel line is `PHAROS: boot ok`, `PHAROS: boot failed: <reason>`, or `PHAROS: panic: <message>`. The command exits 0 only if the kernel signalled success (QEMU exit status 33). On a kernel failure QEMU exits with status 35 and the command fails. Any other exit means the kernel never signalled, for example after a triple fault (QEMU runs with `-no-reboot`). Under UEFI, OVMF prints its own boot messages before the kernel starts.
 
 ### Break into the kernel with GDB
 
