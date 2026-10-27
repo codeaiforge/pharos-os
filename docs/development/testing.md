@@ -47,6 +47,7 @@ A test kernel passes only if it ran at least one check, none failed, and it ende
 | Test kernel | Checks |
 | --- | --- |
 | `kernel/tests/boot_info.rs` | Base revision accepted; memory map present, non-empty, with usable memory and the kernel image; HHDM offset in the higher half; bootloader is Limine; firmware is 64-bit UEFI; the test kernel runs at its linked higher-half address |
+| `kernel/tests/interrupt_state.rs` | Interrupts are disabled at entry; printing and `without_interrupts` (also nested) restore the previous interrupt state, enabled or disabled; `enable_interrupts`/`disable_interrupts` set and clear IF |
 
 To add a test kernel:
 

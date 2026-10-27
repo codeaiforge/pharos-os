@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- Interrupt-safe kernel console (#19): `interrupts_enabled`, `enable_interrupts`, `disable_interrupts`, and `without_interrupts` in the hardware layer; `kprint!`/`kprintln!` hold the console lock with interrupts disabled and restore the previous state. Fatal exception handlers will use the panic handler's print path. New test kernel `interrupt_state` (9 checks).
 - Kernel tests inside QEMU (D-009): test kernels in `kernel/tests/` (first: `boot_info`, 9 checks), the `test_kernel!` and `limine_requests!` macros, and `TestRun`. `cargo xtask runner` boots each test kernel under UEFI as Cargo's runner; `cargo xtask test` runs them after the boot check, so CI runs them too. Kernel Clippy now covers test kernels.
 - Kernel logging: `kprint!` and `kprintln!` write to one COM1 console behind a new `SpinLock` (no `unsafe`, unit-tested with threads). The panic handler releases the lock first, so a panic during printing is still reported. Not interrupt-safe yet (M2.4).
 - CI `qemu` job (Ubuntu 24.04): installs QEMU, OVMF, and xorriso on the runner, runs `cargo xtask test` (boot check under UEFI and BIOS), and checks that two image builds are byte-identical. No new actions, no artifacts. Verified on GitHub: passes on `main` (44 s) with the same image hash as a local build, and fails on a kernel that reports a boot failure.

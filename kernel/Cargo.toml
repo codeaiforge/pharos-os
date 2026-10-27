@@ -23,3 +23,7 @@ undocumented_unsafe_blocks = "deny"
 [[test]]
 name = "boot_info"
 harness = false
+
+[[test]]
+name = "interrupt_state"
+harness = false

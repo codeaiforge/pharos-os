@@ -7,10 +7,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// A spin lock that guards a resource outside Rust's memory, such as the
 /// serial port. It holds no data, so it needs no `unsafe`.
 ///
-/// Not interrupt-safe yet: if an interrupt handler on the same CPU waits for
-/// a lock the interrupted code holds, it spins forever. Before interrupts are
-/// enabled (M2.4), code holding a lock that handlers also use must disable
-/// interrupts first.
+/// Not interrupt-safe by itself: if an interrupt handler on the same CPU
+/// waits for a lock the interrupted code holds, it spins forever. Code that
+/// takes a lock which handlers also use must disable interrupts while holding
+/// it, as the console does with `arch::x86_64::without_interrupts`.
 pub struct SpinLock {
     locked: AtomicBool,
 }

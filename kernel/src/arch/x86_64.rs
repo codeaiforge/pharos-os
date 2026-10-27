@@ -139,31 +139,78 @@ pub fn qemu_exit(status: QemuExit) {
     }
 }
 
+/// RFLAGS interrupt-enable flag (IF).
+const RFLAGS_IF: u64 = 1 << 9;
+
+/// True if maskable interrupts are enabled (RFLAGS.IF).
+pub fn interrupts_enabled() -> bool {
+    let rflags: u64;
+    // SAFETY: `pushfq; pop` reads RFLAGS through the stack and changes no
+    // state; the stack slot it uses is released before the block ends.
+    unsafe { asm!("pushfq", "pop {}", out(reg) rflags, options(nomem, preserves_flags)) };
+    rflags & RFLAGS_IF != 0
+}
+
+/// Enables maskable interrupts (`sti`).
+pub fn enable_interrupts() {
+    // SAFETY: `sti` only sets RFLAGS.IF. Whether a handler is ready for each
+    // unmasked interrupt source is the interrupt setup's responsibility; with
+    // all sources masked (as Limine leaves them) nothing is delivered.
+    unsafe { asm!("sti", options(nomem, nostack)) };
+}
+
+/// Disables maskable interrupts (`cli`).
+pub fn disable_interrupts() {
+    // SAFETY: `cli` only clears RFLAGS.IF; it touches no memory.
+    unsafe { asm!("cli", options(nomem, nostack)) };
+}
+
+/// Runs `f` with maskable interrupts disabled, then restores the previous
+/// state: enabled stays enabled, disabled stays disabled (so calls nest).
+pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
+    let was_enabled = interrupts_enabled();
+    if was_enabled {
+        disable_interrupts();
+    }
+    let result = f();
+    if was_enabled {
+        enable_interrupts();
+    }
+    result
+}
+
 /// Serializes console output so lines from different code paths do not mix.
+/// Held only with interrupts disabled, so an interrupt handler on this CPU
+/// never waits for a holder it interrupted.
 static CONSOLE_LOCK: SpinLock = SpinLock::new();
 /// Whether COM1 has been configured. Only changed while holding the lock.
 static CONSOLE_READY: AtomicBool = AtomicBool::new(false);
 
 /// Writes formatted text to the kernel console (COM1). Used by `kprint!` and
-/// `kprintln!`; configures COM1 on first use.
+/// `kprintln!`; configures COM1 on first use. Interrupts are disabled while
+/// the lock is held and restored afterwards, so interrupt handlers may print.
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments<'_>) {
-    let _guard = CONSOLE_LOCK.lock();
-    let mut serial = if CONSOLE_READY.load(Ordering::Acquire) {
-        Serial { base: COM1 }
-    } else {
-        let serial = Serial::com1();
-        CONSOLE_READY.store(true, Ordering::Release);
-        serial
-    };
-    // Writing to the UART cannot fail.
-    let _ = serial.write_fmt(args);
+    without_interrupts(|| {
+        let _guard = CONSOLE_LOCK.lock();
+        let mut serial = if CONSOLE_READY.load(Ordering::Acquire) {
+            Serial { base: COM1 }
+        } else {
+            let serial = Serial::com1();
+            CONSOLE_READY.store(true, Ordering::Release);
+            serial
+        };
+        // Writing to the UART cannot fail.
+        let _ = serial.write_fmt(args);
+    });
 }
 
-/// Console output for the panic handler. If the panic happened while the
-/// console lock was held (for example inside a `kprintln!`), the holder will
-/// never resume on this single CPU, so the lock is released first; the
-/// interrupted line may be cut short.
+/// Emergency console output for the panic handler and for fatal CPU
+/// exception handlers. A CPU exception (for example a page fault) can occur
+/// while this CPU holds the console lock, even with interrupts disabled, and
+/// the holder never resumes on this single CPU, so the lock is released
+/// first; the interrupted line may be cut short. Not for recoverable paths:
+/// those use `kprintln!`.
 #[doc(hidden)]
 pub fn _print_panic(args: fmt::Arguments<'_>) {
     CONSOLE_LOCK.force_unlock();
