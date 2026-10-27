@@ -2,7 +2,7 @@
 
 **Status: minimal kernel (M2.2).** Limine boots it on UEFI and BIOS. It checks the boot protocol revision, reads the memory map and other boot information, reports them over the COM1 serial port, and halts.
 
-It has **no** interrupt handling, memory management, scheduling, processes, system calls, or drivers beyond serial. Booting has been verified manually in QEMU; automated boot tests come with [#12](https://github.com/codeaiforge/pharos-os/issues/12) and M2.3. Design: [docs/architecture/boot.md](../docs/architecture/boot.md).
+It has **no** interrupt handling, memory management, scheduling, processes, system calls, or drivers beyond serial. `cargo xtask run` boots it in QEMU and checks the result: the kernel signals success or failure through QEMU's `isa-debug-exit` device, only when CPUID reports a hypervisor. Automated boot tests in CI come with M2.3. Design: [docs/architecture/boot.md](../docs/architecture/boot.md).
 
 ## Layout
 
@@ -25,13 +25,15 @@ cargo xtask build                                                         # kern
 cargo xtask image                                                         # target/xtask/image/pharos.iso
 ```
 
-Until `cargo xtask run` exists (#12), boot the image in QEMU by hand, for example with BIOS:
+Boot it in QEMU (builds the kernel and image first):
 
 ```sh
-qemu-system-x86_64 -M q35 -m 256M -cdrom target/xtask/image/pharos.iso -serial stdio -display none
+cargo xtask run          # UEFI (OVMF)
+cargo xtask run --bios   # BIOS (SeaBIOS)
+cargo xtask run --gdb    # wait for GDB; see docs/development/debugging.md
 ```
 
-Expected serial output ends with `PHAROS: boot ok`, after which the kernel halts (stop QEMU with Ctrl+C). For UEFI, add the OVMF firmware as shown in [boot.md](../docs/architecture/boot.md).
+The serial output ends with `PHAROS: boot ok`, and the command exits 0 only on the kernel's success signal (QEMU exit status 33). Boot failures and panics print `PHAROS: boot failed: ...` or `PHAROS: panic: ...`; QEMU then exits with status 35 and `cargo xtask run` fails.
 
 ## Rules for this crate
 

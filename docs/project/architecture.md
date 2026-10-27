@@ -14,7 +14,7 @@ Cargo workspace (stable Rust, edition 2024)
                        └── binary (no_main): entry point, Limine requests
 ```
 
-- **Kernel (M2.2, minimal):** Limine boots it on UEFI and BIOS. It checks the protocol revision, reads the memory map and other boot information, reports them over COM1, and halts. It has no interrupts, memory management, scheduling, processes, or drivers beyond serial. Booting has been verified manually in QEMU; automated boot tests are planned (#12, M2.3).
+- **Kernel (M2.2, minimal):** Limine boots it on UEFI and BIOS. It checks the protocol revision, reads the memory map and other boot information, reports them over COM1, and halts. It has no interrupts, memory management, scheduling, processes, or drivers beyond serial. `cargo xtask run` boots it in QEMU and checks its success signal; automated boot tests in CI are planned (M2.3).
 - `unsafe` is forbidden in host crates. In the kernel it is denied by default and allowed only in the hardware layer and the Limine protocol module, each block documented (enforced by lints).
 - No package has third-party dependencies. The CLI and `xtask` do not depend on the kernel crate.
 

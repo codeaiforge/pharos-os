@@ -20,9 +20,43 @@ echo $?          # 0 success, 1 problem reported, 2 invalid usage
 - Check the active toolchain with `rustup show`; `rust-toolchain.toml` should select `stable`.
 - See the common failures table in [setup.md](setup.md#common-failures).
 
-## Planned: kernel debugging (not available yet)
+## Kernel in QEMU
 
-Nothing below works today, because no bootable kernel exists. It records the intended approach so M2.2–M2.4 can adopt it; the boot path is decided ([boot.md](../architecture/boot.md)); QEMU automation details depend on decision D-009.
+### Boot and read the serial log
+
+```sh
+cargo xtask run          # UEFI (OVMF)
+cargo xtask run --bios   # BIOS (SeaBIOS)
+```
+
+Serial output (COM1) appears on the terminal. The last kernel line is `PHAROS: boot ok`, `PHAROS: boot failed: <reason>`, or `PHAROS: panic: <message>`. The command exits 0 only if the kernel signalled success (QEMU exit status 33); failures exit with status 35. Any other exit means the kernel never signalled, for example after a triple fault (QEMU runs with `-no-reboot`). Under UEFI, OVMF prints its own boot messages before the kernel starts.
+
+### Break into the kernel with GDB
+
+Verified on 2026-10-27 with GDB 15.1 and QEMU 8.2.2.
+
+1. Start QEMU paused, with a GDB server on `localhost:1234`:
+
+   ```sh
+   cargo xtask run --bios --gdb
+   ```
+
+   It prints the GDB command to use, then waits.
+2. In a second terminal:
+
+   ```sh
+   gdb target/x86_64-unknown-none/release/pharos-kernel \
+       -ex 'target remote localhost:1234' -ex 'break kmain' -ex continue
+   ```
+
+   GDB connects while the CPU is still at the reset vector (`0xfff0`), then stops at `Breakpoint 1, 0xffffffff80001170 in kmain ()` once Limine jumps to the kernel. (The address changes as the kernel changes.)
+3. Inspect (`info registers`, `x/8i $rip`, `bt`), then `continue`. The kernel finishes booting and QEMU exits with the kernel's status.
+
+The release build has symbols but no debug information, so GDB shows function names and addresses, not source lines. Source-level debugging needs debug information in the kernel build; add it when a milestone needs it.
+
+### Useful QEMU options
+
+`cargo xtask run` already uses `-serial stdio`, `-display none`, `-no-reboot`, `isa-debug-exit`, and (with `--gdb`) `-s -S`. Other options for manual runs:
 
 | Technique | Purpose | Typical QEMU options |
 | --- | --- | --- |

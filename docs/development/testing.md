@@ -18,6 +18,10 @@ cargo test -p pharos-kernel --lib   # kernel library logic
 
 The CLI is tested through a `run` function that writes to in-memory buffers, and `doctor` takes the OS and architecture as parameters, so tests are deterministic and do not depend on the machine running them.
 
+## Boot check (QEMU)
+
+The kernel's boot is checked with `cargo xtask run` (UEFI) and `cargo xtask run --bios`. A run passes only if QEMU exits with status 33, which the kernel produces after printing `PHAROS: boot ok`; boot errors and panics give status 35. This is a local, manual check for now: it is not part of `scripts/check.sh` or CI, and it has no timeout. Running it automatically in CI with a timeout is milestone M2.3 (decision D-009).
+
 ## Quality gates
 
 Run `scripts/check.sh` before every pull request. It runs these commands, the same ones as CI's `check` job, and stops at the first failure:

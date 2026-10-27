@@ -3,18 +3,19 @@
 Pharos OS by CodeAIForge is an experimental project to build a local-first AI agent platform, and eventually a standalone operating system, in Rust.
 
 > [!WARNING]
-> Pharos OS is **not** a bootable or production-ready operating system. It is in early development at the repository-scaffold stage. Do not use it for anything security-critical.
+> Pharos OS is **not** a usable or production-ready operating system. The kernel only boots in QEMU, prints what the bootloader handed over, and halts. Do not use it for anything security-critical, and do not boot it on real hardware.
 
 ## Status
 
-**v0.1.0 — Phase 1 (Foundation) complete.** Boot decisions are made (M2.1, see [boot design](docs/architecture/boot.md)); the current milestone is M2.2, a minimal bootable kernel. See the [implementation roadmap](docs/project/implementation-roadmap.md).
+**Phase 2 — Core System.** M2.2 is done: a minimal kernel boots in QEMU on UEFI and BIOS with one command (`cargo xtask run`). The current milestone is M2.3, automated QEMU boot tests in CI. See the [implementation roadmap](docs/project/implementation-roadmap.md) and [boot design](docs/architecture/boot.md).
 
 | Area | Status |
 | --- | --- |
 | Rust workspace, formatting, linting, tests, CI config | Implemented |
 | `pharos` host-side CLI (`help`, `version`, `info`, `doctor`) | Implemented |
-| `kernel` crate | Placeholder: a normal host library; does not boot |
-| Bootable x86-64 kernel, QEMU boot | Planned |
+| `cargo xtask` (kernel build, reproducible boot image, QEMU run) | Implemented |
+| Minimal x86-64 kernel: boots via Limine in QEMU (UEFI and BIOS), reports boot information over serial, halts | Implemented |
+| Automated QEMU boot tests in CI | Planned (M2.3) |
 | Memory management, interrupts, scheduling, processes, IPC | Planned |
 | Storage, drivers, networking | Planned |
 | Local AI inference and agent platform | Planned |
@@ -30,7 +31,7 @@ Pharos OS aims to run AI agents locally under an operating-system design where a
 | Host | Linux Mint (other x86-64 Linux distributions should work) |
 | Language | Rust, stable channel, edition 2024 (minimum Rust 1.85) |
 | Architecture | x86-64 |
-| Emulator | QEMU (needed from Phase 2; not used yet) |
+| Emulator | QEMU with OVMF (UEFI) and SeaBIOS (BIOS) |
 
 ## Prerequisites
 
@@ -46,6 +47,17 @@ cargo build
 cargo run -p pharos-cli -- help
 ```
 
+## Boot the kernel in QEMU
+
+Needs `qemu-system-x86`, `ovmf`, and `xorriso` (see [setup](docs/development/setup.md)). One command builds the kernel and the image and boots it:
+
+```sh
+cargo xtask run          # UEFI (OVMF)
+cargo xtask run --bios   # BIOS (SeaBIOS)
+```
+
+The serial output ends with `PHAROS: boot ok`, and the command exits 0 only when the kernel reports success.
+
 ## CLI usage
 
 ```console
@@ -55,7 +67,7 @@ pharos 0.1.0
 $ cargo run -q -p pharos-cli -- info
 Pharos OS 0.1.0
 Project of: CodeAIForge
-Stage:      Phase 1 - Foundation (repository scaffold)
+Stage:      Phase 2 - Core System (minimal kernel, M2.2)
 ...
 
 $ cargo run -q -p pharos-cli -- doctor
@@ -79,7 +91,7 @@ This runs the same checks as CI ([.github/workflows/ci.yml](.github/workflows/ci
 
 | Path | Purpose |
 | --- | --- |
-| `kernel/` | Placeholder for the future kernel ([kernel/README.md](kernel/README.md)) |
+| `kernel/` | The minimal `no_std` kernel ([kernel/README.md](kernel/README.md)) |
 | `tools/pharos-cli/` | The `pharos` host-side development CLI |
 | `xtask/` | `cargo xtask`: builds the kernel and boot image ([boot design](docs/architecture/boot.md#build-tool-xtask)) |
 | `docs/` | Project, development, architecture, and security docs ([index](docs/README.md)) |

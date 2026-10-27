@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.2 — Minimal bootable x86-64 kernel.** Everything in Phases 2–5 is **planned, not implemented**.
+**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.3 — Early serial output and QEMU boot validation.** Everything in Phases 2–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -39,7 +39,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | Phase | Name | Status |
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
-| 2 | Core System | **Current** (M2.2) |
+| 2 | Core System | **Current** (M2.3) |
 | 3 | AI Agent Platform | Planned |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
@@ -162,7 +162,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.2 — Minimal bootable x86-64 kernel
 
-**Status: Current.**
+**Status: Done** — gate passed 2026-10-27. From a clean checkout, `cargo xtask run` built a byte-identical image and booted it to the kernel's success signal (QEMU exit status 33) on UEFI and BIOS; boot failures and panics exit with status 35; the GDB breakpoint on `kmain` was verified. The automated, timed boot test in CI moves to M2.3 together with decision D-009.
 
 - **Objective and scope:** Convert the `kernel` crate into a `no_std` kernel that boots via Limine and reaches its entry point in QEMU and halts cleanly, following [boot.md](../architecture/boot.md) and the D-004 constraints on early kernel code.
 - **Deliverables:** Kernel entry point; panic handler; build configuration; reproducible bootable image creation without root privileges.
@@ -176,7 +176,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.3 — Early serial output and QEMU boot validation
 
-**Status: Planned.**
+**Status: Current.** Serial output already exists (M2.2); the remaining work is the automated harness and CI job (D-009).
 
 - **Objective and scope:** Serial (COM1) output and an automated QEMU test harness that runs in CI.
 - **Deliverables:** Serial driver; logging macros; QEMU harness (per D-009) with timeout and serial capture; CI job running it headless.
@@ -589,4 +589,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26. The current milestone is **M2.2 — Minimal bootable x86-64 kernel**; the first measurable kernel result follows at M2.3 (reproducible QEMU boot with observable serial output, tested in CI).
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26 and M2.2 on 2026-10-27. The current milestone is **M2.3 — Early serial output and QEMU boot validation**: decide D-009 and run the QEMU boot test automatically in CI.

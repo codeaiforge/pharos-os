@@ -42,12 +42,14 @@ Expected: `Finished` with no warnings. The first run may download the toolchain 
 ```sh
 scripts/check.sh
 cargo run -q -p pharos-cli -- doctor
+cargo xtask run --bios   # optional: needs qemu-system-x86, xorriso (and ovmf for UEFI)
 ```
 
 Expected:
 
+- `cargo xtask run --bios` builds the kernel and image, boots it in QEMU, and ends with `PHAROS: boot ok` and `Kernel reported success (QEMU exit status 33).`
 - `scripts/check.sh` runs each check in turn (formatting, Clippy, build, tests, rustdoc, links) and ends with `All checks passed.`
-- `doctor` shows `PASS` for host OS and architecture on Linux x86-64, `SKIP` for QEMU and inference (they do not exist yet), and `Result: no problems found.` It exits 0.
+- `doctor` shows `PASS` for host OS and architecture on Linux x86-64, `SKIP` for QEMU (doctor is read-only and does not run QEMU) and inference (it does not exist yet), and `Result: no problems found.` It exits 0.
 
 ## Common failures
 
