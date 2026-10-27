@@ -108,10 +108,35 @@ jobs:
           rustc --version
 
       # Packages for the runner VM only. curl, xz, and cc are preinstalled.
+      # The .deb files are cached per runner image version, because the
+      # Ubuntu mirror the runners use is often slow. A new image (about
+      # weekly) means one download, then cache hits again.
+      - name: Runner image version
+        id: image
+        run: echo "version=${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"
+
+      # Pinned to a commit SHA (signed v6.1.0 release commit).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-debs
+          key: apt-${{ steps.image.outputs.version }}-qemu-ovmf-xorriso
+
+      # On a cache hit, install from the cached files without touching the
+      # mirror. If that fails (or on a miss), download, keep the files for
+      # the cache, and install.
       - name: Install QEMU, OVMF, and xorriso
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf xorriso
+          pkgs="qemu-system-x86 ovmf xorriso"
+          if ls ~/apt-debs/*.deb >/dev/null 2>&1 &&
+             sudo apt-get install -y --no-install-recommends ~/apt-debs/*.deb; then
+            echo "Installed from the cache"
+          else
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends --download-only $pkgs
+            rm -rf ~/apt-debs && mkdir -p ~/apt-debs
+            cp /var/cache/apt/archives/*.deb ~/apt-debs/
+            sudo apt-get install -y --no-install-recommends $pkgs
+          fi
           qemu-system-x86_64 --version | head -1
 
       # Builds the kernel and image, then boots headless under UEFI and BIOS.
