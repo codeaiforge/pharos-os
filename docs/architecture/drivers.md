@@ -200,3 +200,6 @@ In M2.9 test kernels start drivers. The main kernel enumerates PCI and logs devi
 - **More devices:** virtio-net (networking milestone), a framebuffer, input.
 - **SMP:** MSI-X targets the bootstrap CPU only.
 - **Writes:** a writable virtio-blk queue waits for the copy-on-write design (D-007).
+- **Revocation that unmaps:** revoking a device capability stops new calls, but existing register and DMA mappings stay until the process ends (security review limit). Unmapping on revoke needs a record of each capability's mappings.
+- **Timeouts:** a thread waiting on a revoked or silent interrupt waits until the next interrupt.
+- **A heap that frees:** the user-space bump allocator never frees; long-running services need a real allocator.

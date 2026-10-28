@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.9 — Hardware abstraction and selected drivers.** Everything in Phases 2–5 is **planned, not implemented**.
+**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.10 — Networking and basic system services.** Everything in Phases 2–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -39,7 +39,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | Phase | Name | Status |
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
-| 2 | Core System | **Current** (M2.9) |
+| 2 | Core System | **Current** (M2.10) |
 | 3 | AI Agent Platform | Planned |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
@@ -260,7 +260,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.9 — Hardware abstraction and selected drivers
 
-**Status: Current.** D-008 accepted on 2026-10-27 (#50).
+**Status: Done** — gate passed 2026-10-28: the CI `qemu` job passed on `main` at `35ec2cd` ([run 40713610670](https://github.com/codeaiforge/pharos-os/actions/runs/40713610670)) with 31 test kernels, among them the driver kernels `user_elf`, `pci`, `device_caps`, `device_irq`, and `virtio_blk`. A Rust virtio-blk driver runs as a user process with only its device and a console, reads the disk on MSI-X interrupts, and mounts the `pharos-fs` image on it with the kernel's parser. A driver killed mid-request leaves the kernel running and its device stopped, and a wrong device is refused. An MMIO grant that reached past the device's BAR failed CI on a throwaway branch ([run 40713691815](https://github.com/codeaiforge/pharos-os/actions/runs/40713691815)): the kernel's host tests failed (also on Rust 1.85), and the `device_caps` kernel failed at "past the BAR". Every M2.9 commit passed CI on its first run. The security review ([review-m2.9-drivers.md](../security/review-m2.9-drivers.md)) found and fixed four issues and was approved by the maintainer on 2026-10-28. Delivered: D-008 (#50), driver design (#51), Rust user programs and the ELF loader (#52), PCI discovery (#53), device interrupts (#54), device capabilities with MMIO and DMA (#55), the virtio-blk driver (#56), CI gate and security review (#57). Per D-008, virtio-net, a framebuffer, and a keyboard were left out; the IOMMU is a tracked limit. Design: [drivers.md](../architecture/drivers.md).
 
 - **Objective and scope:** A driver model (per D-008) and drivers for a small set of QEMU devices.
 - **Deliverables:** Device discovery (PCI/ACPI as needed); drivers such as virtio-blk, virtio-net, and a framebuffer or keyboard.
@@ -274,7 +274,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.10 — Networking and basic system services
 
-**Status: Planned.**
+**Status: Current.** Needs a network-stack decision first (a new decision record), as the deliverables below require.
 
 - **Objective and scope:** A minimal network stack and basic user-space services (for example a service manager and logging).
 - **Deliverables:** Network stack (implementation or library choice recorded as a decision); basic services.
@@ -591,4 +591,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27. The current milestone is **M2.9 — Hardware abstraction and selected drivers**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, and M2.9 on 2026-10-28. The current milestone is **M2.10 — Networking and basic system services**, which starts with a network-stack decision. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

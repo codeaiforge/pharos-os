@@ -8,7 +8,7 @@
   - the no-IOMMU limit.
 - **Design under review:** [drivers.md](../architecture/drivers.md), D-008, D-004.
 - **Date:** 2026-10-28, issue #57. Reviewer: AI-assisted (Claude Code), with code reading and a test for each claim; findings fixed in the same issue.
-- **Status:** **awaiting maintainer approval** (M2.9 gate, #57).
+- **Status:** **approved** by the maintainer on 2026-10-28 (M2.9 gate, #57).
 
 ## Method
 
@@ -88,4 +88,4 @@ All of it stays in the allowed modules (AGENTS.md) and has a `// SAFETY:` commen
 
 ## Approval
 
-Pending: the maintainer approves this review as part of the M2.9 gate (#57).
+Approved by the maintainer on 2026-10-28, as part of the M2.9 gate (#57). The accepted limits above are tracked in [drivers.md](../architecture/drivers.md) (open questions and security) and as limits in the [threat model](threat-model.md).
