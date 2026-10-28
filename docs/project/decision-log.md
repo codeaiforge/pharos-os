@@ -496,6 +496,48 @@ Two system calls per direction plus two task switches and two address-space swit
 - Rust user programs unlock moving the M2.8 filesystem out of the kernel later.
 - If user programs or device capabilities prove too large for M2.9, D-004's hybrid fallback applies: a documented, reviewed in-kernel driver.
 
+### D-015: Network stack and service model
+
+- **Status:** Accepted
+- **Needed by:** M2.10
+- **Date accepted:** 2026-10-28
+
+**Context.**
+- D-004 keeps networking out of the kernel. M2.9 gave user-space drivers their devices through capabilities and a shared virtio transport (`pharos_programs::virtio`).
+- Missing for M2.10:
+  - a network driver and stack;
+  - a way for a process to start processes (only the kernel does today);
+  - a service manager that starts services in order and reports failures.
+- IPC is synchronous, with 256-byte messages plus one capability, and carries no sender identity.
+- QEMU user-mode networking (slirp) needs no host privileges, so it runs in CI. It provides the guest address `10.0.2.15` and the gateway (and host) `10.0.2.2`.
+- `smoltcp` (0BSD) is the usual `no_std` stack. Its releases 0.13 and 0.14 need Rust 1.91; only 0.12 builds on the project's minimum, 1.85 (checked with `cargo info`, 2026-10-28).
+
+**Options.**
+- **Stack:**
+  - our own minimal stack: Ethernet, ARP, IPv4, ICMP echo, and UDP;
+  - `smoltcp` 0.12, which includes TCP but pins an old release or raises the minimum Rust.
+- **Placement:** the stack in the virtio-net driver's process, or in a separate process. The second needs shared memory (a new kernel feature) or many messages per frame.
+- **Client identity:** one endpoint per client, or IPC badges (a kernel and IPC change).
+- **Addresses:** static slirp addresses, or DHCP.
+- **Service start:** the kernel starts `init`, which starts the rest; or the kernel starts each service from a fixed list.
+
+**Evaluation criteria.** TCB size (nothing new in the kernel beyond process creation); attack surface; dependency cost and the minimum Rust; effort; whether TCP is needed before Phase 3.
+
+**Decision.**
+
+1. **Our own minimal stack:** Ethernet II, ARP with a bounded cache, IPv4 without fragments, ICMP echo, and UDP. **No TCP in M2.10.** Every parser is safe `no_std` Rust and fuzzed on the host. `smoltcp` is re-evaluated when TCP is needed, together with the minimum Rust.
+2. **One network service:** the stack runs in the virtio-net driver's process, so frames never cross IPC. Clients exchange datagrams of at most one IPC message with it.
+3. **Network access is a capability:** `init` creates one endpoint per client. A client's send capability on its endpoint is its network capability, scoped to one UDP port. The service tells clients apart by the endpoint a request arrived on; there are no kernel badges. How the service waits on several endpoints is settled in the design.
+4. **Static slirp addresses:** `10.0.2.15/24`, gateway `10.0.2.2`. There is no DHCP.
+5. **The kernel starts `init`:** `bin/init` from the root filesystem, with the boot capabilities. `init` starts the services in a fixed order, each with only the capabilities it needs, and reports every failure. This needs new system calls to start a process and wait for it; the program file is passed as a file capability.
+6. **The test endpoint is on the host:** `cargo xtask` runs a UDP echo server bound to localhost and reached through slirp, and the tests also ping the slirp gateway. No root and no TAP devices.
+
+**Consequences.**
+- The kernel gains process creation from user space, its only new trusted code in M2.10; the M2.10 security review covers it.
+- The network service is a single point of trust for networking. A bug in it affects only networking, not the kernel or other processes.
+- Without TCP, Phase 2 networking is datagrams only. Phase 3 needs (for example model downloads, if any) decide whether TCP or `smoltcp` comes next.
+- Per-client endpoints cost one endpoint per client and limit clients to what `init` sets up. Badges stay an option if this proves clumsy.
+
 ## Open and proposed decisions
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
