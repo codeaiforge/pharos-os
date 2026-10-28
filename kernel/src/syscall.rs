@@ -30,6 +30,7 @@ pub mod number {
     pub const ENDPOINT_CREATE: u64 = 14;
     pub const SPAWN: u64 = 15;
     pub const PROCESS_STATUS: u64 = 16;
+    pub const IRQ_NOTIFY: u64 = 17;
 }
 
 /// Largest buffer `debug_write` accepts (and the IPC message size).
@@ -173,6 +174,11 @@ pub enum Call {
     ProcessStatus {
         handle: Handle,
     },
+    IrqNotify {
+        handle: Handle,
+        endpoint: Handle,
+        bit: u32,
+    },
 }
 
 /// A page-aligned user range of `len` bytes (at least one page).
@@ -306,6 +312,14 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             })
         }
         number::PROCESS_STATUS => Ok(Call::ProcessStatus { handle: args[0] }),
+        number::IRQ_NOTIFY => match args[2] {
+            bit @ 0..32 => Ok(Call::IrqNotify {
+                handle: args[0],
+                endpoint: args[1],
+                bit: bit as u32,
+            }),
+            _ => Err(Error::TooLarge),
+        },
         _ => Err(Error::UnknownCall),
     }
 }
@@ -320,7 +334,7 @@ pub fn needed_rights(call: &Call) -> cap::Rights {
         Call::ConfigRead { .. } => cap::CONFIG,
         Call::MmioMap { .. } | Call::DmaAlloc { .. } => cap::MAP,
         Call::IrqCreate { .. } => cap::IRQ,
-        Call::IrqWait { .. } | Call::ProcessStatus { .. } => cap::WAIT,
+        Call::IrqWait { .. } | Call::ProcessStatus { .. } | Call::IrqNotify { .. } => cap::WAIT,
         Call::Spawn { .. } => cap::READ,
         _ => 0,
     }
@@ -700,6 +714,19 @@ mod kernel {
                 endpoint,
                 bit,
             } => spawn(&process, handle, arg, addr, count, endpoint, bit),
+            Call::IrqNotify {
+                handle,
+                endpoint,
+                bit,
+            } => {
+                let cap = process.caps.lock().get(handle, cap::WAIT)?;
+                let Object::Interrupt(irq) = cap.object() else {
+                    return Err(Error::MissingRight);
+                };
+                let target = self::endpoint(&process, endpoint, cap::RECEIVE)?;
+                irq.bind(target, 1 << bit)?;
+                Ok(0)
+            }
             Call::ProcessStatus { handle } => {
                 let cap = process.caps.lock().get(handle, cap::WAIT)?;
                 let Object::Process(record) = cap.object() else {
@@ -743,7 +770,16 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(17, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(18, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(
+            decode(17, [5, 6, 31, 9, 9, 9]),
+            Ok(Call::IrqNotify {
+                handle: 5,
+                endpoint: 6,
+                bit: 31
+            })
+        );
+        assert_eq!(decode(17, [5, 6, 32, 0, 0, 0]), Err(Error::TooLarge));
         assert_eq!(decode(14, [9; 6]), Ok(Call::EndpointCreate));
         assert_eq!(
             decode(16, [3, 0, 0, 0, 0, 0]),
@@ -936,6 +972,7 @@ mod tests {
                     assert!(count <= MAX_SPAWN_CAPS && bit < 32);
                     assert!(count == 0 || user_range_ok(addr, (count * SPAWN_ENTRY) as u64));
                 }
+                Ok(Call::IrqNotify { bit, .. }) => assert!(bit < 32),
                 Ok(_) => assert!(matches!(number, 0 | 1 | 5 | 6 | 13 | 14 | 16)),
                 Err(error) => assert!(error as u64 >= 1 && error as u64 <= 10),
             }

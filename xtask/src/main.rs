@@ -482,7 +482,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 8] = [
+const USER_PROGRAMS: [&str; 9] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -491,6 +491,7 @@ const USER_PROGRAMS: [&str; 8] = [
     "child",
     "init",
     "svc",
+    "netprobe",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -670,9 +671,14 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
         "-display",
         "none",
         "-no-reboot",
-        // No network card: only devices the tests know about.
+        // One network card: modern-only virtio-net on user-mode networking
+        // (slirp: no host privileges; guest 10.0.2.15, gateway 10.0.2.2).
         "-nic",
         "none",
+        "-netdev",
+        "user,id=net0",
+        "-device",
+        "virtio-net-pci,netdev=net0,disable-legacy=on",
         "-device",
         "isa-debug-exit,iobase=0xf4,iosize=0x04",
         "-cdrom",
@@ -1183,6 +1189,11 @@ mod tests {
         assert!(uefi.contains("-cdrom pharos.iso"));
         assert!(uefi.contains("readonly=on,file=disk.img"));
         assert!(uefi.contains("virtio-blk-pci,drive=disk0,disable-legacy=on"));
+        assert!(
+            uefi.contains("-nic none -netdev user,id=net0"),
+            "only the card below"
+        );
+        assert!(uefi.contains("virtio-net-pci,netdev=net0,disable-legacy=on"));
         assert!(uefi.contains(OVMF_CODE) && uefi.contains("file=vars.fd"));
         assert!(!uefi.contains(" -S"));
         assert!(uefi.contains("-serial stdio"));

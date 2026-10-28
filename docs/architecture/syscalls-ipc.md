@@ -142,6 +142,7 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 14 | `endpoint_create` (M2.10) | — | new endpoint handle (`SEND`, `RECEIVE`, `GRANT`) | none |
 | 15 | `spawn` (M2.10) | file, argument, capability array, count (≤ 8), endpoint (0 = none), bit | new process handle (`WAIT`, `GRANT`) | file, `READ`; each passed capability, `GRANT`; endpoint, `RECEIVE` |
 | 16 | `process_status` (M2.10) | process handle | 0 while running; else bit 63, plus bit 62 if killed, and the code or vector | process, `WAIT` |
+| 17 | `irq_notify` (M2.10) | interrupt handle, endpoint, bit (0–31) | 0 (after this, `irq_wait` returns `IN_USE`) | interrupt, `WAIT`; endpoint, `RECEIVE` |
 
 Error codes (`rax`):
 

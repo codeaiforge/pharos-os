@@ -3,3 +3,4 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod virtio;
+pub mod virtio_net;

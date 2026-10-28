@@ -59,8 +59,12 @@ fn run(t: &mut TestRun) {
         }),
     );
     t.check(
-        "no network card (-nic none)",
-        devices.iter().all(|d| d.class[0] != 0x02),
+        "exactly one network card: modern virtio-net (1af4:1041, class 02.00)",
+        devices
+            .iter()
+            .filter(|d| d.class[0] == 0x02)
+            .map(|d| (d.vendor, d.device, d.class[1]))
+            .eq([(0x1af4, 0x1041, 0x00)]),
     );
 
     let blk = devices

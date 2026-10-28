@@ -29,6 +29,7 @@ pub mod number {
     pub const ENDPOINT_CREATE: u64 = 14;
     pub const SPAWN: u64 = 15;
     pub const PROCESS_STATUS: u64 = 16;
+    pub const IRQ_NOTIFY: u64 = 17;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -186,6 +187,15 @@ pub fn receive(endpoint: Handle, buf: &mut [u8]) -> Result<Received, Error> {
 /// Creates an endpoint; the handle has `SEND`, `RECEIVE`, and `GRANT`.
 pub fn endpoint_create() -> Result<Handle, Error> {
     call(number::ENDPOINT_CREATE, [0; 6])
+}
+
+/// Delivers `interrupt` (needs `WAIT`) as notification bit `bit` on
+/// `endpoint` (needs `RECEIVE`) from now on, instead of to [`irq_wait`].
+pub fn irq_notify(interrupt: Handle, endpoint: Handle, bit: u32) -> Result<u64, Error> {
+    call(
+        number::IRQ_NOTIFY,
+        [interrupt, endpoint, bit.into(), 0, 0, 0],
+    )
 }
 
 /// A capability passed to a new process: the caller's `handle` (needs

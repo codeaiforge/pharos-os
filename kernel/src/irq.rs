@@ -40,6 +40,8 @@ struct Slot {
     /// Interrupts since the last wait returned.
     pending: u64,
     waiter: Option<TaskId>,
+    /// Notification bits, once bound to an endpoint with `irq_notify`.
+    bound: Option<u32>,
 }
 
 /// The device-interrupt vectors: which are allocated, their counts, and
@@ -58,6 +60,7 @@ impl Vectors {
             owner: None,
             pending: 0,
             waiter: None,
+            bound: None,
         };
         Self {
             slots: [FREE; DEVICE_VECTORS],
@@ -98,21 +101,40 @@ impl Vectors {
         }
     }
 
-    /// Records an interrupt on vector `index`; returns the thread to wake.
-    pub fn fire(&mut self, index: usize) -> Option<TaskId> {
+    /// Records an interrupt on vector `index`; says what to do about it.
+    pub fn fire(&mut self, index: usize) -> Fired {
         match self.slots.get_mut(index) {
             Some(slot) if slot.owner.is_some() => {
                 self.delivered += 1;
+                if let Some(bits) = slot.bound {
+                    return Fired::Notify(bits);
+                }
                 slot.pending += 1;
-                let waiter = slot.waiter.take();
-                self.woken += u64::from(waiter.is_some());
-                waiter
+                match slot.waiter.take() {
+                    Some(task) => {
+                        self.woken += 1;
+                        Fired::Wake(task)
+                    }
+                    None => Fired::Nothing,
+                }
             }
             _ => {
                 self.spurious += 1;
-                None
+                Fired::Nothing
             }
         }
+    }
+
+    /// Binds vector `index` to notification `bits`: from now on each
+    /// interrupt sets them instead of counting for a waiter. Refused while a
+    /// thread waits or once bound.
+    pub fn bind(&mut self, index: usize, bits: u32) -> Result<(), IrqError> {
+        let slot = self.slots.get_mut(index).ok_or(IrqError::NoEntry)?;
+        if slot.waiter.is_some() || slot.bound.is_some() {
+            return Err(IrqError::InUse);
+        }
+        slot.bound = Some(bits);
+        Ok(())
     }
 
     /// Starts a wait by `me` on vector `index`: returns the interrupts that
@@ -120,7 +142,7 @@ impl Vectors {
     /// waiter (the caller then blocks and calls [`Self::take`] when woken).
     pub fn wait(&mut self, index: usize, me: TaskId) -> Result<Option<u64>, IrqError> {
         let slot = self.slots.get_mut(index).ok_or(IrqError::NoEntry)?;
-        if slot.waiter.is_some() {
+        if slot.waiter.is_some() || slot.bound.is_some() {
             return Err(IrqError::InUse);
         }
         if slot.pending > 0 {
@@ -141,6 +163,17 @@ impl Vectors {
     pub fn in_use(&self) -> usize {
         self.slots.iter().filter(|s| s.owner.is_some()).count()
     }
+}
+
+/// What an interrupt calls for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fired {
+    /// Wake this thread, waiting in `irq_wait`.
+    Wake(TaskId),
+    /// Set these bits on the bound endpoint.
+    Notify(u32),
+    /// Nothing (counted, or spurious).
+    Nothing,
 }
 
 impl Default for Vectors {
@@ -178,10 +211,15 @@ pub fn stats() -> Stats {
 /// Called by the IDT dispatcher for vector `48 + index`, with interrupts
 /// disabled.
 pub fn on_vector(index: usize) {
-    let waiter = VECTORS.lock().fire(index);
+    let fired = VECTORS.lock().fire(index);
     crate::arch::x86_64::apic::eoi();
-    if let Some(task) = waiter {
-        crate::sched::wake(task);
+    match fired {
+        Fired::Wake(task) => {
+            crate::sched::wake(task);
+        }
+        #[cfg(target_os = "none")]
+        Fired::Notify(bits) => kernel::notify(index, bits),
+        _ => {}
     }
 }
 
@@ -196,8 +234,25 @@ mod kernel {
     use crate::arch::x86_64::idt::FIRST_DEVICE_VECTOR;
     use crate::arch::x86_64::{apic, pci as hw};
     use crate::device::DeviceHandle;
+    use crate::ipc::Endpoint;
+    use crate::mm::raw::IrqMutex;
     use crate::pci::Bar;
     use crate::sched;
+
+    /// The endpoint each bound vector notifies (`irq_notify`). Kept beside
+    /// [`VECTORS`] because the host-tested table holds no kernel objects.
+    static BINDINGS: IrqMutex<[Option<Arc<Endpoint>>; DEVICE_VECTORS]> =
+        IrqMutex::new([const { None }; DEVICE_VECTORS]);
+
+    /// Sets `bits` on the endpoint bound to vector `index` (interrupt
+    /// context: no allocation; the binding outlives this call because only
+    /// the interrupt's drop removes it, with interrupts disabled).
+    pub(super) fn notify(index: usize, bits: u32) {
+        let endpoint = BINDINGS.lock().get(index).cloned().flatten();
+        if let Some(endpoint) = endpoint {
+            crate::ipc::notify(&endpoint, bits);
+        }
+    }
 
     /// One MSI-X entry of a device, routed to a vector.
     pub struct Irq {
@@ -266,11 +321,22 @@ mod kernel {
         }
     }
 
+    impl Irq {
+        /// Binds this interrupt to `bits` on `endpoint` (`irq_notify`).
+        pub fn bind(&self, endpoint: Arc<Endpoint>, bits: u32) -> Result<(), IrqError> {
+            VECTORS.lock().bind(self.index, bits)?;
+            BINDINGS.lock()[self.index] = Some(endpoint);
+            Ok(())
+        }
+    }
+
     impl Drop for Irq {
         fn drop(&mut self) {
             // Mask first, so the vector is never raised once it is free.
             let _ = hw::set_msix_entry(self.table_entry, None);
+            let binding = BINDINGS.lock()[self.index].take();
             VECTORS.lock().free(self.index);
+            drop(binding);
         }
     }
 
@@ -323,8 +389,9 @@ mod tests {
         let i = v.alloc(1, 0).unwrap();
         assert_eq!(v.wait(i, 7), Ok(None), "nothing yet: 7 waits");
         assert_eq!(v.wait(i, 8), Err(IrqError::InUse), "one waiter");
-        assert_eq!(v.fire(i), Some(7));
-        assert_eq!(v.fire(i), None, "already woken");
+        assert_eq!(v.bind(i, 1), Err(IrqError::InUse), "not while waiting");
+        assert_eq!(v.fire(i), Fired::Wake(7));
+        assert_eq!(v.fire(i), Fired::Nothing, "already woken");
         assert_eq!((v.delivered, v.woken), (2, 1));
         assert_eq!(v.take(i), 2);
         assert_eq!(v.take(i), 0);
@@ -334,14 +401,28 @@ mod tests {
     }
 
     #[test]
+    fn bound_vectors_notify_instead_of_counting() {
+        let mut v = Vectors::new();
+        let i = v.alloc(1, 0).unwrap();
+        assert_eq!(v.bind(i, 1 << 5), Ok(()));
+        assert_eq!(v.bind(i, 1), Err(IrqError::InUse), "bound once");
+        assert_eq!(v.wait(i, 7), Err(IrqError::InUse), "no irq_wait once bound");
+        assert_eq!(v.fire(i), Fired::Notify(1 << 5));
+        assert_eq!(v.take(i), 0, "nothing counted for a waiter");
+        v.free(i);
+        let j = v.alloc(2, 0).unwrap();
+        assert_eq!(v.fire(j), Fired::Nothing, "a new owner starts unbound");
+    }
+
+    #[test]
     fn unallocated_vectors_count_as_spurious() {
         let mut v = Vectors::new();
-        assert_eq!(v.fire(3), None);
-        assert_eq!(v.fire(99), None);
+        assert_eq!(v.fire(3), Fired::Nothing);
+        assert_eq!(v.fire(99), Fired::Nothing);
         let i = v.alloc(1, 0).unwrap();
         v.wait(i, 5).unwrap();
         v.free(i);
-        assert_eq!(v.fire(i), None, "freed: the old waiter is gone");
+        assert_eq!(v.fire(i), Fired::Nothing, "freed: the old waiter is gone");
         assert_eq!((v.delivered, v.spurious), (0, 3));
     }
 }

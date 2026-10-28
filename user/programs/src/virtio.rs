@@ -1,10 +1,9 @@
-//! virtio 1.x block device over the modern PCI transport
-//! ([drivers.md](../../../docs/architecture/drivers.md)): find the
-//! configuration structures, set up one split virtqueue, and read sectors,
-//! one request at a time. Every value the device returns is checked: the
-//! used index advances by at most the one request outstanding, the
-//! descriptor ID is that request's, the length is what the request asked
-//! for, and the status is OK. Any failure during setup sets `FAILED`.
+//! virtio 1.x over the modern PCI transport
+//! ([drivers.md](../../../docs/architecture/drivers.md)): finding the
+//! configuration structures, feature negotiation, and split virtqueues
+//! ([`Transport`], [`Queue`]), and the block device on top ([`Blk`]: one
+//! queue, one read at a time). Every value a device returns is checked
+//! before use; any failure during setup sets `FAILED`.
 
 use pharos_user::{Error, Handle, Mapped, config_read, dma_alloc, irq_wait, mmio_map};
 
@@ -13,7 +12,7 @@ const NOTIFY_CFG: u32 = 2;
 const DEVICE_CFG: u32 = 4;
 const CAP_VENDOR: u32 = 0x09;
 /// PCI vendor and device ID of a modern virtio-blk device.
-const VIRTIO_BLK_ID: u32 = 0x1042_1af4;
+pub const VIRTIO_BLK_ID: u32 = 0x1042_1af4;
 
 // Common configuration offsets (virtio 1.x, 4.1.4.3).
 const DEVICE_FEATURE_SELECT: usize = 0x00;
@@ -40,27 +39,25 @@ const FAILED: u8 = 128;
 const NO_VECTOR: u16 = 0xffff;
 
 /// Largest queue size used.
-const MAX_QUEUE: u16 = 16;
-// Layout of the two DMA pages: rings and request header in the first,
-// data in the second.
+pub const MAX_QUEUE: u16 = 16;
+// Layout of one queue in its page: descriptors, available ring, used ring.
 const DESC: usize = 0x000;
 const AVAIL: usize = 0x100;
 const USED: usize = 0x200;
-const HEADER: usize = 0x400;
-const STATUS: usize = 0x410;
-const DATA: usize = 0x1000;
-/// Bytes per sector.
-pub const SECTOR: usize = 512;
-/// Largest read per request.
-pub const MAX_READ: usize = 4096;
 
-const NEXT: u16 = 1;
-const WRITE: u16 = 2;
-const REQUEST_IN: u32 = 0;
+/// Descriptor flag: the chain continues at `next`.
+pub const NEXT: u16 = 1;
+/// Descriptor flag: the device writes this buffer.
+pub const WRITE: u16 = 2;
+
+/// True if `device` has the PCI vendor and device ID `id`.
+pub fn has_id(device: Handle, id: u32) -> bool {
+    config_read(device, 0, 4) == Ok(id)
+}
 
 /// True if `device` is a modern virtio-blk device.
 pub fn is_blk(device: Handle) -> bool {
-    config_read(device, 0, 4) == Ok(VIRTIO_BLK_ID)
+    has_id(device, VIRTIO_BLK_ID)
 }
 
 /// A vendor capability's `(BAR, offset, notify multiplier)`.
@@ -98,6 +95,218 @@ fn map(device: Handle, bar: u8, offset: u32, len: usize, at: u64) -> Option<(Map
     Some((mmio_map(device, bar, page, 4096, at).ok()?, inside))
 }
 
+/// A device's configuration structures, mapped.
+pub struct Transport {
+    common: Mapped,
+    c: usize,
+    notify: Mapped,
+    notify_base: usize,
+    multiplier: u32,
+    /// The device-specific configuration, at offset [`Self::d`].
+    pub config: Mapped,
+    pub d: usize,
+}
+
+impl Transport {
+    /// Checks `device` has PCI ID `id` and maps its common, notify, and
+    /// device configuration (at least `config_len` bytes) at `at` to
+    /// `at + 0x3000`. On failure after the common configuration is mapped,
+    /// the device is left `FAILED`.
+    pub fn open(device: Handle, id: u32, config_len: usize, at: u64) -> Result<Self, &'static str> {
+        if !has_id(device, id) {
+            return Err("wrong device type");
+        }
+        let (bar, offset, _) = find(device, COMMON_CFG).ok_or("no common configuration")?;
+        let (common, c) = map(device, bar, offset, COMMON_LEN, at).ok_or("cannot map common")?;
+        let t = find(device, NOTIFY_CFG)
+            .ok_or("no notify configuration")
+            .and_then(|(bar, offset, multiplier)| {
+                let (notify, notify_base) =
+                    map(device, bar, offset, 0, at + 0x1000).ok_or("cannot map notify")?;
+                let (bar, offset, _) = find(device, DEVICE_CFG).ok_or("no device configuration")?;
+                let (config, d) =
+                    map(device, bar, offset, config_len, at + 0x2000).ok_or("cannot map config")?;
+                Ok(Self {
+                    common,
+                    c,
+                    notify,
+                    notify_base,
+                    multiplier,
+                    config,
+                    d,
+                })
+            });
+        if t.is_err() {
+            common.write8(c + DEVICE_STATUS, FAILED);
+        }
+        t
+    }
+
+    fn status(&self, v: u8) {
+        self.common.write8(self.c + DEVICE_STATUS, v);
+    }
+
+    /// Resets the device and negotiates `VERSION_1` plus the low feature
+    /// bits `wanted`, all of which the device must offer.
+    pub fn negotiate(&self, wanted: u32) -> Result<(), &'static str> {
+        let (common, c) = (&self.common, self.c);
+        self.status(0);
+        if common.read8(c + DEVICE_STATUS) != 0 {
+            return Err("reset failed");
+        }
+        self.status(ACKNOWLEDGE);
+        self.status(ACKNOWLEDGE | DRIVER);
+        common.write32(c + DEVICE_FEATURE_SELECT, 1);
+        if common.read32(c + DEVICE_FEATURE) & 1 == 0 {
+            return Err("no VERSION_1");
+        }
+        common.write32(c + DEVICE_FEATURE_SELECT, 0);
+        if common.read32(c + DEVICE_FEATURE) & wanted != wanted {
+            return Err("a needed feature is missing");
+        }
+        common.write32(c + DRIVER_FEATURE_SELECT, 0);
+        common.write32(c + DRIVER_FEATURE, wanted);
+        common.write32(c + DRIVER_FEATURE_SELECT, 1);
+        common.write32(c + DRIVER_FEATURE, 1);
+        self.status(ACKNOWLEDGE | DRIVER | FEATURES_OK);
+        if common.read8(c + DEVICE_STATUS) & FEATURES_OK == 0 {
+            return Err("features refused");
+        }
+        common.write16(c + CONFIG_MSIX_VECTOR, NO_VECTOR);
+        Ok(())
+    }
+
+    /// Sets up queue `index` (size min(device maximum, 16)) in the page at
+    /// offset `base` of `mem` (physical `phys`), interrupts on MSI-X entry
+    /// `entry`, and enables it.
+    pub fn queue(
+        &self,
+        index: u16,
+        entry: u16,
+        mem: Mapped,
+        base: usize,
+        phys: u64,
+    ) -> Result<Queue, &'static str> {
+        let (common, c) = (&self.common, self.c);
+        common.write16(c + QUEUE_SELECT, index);
+        let size = common.read16(c + QUEUE_SIZE).min(MAX_QUEUE);
+        if !size.is_power_of_two() {
+            return Err("bad queue size");
+        }
+        common.write16(c + QUEUE_SIZE, size);
+        common.write16(c + QUEUE_MSIX_VECTOR, entry);
+        if common.read16(c + QUEUE_MSIX_VECTOR) != entry {
+            return Err("queue vector refused");
+        }
+        for (reg, part) in [
+            (QUEUE_DESC, DESC),
+            (QUEUE_DRIVER, AVAIL),
+            (QUEUE_DEVICE, USED),
+        ] {
+            let addr = phys + part as u64;
+            common.write32(c + reg, addr as u32);
+            common.write32(c + reg + 4, (addr >> 32) as u32);
+        }
+        let n = usize::from(common.read16(c + QUEUE_NOTIFY_OFF)) * self.multiplier as usize;
+        let n = self
+            .notify_base
+            .checked_add(n)
+            .filter(|&n| n + 2 <= 4096)
+            .ok_or("notify address outside the page")?;
+        common.write16(c + QUEUE_ENABLE, 1);
+        Ok(Queue {
+            mem,
+            base,
+            size,
+            index,
+            avail: 0,
+            used: 0,
+            notify: self.notify,
+            n,
+        })
+    }
+
+    /// Tells the device the driver is ready (`DRIVER_OK`).
+    pub fn ready(&self) {
+        self.status(ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    }
+
+    /// Marks the device `FAILED`.
+    pub fn fail(&self) {
+        self.status(FAILED);
+    }
+
+    /// Resets the device (stops all queue activity).
+    pub fn reset(&self) {
+        self.status(0);
+    }
+}
+
+/// One split virtqueue.
+pub struct Queue {
+    mem: Mapped,
+    base: usize,
+    /// Number of descriptors.
+    pub size: u16,
+    index: u16,
+    avail: u16,
+    used: u16,
+    notify: Mapped,
+    n: usize,
+}
+
+impl Queue {
+    /// Writes descriptor `i`.
+    pub fn set(&self, i: u16, addr: u64, len: u32, flags: u16, next: u16) {
+        let d = self.base + DESC + 16 * usize::from(i % self.size);
+        self.mem.write64(d, addr);
+        self.mem.write32(d + 8, len);
+        self.mem.write16(d + 12, flags);
+        self.mem.write16(d + 14, next);
+    }
+
+    /// Makes the chain starting at descriptor `head` available.
+    pub fn offer(&mut self, head: u16) {
+        let slot = self.base + AVAIL + 4 + 2 * usize::from(self.avail % self.size);
+        self.mem.write16(slot, head);
+        self.avail = self.avail.wrapping_add(1);
+        self.mem.write16(self.base + AVAIL + 2, self.avail);
+    }
+
+    /// Tells the device there is new work.
+    pub fn kick(&self) {
+        self.notify.write16(self.n, self.index);
+    }
+
+    /// How far the device moved the used index since the last
+    /// [`Self::take_used`] (untrusted: check against what is outstanding).
+    pub fn used_advance(&self) -> u16 {
+        self.mem
+            .read16(self.base + USED + 2)
+            .wrapping_sub(self.used)
+    }
+
+    /// The next used element `(id, len)` (untrusted), and moves past it.
+    pub fn take_used(&mut self) -> (u32, u32) {
+        let e = self.base + USED + 4 + 8 * usize::from(self.used % self.size);
+        self.used = self.used.wrapping_add(1);
+        (self.mem.read32(e), self.mem.read32(e + 4))
+    }
+}
+
+// ---- Block device ----------------------------------------------------------
+
+/// Bytes per sector.
+pub const SECTOR: usize = 512;
+/// Largest read per request.
+pub const MAX_READ: usize = 4096;
+// In the first DMA page after the queue: request header and status. Data in
+// the second page.
+const HEADER: usize = 0x400;
+const STATUS: usize = 0x410;
+const DATA: usize = 0x1000;
+const REQUEST_IN: u32 = 0;
+
 /// Judges the used ring for the one request in flight (data length
 /// `len`): `advance` is how far the used index moved, `id` and `used_len`
 /// are the new used element, `status` the request's status byte. All of
@@ -128,15 +337,10 @@ pub fn check_used(
 
 /// One virtio-blk device with one queue.
 pub struct Blk {
-    common: Mapped,
-    c: usize,
-    notify: Mapped,
-    n: usize,
-    queue: Mapped,
+    t: Transport,
+    q: Queue,
+    mem: Mapped,
     phys: u64,
-    size: u16,
-    avail: u16,
-    used: u16,
     /// Data bytes of the request in flight, if any.
     outstanding: Option<usize>,
     /// Disk size in sectors.
@@ -151,88 +355,31 @@ impl Blk {
         if !is_blk(device) {
             return Err("not a virtio-blk device");
         }
-        let (bar, offset, _) = find(device, COMMON_CFG).ok_or("no common configuration")?;
-        let (common, c) = map(device, bar, offset, COMMON_LEN, at).ok_or("cannot map common")?;
-        let result = Self::setup(device, entry, at, &common, c);
-        if result.is_err() {
-            common.write8(c + DEVICE_STATUS, FAILED);
-        }
-        result
-    }
-
-    fn setup(
-        device: Handle,
-        entry: u16,
-        at: u64,
-        common: &Mapped,
-        c: usize,
-    ) -> Result<Self, &'static str> {
-        let (bar, offset, multiplier) =
-            find(device, NOTIFY_CFG).ok_or("no notify configuration")?;
-        let (notify, notify_base) =
-            map(device, bar, offset, 0, at + 0x1000).ok_or("cannot map notify")?;
-        let (bar, offset, _) = find(device, DEVICE_CFG).ok_or("no device configuration")?;
-        let (config, d) = map(device, bar, offset, 8, at + 0x2000).ok_or("cannot map config")?;
-        let (queue, phys) = dma_alloc(device, 2, at + 0x10_0000).map_err(|_| "no DMA pages")?;
-
-        let status = |v: u8| common.write8(c + DEVICE_STATUS, v);
-        status(0);
-        if common.read8(c + DEVICE_STATUS) != 0 {
-            return Err("reset failed");
-        }
-        status(ACKNOWLEDGE);
-        status(ACKNOWLEDGE | DRIVER);
-        // Only VERSION_1 (feature bit 32), and it is required.
-        common.write32(c + DEVICE_FEATURE_SELECT, 1);
-        if common.read32(c + DEVICE_FEATURE) & 1 == 0 {
-            return Err("no VERSION_1");
-        }
-        common.write32(c + DRIVER_FEATURE_SELECT, 0);
-        common.write32(c + DRIVER_FEATURE, 0);
-        common.write32(c + DRIVER_FEATURE_SELECT, 1);
-        common.write32(c + DRIVER_FEATURE, 1);
-        status(ACKNOWLEDGE | DRIVER | FEATURES_OK);
-        if common.read8(c + DEVICE_STATUS) & FEATURES_OK == 0 {
-            return Err("features refused");
-        }
-        common.write16(c + CONFIG_MSIX_VECTOR, NO_VECTOR);
-        common.write16(c + QUEUE_SELECT, 0);
-        let size = common.read16(c + QUEUE_SIZE).min(MAX_QUEUE);
-        if !size.is_power_of_two() {
-            return Err("bad queue size");
-        }
-        common.write16(c + QUEUE_SIZE, size);
-        common.write16(c + QUEUE_MSIX_VECTOR, entry);
-        if common.read16(c + QUEUE_MSIX_VECTOR) != entry {
-            return Err("queue vector refused");
-        }
-        for (reg, part) in [
-            (QUEUE_DESC, DESC),
-            (QUEUE_DRIVER, AVAIL),
-            (QUEUE_DEVICE, USED),
-        ] {
-            let addr = phys + part as u64;
-            common.write32(c + reg, addr as u32);
-            common.write32(c + reg + 4, (addr >> 32) as u32);
-        }
-        let n = usize::from(common.read16(c + QUEUE_NOTIFY_OFF)) * multiplier as usize;
-        let n = notify_base
-            .checked_add(n)
-            .filter(|&n| n + 2 <= 4096)
-            .ok_or("notify address outside the page")?;
-        let capacity = u64::from(config.read32(d)) | u64::from(config.read32(d + 4)) << 32;
-        common.write16(c + QUEUE_ENABLE, 1);
-        status(ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+        let t = Transport::open(device, VIRTIO_BLK_ID, 8, at)?;
+        let (mem, phys) = match dma_alloc(device, 2, at + 0x10_0000) {
+            Ok(dma) => dma,
+            Err(_) => {
+                t.fail();
+                return Err("no DMA pages");
+            }
+        };
+        let q = match t
+            .negotiate(0)
+            .and_then(|()| t.queue(0, entry, mem, 0, phys))
+        {
+            Ok(q) => q,
+            Err(why) => {
+                t.fail();
+                return Err(why);
+            }
+        };
+        let capacity = u64::from(t.config.read32(t.d)) | u64::from(t.config.read32(t.d + 4)) << 32;
+        t.ready();
         Ok(Self {
-            common: *common,
-            c,
-            notify,
-            n,
-            queue,
+            t,
+            q,
+            mem,
             phys,
-            size,
-            avail: 0,
-            used: 0,
             outstanding: None,
             capacity,
         })
@@ -251,28 +398,18 @@ impl Blk {
         if end.is_none_or(|end| end > self.capacity) {
             return Err("read past the end of the disk");
         }
-        let q = &self.queue;
-        q.write32(HEADER, REQUEST_IN);
-        q.write32(HEADER + 4, 0);
-        q.write64(HEADER + 8, sector);
-        q.write8(STATUS, 0xff);
-        let descs = [
-            (HEADER, 16, NEXT, 1),
-            (DATA, len as u32, NEXT | WRITE, 2),
-            (STATUS, 1, WRITE, 0),
-        ];
-        for (i, (part, len, flags, next)) in descs.into_iter().enumerate() {
-            let d = DESC + 16 * i;
-            q.write64(d, self.phys + part as u64);
-            q.write32(d + 8, len);
-            q.write16(d + 12, flags);
-            q.write16(d + 14, next);
-        }
-        q.write16(AVAIL + 4 + 2 * usize::from(self.avail % self.size), 0);
-        self.avail = self.avail.wrapping_add(1);
-        q.write16(AVAIL + 2, self.avail);
+        let m = &self.mem;
+        m.write32(HEADER, REQUEST_IN);
+        m.write32(HEADER + 4, 0);
+        m.write64(HEADER + 8, sector);
+        m.write8(STATUS, 0xff);
+        self.q.set(0, self.phys + HEADER as u64, 16, NEXT, 1);
+        self.q
+            .set(1, self.phys + DATA as u64, len as u32, NEXT | WRITE, 2);
+        self.q.set(2, self.phys + STATUS as u64, 1, WRITE, 0);
+        self.q.offer(0);
         self.outstanding = Some(len);
-        self.notify.write16(self.n, 0);
+        self.q.kick();
         Ok(())
     }
 
@@ -280,21 +417,13 @@ impl Blk {
     /// yet, `Ok(true)` once the device returned it correctly.
     pub fn complete(&mut self) -> Result<bool, &'static str> {
         let len = self.outstanding.ok_or("no request in flight")?;
-        let q = &self.queue;
-        let used = q.read16(USED + 2);
-        let element = USED + 4 + 8 * usize::from(self.used % self.size);
-        let verdict = check_used(
-            used.wrapping_sub(self.used),
-            q.read32(element),
-            q.read32(element + 4),
-            len,
-            q.read8(STATUS),
-        );
-        if verdict != Ok(false) {
-            self.used = used;
-            self.outstanding = None;
+        let advance = self.q.used_advance();
+        if advance == 0 {
+            return Ok(false);
         }
-        verdict
+        let (id, used_len) = self.q.take_used();
+        self.outstanding = None;
+        check_used(advance, id, used_len, len, self.mem.read8(STATUS))
     }
 
     /// Reads `buf.len()` bytes (whole sectors, at most [`MAX_READ`]) from
@@ -305,14 +434,14 @@ impl Blk {
             irq_wait(irq).map_err(|_: Error| "irq_wait failed")?;
         }
         for (i, chunk) in buf.chunks_exact_mut(8).enumerate() {
-            chunk.copy_from_slice(&self.queue.read64(DATA + 8 * i).to_le_bytes());
+            chunk.copy_from_slice(&self.mem.read64(DATA + 8 * i).to_le_bytes());
         }
         Ok(())
     }
 
     /// Resets the device (stops all queue activity).
     pub fn reset(&self) {
-        self.common.write8(self.c + DEVICE_STATUS, 0);
+        self.t.reset();
     }
 }
 

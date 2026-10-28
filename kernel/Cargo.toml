@@ -154,3 +154,7 @@ harness = false
 [[test]]
 name = "services"
 harness = false
+
+[[test]]
+name = "virtio_net"
+harness = false

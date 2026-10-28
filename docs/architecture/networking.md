@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-28 (M2.10, #59). It follows [D-015](../project/decision-log.md#d-015-network-stack-and-service-model) (as amended on 2026-10-28) and builds on [drivers.md](drivers.md) (device capabilities, the virtio transport) and [services.md](services.md) (badges, notifications, `init`).
-- **Implementation:** **planned** (#62, #63, #64).
+- **Implementation:** the virtio-net driver is **implemented** (#62: `pharos_programs::virtio_net` on the shared `virtio::Transport` and `virtio::Queue`, `irq_notify`, a virtio-net card on every QEMU run; tested by `virtio_net` with the `netprobe` program). **Planned:** the network service and stack (#63), the host endpoint (#64).
 
 ## 2. Context
 
@@ -99,9 +99,9 @@ All parsing is in `pharos_programs::net`: safe Rust, no allocation per packet, e
 
 ### QEMU and the host endpoint
 
-- **Every QEMU run attaches the network device:** `-netdev user,id=net0 -device virtio-net-pci,netdev=net0,disable-legacy=on`. This uses user-mode networking: no root, no TAP device, and nothing that reaches beyond the host. Existing kernels find their devices by ID, so the extra device changes nothing for them.
+- **Every QEMU run attaches the network device:** `-netdev user,id=net0 -device virtio-net-pci,netdev=net0,disable-legacy=on`. This uses user-mode networking: no root and no TAP device. slirp's NAT could reach beyond the host (`restrict=on` would also block the host endpoint at `10.0.2.2`); nothing in the guest sends anywhere but `10.0.2.2`. Existing kernels find their devices by ID, so the extra device changes nothing for them.
 - **`cargo xtask test` runs a UDP echo server** on `127.0.0.1:47000` for the run's duration, failing with a clear message if the port is taken. slirp forwards the guest's datagrams to `10.0.2.2` on to the host's loopback, so the guest reaches the server at `10.0.2.2:47000`.
-- **Ping target:** the slirp gateway `10.0.2.2`. slirp answers pings to its own address itself; this is confirmed in #62 before tests rely on it.
+- **Ping target:** the slirp gateway `10.0.2.2`. slirp answers pings to its own address itself (confirmed in #62: `virtio_net` pings it, locally and in CI).
 - **Optional packet capture** for debugging (`-object filter-dump`), written under `target/xtask/logs/`, never committed.
 
 ## 4. Security
