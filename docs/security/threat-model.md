@@ -86,6 +86,31 @@ Design: [drivers.md](../architecture/drivers.md) and [D-008](../project/decision
 | A revoked driver keeps device access | **Limit:** revocation stops new calls, but existing mappings stay until the process ends; ending the process is the full revocation |
 | A device returns bad values | The driver checks every ring index, descriptor ID, length, and status (host-tested); the kernel bounds its capability-list walk and checks BARs |
 
+### Processes and services (M2.10, planned)
+
+Design: [services.md](../architecture/services.md) and [D-015](../project/decision-log.md#d-015-network-stack-and-service-model). Every row is **planned** (#60, #61).
+
+| Threat | Planned mitigation |
+| --- | --- |
+| A process starts programs or passes capabilities it should not | `spawn` takes the program as a file capability (`READ`) and passes only listed capabilities, each derived from one the caller holds with `GRANT`, rights only narrowed; revocation reaches children |
+| A client forges its identity | Badges are set once by the capability's grantor and delivered by the kernel; holders cannot change them |
+| A process exhausts kernel memory by spawning or signalling | 32 live processes, 8 capabilities per spawn, notifications are a fixed word per endpoint; limits checked before allocation |
+| `init` misuses its authority | `init` holds every boot capability; it is small, its service table is reviewed code, and it passes each service only what the table lists |
+| A stuck service hangs the boot | **Limit:** no timeouts in M2.10; the boot check fails at its time limit instead of passing |
+
+### Networking (M2.10, planned)
+
+Design: [networking.md](../architecture/networking.md). Every row is **planned** (#62–#64).
+
+| Threat | Planned mitigation |
+| --- | --- |
+| A malformed or hostile packet crashes or corrupts the network service | Every layer is parsed by safe, allocation-free code with checked lengths and checksums, fuzzed on the host; bad frames are dropped and counted |
+| A process uses the network without permission | Network access only through a badged `SEND` capability on the service's endpoint; badge 0 is refused; revocable |
+| A client impersonates another client or spoofs addresses | Identity is the kernel-delivered badge (one UDP port per client); the service builds every header itself |
+| A client blocks or floods the service | Replies are non-blocking sends; per-client queues and outstanding requests are bounded; drops are counted |
+| A client reaches arbitrary hosts | **Limit:** no destination policy in M2.10; per-destination grants come with D-012 (M3.4) |
+| A virtio-net device DMAs anywhere | **Limit:** no IOMMU (D-008) |
+
 ### Known limitations
 
 - No automated secret scanning or dependency auditing is configured yet (nothing to audit today).

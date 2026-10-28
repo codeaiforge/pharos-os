@@ -11,6 +11,8 @@ Current documents:
 - [System calls and IPC](syscalls-ipc.md) — processes, the system-call interface, capabilities, and IPC (M2.7, D-004, D-012, D-014).
 - [Storage and the filesystem](storage.md) — block devices, the read-only image format, its validation, and file capabilities (M2.8, D-007).
 - [Drivers and device access](drivers.md) — Rust user programs and the ELF loader, PCI discovery, device interrupts, MMIO and DMA capabilities, and the virtio-blk driver (M2.9, D-008).
+- [Processes and system services](services.md) — process creation from user space, badges, endpoint notifications, and the `init` service manager (M2.10, D-015).
+- [Networking](networking.md) — the virtio-net driver, the minimal network stack, network capabilities, and the host test endpoint (M2.10, D-015).
 - [Boot evaluation](boot-evaluation.md) — options and prototype evidence behind D-001 to D-003.
 
 ## When to write one

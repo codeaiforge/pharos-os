@@ -274,7 +274,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.10 — Networking and basic system services
 
-**Status: Current.** D-015 accepted on 2026-10-28 (#58): our own minimal stack (no TCP) inside the virtio-net driver's process, per-client endpoints as network capabilities, and `init` started by the kernel.
+**Status: Current.** D-015 accepted on 2026-10-28 (#58): our own minimal stack (no TCP) inside the virtio-net driver's process, badged capabilities as network capabilities (amended from per-client endpoints, #59), and `init` started by the kernel.
 
 - **Objective and scope:** A minimal network stack and basic user-space services (for example a service manager and logging).
 - **Deliverables:** Network stack (implementation or library choice recorded as a decision); basic services.
@@ -585,7 +585,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-009 | QEMU automation and debugging | M2.3 | **Accepted:** status 33 + serial marker, 60 s timeout, test kernels via Cargo runner and `cargo xtask test` |
 | D-010 | Inference runtime, model formats, licensing | M3.1 | Licenses, memory safety, performance, portability |
 | D-011 | CPU/GPU support, memory/VRAM | M3.1, M3.2 | Hardware requirements, driver availability |
-| D-015 | Network stack and service model | M2.10 | **Accepted:** own minimal stack (Ethernet, ARP, IPv4, ICMP echo, UDP; no TCP) inside the virtio-net driver's process; per-client endpoints as network capabilities; static slirp addresses; the kernel starts `init`, which starts services |
+| D-015 | Network stack and service model | M2.10 | **Accepted:** own minimal stack (Ethernet, ARP, IPv4, ICMP echo, UDP; no TCP) inside the virtio-net driver's process; badged capabilities as network capabilities (amended, #59); static slirp addresses; the kernel starts `init`, which starts services |
 | D-014 | IPC model and system-call mechanism | M2.7 | **Accepted:** `syscall`/`sysret`; synchronous endpoints, 256-byte messages plus one capability, bounded per-thread buffers |
 | D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | **Direction:** kernel-enforced capabilities (per-process handle tables, rights, grant over IPC, revocation), policy in user space; final at M3.4 |
 | D-013 | Scheduling model | M2.6 | **Accepted:** preemptive round-robin on one CPU, 10 ms slice, kernel threads on guarded stacks, no lock held across a switch |

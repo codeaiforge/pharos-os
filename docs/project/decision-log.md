@@ -527,7 +527,7 @@ Two system calls per direction plus two task switches and two address-space swit
 
 1. **Our own minimal stack:** Ethernet II, ARP with a bounded cache, IPv4 without fragments, ICMP echo, and UDP. **No TCP in M2.10.** Every parser is safe `no_std` Rust and fuzzed on the host. `smoltcp` is re-evaluated when TCP is needed, together with the minimum Rust.
 2. **One network service:** the stack runs in the virtio-net driver's process, so frames never cross IPC. Clients exchange datagrams of at most one IPC message with it.
-3. **Network access is a capability:** `init` creates one endpoint per client. A client's send capability on its endpoint is its network capability, scoped to one UDP port. The service tells clients apart by the endpoint a request arrived on; there are no kernel badges. How the service waits on several endpoints is settled in the design.
+3. **Network access is a capability:** each client holds a `SEND` capability on the network service's one endpoint, with a **badge** set by `init` that names the UDP port it may use. The kernel delivers the sender's badge with every message, so the service tells clients apart without trusting message contents. *(Amended 2026-10-28, #59, approved by the maintainer. Originally one endpoint per client with no badges. The design found that this needs a call that waits on several endpoints at once, a larger and more race-prone kernel change than a badge field. Interrupts and child exits reach the same blocking point as endpoint notification bits; see [services.md](../architecture/services.md).)*
 4. **Static slirp addresses:** `10.0.2.15/24`, gateway `10.0.2.2`. There is no DHCP.
 5. **The kernel starts `init`:** `bin/init` from the root filesystem, with the boot capabilities. `init` starts the services in a fixed order, each with only the capabilities it needs, and reports every failure. This needs new system calls to start a process and wait for it; the program file is passed as a file capability.
 6. **The test endpoint is on the host:** `cargo xtask` runs a UDP echo server bound to localhost and reached through slirp, and the tests also ping the slirp gateway. No root and no TAP devices.
@@ -536,7 +536,7 @@ Two system calls per direction plus two task switches and two address-space swit
 - The kernel gains process creation from user space, its only new trusted code in M2.10; the M2.10 security review covers it.
 - The network service is a single point of trust for networking. A bug in it affects only networking, not the kernel or other processes.
 - Without TCP, Phase 2 networking is datagrams only. Phase 3 needs (for example model downloads, if any) decide whether TCP or `smoltcp` comes next.
-- Per-client endpoints cost one endpoint per client and limit clients to what `init` sets up. Badges stay an option if this proves clumsy.
+- Badges, endpoint notifications, `call`, and a non-blocking `send` extend the D-014 IPC model ([services.md](../architecture/services.md), [networking.md](../architecture/networking.md)). Each service waits at one blocking point.
 
 ## Open and proposed decisions
 
