@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** Accepted with [D-006](../project/decision-log.md#d-006-interrupt-controller-and-timer-design) (controller part, 2026-10-27).
-- **Implementation:** CPU exceptions, the double-fault stack, and the local APIC timer are **implemented** ([M2.4](../project/implementation-roadmap.md#m24--exceptions-interrupts-and-debugging), issues #19–#23), and so are timer calibration and the kernel clock (M2.6, #32), and preemptive scheduling on the tick ([scheduling.md](scheduling.md), #34). Interrupts and exceptions from user mode are implemented too (M2.7, #39). Device interrupts (IOAPIC) and SMP are **planned**.
+- **Implementation:** CPU exceptions, the double-fault stack, and the local APIC timer are **implemented** ([M2.4](../project/implementation-roadmap.md#m24--exceptions-interrupts-and-debugging), issues #19–#23), and so are timer calibration and the kernel clock (M2.6, #32), and preemptive scheduling on the tick ([scheduling.md](scheduling.md), #34). Interrupts and exceptions from user mode are implemented too (M2.7, #39), and so are MSI-X device interrupts for user-space drivers on vectors 48–63 (M2.9, #54; [drivers.md](drivers.md)). IOAPIC routing for legacy devices and SMP are **planned**.
 
 ## 2. Context
 
@@ -35,8 +35,9 @@ All IDT entries are 64-bit interrupt gates (interrupts disabled on entry) using 
 | 0–31 (others), from ring 0 | CPU exceptions | Fatal: report vector, decoded error code, CR2 for page faults, registers; signal failure to QEMU; halt |
 | 0–31, from ring 3 | CPU exceptions in user mode | The user-fault handler (`idt::set_user_fault_handler`, installed by `process::init`) prints `PHAROS: process <id> killed: <report>` and ends the process; the kernel continues |
 | 32 | Local APIC timer | Count the tick, send EOI, then call the tick handler (the scheduler, once preemption is enabled), which may switch tasks |
+| 48–63 | Device interrupts (MSI-X), routed by `irq_create` | `irq::on_vector`: count the interrupt (or a spurious one, on a free vector), send EOI, wake the one waiting thread. No driver work in the handler |
 | 255 | Local APIC spurious interrupt | Count it, no EOI |
-| 33–254 | Not present | Arriving there raises a general-protection fault (fatal) |
+| 33–47, 64–254 | Not present | Arriving there raises a general-protection fault (fatal) |
 
 Fatal reports go through the panic print path, which releases the console lock first, because an exception can hit while the lock is held. Test kernels can install a fatal hook to turn an expected exception into test results.
 
@@ -61,7 +62,7 @@ Fatal reports go through the panic print path, which releases the console lock f
 
 ## 4. Security
 
-All of this is ring-0 code in the hardware layer (`arch::x86_64` and its submodules), the only place besides the Limine module where `unsafe` is allowed. Page-table writes are limited to one MMIO page at a fixed, HHDM-relative address and refuse to replace an existing mapping. Since M2.7 (#39) user code runs in ring 3. Every IDT gate has DPL 0, so `int n` from user mode, including `int3`, raises a general-protection fault, and the process is killed. Interrupts and exceptions from ring 3 switch to the thread's own kernel stack through TSS `rsp0`. See the kernel/user boundary in the [threat model](../security/threat-model.md).
+All of this is ring-0 code in the hardware layer (`arch::x86_64` and its submodules), the only place besides the Limine module where `unsafe` is allowed. Page-table writes here are limited to MMIO pages at `HHDM + physical address` (the local APIC, and since #54 the MSI-X table pages of devices given to drivers) and refuse to replace an existing mapping. Since M2.7 (#39) user code runs in ring 3. Every IDT gate has DPL 0, so `int n` from user mode, including `int3`, raises a general-protection fault, and the process is killed. Interrupts and exceptions from ring 3 switch to the thread's own kernel stack through TSS `rsp0`. See the kernel/user boundary in the [threat model](../security/threat-model.md).
 
 ## 5. Testing
 
@@ -72,6 +73,7 @@ Test kernels in `kernel/tests/`, run by `cargo xtask test` locally and in CI ([t
 - `exceptions`: breakpoints continue with registers intact; a page fault on an unmapped page reports the right CR2 and error code.
 - `double_fault`: unbounded recursion hits the guard page and is reported as a double fault on IST1.
 - `apic_timer`: the local APIC is mapped and the timer delivers at least 20 interrupts.
+- `device_irq`: a virtio-blk completion interrupt wakes a driver blocked in `irq_wait` (see [drivers.md](drivers.md)).
 - `timer`: calibration is accepted; the TSC clock agrees with the PIT, `delay` waits long enough, uptime never goes backwards, and 20 ticks take about 200 ms (wide bounds for TCG). Checked to fail with a tick period or TSC rate off by a factor of 10.
 
 Each was checked once to fail when the feature it tests is broken. The boot check also maps the local APIC under UEFI and BIOS. Gate, IDT, and page-table entry encoding and the exception report text are unit-tested on the host.
@@ -84,5 +86,5 @@ Each was checked once to fail when the feature it tests is broken. The boot chec
 
 ## 7. Open questions
 
-- IOAPIC and ACPI MADT parsing for device interrupts.
+- IOAPIC and ACPI MADT parsing for legacy (non-MSI) device interrupts.
 - Per-CPU stacks and their guard pages (SMP). The kernel and double-fault stacks have guard pages since #27.

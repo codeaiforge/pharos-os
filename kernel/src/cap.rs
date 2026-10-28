@@ -32,8 +32,12 @@ pub const WRITE: Rights = 1 << 3;
 pub const READ: Rights = 1 << 4;
 /// Map a device's BARs and allocate DMA buffers for it.
 pub const MAP: Rights = 1 << 5;
+/// Create interrupts for a device.
+pub const IRQ: Rights = 1 << 6;
 /// Read a device's PCI configuration space.
 pub const CONFIG: Rights = 1 << 7;
+/// Wait for an interrupt.
+pub const WAIT: Rights = 1 << 8;
 
 /// Largest number of handles a process can hold.
 // ponytail: fixed cap per process; make it a quota when processes need more.
@@ -55,6 +59,9 @@ pub enum Object {
     },
     /// One PCI function handed to a driver (drivers.md).
     Device(Arc<crate::device::DeviceHandle>),
+    /// One MSI-X entry of a device (drivers.md).
+    #[cfg(target_os = "none")]
+    Interrupt(Arc<crate::irq::Irq>),
 }
 
 impl fmt::Debug for Object {
@@ -65,6 +72,8 @@ impl fmt::Debug for Object {
             Self::Filesystem(fs) => write!(f, "Filesystem({:p})", Arc::as_ptr(fs)),
             Self::File { fs, file } => write!(f, "File({:p}, {file:?})", Arc::as_ptr(fs)),
             Self::Device(d) => write!(f, "{d:?}"),
+            #[cfg(target_os = "none")]
+            Self::Interrupt(i) => write!(f, "{i:?}"),
         }
     }
 }
@@ -102,20 +111,22 @@ impl Capability {
     /// A child capability for the same object with this one's rights
     /// limited to `mask`, recorded in the derivation tree.
     pub fn derive(self: &Arc<Self>, mask: Rights) -> Arc<Self> {
-        self.derive_object(self.object.clone(), mask)
+        self.derive_object(self.object.clone(), self.rights & mask)
     }
 
     /// A child capability for a different `object` reached through this
-    /// one (a file opened through a filesystem), with this one's rights
-    /// limited to `mask`. Revoking this capability revokes the child too.
-    pub fn derive_object(self: &Arc<Self>, object: Object, mask: Rights) -> Arc<Self> {
-        let child = Self::new(object, self.rights & mask);
+    /// one (a file opened through a filesystem, an interrupt created for a
+    /// device) with `rights`, which the caller chooses for the new object.
+    /// Revoking this capability revokes the child too.
+    pub fn derive_object(self: &Arc<Self>, object: Object, rights: Rights) -> Arc<Self> {
+        let child = Self::new(object, rights);
         if self.is_revoked() {
             child.revoked.store(true, Ordering::Relaxed);
         }
         let mut children = self.children.lock();
         children.retain(|c| c.strong_count() > 0);
         children.push(Arc::downgrade(&child));
+        drop(children);
         child
     }
 

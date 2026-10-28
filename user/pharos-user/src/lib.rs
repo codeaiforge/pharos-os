@@ -24,6 +24,8 @@ pub mod number {
     pub const CONFIG_READ: u64 = 9;
     pub const MMIO_MAP: u64 = 10;
     pub const DMA_ALLOC: u64 = 11;
+    pub const IRQ_CREATE: u64 = 12;
+    pub const IRQ_WAIT: u64 = 13;
 }
 
 /// A capability handle in this process's table.
@@ -186,6 +188,18 @@ pub fn mmio_map(device: Handle, bar: u8, offset: u64, len: u64, at: u64) -> Resu
 pub fn dma_alloc(device: Handle, pages: u64, at: u64) -> Result<(Mapped, u64), Error> {
     let phys = call(number::DMA_ALLOC, [device, pages, at, 0, 0, 0])?;
     Ok((Mapped::new(at, pages * 4096), phys))
+}
+
+/// Routes MSI-X table entry `entry` of `device` (needs `IRQ`) to a new
+/// interrupt and returns its handle.
+pub fn irq_create(device: Handle, entry: u16) -> Result<Handle, Error> {
+    call(number::IRQ_CREATE, [device, entry.into(), 0, 0, 0, 0])
+}
+
+/// Waits for an interrupt (needs `WAIT`); returns how many arrived since
+/// the last wait (at least 1).
+pub fn irq_wait(interrupt: Handle) -> Result<u64, Error> {
+    call(number::IRQ_WAIT, [interrupt, 0, 0, 0, 0, 0])
 }
 
 /// Exit code a program's panic ends it with.

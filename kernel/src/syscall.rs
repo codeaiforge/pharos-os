@@ -25,6 +25,8 @@ pub mod number {
     pub const CONFIG_READ: u64 = 9;
     pub const MMIO_MAP: u64 = 10;
     pub const DMA_ALLOC: u64 = 11;
+    pub const IRQ_CREATE: u64 = 12;
+    pub const IRQ_WAIT: u64 = 13;
 }
 
 /// Largest buffer `debug_write` accepts (and the IPC message size).
@@ -56,6 +58,17 @@ impl From<CapError> for Error {
             CapError::Revoked => Self::Revoked,
             CapError::MissingRight => Self::MissingRight,
             CapError::TableFull => Self::NoMemory,
+        }
+    }
+}
+
+impl From<crate::irq::IrqError> for Error {
+    fn from(error: crate::irq::IrqError) -> Self {
+        use crate::irq::IrqError;
+        match error {
+            IrqError::NoEntry => Self::NotFound,
+            IrqError::InUse => Self::InUse,
+            IrqError::NoVector | IrqError::Hardware => Self::NoMemory,
         }
     }
 }
@@ -125,6 +138,14 @@ pub enum Call {
         handle: Handle,
         pages: usize,
         addr: u64,
+    },
+    IrqCreate {
+        handle: Handle,
+        /// MSI-X table entry.
+        entry: u16,
+    },
+    IrqWait {
+        handle: Handle,
     },
 }
 
@@ -222,6 +243,15 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
                 addr: user_pages(args[2], pages * 4096)?,
             })
         }
+        number::IRQ_CREATE => Ok(Call::IrqCreate {
+            handle: args[0],
+            // MSI-X tables have at most 2048 entries.
+            entry: u16::try_from(args[1])
+                .ok()
+                .filter(|&e| e < 2048)
+                .ok_or(Error::NotFound)?,
+        }),
+        number::IRQ_WAIT => Ok(Call::IrqWait { handle: args[0] }),
         _ => Err(Error::UnknownCall),
     }
 }
@@ -235,6 +265,8 @@ pub fn needed_rights(call: &Call) -> cap::Rights {
         Call::Open { .. } | Call::Read { .. } => cap::READ,
         Call::ConfigRead { .. } => cap::CONFIG,
         Call::MmioMap { .. } | Call::DmaAlloc { .. } => cap::MAP,
+        Call::IrqCreate { .. } => cap::IRQ,
+        Call::IrqWait { .. } => cap::WAIT,
         _ => 0,
     }
 }
@@ -386,7 +418,8 @@ mod kernel {
                     fs: fs.clone(),
                     file,
                 };
-                let child = parent.derive_object(object, cap::READ | cap::GRANT);
+                let child =
+                    parent.derive_object(object, parent.rights() & (cap::READ | cap::GRANT));
                 Ok(process.caps.lock().insert(child)?)
             }
             Call::Read {
@@ -490,6 +523,28 @@ mod kernel {
                 }
                 Ok(phys)
             }
+            Call::IrqCreate { handle, entry } => {
+                let parent = process.caps.lock().get(handle, cap::IRQ)?;
+                let Object::Device(device) = parent.object() else {
+                    return Err(Error::MissingRight);
+                };
+                if process.caps.lock().len() >= MAX_HANDLES {
+                    return Err(Error::NoMemory);
+                }
+                let irq = crate::irq::Irq::create(device.clone(), entry)?;
+                let rights = cap::WAIT | (parent.rights() & cap::GRANT);
+                let child = parent.derive_object(Object::Interrupt(irq), rights);
+                Ok(process.caps.lock().insert(child)?)
+            }
+            Call::IrqWait { handle } => {
+                let cap = process.caps.lock().get(handle, cap::WAIT)?;
+                let Object::Interrupt(irq) = cap.object() else {
+                    return Err(Error::MissingRight);
+                };
+                let irq = irq.clone();
+                drop((cap, process));
+                Ok(crate::irq::wait(&irq)?)
+            }
         }
     }
 }
@@ -521,7 +576,20 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(12, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(14, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(
+            decode(12, [2, 2047, 0, 0, 0, 0]),
+            Ok(Call::IrqCreate {
+                handle: 2,
+                entry: 2047
+            })
+        );
+        assert_eq!(decode(12, [2, 2048, 0, 0, 0, 0]), Err(Error::NotFound));
+        assert_eq!(decode(12, [2, u64::MAX, 0, 0, 0, 0]), Err(Error::NotFound));
+        assert_eq!(
+            decode(13, [5, 9, 9, 9, 9, 9]),
+            Ok(Call::IrqWait { handle: 5 })
+        );
         let config = |offset, width| decode(9, [1, offset, width, 0, 0, 0]);
         assert_eq!(
             config(0x10, 4),
@@ -632,7 +700,7 @@ mod tests {
         let mut accepted = 0;
         for _ in 0..200_000 {
             // Small numbers and lengths often, huge ones sometimes.
-            let number = next() % 13;
+            let number = next() % 15;
             let args: [u64; 6] = core::array::from_fn(|_| next() >> (next() % 64));
             match decode(number, args) {
                 Ok(
@@ -667,7 +735,8 @@ mod tests {
                     assert!((1..=16).contains(&pages) && addr % 4096 == 0);
                     assert!(user_range_ok(addr, pages as u64 * 4096));
                 }
-                Ok(_) => assert!(matches!(number, 0 | 1 | 5 | 6)),
+                Ok(Call::IrqCreate { entry, .. }) => assert!(entry < 2048),
+                Ok(_) => assert!(matches!(number, 0 | 1 | 5 | 6 | 13)),
                 Err(error) => assert!(error as u64 >= 1 && error as u64 <= 9),
             }
         }

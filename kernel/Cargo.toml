@@ -40,6 +40,10 @@ name = "device_caps"
 harness = false
 
 [[test]]
+name = "device_irq"
+harness = false
+
+[[test]]
 name = "double_fault"
 harness = false
 

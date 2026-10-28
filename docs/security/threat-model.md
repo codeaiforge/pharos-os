@@ -73,7 +73,7 @@ Design: [storage.md](../architecture/storage.md) and [D-007](../project/decision
 
 ### Drivers and devices (M2.9, planned)
 
-Design: [drivers.md](../architecture/drivers.md) and [D-008](../project/decision-log.md#d-008-driver-strategy). The first row is **implemented** (#52), and so are the second and fourth (#55: device capabilities, MMIO limits, and stopping a device before its DMA buffers are freed, all tested in `device_caps`). The other rows are **planned** (#54, #56).
+Design: [drivers.md](../architecture/drivers.md) and [D-008](../project/decision-log.md#d-008-driver-strategy). The first row is **implemented** (#52), and so are the second and fourth (#55: device capabilities, MMIO limits, and stopping a device before its DMA buffers are freed, all tested in `device_caps`) and the third (#54: the kernel programs MSI-X entries through its own mapping, vectors come from a fixed set of 16, and deleting an interrupt masks its entry, tested in `device_irq`). The fifth is a limit, and the last row is **planned** (#56).
 
 | Threat | Planned mitigation |
 | --- | --- |

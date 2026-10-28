@@ -1,7 +1,8 @@
 //! PCI configuration access, mechanism #1 (ports `0xCF8`/`0xCFC`; D-008,
 //! drivers.md). Safe functions only: reads; BAR size probing that puts
-//! everything back; and the command and MSI-X control bits the kernel's
-//! device handling sets (`device.rs`). Nothing here re-points a BAR.
+//! everything back; the command and MSI-X control bits the kernel's
+//! device handling sets (`device.rs`); and MSI-X table entries (`irq.rs`).
+//! Nothing here re-points a BAR.
 
 use core::arch::asm;
 
@@ -123,6 +124,34 @@ pub fn set_msix_control(address: Address, cap: u8, enable: bool, function_mask: 
     control = (control & !(3 << 14)) | u32::from(enable) << 15 | u32::from(function_mask) << 14;
     // The low half (ID and next pointer) is read-only.
     write32_locked(address, cap, (header & 0xffff) | control << 16);
+}
+
+/// Vector control bit of an MSI-X table entry: masked.
+const MSIX_MASKED: u32 = 1;
+
+/// Programs the MSI-X table entry at physical address `entry` (16 bytes,
+/// in a device BAR that only the kernel maps): to raise `vector` on the
+/// local APIC `apic_id` and unmasked, or masked with `None`. The entry is
+/// masked while its address and data change.
+pub fn set_msix_entry(
+    entry: u64,
+    target: Option<(u8, u32)>,
+) -> Result<(), super::paging::MapError> {
+    use super::paging::mmio_write32;
+    mmio_write32(entry + 12, MSIX_MASKED)?;
+    if let Some((vector, apic_id)) = target {
+        // Fixed delivery, edge-triggered, physical destination.
+        mmio_write32(entry, 0xfee0_0000 | (apic_id & 0xff) << 12)?;
+        mmio_write32(entry + 4, 0)?;
+        mmio_write32(entry + 8, u32::from(vector))?;
+        mmio_write32(entry + 12, 0)?;
+    }
+    Ok(())
+}
+
+/// True if the MSI-X table entry at physical address `entry` is masked.
+pub fn msix_entry_masked(entry: u64) -> bool {
+    super::paging::mmio_read32(entry + 12).is_ok_and(|c| c & MSIX_MASKED != 0)
 }
 
 #[cfg(test)]

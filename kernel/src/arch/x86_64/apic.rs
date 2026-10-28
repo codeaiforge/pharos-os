@@ -197,6 +197,11 @@ pub(super) fn on_timer() {
     }
 }
 
+/// Signals the end of a device interrupt (vectors 48–63, `irq.rs`).
+pub fn eoi() {
+    write(REG_EOI, 0);
+}
+
 /// Spurious-interrupt handler. The APIC expects no EOI for these.
 pub(super) fn on_spurious() {
     SPURIOUS.fetch_add(1, Ordering::Relaxed);

@@ -10,7 +10,9 @@
 //! Breakpoints (`int3`) are reported and execution continues. Every other
 //! exception is fatal: it is reported over serial, QEMU is told the run
 //! failed, and the CPU halts. Vector 32 (local APIC timer) and 255 (APIC
-//! spurious interrupt) go to the `apic` module. Test kernels can install a fatal hook to turn an
+//! spurious interrupt) go to the `apic` module, and 48–63 (device
+//! interrupts for user-space drivers, MSI-X) to `crate::irq`. Test kernels
+//! can install a fatal hook to turn an
 //! expected exception into a test result. Other vectors from 33 to 254 are not
 //! present, so an interrupt on them raises a general-protection fault. The double fault
 //! runs on its own stack (TSS IST1), so a kernel stack overflow is reported.
@@ -290,6 +292,17 @@ pub fn touch_unmapped_probe() {
     };
 }
 
+/// First vector for device interrupts (MSI-X, drivers.md).
+pub const FIRST_DEVICE_VECTOR: u8 = 48;
+/// Number of device-interrupt vectors (48–63).
+pub const DEVICE_VECTORS: usize = 16;
+
+/// Index (0–15) of a device-interrupt vector, if `vector` is one.
+pub fn device_vector_index(vector: u64) -> Option<usize> {
+    let index = vector.checked_sub(u64::from(FIRST_DEVICE_VECTOR))?;
+    (index < DEVICE_VECTORS as u64).then_some(index as usize)
+}
+
 /// Called by the entry stubs with interrupts disabled.
 extern "C" fn dispatch(frame: &mut ExceptionFrame) {
     debug_assert_eq!(
@@ -308,6 +321,10 @@ extern "C" fn dispatch(frame: &mut ExceptionFrame) {
     }
     if frame.vector == u64::from(super::apic::SPURIOUS_VECTOR) {
         super::apic::on_spurious();
+        return;
+    }
+    if let Some(index) = device_vector_index(frame.vector) {
+        crate::irq::on_vector(index);
         return;
     }
     // (No let chains: the minimum supported Rust is 1.85.)
@@ -330,7 +347,7 @@ extern "C" fn dispatch(frame: &mut ExceptionFrame) {
 
 #[cfg(target_os = "none")]
 mod entry {
-    use super::{ExceptionFrame, dispatch, gate};
+    use super::{ExceptionFrame, FIRST_DEVICE_VECTOR, dispatch, gate};
     use crate::arch::x86_64::apic;
     use crate::arch::x86_64::gdt::{DOUBLE_FAULT_IST, KERNEL_CODE};
 
@@ -368,6 +385,9 @@ mod entry {
         ".irp n, 0,1,2,3,4,5,6,7,9,15,16,18,19,20,22,23,24,25,26,27,28,31,32,255",
         "pharos_isr_\\n: pharos_stub \\n, 0",
         ".endr",
+        ".irp n, 48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63",
+        "pharos_isr_\\n: pharos_stub \\n, 0",
+        ".endr",
         ".irp n, 8,10,11,12,13,14,17,21,29,30",
         "pharos_isr_\\n: pharos_stub \\n, 1",
         ".endr",
@@ -382,6 +402,12 @@ mod entry {
         ".global pharos_irq_table",
         "pharos_irq_table:",
         ".quad pharos_isr_32, pharos_isr_255",
+        // Device interrupts 48–63.
+        ".global pharos_device_irq_table",
+        "pharos_device_irq_table:",
+        ".irp n, 48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63",
+        ".quad pharos_isr_\\n",
+        ".endr",
         ".text",
         dispatch = sym dispatch,
     );
@@ -389,6 +415,7 @@ mod entry {
     unsafe extern "C" {
         static pharos_isr_table: [u64; 32];
         static pharos_irq_table: [u64; 2];
+        static pharos_device_irq_table: [u64; super::DEVICE_VECTORS];
     }
 
     /// Vectors of the entries in `pharos_irq_table`; must match the assembly.
@@ -428,6 +455,14 @@ mod entry {
         for (&vector, &handler) in IRQ_VECTORS.iter().zip(irq_handlers) {
             // SAFETY: as for the exception gates above.
             unsafe { (*idt).0[usize::from(vector)] = gate(handler, KERNEL_CODE, 0) };
+        }
+        // SAFETY: `pharos_device_irq_table` is the immutable 16-entry table
+        // above, for vectors 48–63 in order.
+        let device_handlers = unsafe { &pharos_device_irq_table };
+        for (i, &handler) in device_handlers.iter().enumerate() {
+            let vector = usize::from(FIRST_DEVICE_VECTOR) + i;
+            // SAFETY: as for the exception gates above.
+            unsafe { (*idt).0[vector] = gate(handler, KERNEL_CODE, 0) };
         }
         let pointer = IdtPointer {
             limit: (size_of::<Idt>() - 1) as u16,
@@ -475,6 +510,15 @@ mod tests {
         assert_eq!(size_of::<ExceptionFrame>(), 22 * 8);
         assert_eq!(core::mem::offset_of!(ExceptionFrame, vector), 15 * 8);
         assert_eq!(core::mem::offset_of!(ExceptionFrame, rip), 17 * 8);
+    }
+
+    #[test]
+    fn device_vectors() {
+        assert_eq!(device_vector_index(47), None);
+        assert_eq!(device_vector_index(48), Some(0));
+        assert_eq!(device_vector_index(63), Some(15));
+        assert_eq!(device_vector_index(64), None);
+        assert_eq!(device_vector_index(u64::MAX), None);
     }
 
     #[test]

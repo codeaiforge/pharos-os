@@ -482,7 +482,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 2] = ["hello", "devprobe"];
+const USER_PROGRAMS: [&str; 3] = ["hello", "devprobe", "irqprobe"];
 
 /// A file for a filesystem image: its path and contents.
 type ImageFile = (String, Vec<u8>);

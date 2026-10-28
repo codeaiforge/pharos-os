@@ -1,0 +1,330 @@
+//! Device interrupts for user-space drivers (M2.9, issue #54,
+//! [drivers.md](../../docs/architecture/drivers.md)).
+//!
+//! An [`Irq`] is the object behind an `Interrupt` capability: one MSI-X
+//! table entry of one device, routed to one of the 16 vectors 48–63. The
+//! kernel programs the table entry (drivers never map the table), so a
+//! driver cannot aim interrupts anywhere else. The handler only counts,
+//! wakes the one waiting thread, and sends EOI; the driver acknowledges at
+//! the device. Dropping the object masks the entry and frees the vector.
+//!
+//! [`Vectors`] is the bookkeeping, host-tested; the rest touches hardware.
+//! Safe Rust.
+
+use crate::arch::x86_64::idt::DEVICE_VECTORS;
+use crate::mm::raw::IrqMutex;
+
+/// A thread ID (`sched::TaskId`).
+pub type TaskId = u64;
+
+/// Why an interrupt cannot be created or waited on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrqError {
+    /// The device has no MSI-X, or no table entry with that index.
+    NoEntry,
+    /// The entry already has an interrupt, or a thread already waits.
+    InUse,
+    /// All 16 vectors are taken.
+    NoVector,
+    /// The table entry could not be reached.
+    Hardware,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Slot {
+    /// `(device identity, MSI-X entry)` while allocated.
+    owner: Option<(usize, u16)>,
+    /// Interrupts since the last wait returned.
+    pending: u64,
+    waiter: Option<TaskId>,
+}
+
+/// The device-interrupt vectors: which are allocated, their counts, and
+/// their waiters.
+pub struct Vectors {
+    slots: [Slot; DEVICE_VECTORS],
+    delivered: u64,
+    spurious: u64,
+    woken: u64,
+}
+
+impl Vectors {
+    /// No vector allocated.
+    pub const fn new() -> Self {
+        const FREE: Slot = Slot {
+            owner: None,
+            pending: 0,
+            waiter: None,
+        };
+        Self {
+            slots: [FREE; DEVICE_VECTORS],
+            delivered: 0,
+            spurious: 0,
+            woken: 0,
+        }
+    }
+
+    /// Allocates a vector index for MSI-X entry `entry` of `device`.
+    pub fn alloc(&mut self, device: usize, entry: u16) -> Result<usize, IrqError> {
+        if self.slots.iter().any(|s| s.owner == Some((device, entry))) {
+            return Err(IrqError::InUse);
+        }
+        let index = self
+            .slots
+            .iter()
+            .position(|s| s.owner.is_none())
+            .ok_or(IrqError::NoVector)?;
+        self.slots[index] = Slot {
+            owner: Some((device, entry)),
+            ..Slot::default()
+        };
+        Ok(index)
+    }
+
+    /// Frees vector `index`.
+    pub fn free(&mut self, index: usize) {
+        if let Some(slot) = self.slots.get_mut(index) {
+            *slot = Slot::default();
+        }
+    }
+
+    /// Records an interrupt on vector `index`; returns the thread to wake.
+    pub fn fire(&mut self, index: usize) -> Option<TaskId> {
+        match self.slots.get_mut(index) {
+            Some(slot) if slot.owner.is_some() => {
+                self.delivered += 1;
+                slot.pending += 1;
+                let waiter = slot.waiter.take();
+                self.woken += u64::from(waiter.is_some());
+                waiter
+            }
+            _ => {
+                self.spurious += 1;
+                None
+            }
+        }
+    }
+
+    /// Starts a wait by `me` on vector `index`: returns the interrupts that
+    /// arrived since the last wait, or `None` after recording `me` as the
+    /// waiter (the caller then blocks and calls [`Self::take`] when woken).
+    pub fn wait(&mut self, index: usize, me: TaskId) -> Result<Option<u64>, IrqError> {
+        let slot = self.slots.get_mut(index).ok_or(IrqError::NoEntry)?;
+        if slot.waiter.is_some() {
+            return Err(IrqError::InUse);
+        }
+        if slot.pending > 0 {
+            return Ok(Some(core::mem::take(&mut slot.pending)));
+        }
+        slot.waiter = Some(me);
+        Ok(None)
+    }
+
+    /// Takes the interrupts counted on vector `index`.
+    pub fn take(&mut self, index: usize) -> u64 {
+        self.slots
+            .get_mut(index)
+            .map_or(0, |s| core::mem::take(&mut s.pending))
+    }
+
+    /// Vectors allocated.
+    pub fn in_use(&self) -> usize {
+        self.slots.iter().filter(|s| s.owner.is_some()).count()
+    }
+}
+
+impl Default for Vectors {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static VECTORS: IrqMutex<Vectors> = IrqMutex::new(Vectors::new());
+
+/// Device-interrupt counts since boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stats {
+    /// Interrupts on allocated vectors.
+    pub delivered: u64,
+    /// Interrupts on unallocated device vectors.
+    pub spurious: u64,
+    /// Interrupts that woke a blocked waiter.
+    pub woken: u64,
+    /// Vectors allocated now.
+    pub in_use: usize,
+}
+
+/// Device-interrupt counts since boot.
+pub fn stats() -> Stats {
+    let v = VECTORS.lock();
+    Stats {
+        delivered: v.delivered,
+        spurious: v.spurious,
+        woken: v.woken,
+        in_use: v.in_use(),
+    }
+}
+
+/// Called by the IDT dispatcher for vector `48 + index`, with interrupts
+/// disabled.
+pub fn on_vector(index: usize) {
+    let waiter = VECTORS.lock().fire(index);
+    crate::arch::x86_64::apic::eoi();
+    if let Some(task) = waiter {
+        crate::sched::wake(task);
+    }
+}
+
+#[cfg(target_os = "none")]
+pub use kernel::{Irq, wait};
+
+#[cfg(target_os = "none")]
+mod kernel {
+    use alloc::sync::Arc;
+
+    use super::*;
+    use crate::arch::x86_64::idt::FIRST_DEVICE_VECTOR;
+    use crate::arch::x86_64::{apic, pci as hw};
+    use crate::device::DeviceHandle;
+    use crate::pci::Bar;
+    use crate::sched;
+
+    /// One MSI-X entry of a device, routed to a vector.
+    pub struct Irq {
+        /// Kept alive (and enabled) while the interrupt exists.
+        pub device: Arc<DeviceHandle>,
+        pub entry: u16,
+        index: usize,
+        /// Physical address of the table entry.
+        table_entry: u64,
+    }
+
+    impl core::fmt::Debug for Irq {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(
+                f,
+                "Irq({:?}, entry {}, vector {})",
+                self.device,
+                self.entry,
+                self.vector()
+            )
+        }
+    }
+
+    impl Irq {
+        /// Routes MSI-X entry `entry` of `device` to a free vector,
+        /// unmasks it, and enables MSI-X on the device.
+        pub fn create(device: Arc<DeviceHandle>, entry: u16) -> Result<Arc<Self>, IrqError> {
+            let msix = device.pci.msix.ok_or(IrqError::NoEntry)?;
+            if entry >= msix.table_size {
+                return Err(IrqError::NoEntry);
+            }
+            let Some(Some(Bar::Memory { base, .. })) =
+                device.pci.bars.get(usize::from(msix.table_bar))
+            else {
+                return Err(IrqError::NoEntry);
+            };
+            let table_entry = base + u64::from(msix.table_offset) + 16 * u64::from(entry);
+            let owner = Arc::as_ptr(&device) as usize;
+            let index = VECTORS.lock().alloc(owner, entry)?;
+            // From here on, dropping `irq` masks the entry and frees the vector.
+            let irq = Arc::new(Self {
+                device,
+                entry,
+                index,
+                table_entry,
+            });
+            hw::set_msix_entry(table_entry, Some((irq.vector(), apic::id())))
+                .map_err(|_| IrqError::Hardware)?;
+            hw::set_msix_control(irq.device.pci.address, msix.offset, true, false);
+            Ok(irq)
+        }
+
+        /// The CPU vector (48–63).
+        pub fn vector(&self) -> u8 {
+            FIRST_DEVICE_VECTOR + self.index as u8
+        }
+
+        /// True if the table entry is masked (tests).
+        pub fn masked(&self) -> bool {
+            hw::msix_entry_masked(self.table_entry)
+        }
+
+        /// Physical address of the table entry (tests).
+        pub fn table_entry(&self) -> u64 {
+            self.table_entry
+        }
+    }
+
+    impl Drop for Irq {
+        fn drop(&mut self) {
+            // Mask first, so the vector is never raised once it is free.
+            let _ = hw::set_msix_entry(self.table_entry, None);
+            VECTORS.lock().free(self.index);
+        }
+    }
+
+    /// Waits for `irq` on the running thread; returns the interrupts since
+    /// the last wait (at least 1). Runs inside a system call, with
+    /// interrupts disabled until the thread blocks, so no wake is missed.
+    pub fn wait(irq: &Irq) -> Result<u64, IrqError> {
+        let me = sched::current_id().unwrap_or(0);
+        let started = VECTORS.lock().wait(irq.index, me)?;
+        if let Some(count) = started {
+            return Ok(count);
+        }
+        sched::block_current();
+        Ok(VECTORS.lock().take(irq.index).max(1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vectors_are_allocated_once_per_entry_and_freed() {
+        let mut v = Vectors::new();
+        assert_eq!(v.alloc(1, 0), Ok(0));
+        assert_eq!(v.alloc(1, 0), Err(IrqError::InUse), "same entry");
+        assert_eq!(v.alloc(1, 1), Ok(1));
+        assert_eq!(v.alloc(2, 0), Ok(2), "another device");
+        v.free(0);
+        assert_eq!(v.in_use(), 2);
+        assert_eq!(v.alloc(1, 0), Ok(0), "lowest free vector");
+        for entry in 2..15 {
+            v.alloc(1, entry).unwrap();
+        }
+        assert_eq!(v.in_use(), DEVICE_VECTORS);
+        assert_eq!(v.alloc(3, 0), Err(IrqError::NoVector));
+        v.free(99); // out of range: ignored
+    }
+
+    #[test]
+    fn interrupts_are_counted_and_wake_the_waiter() {
+        let mut v = Vectors::new();
+        let i = v.alloc(1, 0).unwrap();
+        assert_eq!(v.wait(i, 7), Ok(None), "nothing yet: 7 waits");
+        assert_eq!(v.wait(i, 8), Err(IrqError::InUse), "one waiter");
+        assert_eq!(v.fire(i), Some(7));
+        assert_eq!(v.fire(i), None, "already woken");
+        assert_eq!((v.delivered, v.woken), (2, 1));
+        assert_eq!(v.take(i), 2);
+        assert_eq!(v.take(i), 0);
+        v.fire(i);
+        assert_eq!(v.wait(i, 7), Ok(Some(1)), "returns at once");
+        assert_eq!(v.wait(i, 7), Ok(None));
+    }
+
+    #[test]
+    fn unallocated_vectors_count_as_spurious() {
+        let mut v = Vectors::new();
+        assert_eq!(v.fire(3), None);
+        assert_eq!(v.fire(99), None);
+        let i = v.alloc(1, 0).unwrap();
+        v.wait(i, 5).unwrap();
+        v.free(i);
+        assert_eq!(v.fire(i), None, "freed: the old waiter is gone");
+        assert_eq!((v.delivered, v.spurious), (0, 3));
+    }
+}

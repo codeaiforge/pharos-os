@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.9, #51). It follows [D-008](../project/decision-log.md#d-008-driver-strategy) (user-space drivers with device capabilities, virtio-blk only, MSI-X, no IOMMU yet) and [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries).
-- **Implementation:** Rust user programs and the ELF loader are **implemented** (#52: `user/pharos-user`, `user/programs`, `crates/pharos-elf`, `process::load_elf` and `spawn_elf`; programs are in the boot filesystem as `bin/<name>`). So is PCI discovery (#53: `arch::x86_64::pci` for configuration access and BAR probing, `pci::enumerate` with decoding and a bounded capability walk, the boot log listing devices; every QEMU run attaches `disk.img` as `virtio-blk-pci,disable-legacy=on` and has no network card). So are the `Device` capability with `config_read`, `mmio_map`, and `dma_alloc` (#55: `device::DeviceHandle`, `device::mmio_range`, the `DEVICE` page-table bit, `Mapped` in `pharos-user`, and the `devprobe` test program). **Planned:** device interrupts (#54) and the virtio-blk driver (#56).
+- **Implementation:** Rust user programs and the ELF loader are **implemented** (#52: `user/pharos-user`, `user/programs`, `crates/pharos-elf`, `process::load_elf` and `spawn_elf`; programs are in the boot filesystem as `bin/<name>`). So is PCI discovery (#53: `arch::x86_64::pci` for configuration access and BAR probing, `pci::enumerate` with decoding and a bounded capability walk, the boot log listing devices; every QEMU run attaches `disk.img` as `virtio-blk-pci,disable-legacy=on` and has no network card). So are the `Device` capability with `config_read`, `mmio_map`, and `dma_alloc` (#55: `device::DeviceHandle`, `device::mmio_range`, the `DEVICE` page-table bit, `Mapped` in `pharos-user`, and the `devprobe` test program). So are device interrupts (#54: `irq::Irq` and the vector table in `kernel/src/irq.rs`, IDT stubs for vectors 48–63, MSI-X table writes through a kernel-only mapping, `irq_create` and `irq_wait`, and the `irqprobe` test program with a minimal virtio-blk queue in `user/programs/src/virtio.rs`). **Planned:** the virtio-blk driver (#56).
 
 ## 2. Context
 
@@ -105,7 +105,8 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
   - the result is the physical address the driver writes into descriptors.
 - **`irq_create`:**
   - allocates a free vector from 48–63 and programs MSI-X entry `index` to target the bootstrap CPU's local APIC (message address `0xFEE00000`, data = the vector), then unmasks it and enables MSI-X (function mask off);
-  - the interrupt capability is derived from the device capability, so revoking the device revokes it.
+  - the interrupt capability is derived from the device capability, so revoking the device revokes it. It gets `WAIT`, plus `GRANT` if the device capability has it;
+  - the interrupt object holds the device, so the device stays enabled while any interrupt for it exists.
 - **`irq_wait`:**
   - returns at once if interrupts arrived since the last wait, otherwise blocks the thread;
   - one waiter per interrupt;

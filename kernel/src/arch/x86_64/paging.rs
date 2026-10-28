@@ -930,6 +930,45 @@ pub fn kernel_root() -> Option<u64> {
     KERNEL_SPACE.lock().as_ref().map(AddressSpace::root)
 }
 
+/// The kernel's uncached mapping of the device page holding `phys`, at
+/// `HHDM + phys`, created on first use and kept (device pages are never
+/// RAM, so the direct map does not cover them).
+// ponytail: one kernel page per device register page, never unmapped; few devices.
+fn mmio_page(phys: u64) -> Result<u64, MapError> {
+    let page = phys & !0xfff;
+    let virt = HHDM.load(Ordering::Relaxed) + page;
+    if translate_kernel(virt).is_none() {
+        let mut frames = crate::mm::frames();
+        let frames = frames.as_mut().ok_or(MapError::NotInitialized)?;
+        map_kernel_page(virt, page, PageSize::Size4K, Flags::MMIO, frames)?;
+    }
+    Ok(virt + (phys & 0xfff))
+}
+
+/// Writes the device register at physical address `phys` (4-byte aligned).
+/// For registers only the kernel may touch, such as the MSI-X table.
+pub fn mmio_write32(phys: u64, value: u32) -> Result<(), MapError> {
+    if phys % 4 != 0 {
+        return Err(MapError::Misaligned);
+    }
+    let virt = mmio_page(phys)?;
+    // SAFETY: `virt` is the kernel's uncached mapping of the device page
+    // holding `phys` (`mmio_page`), 4-byte aligned. Callers pass only
+    // device register addresses, never RAM, so no kernel memory changes.
+    unsafe { (virt as *mut u32).write_volatile(value) };
+    Ok(())
+}
+
+/// Reads the device register at physical address `phys` (4-byte aligned).
+pub fn mmio_read32(phys: u64) -> Result<u32, MapError> {
+    if phys % 4 != 0 {
+        return Err(MapError::Misaligned);
+    }
+    let virt = mmio_page(phys)?;
+    // SAFETY: as in `mmio_write32`; a read changes no kernel memory.
+    Ok(unsafe { (virt as *const u32).read_volatile() })
+}
+
 // ---- Test helpers -------------------------------------------------------
 
 /// User-half address that address-space tests map (as a kernel-only page,
