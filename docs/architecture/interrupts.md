@@ -22,7 +22,7 @@ The kernel must report CPU exceptions instead of rebooting, survive a stack over
 5. Map and enable the local APIC (`arch::x86_64::apic::init`).
 6. Calibrate the APIC timer and the TSC against the PIT (`time::init`, about 50 ms).
 
-The main kernel then reports boot information and halts with interrupts still disabled. Only test kernels enable interrupts so far (directly, or through `sched::enable_preemption`).
+The main kernel then reports boot information, enables preemption (`sched::enable_preemption`, which turns interrupts on), and starts `init` ([services.md](services.md)). Test kernels enable interrupts the same way, or directly.
 
 ### Exception and interrupt entry
 

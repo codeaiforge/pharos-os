@@ -3,7 +3,7 @@
 Pharos OS by CodeAIForge is an experimental project to build a local-first AI agent platform, and eventually a standalone operating system, in Rust.
 
 > [!WARNING]
-> Pharos OS is **not** a usable or production-ready operating system. The kernel only boots in QEMU, prints what the bootloader handed over, and halts. Do not use it for anything security-critical, and do not boot it on real hardware.
+> Pharos OS is **not** a usable or production-ready operating system. The kernel only boots in QEMU, prints what the bootloader handed over, and starts a few test services. Do not use it for anything security-critical, and do not boot it on real hardware.
 
 ## Status
 
@@ -14,7 +14,7 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 | Rust workspace, formatting, linting, tests, CI config | Implemented |
 | `pharos` host-side CLI (`help`, `version`, `info`, `doctor`) | Implemented |
 | `cargo xtask` (kernel build, reproducible boot image, QEMU run, filesystem images) | Implemented |
-| Minimal x86-64 kernel: boots via Limine in QEMU (UEFI and BIOS), reports boot information over serial, halts | Implemented |
+| Minimal x86-64 kernel: boots via Limine in QEMU (UEFI and BIOS), reports boot information over serial, starts `init` and its services | Implemented |
 | Automated QEMU boot check in CI (UEFI and BIOS, reproducible image) | Implemented |
 | Kernel tests inside QEMU (test kernels, run locally and in CI) | Implemented |
 | Memory management, exceptions and timer interrupts, preemptive scheduling, user processes, system calls, IPC with capabilities | Implemented |
@@ -61,7 +61,7 @@ cargo xtask run          # UEFI (OVMF)
 cargo xtask run --bios   # BIOS (SeaBIOS)
 ```
 
-The serial output ends with `PHAROS: boot ok`, and the command exits 0 only when the kernel reports success. `cargo xtask test` runs the same boot headless under both firmwares, with a time limit, and reports pass or fail for each; CI runs it on every push to `main`.
+The serial output shows `init` starting the services, then ends with `PHAROS: boot ok`, and the command exits 0 only when the kernel reports success. `cargo xtask test` runs the same boot headless under both firmwares, with a time limit, and reports pass or fail for each; CI runs it on every push to `main`.
 
 ## CLI usage
 

@@ -148,7 +148,7 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
 
 ### Startup
 
-In M2.9 test kernels start drivers. The main kernel enumerates PCI and logs devices; it starts no driver until there is a service manager.
+In M2.9 test kernels started drivers. Since M2.10 (#61) the main kernel grants the supported devices to `init`, which starts the virtio-blk driver at boot ([services.md](services.md#init)).
 
 ## 4. Security
 

@@ -3,13 +3,13 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-28 (M2.10, #59). It follows [D-015](../project/decision-log.md#d-015-network-stack-and-service-model) (as amended on 2026-10-28: badges instead of per-client endpoints), [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism) (IPC), and [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries). Networking is in [networking.md](networking.md).
-- **Implementation:** `endpoint_create`, `spawn`, `process_status`, badges, and endpoint notifications are **implemented** (#60: `cap::Capability::derive_badged`, `ipc::Endpoint::signal`, `process::ProcessRecord`, `pharos_user::{spawn, Grant, Received, Status}`; tested by the `spawn` test kernel with the `spawner` and `child` programs). **Planned:** `init` (#61), `irq_notify` (#62), `call` and non-blocking `send` (#63).
+- **Implementation:** `endpoint_create`, `spawn`, `process_status`, badges, and endpoint notifications are **implemented** (#60: `cap::Capability::derive_badged`, `ipc::Endpoint::signal`, `process::ProcessRecord`, `pharos_user::{spawn, Grant, Received, Status}`; tested by the `spawn` test kernel with the `spawner` and `child` programs). So is `init` (#61: `user/programs/src/bin/init.rs`, `process::init_capabilities`, `ipc::poll` for the kernel's wait on the report; the main kernel starts it at boot, and the `services` test kernel runs its test table with the `svc` program). The boot table has only `virtio-blk` until the network service exists (#63). **Planned:** `irq_notify` (#62), `call` and non-blocking `send` (#63).
 
 ## 2. Context
 
 M2.10 must start services in a defined order and report failures ([roadmap](../project/implementation-roadmap.md#m210--networking-and-basic-system-services)). Today:
 
-- Only the kernel starts processes (`process::spawn_elf`), and only test kernels do so; the main kernel runs no user code.
+- Only the kernel starts processes (`process::spawn_elf`), and only test kernels do so; the main kernel runs no user code. *(Before M2.10.)*
 - IPC is synchronous: 256-byte messages plus one capability. A receiver cannot tell senders apart, and a thread blocks on exactly one thing: one endpoint (`receive`) or one interrupt (`irq_wait`).
 - Endpoints are created only by the kernel.
 
@@ -125,12 +125,13 @@ That is, for a notification, bits 32–63 hold the 32 notification bits.
   `init` identifies the devices with `config_read`.
 - **The service table is compiled into `init`:** name, program, kind, the capabilities to pass, and the services it depends on. The argument selects a table (0: boot; others: test tables for the test kernels).
   - A **one-shot** service succeeds when it exits with code 0 (in M2.10: `virtio-blk`, which mounts the disk's image and exits).
+  - A service whose device the kernel did not pass is reported (`no device`) and fails.
   - A **daemon** succeeds when it sends `ready` on its badged report capability (in M2.10: `net`, the network service). It fails if it ends first.
 - **Order:** services start one after another in table order. A service starts only after the ones it depends on succeeded; otherwise it is skipped and reported as such.
 - **One blocking point:** `init` creates one endpoint. It gives each daemon a `SEND` capability on it badged with the service's index, and binds each child's exit to bit *index*. It then loops on `receive`: messages (ready, by badge) and notifications (exits, then `process_status`).
 - **Reports:** a console line per event (`init: <name> started`, `ready`, `exited <code>`, `killed <vector>`, `skipped`, `missing program`). After the last service, it sends one summary message to the kernel: services started and failed.
 - **Then `init` keeps running:** it reports any daemon that ends later. No restarts in M2.10.
-- **The kernel** prints the summary. Under QEMU it then prints `PHAROS: boot ok` and signals success only if no service failed. A boot with a failing service fails the boot check, so CI catches broken services.
+- **The kernel** polls the report endpoint (a kernel task has no inbox, so it uses `Endpoint::try_take`) for up to 30 s, and prints the summary. Under QEMU it then prints `PHAROS: boot ok` and signals success only if no service failed. If no report arrives in 30 s, the boot fails. A boot with a failing service fails the boot check, so CI catches broken services.
 - **Limit:** there are no timeouts. A daemon that never reports ready stalls `init`, and the boot check fails at its 60 s limit instead of passing.
 
 ## 4. Security

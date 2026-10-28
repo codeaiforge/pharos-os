@@ -150,3 +150,7 @@ harness = false
 [[test]]
 name = "spawn"
 harness = false
+
+[[test]]
+name = "services"
+harness = false

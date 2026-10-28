@@ -106,6 +106,13 @@ impl Endpoint {
         }
     }
 
+    /// The first waiting sender with its message, without queueing as a
+    /// receiver if there is none: for kernel tasks, which have no inbox and
+    /// poll instead (the boot waits for `init`'s report this way).
+    pub fn try_take(&self) -> Option<(TaskId, Message)> {
+        self.queues.lock().senders.pop_front()
+    }
+
     /// Takes pending notification bits (0 if none): a receiver woken by
     /// [`Self::signal`] collects them here.
     pub fn take_notifications(&self) -> u32 {
@@ -137,7 +144,7 @@ pub enum Taken {
 }
 
 #[cfg(target_os = "none")]
-pub use kernel::{notify, receive, send};
+pub use kernel::{notify, poll, receive, send};
 
 #[cfg(target_os = "none")]
 mod kernel {
@@ -180,6 +187,24 @@ mod kernel {
                 }
                 Some(Received::Notification(endpoint.take_notifications()))
             }
+        }
+    }
+
+    /// Polls `endpoint` from a kernel task for up to `limit`; returns the
+    /// first message (its sender is woken) or `None` on time-out.
+    pub fn poll(endpoint: &Endpoint, limit: core::time::Duration) -> Option<Message> {
+        let step = core::time::Duration::from_millis(10);
+        let mut waited = core::time::Duration::ZERO;
+        loop {
+            if let Some((sender, message)) = endpoint.try_take() {
+                sched::wake(sender);
+                return Some(message);
+            }
+            if waited >= limit {
+                return None;
+            }
+            sched::sleep(step);
+            waited += step;
         }
     }
 
@@ -249,6 +274,18 @@ mod tests {
             .collect();
         assert_eq!(order, [(1, b'a'), (2, b'b'), (3, b'c')]);
         assert_eq!(e.waiting(), (0, 0));
+    }
+
+    #[test]
+    fn try_take_never_queues_a_receiver() {
+        let e = Endpoint::new();
+        assert!(e.try_take().is_none());
+        assert_eq!(e.waiting(), (0, 0), "no receiver queued");
+        assert!(e.offer(4, message(b'r')).is_none());
+        assert_eq!(
+            e.try_take().map(|(s, m)| (s, m.bytes()[0])),
+            Some((4, b'r'))
+        );
     }
 
     #[test]

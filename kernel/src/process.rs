@@ -259,6 +259,39 @@ pub fn start(
     })
 }
 
+/// PCI vendor and device IDs of the devices `init` is given.
+pub const INIT_DEVICES: [(u16, u16); 2] = [(0x1af4, 0x1042), (0x1af4, 0x1041)];
+
+/// The capabilities the kernel starts `init` with (services.md): 1 the
+/// debug console, 2 `fs`, 3 `report` (`SEND`), then each device in
+/// [`INIT_DEVICES`] found by PCI enumeration (granted, in PCI order) when
+/// `devices` is true.
+#[cfg(target_os = "none")]
+pub fn init_capabilities(
+    fs: Arc<crate::fs::Fs>,
+    report: Arc<crate::ipc::Endpoint>,
+    devices: bool,
+) -> Vec<Arc<Capability>> {
+    use crate::cap::{CONFIG, GRANT, IRQ, MAP, Object, READ, SEND, WRITE};
+    let mut caps = alloc::vec![
+        Capability::new(Object::DebugConsole, WRITE | GRANT),
+        Capability::new(Object::Filesystem(fs), READ | GRANT),
+        Capability::new(Object::Endpoint(report), SEND),
+    ];
+    let wanted = crate::pci::devices()
+        .into_iter()
+        .filter(|d| devices && INIT_DEVICES.contains(&(d.vendor, d.device)));
+    for device in wanted {
+        if let Some(handle) = crate::device::DeviceHandle::grant(device) {
+            caps.push(Capability::new(
+                Object::Device(handle),
+                MAP | CONFIG | IRQ | GRANT,
+            ));
+        }
+    }
+    caps
+}
+
 /// How a process ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum End {

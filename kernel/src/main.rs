@@ -2,8 +2,9 @@
 //!
 //! Limine loads this binary at `0xffffffff80000000` and jumps to [`kmain`] in
 //! 64-bit mode (see `docs/architecture/boot.md`). The kernel reports what the
-//! bootloader handed over on COM1, signals the result to QEMU (only when
-//! running under a hypervisor), then halts.
+//! bootloader handed over on COM1, then starts `init` (services.md), which
+//! starts the services and reports. Boot succeeds only if every service
+//! did; the result goes to QEMU (only when running under a hypervisor).
 
 #![no_std]
 #![no_main]
@@ -20,7 +21,7 @@ use pharos_kernel::limine::BASE_REVISION;
 use pharos_kernel::mm;
 use pharos_kernel::storage;
 use pharos_kernel::time;
-use pharos_kernel::{fs, kprintln, pci};
+use pharos_kernel::{fs, ipc, kprintln, pci, process, sched};
 
 pharos_kernel::limine_requests!();
 
@@ -185,6 +186,34 @@ extern "C" fn kernel_main() -> ! {
         fail(format_args!("heap smoke test failed"));
     }
     drop(numbers);
+
+    // User space: `init` starts the services and reports (services.md).
+    process::init();
+    if let Err(error) = sched::init().and_then(|()| sched::enable_preemption()) {
+        fail(format_args!("scheduler setup failed: {error}"));
+    }
+    let Some(root) = fs::root() else {
+        fail(format_args!("no root filesystem, so init cannot start"));
+    };
+    let report = ipc::Endpoint::new();
+    let caps = process::init_capabilities(root.clone(), report.clone(), true);
+    match process::spawn_elf(&root, b"bin/init", 0, caps) {
+        Ok(id) => kprintln!("  init:       started (process {id})"),
+        Err(error) => fail(format_args!("cannot start init: {error}")),
+    }
+    match ipc::poll(&report, core::time::Duration::from_secs(30)) {
+        Some(m) if m.len == 2 => {
+            let (ready, failed) = (m.data[0], m.data[1]);
+            kprintln!("  services:   {ready} ready, {failed} failed");
+            if failed != 0 {
+                fail(format_args!(
+                    "{failed} service(s) failed (see init's lines above)"
+                ));
+            }
+        }
+        Some(_) => fail(format_args!("init sent a malformed report")),
+        None => fail(format_args!("init did not report within 30 s")),
+    }
 
     kprintln!("PHAROS: boot ok");
     qemu_exit(QemuExit::Success);

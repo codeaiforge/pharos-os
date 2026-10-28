@@ -55,7 +55,7 @@ const COMPONENTS: &[(&str, &str)] = &[
     (
         "implemented",
         "minimal x86-64 kernel: boots in QEMU via Limine (UEFI and BIOS), \
-         reports boot information over serial, then halts",
+         reports boot information over serial, starts init and its services",
     ),
     (
         "implemented",
