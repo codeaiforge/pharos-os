@@ -29,7 +29,7 @@ fn free_frames() -> usize {
 }
 
 /// Steps `devprobe` must report as passed.
-const STEPS: [&str; 20] = [
+const STEPS: [&str; 21] = [
     "config_read vendor and device",
     "config_read a byte",
     "mmio_map the common configuration",
@@ -42,6 +42,7 @@ const STEPS: [&str; 20] = [
     "MSI-X table page: BAD_ADDRESS",
     "no MAP right: MISSING_RIGHT",
     "no CONFIG right: MISSING_RIGHT",
+    "256 register pages in all, then NO_MEMORY",
     "dma_alloc 2 pages",
     "DMA buffer starts zeroed",
     "17 pages: TOO_LARGE",
@@ -113,7 +114,14 @@ fn run(t: &mut TestRun) {
     let before = free_frames();
     // Firmware may leave the device enabled; granting sets a known state.
 
-    let device = DeviceHandle::grant(blk.clone());
+    let Some(device) = DeviceHandle::grant(blk.clone()) else {
+        t.check("virtio-blk granted", false);
+        return;
+    };
+    t.check(
+        "a granted device cannot be granted again",
+        DeviceHandle::grant(blk.clone()).is_none(),
+    );
     t.check(
         "granting turns on memory decoding and bus mastering",
         hw::enabled_bits(blk.address) == (true, true),
@@ -195,5 +203,47 @@ fn run(t: &mut TestRun) {
     t.check(
         "every frame returned (DMA buffers, mappings, process)",
         free_frames() == before,
+    );
+
+    // A register mapping alone pins the device too (security review F2).
+    let Some(device) = DeviceHandle::grant(blk.clone()) else {
+        t.check("granted again once the driver is gone", false);
+        return;
+    };
+    t.check("granted again once the driver is gone", true);
+    let wait = Endpoint::new();
+    let caps = vec![
+        Capability::new(Object::DebugConsole, WRITE),
+        Capability::new(Object::Device(device.clone()), MAP | CONFIG),
+        Capability::new(Object::Endpoint(wait.clone()), RECEIVE),
+        Capability::new(Object::Device(device), GRANT),
+    ];
+    let arg = common.unwrap_or(0) | 1 << 63;
+    let id = process::spawn_elf(&programs, b"bin/devprobe", arg, caps).unwrap_or(u64::MAX);
+    sched::sleep(Duration::from_millis(100));
+    let lines = output_of(id);
+    t.check(
+        "registers mapped, then both handles deleted",
+        lines.iter().any(|l| l == b"ok mmio_map only")
+            && lines.iter().any(|l| l == b"ok delete both device handles"),
+    );
+    t.check(
+        "pinned by the register mapping: still enabled, cannot be granted",
+        hw::enabled_bits(blk.address) == (true, true) && DeviceHandle::grant(blk.clone()).is_none(),
+    );
+    ipc::send(
+        &wait,
+        Message {
+            data: [0; MAX_MESSAGE],
+            len: 1,
+            cap: None,
+        },
+    );
+    sched::sleep(Duration::from_millis(100));
+    t.check(
+        "after it ends: stopped, and every frame returned",
+        process::exits().iter().any(|e| e.task == id && e.code == 0)
+            && hw::enabled_bits(blk.address) == (false, false)
+            && free_frames() == before,
     );
 }

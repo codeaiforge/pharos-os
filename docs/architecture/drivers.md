@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.9, #51). It follows [D-008](../project/decision-log.md#d-008-driver-strategy) (user-space drivers with device capabilities, virtio-blk only, MSI-X, no IOMMU yet) and [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries).
-- **Implementation:** Rust user programs and the ELF loader are **implemented** (#52: `user/pharos-user`, `user/programs`, `crates/pharos-elf`, `process::load_elf` and `spawn_elf`; programs are in the boot filesystem as `bin/<name>`). So is PCI discovery (#53: `arch::x86_64::pci` for configuration access and BAR probing, `pci::enumerate` with decoding and a bounded capability walk, the boot log listing devices; every QEMU run attaches `disk.img` as `virtio-blk-pci,disable-legacy=on` and has no network card). So are the `Device` capability with `config_read`, `mmio_map`, and `dma_alloc` (#55: `device::DeviceHandle`, `device::mmio_range`, the `DEVICE` page-table bit, `Mapped` in `pharos-user`, and the `devprobe` test program). So are device interrupts (#54: `irq::Irq` and the vector table in `kernel/src/irq.rs`, IDT stubs for vectors 48–63, MSI-X table writes through a kernel-only mapping, `irq_create` and `irq_wait`, and the `irqprobe` test program with a minimal virtio-blk queue in `user/programs/src/virtio.rs`). So is the virtio-blk driver (#56: `user/programs/src/bin/virtio-blk.rs` on the shared `pharos_programs::virtio` module, mounting the disk's `pharos-fs` image with the kernel's parser; tested in `virtio_blk`). To run that parser, `pharos-user` has a heap: a 256 KiB bump allocator in its `syscall` module that never frees memory.
+- **Implementation:** Rust user programs and the ELF loader are **implemented** (#52: `user/pharos-user`, `user/programs`, `crates/pharos-elf`, `process::load_elf` and `spawn_elf`; programs are in the boot filesystem as `bin/<name>`). So is PCI discovery (#53: `arch::x86_64::pci` for configuration access and BAR probing, `pci::enumerate` with decoding and a bounded capability walk, the boot log listing devices; every QEMU run attaches `disk.img` as `virtio-blk-pci,disable-legacy=on` and has no network card). So are the `Device` capability with `config_read`, `mmio_map`, and `dma_alloc` (#55: `device::DeviceHandle`, `device::mmio_range`, the `DEVICE` page-table bit, `Mapped` in `pharos-user`, and the `devprobe` test program). So are device interrupts (#54: `irq::Irq` and the vector table in `kernel/src/irq.rs`, IDT stubs for vectors 48–63, MSI-X table writes through a kernel-only mapping, `irq_create` and `irq_wait`, and the `irqprobe` test program with a minimal virtio-blk queue in `user/programs/src/virtio.rs`). So is the virtio-blk driver (#56: `user/programs/src/bin/virtio-blk.rs` on the shared `pharos_programs::virtio` module, mounting the disk's `pharos-fs` image with the kernel's parser; tested in `virtio_blk`). To run that parser, `pharos-user` has a heap: a 256 KiB bump allocator in its `syscall` module that never frees memory. The M2.9 security review ([review-m2.9-drivers.md](../security/review-m2.9-drivers.md), #57) found and fixed four issues (F1–F4), recorded below where they apply.
 
 ## 2. Context
 
@@ -65,6 +65,7 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
   - vendor and device ID, class, and header type (only type 0 devices get a `Device`);
   - BARs: memory or I/O, 32- or 64-bit, prefetchable, and size, probed by writing all ones with decoding disabled in the command register, then restoring;
   - the capability list, walked with a step limit (48) and a check that each pointer is at or above `0x40` and 4-byte aligned. The MSI-X capability is recorded: table size, table BAR and offset, PBA BAR and offset.
+- **BARs are untrusted:** a memory BAR that overlaps any entry of the boot memory map, or runs past the end of the address space, is ignored and logged. It would otherwise expose RAM (or the framebuffer) to a driver and to the kernel's MSI-X writes (security review F1). In QEMU this drops the VGA framebuffer BAR.
 - **The boot log** lists the devices found. QEMU runs for tests attach `virtio-blk-pci,disable-legacy=on` (vendor `0x1af4`, device `0x1042`) with a disk image built by xtask.
 
 ### Device capabilities
@@ -75,7 +76,8 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
 | `Interrupt(Arc<Irq>)`: one MSI-X vector of one device | `WAIT`, `GRANT` | `irq_create`, derived from the device capability |
 
 - **Driver lifecycle:**
-  - when the kernel hands out a `Device`, it enables memory decoding and bus mastering in the PCI command register;
+  - when the kernel hands out a `Device`, it enables memory decoding and bus mastering in the PCI command register. A device is granted to one driver at a time: `grant` refuses it until the previous handle's last reference is gone (F2);
+  - a process that maps a device's registers (`mmio_map`) or buffers (`dma_alloc`) pins the device until it ends, even if it deletes its handles (F2);
   - when the `Device` object's last reference goes (the driver exits or is killed, and nothing else holds it or pins it), the kernel disables bus mastering and memory decoding and masks MSI-X (function mask). Only then are the device's DMA buffers freed.
   - So a device can never DMA into freed memory. Firmware may leave a device enabled before it is granted; granting sets a known state.
 - **New rights:** `MAP = 1 << 5`, `IRQ = 1 << 6`, `CONFIG = 1 << 7`, `WAIT = 1 << 8`.
@@ -96,6 +98,7 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
 - **`mmio_map`:**
   - offset and length are page-aligned, and the range lies inside a memory BAR;
   - the user address is page-aligned, in the user half, and below the last user page, and nothing is mapped there yet;
+  - at most 256 register pages per process in all (`NO_MEMORY` beyond; F4);
   - **pages that overlap the MSI-X table or PBA are refused,** so a driver cannot aim interrupts at arbitrary vectors;
   - the mapping is user, writable, no-execute, and uncached. Its page-table entries carry a software bit (`DEVICE`) so `destroy` unmaps them without freeing the frames.
 - **`dma_alloc`:**
@@ -104,7 +107,7 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
   - **the device handle owns them,** not the address space, and frees them only after bus mastering is off. The process records the device as pinned, so even if it deletes every device handle, the buffers it still has mapped stay allocated until the process ends. (Tightened during #55: an address space freeing them could race a device still granted to another process.)
   - the result is the physical address the driver writes into descriptors.
 - **`irq_create`:**
-  - allocates a free vector from 48–63 and programs MSI-X entry `index` to target the bootstrap CPU's local APIC (message address `0xFEE00000`, data = the vector), then unmasks it and enables MSI-X (function mask off);
+  - allocates a free vector from 48–63 (at most 4 per device, F3) and programs MSI-X entry `index` to target the bootstrap CPU's local APIC (message address `0xFEE00000`, data = the vector), then unmasks it and enables MSI-X (function mask off);
   - the interrupt capability is derived from the device capability, so revoking the device revokes it. It gets `WAIT`, plus `GRANT` if the device capability has it;
   - the interrupt object holds the device, so the device stays enabled while any interrupt for it exists.
 - **`irq_wait`:**
@@ -162,7 +165,7 @@ In M2.9 test kernels start drivers. The main kernel enumerates PCI and logs devi
 - **Interrupts:** a driver cannot choose vectors (the kernel programs MSI-X, and its pages are never mapped). The handler does no driver work. Spurious vectors are counted.
 - **Devices are untrusted input** to the driver: every ring index, ID, length, and status is checked. The kernel itself reads only configuration space from devices, and it bounds the capability-list walk.
 - **ELF files are untrusted input:** the safe parser checks everything before any allocation, and it is fuzzed.
-- **Kernel memory:** DMA is at most 64 pages per device; programs at most 4 MiB; interrupt vectors are a fixed set of 16.
+- **Kernel memory:** DMA is at most 64 pages per device; register mappings at most 256 pages per process (F4); programs at most 4 MiB; interrupt vectors are a fixed set of 16, at most 4 per device.
 - **`unsafe`:**
   - port I/O for PCI configuration, IDT stubs for vectors 48–63, the device-page bit in page tables, and kernel MMIO access to MSI-X tables, all in the hardware layer;
   - in `pharos-user`'s `syscall` module: the `syscall` instruction and entry stub, volatile access to mapped device memory (`Mapped`), and the bump heap allocator (added with #56; the shared filesystem parser needs `alloc`);

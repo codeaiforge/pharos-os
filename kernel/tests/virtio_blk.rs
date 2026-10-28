@@ -45,12 +45,12 @@ enum End {
 /// Starts the driver on `device` with `arg` and waits up to 3 s for it to
 /// end. Returns its task ID, how it ended, and its output.
 fn run_driver(programs: &fs::Fs, device: Arc<pci::Device>, arg: u64) -> (u64, End, Vec<Vec<u8>>) {
+    let Some(handle) = DeviceHandle::grant(device) else {
+        return (u64::MAX, End::Running, Vec::new());
+    };
     let caps = vec![
         Capability::new(Object::DebugConsole, WRITE),
-        Capability::new(
-            Object::Device(DeviceHandle::grant(device)),
-            MAP | CONFIG | IRQ,
-        ),
+        Capability::new(Object::Device(handle), MAP | CONFIG | IRQ),
     ];
     let Ok(id) = process::spawn_elf(programs, b"bin/virtio-blk", arg, caps) else {
         return (u64::MAX, End::Running, Vec::new());

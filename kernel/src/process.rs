@@ -193,10 +193,15 @@ pub struct Process {
     /// A message handed over by a sender while this process waited in
     /// `receive` (#41).
     pub inbox: IrqMutex<Option<crate::ipc::Message>>,
-    /// Devices whose DMA buffers are mapped into this process. Holding them
-    /// keeps the buffers allocated for as long as the process lives, even if
-    /// it deletes its device handle (drivers.md).
+    /// Devices whose registers or DMA buffers are mapped into this process.
+    /// Holding them keeps each device granted to this process, enabled, and
+    /// its buffers allocated for as long as the process lives, even if it
+    /// deletes its device handles (drivers.md).
     pub pins: IrqMutex<Vec<Arc<crate::device::DeviceHandle>>>,
+    /// Device register pages mapped so far (at most
+    /// [`crate::device::MAX_MMIO_PAGES`]; they and their page tables are
+    /// freed only when the process ends).
+    pub mmio_pages: IrqMutex<u64>,
 }
 
 /// Live processes by task ID (one thread each).
@@ -225,6 +230,7 @@ pub fn start(
         caps: IrqMutex::new(table),
         inbox: IrqMutex::new(None),
         pins: IrqMutex::new(Vec::new()),
+        mmio_pages: IrqMutex::new(0),
     });
     // Register the process before its thread can run (no preemption here).
     without_interrupts(|| {

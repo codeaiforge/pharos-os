@@ -7,6 +7,10 @@
 //! is the number of failures. The program prints `dma <hex>` (the buffer's
 //! physical address) and waits for a message before exiting, so the kernel
 //! can inspect the buffer and the device while it lives.
+//!
+//! With bit 63 of the argument set, it only maps the common configuration,
+//! deletes both device handles, and waits: the mapping alone must keep the
+//! device granted and enabled.
 
 #![no_std]
 #![no_main]
@@ -47,9 +51,34 @@ fn hex(value: u64) -> [u8; 20] {
     out
 }
 
+/// Argument bit: map registers only.
+const MMIO_ONLY: u64 = 1 << 63;
+
 fn main(arg: u64) -> u64 {
     let mut f = 0;
+    let mmio_only = arg & MMIO_ONLY != 0;
+    let arg = arg & !MMIO_ONLY;
     let (bar, offset) = ((arg & 0xff) as u8, arg >> 8);
+    if mmio_only {
+        let page = offset / 4096 * 4096;
+        report(
+            &mut f,
+            "mmio_map only",
+            mmio_map(DEVICE, bar, page, 4096, REGS).is_ok(),
+        );
+        report(
+            &mut f,
+            "delete both device handles",
+            delete(DEVICE).is_ok() && delete(POWERLESS).is_ok(),
+        );
+        let mut msg = [0u8; 8];
+        report(
+            &mut f,
+            "released by the kernel",
+            receive(WAIT, &mut msg).is_ok(),
+        );
+        return f;
+    }
     let page = offset / 4096 * 4096;
     let in_page = (offset - page) as usize;
 
@@ -112,6 +141,22 @@ fn main(arg: u64) -> u64 {
         &mut f,
         "no CONFIG right: MISSING_RIGHT",
         config_read(POWERLESS, 0, 4).err() == Some(Error::MissingRight),
+    );
+
+    // Register mappings are limited to 256 pages per process: 1 so far,
+    // then the whole 4-page BAR 63 more times.
+    let mut mapped = 0;
+    let last = loop {
+        let at = REGS + 0x100_0000 + mapped * 0x4000;
+        match mmio_map(DEVICE, bar, 0, 0x4000, at) {
+            Ok(_) if mapped < 100 => mapped += 1,
+            other => break other.err(),
+        }
+    };
+    report(
+        &mut f,
+        "256 register pages in all, then NO_MEMORY",
+        mapped == 63 && last == Some(Error::NoMemory),
     );
 
     let dma = dma_alloc(DEVICE, 2, DMA);

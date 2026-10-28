@@ -303,6 +303,16 @@ mod kernel {
         }
     }
 
+    /// Keeps `device` alive (granted, enabled, its DMA buffers allocated)
+    /// for as long as `process` lives: the process has its registers or
+    /// buffers mapped, even if it deletes every handle (drivers.md).
+    fn pin(process: &process::Process, device: alloc::sync::Arc<crate::device::DeviceHandle>) {
+        let mut pins = process.pins.lock();
+        if !pins.iter().any(|p| alloc::sync::Arc::ptr_eq(p, &device)) {
+            pins.push(device);
+        }
+    }
+
     /// The endpoint behind `handle`, if the caller holds `needed` on it.
     fn endpoint(
         process: &process::Process,
@@ -476,6 +486,9 @@ mod kernel {
                     },
                 )?;
                 let pages = len / 4096;
+                if *process.mmio_pages.lock() + pages > crate::device::MAX_MMIO_PAGES {
+                    return Err(Error::NoMemory);
+                }
                 sched::with_current_space(|space| {
                     if !space.range_free(addr, pages) {
                         return Err(Error::InUse);
@@ -493,7 +506,10 @@ mod kernel {
                     }
                     Ok(0)
                 })
-                .ok_or(Error::BadAddress)?
+                .ok_or(Error::BadAddress)??;
+                *process.mmio_pages.lock() += pages;
+                pin(&process, device);
+                Ok(0)
             }
             Call::DmaAlloc {
                 handle,
@@ -517,10 +533,7 @@ mod kernel {
                 })
                 .ok_or(Error::BadAddress)??;
                 device.add_dma(phys, pages);
-                let mut pins = process.pins.lock();
-                if !pins.iter().any(|p| alloc::sync::Arc::ptr_eq(p, &device)) {
-                    pins.push(device);
-                }
+                pin(&process, device);
                 Ok(phys)
             }
             Call::IrqCreate { handle, entry } => {

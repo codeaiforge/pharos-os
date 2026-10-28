@@ -200,6 +200,39 @@ $5 = 0x0
 
 Verified on 2026-10-27 (GDB 15.1, QEMU 8.2.2, UEFI). The breakpoint in the handler stopped on the process's first call, with its own CR3 loaded (`print/x $cr3` showed `0x621000`, not the kernel root). The hardware breakpoint stopped in ring 3 right after `sysret`, at the table program's instruction that stores the result (`TestProgram::SyscallTable`). After `continue` the test kernel passed (QEMU status 33), and GDB reported the closed connection when QEMU exited. To stop on a fault in user mode instead, break on `pharos_kernel::process::on_user_fault`.
 
+### Debug a Rust user program or driver
+
+Rust user programs (`user/programs`, M2.9) are ELF files with a symbol table. xtask builds them in release mode into `target/x86_64-unknown-none/release/<name>` and copies them into the boot image as `bin/<name>`. Load that file's symbols next to the kernel's, and set *hardware* breakpoints on its functions: the code is mapped read-only in the process, and a hardware breakpoint writes nothing. The process's address space is loaded whenever it runs, so its addresses resolve while it is on the CPU.
+
+```text
+$ cargo test -p pharos-kernel --target x86_64-unknown-none --test virtio_blk --no-run
+$ cargo xtask run --kernel target/x86_64-unknown-none/debug/deps/virtio_blk-<hash> --gdb
+$ gdb target/x86_64-unknown-none/debug/deps/virtio_blk-<hash>   # second terminal
+(gdb) target remote localhost:1234
+(gdb) add-symbol-file target/x86_64-unknown-none/release/virtio-blk
+(gdb) hbreak virtio_blk::main
+Hardware assisted breakpoint 1 at 0x401280
+(gdb) continue
+Breakpoint 1, 0x0000000000401280 in virtio_blk::main ()
+(gdb) print/x $cs              # ring 3
+$1 = 0x33
+(gdb) bt 3
+#0  0x0000000000401280 in virtio_blk::main ()
+#1  0x0000000000402866 in pharos_main ()
+#2  0x0000000000000000 in ?? ()
+(gdb) delete
+(gdb) continue
+```
+
+Verified on 2026-10-28 (GDB 15.1, QEMU 8.2.2, UEFI): the breakpoint stopped in the driver's first run, and after `continue` the test kernel passed (QEMU status 33). Addresses differ between builds; `nm -C target/x86_64-unknown-none/release/<name>` lists the functions. Release builds inline small functions, so a breakpoint on one may never be hit; break on its caller.
+
+Other ways to see what a driver does:
+
+- **Its output:** every `debug_write` line appears in the serial log as `process <id>: <text>`; test kernels also echo their program's lines. The driver's exit code says where it stopped (the table in `user/programs/src/bin/virtio-blk.rs`).
+- **A fault:** the kernel prints `PHAROS: process <id> killed:` with the full exception report, including `RIP` in the program; `nm` turns it into a function name. A panic exits with code `0xdead` (`pharos_user::PANIC_EXIT`).
+- **Kernel side:** break on `pharos_kernel::syscall::kernel::handle` to watch its system calls, or on `pharos_kernel::irq::on_vector` to see device interrupts arrive.
+- **The device:** `info pci` and `info mtree` in the QEMU monitor show its BARs and where they are mapped (see [Useful QEMU options](#useful-qemu-options) for reaching the monitor).
+
 ### Trace task switches
 
 `sched::set_trace(true)` prints every task switch over serial, with the scheduler's tick count. Task 0 is the boot thread; with preemption enabled, the idle task is the first task created by `sched::enable_preemption`. The `preemption` test kernel turns tracing on while three tasks sleep 50, 10, and 30 ms and task 0 sleeps 100 ms. Boot that test kernel to see the trace:

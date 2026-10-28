@@ -112,7 +112,10 @@ fn run(t: &mut TestRun) {
     let start = irq::stats();
     t.check("no device vectors in use yet", start.in_use == 0);
 
-    let device = DeviceHandle::grant(blk.clone());
+    let Some(device) = DeviceHandle::grant(blk.clone()) else {
+        t.check("virtio-blk granted", false);
+        return;
+    };
     let wait = Endpoint::new();
     let caps = vec![
         Capability::new(Object::DebugConsole, WRITE),

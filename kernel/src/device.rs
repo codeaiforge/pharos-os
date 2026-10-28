@@ -2,8 +2,9 @@
 //! [drivers.md](../../docs/architecture/drivers.md)).
 //!
 //! A [`DeviceHandle`] is the object behind a `Device` capability: one PCI
-//! function. Granting it turns on memory decoding and bus mastering. The
-//! handle owns the DMA buffers allocated for the device. When its last
+//! function, granted to one driver at a time. Granting it turns on memory
+//! decoding and bus mastering. The handle owns the DMA buffers allocated
+//! for the device. When its last
 //! reference goes, it first turns bus mastering off and masks MSI-X, and
 //! only then frees those buffers, so the device can never write to memory
 //! that has been reused. [`mmio_range`] decides which BAR ranges a driver
@@ -18,6 +19,9 @@ use crate::pci::{self, Bar};
 
 /// Most DMA pages one device may hold at a time.
 pub const MAX_DMA_PAGES: usize = 64;
+/// Most device register pages one process may map in all, which bounds
+/// the page tables a driver can make the kernel allocate.
+pub const MAX_MMIO_PAGES: u64 = 256;
 /// Most pages one `dma_alloc` call may ask for.
 pub const MAX_DMA_ALLOC: usize = 16;
 const PAGE: u64 = 4096;
@@ -113,12 +117,24 @@ mod kernel {
     use crate::arch::x86_64::pci as hw;
     use crate::mm::frame::Frame;
 
+    /// Functions with a live handle: each is granted to one driver at a
+    /// time.
+    static GRANTED: IrqMutex<Vec<hw::Address>> = IrqMutex::new(Vec::new());
+
     impl DeviceHandle {
         /// Hands `pci` to a driver: turns memory decoding and bus mastering
-        /// on.
-        pub fn grant(pci: Arc<pci::Device>) -> Arc<Self> {
+        /// on. `None` if the function already has a live handle (until that
+        /// handle's last reference, including pins, is gone).
+        pub fn grant(pci: Arc<pci::Device>) -> Option<Arc<Self>> {
+            {
+                let mut granted = GRANTED.lock();
+                if granted.contains(&pci.address) {
+                    return None;
+                }
+                granted.push(pci.address);
+            }
             hw::set_enabled(pci.address, true);
-            Arc::new(Self::new(pci))
+            Some(Arc::new(Self::new(pci)))
         }
     }
 
@@ -138,6 +154,8 @@ mod kernel {
                     }
                 }
             }
+            // Stopped and its memory freed: it may be granted again.
+            GRANTED.lock().retain(|a| *a != self.pci.address);
         }
     }
 }

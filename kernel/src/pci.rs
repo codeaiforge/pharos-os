@@ -127,6 +127,39 @@ pub struct Msix {
     pub pba_offset: u32,
 }
 
+/// Removes memory BARs that overlap an entry of the boot memory map
+/// (`(base, length)`: RAM, the kernel, modules, firmware tables, the
+/// framebuffer) or run past the end of the address space. Device registers
+/// never lie there, so such a BAR is hostile or misconfigured, and mapping
+/// it would hand out memory. With an incomplete map (`complete` false)
+/// every memory BAR is removed. Returns how many were removed.
+pub fn remove_bars_over_memory(
+    bars: &mut [Option<Bar>; 6],
+    map: impl Iterator<Item = (u64, u64)> + Clone,
+    complete: bool,
+) -> usize {
+    let mut removed = 0;
+    for bar in bars.iter_mut() {
+        let Some(Bar::Memory { base, size, .. }) = *bar else {
+            continue;
+        };
+        let bad = match base.checked_add(size) {
+            None => true,
+            Some(end) => {
+                !complete
+                    || map
+                        .clone()
+                        .any(|(b, len)| b < end && base < b.saturating_add(len))
+            }
+        };
+        if bad {
+            *bar = None;
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// Decodes the MSI-X capability at `offset`.
 pub fn msix(offset: u8, read32: impl Fn(u8) -> u32) -> Msix {
     let control = read32(offset) >> 16;
@@ -206,6 +239,22 @@ mod kernel {
                 (original[i as usize], probe[i as usize]) = hw::probe_bar(address, i);
             }
             bars = decode_bars(original, probe);
+            let removed = match crate::mm::memory_map().as_ref() {
+                Some(map) => remove_bars_over_memory(
+                    &mut bars,
+                    map.entries().iter().map(|e| (e.base, e.length)),
+                    map.truncated() == 0,
+                ),
+                None => remove_bars_over_memory(&mut bars, core::iter::empty(), false),
+            };
+            if removed > 0 {
+                crate::kprintln!(
+                    "pci: {:02x}:{:02x}.{}: {removed} memory BAR(s) overlap memory, ignored",
+                    address.bus,
+                    address.device,
+                    address.function
+                );
+            }
             let status = hw::read32(address, 0x04) >> 16;
             if status & (1 << 4) != 0 {
                 let first = hw::read32(address, 0x34) as u8 & !0b11;
@@ -271,6 +320,42 @@ mod kernel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bars_over_memory_are_removed() {
+        let mem = |base, size| {
+            Some(Bar::Memory {
+                base,
+                size,
+                prefetchable: false,
+                wide: false,
+            })
+        };
+        let map = [(0x0, 0x9_f000), (0x10_0000, 0x7ff0_0000)];
+        let mut bars = [
+            mem(0xfebf_0000, 0x1000), // MMIO hole: kept
+            mem(0x7000_0000, 0x1000), // inside RAM
+            mem(0x9_e000, 0x2000),    // runs into RAM's end
+            Some(Bar::Io {
+                base: 0xc000,
+                size: 0x40,
+            }),
+            mem(0x9_f000, 0x6_1000),       // exactly the gap: kept
+            mem(u64::MAX - 0xfff, 0x2000), // wraps
+        ];
+        assert_eq!(
+            remove_bars_over_memory(&mut bars, map.iter().copied(), true),
+            3
+        );
+        assert!(bars[0].is_some() && bars[3].is_some() && bars[4].is_some());
+        assert!(bars[1].is_none() && bars[2].is_none() && bars[5].is_none());
+        // An incomplete map trusts no memory BAR; I/O BARs stay.
+        assert_eq!(
+            remove_bars_over_memory(&mut bars, map.iter().copied(), false),
+            2
+        );
+        assert!(bars[3].is_some() && bars.iter().filter(|b| b.is_some()).count() == 1);
+    }
 
     #[test]
     fn decodes_bars() {

@@ -1,6 +1,6 @@
 # Threat model
 
-**Status:** updated at the M2.7 gate (2026-10-27). It covers what exists today, the host workspace and a kernel with isolated user processes, and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
+**Status:** updated at the M2.9 gate (2026-10-28). It covers what exists today (the host workspace, and a kernel with isolated user processes, a read-only RAM-disk filesystem, and user-space drivers) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
 
 ## Security principles
 
@@ -61,9 +61,9 @@ User processes run in ring 3 since M2.7. Design: [syscalls-ipc.md](../architectu
 | Speculative execution leaks kernel memory (Meltdown class) | **Limit:** not mitigated (no KPTI); revisit before real-hardware use |
 | Timing side channels | **Limit:** `rdtsc` is available in user mode |
 
-### Storage images (M2.8, planned)
+### Storage images (M2.8)
 
-Design: [storage.md](../architecture/storage.md) and [D-007](../project/decision-log.md#d-007-filesystem-and-persistent-storage). The first two rows are **implemented** (#45–#48) and covered by host tests and the `fs` and `files` test kernels.
+Design: [storage.md](../architecture/storage.md) and [D-007](../project/decision-log.md#d-007-filesystem-and-persistent-storage). The first two rows are **implemented** (#45–#48) and covered by host tests and the `fs` and `files` test kernels. Since M2.9 the virtio-blk driver runs the same parser in user space on the disk's image (`virtio_blk`).
 
 | Threat | Mitigation |
 | --- | --- |
@@ -71,18 +71,20 @@ Design: [storage.md](../architecture/storage.md) and [D-007](../project/decision
 | A process reads files it was not given | Files only through capabilities: a filesystem capability with `READ` opens files, file capabilities narrow rights, pass over IPC only with `GRANT`, and are revoked through the derivation tree |
 | An image is replaced or tampered with | **Limit:** CRC-32 detects corruption only; images are not authenticated until secure boot |
 
-### Drivers and devices (M2.9, planned)
+### Drivers and devices (M2.9)
 
-Design: [drivers.md](../architecture/drivers.md) and [D-008](../project/decision-log.md#d-008-driver-strategy). The first row is **implemented** (#52), and so are the second and fourth (#55: device capabilities, MMIO limits, and stopping a device before its DMA buffers are freed, all tested in `device_caps`) and the third (#54: the kernel programs MSI-X entries through its own mapping, vectors come from a fixed set of 16, and deleting an interrupt masks its entry, tested in `device_irq`). The fifth is a limit. The last row is **implemented** too (#56: the driver's checks of device values are host-tested; the kernel bounds its capability walk).
+Design: [drivers.md](../architecture/drivers.md) and [D-008](../project/decision-log.md#d-008-driver-strategy). Every mitigation below is **implemented** (#52–#56) and was reviewed at the M2.9 gate: [review-m2.9-drivers.md](review-m2.9-drivers.md) (findings F1–F4 fixed). Tests: host tests, and the `user_elf`, `pci`, `device_caps`, `device_irq`, and `virtio_blk` test kernels.
 
-| Threat | Planned mitigation |
+| Threat | Mitigation |
 | --- | --- |
 | A malformed program file corrupts the kernel | One safe `no_std` ELF parser checks every header and segment before anything is allocated, and is fuzzed on the host |
-| A driver reaches memory or devices it was not given | Device capabilities only: MMIO mappings limited to its device's BARs, never RAM, other devices, or the MSI-X table; no configuration-space writes |
+| A driver reaches memory or devices it was not given | Device capabilities only: MMIO mappings limited to its device's memory BARs, never the MSI-X table; no configuration-space writes. BARs that overlap the memory map are ignored, so a hostile device cannot expose RAM (F1). A device is granted to one driver at a time, and stays with it while any of its pages are mapped (F2) |
 | A driver injects interrupts | The kernel programs MSI-X; the table's pages are never mapped to drivers; handlers do no driver work |
-| A device DMAs into freed memory after its driver dies | Bus mastering is disabled and MSI-X masked when the device capability goes, before the driver's frames are freed |
+| A device DMAs into freed memory after its driver dies | Bus mastering is disabled and MSI-X masked when the device's last reference goes (handles and pins), before its DMA frames are freed; checked after exit and after a kill |
+| A driver exhausts kernel resources | At most 64 DMA pages per device, 256 register pages per process (F4), 4 interrupt vectors per device (F3), 16 in all |
 | A driver programs DMA to arbitrary memory | **Limit:** no IOMMU in M2.9; a driver is trusted with all memory through its device. Only the kernel starts drivers; the IOMMU is evaluated before real hardware |
-| A device returns bad values | The driver checks every ring index, descriptor ID, length, and status; the kernel bounds its capability-list walk |
+| A revoked driver keeps device access | **Limit:** revocation stops new calls, but existing mappings stay until the process ends; ending the process is the full revocation |
+| A device returns bad values | The driver checks every ring index, descriptor ID, length, and status (host-tested); the kernel bounds its capability-list walk and checks BARs |
 
 ### Known limitations
 

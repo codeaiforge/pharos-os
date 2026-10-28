@@ -14,6 +14,9 @@
 use crate::arch::x86_64::idt::DEVICE_VECTORS;
 use crate::mm::raw::IrqMutex;
 
+/// Most vectors one device may hold, so one driver cannot take all 16.
+pub const MAX_PER_DEVICE: usize = 4;
+
 /// A thread ID (`sched::TaskId`).
 pub type TaskId = u64;
 
@@ -24,7 +27,7 @@ pub enum IrqError {
     NoEntry,
     /// The entry already has an interrupt, or a thread already waits.
     InUse,
-    /// All 16 vectors are taken.
+    /// All 16 vectors are taken, or the device holds [`MAX_PER_DEVICE`].
     NoVector,
     /// The table entry could not be reached.
     Hardware,
@@ -68,6 +71,13 @@ impl Vectors {
     pub fn alloc(&mut self, device: usize, entry: u16) -> Result<usize, IrqError> {
         if self.slots.iter().any(|s| s.owner == Some((device, entry))) {
             return Err(IrqError::InUse);
+        }
+        let held = self
+            .slots
+            .iter()
+            .filter(|s| s.owner.is_some_and(|(d, _)| d == device));
+        if held.count() >= MAX_PER_DEVICE {
+            return Err(IrqError::NoVector);
         }
         let index = self
             .slots
@@ -292,11 +302,18 @@ mod tests {
         v.free(0);
         assert_eq!(v.in_use(), 2);
         assert_eq!(v.alloc(1, 0), Ok(0), "lowest free vector");
-        for entry in 2..15 {
-            v.alloc(1, entry).unwrap();
+        assert_eq!(v.alloc(1, 2), Ok(3));
+        assert_eq!(v.alloc(1, 3), Ok(4), "4 for device 1");
+        assert_eq!(v.alloc(1, 4), Err(IrqError::NoVector), "per-device limit");
+        // 5 in use; 10 more from three devices.
+        for (device, entries) in [(10, 4), (11, 4), (12, 2)] {
+            for entry in 0..entries {
+                v.alloc(device, entry).unwrap();
+            }
         }
-        assert_eq!(v.in_use(), DEVICE_VECTORS);
-        assert_eq!(v.alloc(3, 0), Err(IrqError::NoVector));
+        assert_eq!(v.in_use(), DEVICE_VECTORS - 1);
+        assert_eq!(v.alloc(3, 0), Ok(15));
+        assert_eq!(v.alloc(4, 0), Err(IrqError::NoVector), "all 16 taken");
         v.free(99); // out of range: ignored
     }
 

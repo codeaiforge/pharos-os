@@ -133,6 +133,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Security
 
+- M2.9 security review (#57, `docs/security/review-m2.9-drivers.md`), four findings fixed: memory BARs that overlap the boot memory map are ignored, so a hostile device cannot get RAM mapped or have the kernel write MSI-X entries into it (F1); a device is granted to one driver at a time, and register mappings pin it like DMA buffers (F2); at most 4 interrupt vectors per device (F3); at most 256 register pages per process (F4). The threat model's drivers section is updated.
 - Fixed a stale-TLB bug from #38: unmapping a kernel page (such as a freed task stack) while a process address space was active did not flush the TLB, so the freed frame could stay reachable. Unmapping from the kernel space now always flushes. A new `address_spaces` check fails without the fix.
 - Pin `actions/checkout` in CI to the signed v5.1.0 release commit SHA instead of the movable `v5` tag.
 
