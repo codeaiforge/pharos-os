@@ -142,3 +142,7 @@ harness = false
 [[test]]
 name = "hardening"
 harness = false
+
+[[test]]
+name = "virtio_blk"
+harness = false

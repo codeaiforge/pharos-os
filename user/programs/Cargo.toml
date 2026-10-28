@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+pharos-fs = { path = "../../crates/pharos-fs" }
 pharos-user = { path = "../pharos-user" }
 
 # `unsafe` is denied (not forbidden) only so `pharos_user::entry!` can mark

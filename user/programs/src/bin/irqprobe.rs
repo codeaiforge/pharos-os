@@ -11,9 +11,7 @@
 #![no_std]
 #![no_main]
 
-#[path = "../virtio.rs"]
-mod virtio;
-
+use pharos_programs::virtio;
 use pharos_user::{Error, debug_write, delete, irq_create, irq_wait, receive, revoke};
 
 pharos_user::entry!(main);
@@ -67,17 +65,19 @@ fn main(_: u64) -> u64 {
     match virtio::Blk::init(DEVICE, 0, BASE) {
         Ok(mut blk) => {
             report(&mut f, "virtio-blk set up", true);
-            blk.submit_read(0);
+            let submitted = blk.submit(0, virtio::SECTOR).is_ok();
             report(
                 &mut f,
                 "irq_wait wakes on the completion interrupt",
-                irq_wait(irq).is_ok_and(|n| n >= 1),
+                submitted && irq_wait(irq).is_ok_and(|n| n >= 1),
             );
-            report(&mut f, "read completed", blk.complete().is_ok());
+            report(&mut f, "read completed", blk.complete() == Ok(true));
+            // The data, read again through the driver's blocking path.
+            let mut sector = [0u8; virtio::SECTOR];
             report(
                 &mut f,
                 "sector 0 starts with the filesystem magic",
-                blk.data64(0) == u64::from_le_bytes(*b"PHAROSFS"),
+                blk.read(irq, 0, &mut sector).is_ok() && sector.starts_with(b"PHAROSFS"),
             );
             blk.reset();
         }

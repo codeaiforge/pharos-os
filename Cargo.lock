@@ -26,6 +26,7 @@ dependencies = [
 name = "pharos-programs"
 version = "0.1.0"
 dependencies = [
+ "pharos-fs",
  "pharos-user",
 ]
 

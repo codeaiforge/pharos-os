@@ -1,5 +1,6 @@
-//! The only `unsafe` code in user space: the program entry stub and the
-//! `syscall` instruction (AGENTS.md section 5, drivers.md).
+//! The only `unsafe` code in user space: the program entry stub, the
+//! `syscall` instruction, volatile access to mapped device memory, and the
+//! heap allocator (AGENTS.md section 5, drivers.md).
 
 #![allow(unsafe_code)]
 
@@ -133,5 +134,97 @@ impl Mapped {
         let at = self.at(offset, 8);
         // SAFETY: as in `write8`; `at` is 8-byte aligned (checked).
         unsafe { (at as *mut u64).write_volatile(value) }
+    }
+}
+
+/// The heap: a bump allocator, installed as the global allocator on the
+/// bare-metal target.
+// Host builds only run its unit test.
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+mod heap {
+    /// Bytes of heap each program has (in its `.bss`).
+    pub const HEAP_SIZE: usize = 256 * 1024;
+
+    #[repr(C, align(4096))]
+    struct Arena(core::cell::UnsafeCell<[u8; HEAP_SIZE]>);
+
+    // SAFETY: `Bump::alloc` hands out disjoint ranges of the arena (each byte
+    // at most once, claimed through the atomic `NEXT`), so threads never share
+    // a byte through it.
+    unsafe impl Sync for Arena {}
+
+    static ARENA: Arena = Arena(core::cell::UnsafeCell::new([0; HEAP_SIZE]));
+    /// Offset of the first unclaimed arena byte.
+    static NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+    /// A bump allocator over a fixed arena: allocation claims the next aligned
+    /// range; nothing is ever freed.
+    // ponytail: never frees, fine for short-lived programs that allocate once
+    // (mounting an image); add a free list when a long-running service needs one.
+    pub struct Bump;
+
+    // SAFETY: `alloc` returns either null or a range of `layout.size()` bytes
+    // aligned to `layout.align()` inside the static arena that no other call
+    // returned (the compare-exchange claims it exactly once). `dealloc` does
+    // nothing, which is always allowed.
+    unsafe impl core::alloc::GlobalAlloc for Bump {
+        unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+            use core::sync::atomic::Ordering::Relaxed;
+            let base = ARENA.0.get().cast::<u8>();
+            let mut next = NEXT.load(Relaxed);
+            loop {
+                // Align the address, not the offset (the arena is page-aligned,
+                // so the two agree for every alignment up to 4096).
+                let Some(start) = (base as usize + next)
+                    .checked_next_multiple_of(layout.align())
+                    .map(|a| a - base as usize)
+                else {
+                    return core::ptr::null_mut();
+                };
+                let end = match start.checked_add(layout.size()) {
+                    Some(end) if end <= HEAP_SIZE => end,
+                    _ => return core::ptr::null_mut(),
+                };
+                match NEXT.compare_exchange_weak(next, end, Relaxed, Relaxed) {
+                    // SAFETY: `start <= end <= HEAP_SIZE`, so the pointer stays
+                    // inside the arena.
+                    Ok(_) => return unsafe { base.add(start) },
+                    Err(current) => next = current,
+                }
+            }
+        }
+
+        unsafe fn dealloc(&self, _: *mut u8, _: core::alloc::Layout) {}
+    }
+
+    #[cfg(target_os = "none")]
+    #[global_allocator]
+    static ALLOCATOR: Bump = Bump;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::heap::*;
+
+    #[test]
+    fn bump_allocator_aligns_never_overlaps_and_runs_out() {
+        use core::alloc::{GlobalAlloc, Layout};
+        let heap = Bump;
+        let mut ranges = Vec::new();
+        for (size, align) in [(1, 1), (24, 8), (3, 1), (100, 64), (4096, 4096), (8, 16)] {
+            let layout = Layout::from_size_align(size, align).unwrap();
+            // SAFETY: a valid, non-zero-size layout.
+            let p = unsafe { heap.alloc(layout) } as usize;
+            assert!(p != 0 && p % align == 0, "size {size} align {align}");
+            ranges.push(p..p + size);
+        }
+        for (i, a) in ranges.iter().enumerate() {
+            for b in &ranges[i + 1..] {
+                assert!(a.end <= b.start || b.end <= a.start, "overlap");
+            }
+        }
+        let too_big = Layout::from_size_align(HEAP_SIZE, 1).unwrap();
+        // SAFETY: as above.
+        assert!(unsafe { heap.alloc(too_big) }.is_null(), "exhausted");
     }
 }

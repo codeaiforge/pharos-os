@@ -14,6 +14,7 @@ run cargo fmt --all -- --check
 run cargo clippy --workspace --exclude pharos-kernel --exclude pharos-programs --all-targets --locked -- -D warnings
 run cargo build --workspace --exclude pharos-kernel --exclude pharos-programs --locked
 run cargo test --workspace --exclude pharos-kernel --exclude pharos-programs --locked
+run cargo test -p pharos-programs --lib --locked
 # Kernel: host-testable library logic, then the bare-metal target.
 run cargo test -p pharos-kernel --lib --locked
 run cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --test '*' --locked -- -D warnings
@@ -29,6 +30,7 @@ run python3 scripts/check-links.py
 if rustup run 1.85 rustc --version >/dev/null 2>&1; then
     run cargo +1.85 build --workspace --exclude pharos-kernel --exclude pharos-programs --locked
     run cargo +1.85 test --workspace --exclude pharos-kernel --exclude pharos-programs --locked
+    run cargo +1.85 test -p pharos-programs --lib --locked
     run cargo +1.85 test -p pharos-kernel --lib --locked
 else
     printf '\n==> SKIPPED: Rust 1.85 not installed, so the CI msrv job was not repeated locally.\n'

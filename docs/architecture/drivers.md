@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.9, #51). It follows [D-008](../project/decision-log.md#d-008-driver-strategy) (user-space drivers with device capabilities, virtio-blk only, MSI-X, no IOMMU yet) and [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries).
-- **Implementation:** Rust user programs and the ELF loader are **implemented** (#52: `user/pharos-user`, `user/programs`, `crates/pharos-elf`, `process::load_elf` and `spawn_elf`; programs are in the boot filesystem as `bin/<name>`). So is PCI discovery (#53: `arch::x86_64::pci` for configuration access and BAR probing, `pci::enumerate` with decoding and a bounded capability walk, the boot log listing devices; every QEMU run attaches `disk.img` as `virtio-blk-pci,disable-legacy=on` and has no network card). So are the `Device` capability with `config_read`, `mmio_map`, and `dma_alloc` (#55: `device::DeviceHandle`, `device::mmio_range`, the `DEVICE` page-table bit, `Mapped` in `pharos-user`, and the `devprobe` test program). So are device interrupts (#54: `irq::Irq` and the vector table in `kernel/src/irq.rs`, IDT stubs for vectors 48–63, MSI-X table writes through a kernel-only mapping, `irq_create` and `irq_wait`, and the `irqprobe` test program with a minimal virtio-blk queue in `user/programs/src/virtio.rs`). **Planned:** the virtio-blk driver (#56).
+- **Implementation:** Rust user programs and the ELF loader are **implemented** (#52: `user/pharos-user`, `user/programs`, `crates/pharos-elf`, `process::load_elf` and `spawn_elf`; programs are in the boot filesystem as `bin/<name>`). So is PCI discovery (#53: `arch::x86_64::pci` for configuration access and BAR probing, `pci::enumerate` with decoding and a bounded capability walk, the boot log listing devices; every QEMU run attaches `disk.img` as `virtio-blk-pci,disable-legacy=on` and has no network card). So are the `Device` capability with `config_read`, `mmio_map`, and `dma_alloc` (#55: `device::DeviceHandle`, `device::mmio_range`, the `DEVICE` page-table bit, `Mapped` in `pharos-user`, and the `devprobe` test program). So are device interrupts (#54: `irq::Irq` and the vector table in `kernel/src/irq.rs`, IDT stubs for vectors 48–63, MSI-X table writes through a kernel-only mapping, `irq_create` and `irq_wait`, and the `irqprobe` test program with a minimal virtio-blk queue in `user/programs/src/virtio.rs`). So is the virtio-blk driver (#56: `user/programs/src/bin/virtio-blk.rs` on the shared `pharos_programs::virtio` module, mounting the disk's `pharos-fs` image with the kernel's parser; tested in `virtio_blk`). To run that parser, `pharos-user` has a heap: a 256 KiB bump allocator in its `syscall` module that never frees memory.
 
 ## 2. Context
 
@@ -30,7 +30,7 @@ This document fixes the interfaces for all four, and the virtio-blk subset the f
 | Device-interrupt entry stubs | `arch::x86_64::idt`, vectors 48–63 | hardware layer |
 | MMIO mappings | `arch::x86_64::paging` (device pages, never freed as RAM) | hardware layer |
 | Device, interrupt, and DMA capabilities; new system calls | `cap.rs`, `syscall.rs`, new `kernel/src/device.rs` | none |
-| virtio-blk driver | `user/programs/virtio-blk` | none |
+| virtio-blk driver | `user/programs/src/bin/virtio-blk.rs`, `user/programs/src/virtio.rs` | none |
 
 Adding `user/pharos-user`'s `syscall` module to the list of places allowed to use `unsafe` is a change to AGENTS.md section 5. It is made with #52 and reviewed then.
 
@@ -116,7 +116,7 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
 
 ### virtio-blk driver (virtio 1.x, modern PCI)
 
-- **Transport:** the driver finds the vendor-specific capabilities (ID `0x09`) with `config_read`: `COMMON_CFG`, `NOTIFY_CFG`, `ISR_CFG`, and `DEVICE_CFG`, each with BAR, offset, and length. It maps those ranges with `mmio_map`.
+- **Transport:** the driver checks the device ID (`0x1af4:0x1042`) and finds the vendor-specific capabilities (ID `0x09`) with `config_read`: `COMMON_CFG`, `NOTIFY_CFG`, and `DEVICE_CFG` (for the capacity), each with BAR, offset, and length. It maps those pages with `mmio_map`. `ISR_CFG` is not needed: with MSI-X the ISR status is unused.
 - **Initialisation:**
   1. reset;
   2. `ACKNOWLEDGE`, then `DRIVER`;
@@ -126,7 +126,7 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
   6. `DRIVER_OK`.
 
   Any unexpected value sets `FAILED` and exits.
-- **Queue:** one split virtqueue, size min(device maximum, 16), in one `dma_alloc` buffer: descriptor table (16-byte aligned), available ring, and used ring (4-byte aligned). The queue's MSI-X vector is set through `queue_msix_vector` from an `irq_create` interrupt, and the configuration vector is `NO_VECTOR`.
+- **Queue:** one split virtqueue, size min(device maximum, 16), in one 2-page `dma_alloc` buffer: descriptor table (16-byte aligned), available ring, used ring (4-byte aligned), and the request header and status in the first page, data in the second. The queue's MSI-X vector is set through `queue_msix_vector` from an `irq_create` interrupt, and the configuration vector is `NO_VECTOR`.
 - **Requests:** read only. A chain of three descriptors:
   - the header (`type = IN`, sector);
   - the data (device-writable, 512 to 4096 bytes);
@@ -137,8 +137,11 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
   - used-ring index advances at most the number outstanding;
   - descriptor ID in range and outstanding;
   - status must be `OK`;
-  - the length is checked against the request.
-- **Test service:** the driver reads the disk's blocks into a `pharos-fs` `BlockDevice`, mounts the image with the same parser as the kernel, and reports a file's contents with `debug_write`. It then exits with a code that encodes the outcome.
+  - the length is checked against the request (data plus the status byte);
+  - reads past the disk's capacity are refused before submission.
+
+  These checks are one pure function (`virtio::check_used`), unit-tested on the host.
+- **Test service:** the driver reads the disk's blocks into a `pharos-fs` `BlockDevice`, mounts the image with the same parser as the kernel, and reports a file's contents with `debug_write`. It then exits with a code that encodes the outcome (0 success, 1 not virtio-blk, 2 setup failed, 3 read failed, 4 mount failed, 5 file missing or wrong).
 
 ### Startup
 
@@ -161,8 +164,8 @@ In M2.9 test kernels start drivers. The main kernel enumerates PCI and logs devi
 - **ELF files are untrusted input:** the safe parser checks everything before any allocation, and it is fuzzed.
 - **Kernel memory:** DMA is at most 64 pages per device; programs at most 4 MiB; interrupt vectors are a fixed set of 16.
 - **`unsafe`:**
-  - port I/O for PCI configuration, IDT stubs for vectors 48–63, and the device-page bit in page tables, all in the hardware layer;
-  - the `syscall` instruction in `pharos-user`;
+  - port I/O for PCI configuration, IDT stubs for vectors 48–63, the device-page bit in page tables, and kernel MMIO access to MSI-X tables, all in the hardware layer;
+  - in `pharos-user`'s `syscall` module: the `syscall` instruction and entry stub, volatile access to mapped device memory (`Mapped`), and the bump heap allocator (added with #56; the shared filesystem parser needs `alloc`);
   - nothing else.
 - The threat model gains a "Drivers and devices" section with these mitigations and limits.
 

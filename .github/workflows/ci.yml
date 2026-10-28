@@ -50,6 +50,10 @@ jobs:
       - name: Test, host crates
         run: cargo test --workspace --exclude pharos-kernel --exclude pharos-programs --locked
 
+      # The user programs' shared library (driver logic), unit-tested on the host.
+      - name: Test, user-program library on host
+        run: cargo test -p pharos-programs --lib --locked
+
       # Target-independent kernel logic, unit-tested on the host.
       - name: Test, kernel library on host
         run: cargo test -p pharos-kernel --lib --locked
@@ -92,6 +96,7 @@ jobs:
         run: |
           cargo +1.85 build --workspace --exclude pharos-kernel --exclude pharos-programs --locked
           cargo +1.85 test --workspace --exclude pharos-kernel --exclude pharos-programs --locked
+          cargo +1.85 test -p pharos-programs --lib --locked
           cargo +1.85 test -p pharos-kernel --lib --locked
 
   qemu:
