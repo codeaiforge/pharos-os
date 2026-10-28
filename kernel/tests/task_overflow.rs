@@ -62,7 +62,7 @@ fn on_double_fault(frame: &idt::ExceptionFrame) -> ! {
         "the overflowing code was the task, in the stack window",
         task_sp > STACK_WINDOW && task_sp < STACK_WINDOW + SLOT_SIZE,
     );
-    // Slot 0: the stack is [WINDOW + 16 KiB, WINDOW + 32 KiB).
+    // Slot 0: the stack is [WINDOW + SLOT_SIZE - STACK_SIZE, WINDOW + SLOT_SIZE).
     let bottom = STACK_WINDOW + SLOT_SIZE - STACK_SIZE;
     t.check(
         "faulting RSP is at the bottom of the task stack",

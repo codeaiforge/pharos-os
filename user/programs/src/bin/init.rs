@@ -3,7 +3,8 @@
 //! The kernel gives it handles 1 debug console, 2 the root filesystem
 //! (`READ | GRANT`), 3 the kernel's report endpoint (`SEND`), and from 4
 //! each supported device (`MAP | CONFIG | IRQ | GRANT`). The argument
-//! selects a service table (0: boot; 1: the `services` test kernel).
+//! selects a service table (0: boot; 1: the `services` test kernel; 2: the
+//! `network` test kernel).
 //! Services start one after another; each gets only what its entry lists.
 //! A one-shot service succeeds by exiting with 0, a daemon by sending
 //! `ready`. Every event is printed; after the last service `init` sends
@@ -12,7 +13,7 @@
 #![no_std]
 #![no_main]
 
-use pharos_user::rights::{CONFIG, IRQ, MAP, SEND, WRITE};
+use pharos_user::rights::{CONFIG, IRQ, MAP, RECEIVE, SEND, WRITE};
 use pharos_user::{
     Error, Grant, Handle, Received, Status, config_read, debug_write, endpoint_create, open,
     process_status, receive, send, spawn,
@@ -26,6 +27,7 @@ const REPORT: Handle = 3;
 const FIRST_DEVICE: Handle = 4;
 
 const VIRTIO_BLK: u32 = 0x1042_1af4;
+const VIRTIO_NET: u32 = 0x1041_1af4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -43,6 +45,11 @@ enum Cap {
     Device(u32),
     /// `init`'s endpoint, badged with the service's number (daemons).
     Report,
+    /// The network service's endpoint, to receive on (the service itself).
+    NetService,
+    /// A network capability: `SEND` on the service endpoint, badged with
+    /// this UDP port (0: an unbadged capability, which the service refuses).
+    Network(u16),
 }
 
 struct Service {
@@ -55,14 +62,59 @@ struct Service {
     after: &'static [usize],
 }
 
-const BOOT: &[Service] = &[Service {
-    name: "virtio-blk",
-    path: b"bin/virtio-blk",
+const NET: Service = Service {
+    name: "net",
+    path: b"bin/net",
     arg: 0,
-    kind: Kind::OneShot,
-    caps: &[Cap::Console, Cap::Device(VIRTIO_BLK)],
+    kind: Kind::Daemon,
+    caps: &[
+        Cap::Console,
+        Cap::Device(VIRTIO_NET),
+        Cap::NetService,
+        Cap::Report,
+    ],
     after: &[],
-}];
+};
+
+const BOOT: &[Service] = &[
+    Service {
+        name: "virtio-blk",
+        path: b"bin/virtio-blk",
+        arg: 0,
+        kind: Kind::OneShot,
+        caps: &[Cap::Console, Cap::Device(VIRTIO_BLK)],
+        after: &[],
+    },
+    NET,
+];
+
+const NETWORK: &[Service] = &[
+    NET,
+    Service {
+        name: "echoer",
+        path: b"bin/netclient",
+        arg: 2,
+        kind: Kind::Daemon,
+        caps: &[Cap::Console, Cap::Network(40001), Cap::Report],
+        after: &[0],
+    },
+    Service {
+        name: "sender",
+        path: b"bin/netclient",
+        arg: 1,
+        kind: Kind::OneShot,
+        caps: &[Cap::Console, Cap::Network(40000)],
+        after: &[1],
+    },
+    Service {
+        name: "unbadged",
+        path: b"bin/netclient",
+        arg: 3,
+        kind: Kind::OneShot,
+        caps: &[Cap::Console, Cap::Network(0)],
+        after: &[0],
+    },
+];
 
 const TEST: &[Service] = &[
     Service {
@@ -205,9 +257,10 @@ fn main(arg: u64) -> u64 {
     let table = match arg {
         0 => BOOT,
         1 => TEST,
+        2 => NETWORK,
         _ => &[],
     };
-    let Ok(events) = endpoint_create() else {
+    let (Ok(events), Ok(net_service)) = (endpoint_create(), endpoint_create()) else {
         let _ = debug_write(CONSOLE, b"init: cannot create an endpoint");
         return 1;
     };
@@ -247,6 +300,16 @@ fn main(arg: u64) -> u64 {
                     handle: events,
                     rights: SEND,
                     badge: i as u32 + 1,
+                },
+                Cap::NetService => Grant {
+                    handle: net_service,
+                    rights: RECEIVE,
+                    badge: 0,
+                },
+                Cap::Network(port) => Grant {
+                    handle: net_service,
+                    rights: SEND,
+                    badge: u32::from(*port),
                 },
                 Cap::Device(id) => match devices[..device_count].iter().find(|d| d.1 == *id) {
                     Some(&(handle, _)) => Grant {

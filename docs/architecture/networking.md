@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-28 (M2.10, #59). It follows [D-015](../project/decision-log.md#d-015-network-stack-and-service-model) (as amended on 2026-10-28) and builds on [drivers.md](drivers.md) (device capabilities, the virtio transport) and [services.md](services.md) (badges, notifications, `init`).
-- **Implementation:** the virtio-net driver is **implemented** (#62: `pharos_programs::virtio_net` on the shared `virtio::Transport` and `virtio::Queue`, `irq_notify`, a virtio-net card on every QEMU run; tested by `virtio_net` with the `netprobe` program). **Planned:** the network service and stack (#63), the host endpoint (#64).
+- **Implementation:** the virtio-net driver is **implemented** (#62: `pharos_programs::virtio_net` on the shared `virtio::Transport` and `virtio::Queue`, `irq_notify`, a virtio-net card on every QEMU run; tested by `virtio_net` with the `netprobe` program). So are the network service and stack (#63: `pharos_programs::net` with `classify`, the builders, the ARP cache, and the client encoding; `user/programs/src/bin/net.rs`; `call` and non-blocking `send`; started by `init` at boot; tested by `network` with the `netclient` program, and fuzzed on the host). **Planned:** the host endpoint (#64).
 
 ## 2. Context
 
@@ -57,7 +57,7 @@ All parsing is in `pharos_programs::net`: safe Rust, no allocation per packet, e
 | ICMP | Echo request (answered); echo reply matching a client's ping | Other types; bad checksum |
 | UDP | Length within the IP payload; checksum valid or zero; a client bound to the destination port | No client on the port (counted, no ICMP error sent) |
 
-- **Routing:** a destination in `10.0.2.0/24` is resolved directly; anything else goes through the gateway `10.0.2.2`.
+- **Routing:** a destination in `10.0.2.0/24` is resolved directly; anything else goes through the gateway `10.0.2.2`. A datagram to our own address `10.0.2.15` is delivered locally to the client on its port, without the device (added in #63, so clients can be tested against each other).
 - **ARP:**
   - a cache of 8 entries, replacing the oldest;
   - a datagram to an unresolved address waits while one ARP request is out, with one waiting datagram per client; a second is dropped.
@@ -80,7 +80,9 @@ All parsing is in `pharos_programs::net`: safe Rust, no allocation per packet, e
   | 3 `ping` | `[3, 0, seq:u16, dst_ip:[u8;4]]` | `[status, 0, seq:u16]`, deferred until the echo reply |
   | 4 `stats` | `[4]` | `[status, counters…]`: frames received and sent, drops by reason |
 
-  Status codes: 0 OK, 1 bad request, 2 too large, 3 busy (a receive or ping is already outstanding), 4 no port (badge 0).
+  Status codes: 0 OK, 1 bad request, 2 too large, 3 busy (a receive or ping is already outstanding, or a datagram already waits for ARP), 4 no port (badge 0 or above 65535), 5 no room (8 clients already known).
+- **Counters** (`stats`): frames received and sent, frames dropped by the parser (malformed or not for us), datagrams for a port no client holds, replies dropped because the client was not waiting, and datagrams dropped from a full queue.
+- **Clients are known by port from their first request** and stay known; with 8 ports seen, new ones get `NO_ROOM`. A client registers by making any request (the echoer in the tests asks for `stats` first), so datagrams that arrive before its first `recv` are queued.
 - **No destination policy in M2.10:** a client may send to any address and port. Per-destination grants come with D-012 (M3.4).
 
 ### IPC additions (kernel)

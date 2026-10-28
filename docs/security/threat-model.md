@@ -100,7 +100,7 @@ Design: [services.md](../architecture/services.md) and [D-015](../project/decisi
 
 ### Networking (M2.10, planned)
 
-Design: [networking.md](../architecture/networking.md). Every row is **planned** (#62–#64).
+Design: [networking.md](../architecture/networking.md). The first four rows are **implemented** (#62, #63: the parser is fuzzed on the host; `network` checks badges, the refused unbadged client, and the counters); the last two are accepted limits.
 
 | Threat | Planned mitigation |
 | --- | --- |

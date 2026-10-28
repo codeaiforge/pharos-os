@@ -78,8 +78,14 @@ fn run(t: &mut TestRun) {
         t.check("bin/child in the programs image", false);
         return;
     };
-    let _ = sched::spawn(|| {});
-    sched::sleep(Duration::from_millis(20));
+    // The limit test runs 33 processes at once, so stacks reach past the
+    // first 2 MiB of the stack window, whose second page table the kernel
+    // then keeps. Touch those slots first, so the frame count below sees
+    // only what processes use.
+    for _ in 0..40 {
+        let _ = sched::spawn(|| sched::sleep(Duration::from_millis(30)));
+    }
+    sched::sleep(Duration::from_millis(100));
     let before = free_frames();
     let live = process::count();
 

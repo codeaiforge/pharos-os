@@ -31,6 +31,7 @@ pub mod number {
     pub const SPAWN: u64 = 15;
     pub const PROCESS_STATUS: u64 = 16;
     pub const IRQ_NOTIFY: u64 = 17;
+    pub const CALL: u64 = 18;
 }
 
 /// Largest buffer `debug_write` accepts (and the IPC message size).
@@ -60,6 +61,7 @@ pub enum Error {
     NotFound = 8,
     InUse = 9,
     BadProgram = 10,
+    WouldBlock = 11,
 }
 
 impl From<CapError> for Error {
@@ -115,6 +117,8 @@ pub enum Call {
         rights: cap::Rights,
         /// Badge for the passed capability, if it has none yet.
         badge: u32,
+        /// Fail with `WOULD_BLOCK` instead of waiting for a receiver.
+        nonblocking: bool,
     },
     Receive {
         handle: Handle,
@@ -179,6 +183,14 @@ pub enum Call {
         endpoint: Handle,
         bit: u32,
     },
+    Call {
+        handle: Handle,
+        /// One buffer: the request (`len` bytes), then the reply (`max`).
+        addr: u64,
+        len: usize,
+        reply: Handle,
+        max: usize,
+    },
 }
 
 /// A page-aligned user range of `len` bytes (at least one page).
@@ -229,6 +241,8 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             // handler, after the handles, and only if a capability is passed.
             rights: args[4] as cap::Rights,
             badge: (args[4] >> 32) as u32,
+            // Bit 0 of the flags; other bits name nothing.
+            nonblocking: args[5] & 1 != 0,
         }),
         number::RECEIVE => Ok(Call::Receive {
             handle: args[0],
@@ -312,6 +326,13 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             })
         }
         number::PROCESS_STATUS => Ok(Call::ProcessStatus { handle: args[0] }),
+        number::CALL => Ok(Call::Call {
+            handle: args[0],
+            addr: args[1],
+            len: buffer(args[1], args[2])?,
+            reply: args[3],
+            max: buffer(args[1], args[4])?,
+        }),
         number::IRQ_NOTIFY => match args[2] {
             bit @ 0..32 => Ok(Call::IrqNotify {
                 handle: args[0],
@@ -328,7 +349,7 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
 pub fn needed_rights(call: &Call) -> cap::Rights {
     match call {
         Call::DebugWrite { .. } => cap::WRITE,
-        Call::Send { .. } => cap::SEND,
+        Call::Send { .. } | Call::Call { .. } => cap::SEND,
         Call::Receive { .. } => cap::RECEIVE,
         Call::Open { .. } | Call::Read { .. } => cap::READ,
         Call::ConfigRead { .. } => cap::CONFIG,
@@ -392,6 +413,114 @@ mod kernel {
             Object::Endpoint(endpoint) => Ok(endpoint.clone()),
             _ => Err(Error::MissingRight),
         }
+    }
+
+    /// `send`, in its own function for the same reason as [`do_call`].
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn do_send(
+        process: alloc::sync::Arc<process::Process>,
+        handle: Handle,
+        addr: u64,
+        len: usize,
+        cap: Handle,
+        rights: cap::Rights,
+        badge: u32,
+        nonblocking: bool,
+    ) -> Result<u64, Error> {
+        let sent_through = process.caps.lock().get(handle, cap::SEND)?;
+        let Object::Endpoint(endpoint) = sent_through.object() else {
+            return Err(Error::MissingRight);
+        };
+        let endpoint = endpoint.clone();
+        let mut message = Message {
+            data: [0; MAX_MESSAGE],
+            len,
+            cap: None,
+            badge: sent_through.badge(),
+        };
+        sched::with_current_space(|space| space.read_user(addr, &mut message.data[..len]))
+            .ok_or(Error::BadAddress)??;
+        if cap != 0 {
+            let passed = process.caps.lock().get(cap, cap::GRANT)?;
+            if badge > cap::BADGE_MASK {
+                return Err(Error::TooLarge);
+            }
+            message.cap = Some(passed.derive_badged(rights, badge));
+        }
+        drop(process);
+        if nonblocking {
+            return match ipc::try_send(&endpoint, message) {
+                true => Ok(0),
+                false => Err(Error::WouldBlock),
+            };
+        }
+        ipc::send(&endpoint, message);
+        Ok(0)
+    }
+
+    /// `call` (networking.md), in its own function: its message buffer
+    /// stays off the dispatcher's stack frame, which every system call
+    /// pays for on the 16 KiB kernel stack.
+    #[inline(never)]
+    fn do_call(
+        process: &process::Process,
+        handle: Handle,
+        addr: u64,
+        len: usize,
+        reply: Handle,
+        max: usize,
+    ) -> Result<u64, Error> {
+        let sent_through = process.caps.lock().get(handle, cap::SEND)?;
+        let Object::Endpoint(endpoint) = sent_through.object() else {
+            return Err(Error::MissingRight);
+        };
+        let reply_cap = process.caps.lock().get(reply, cap::SEND | cap::RECEIVE)?;
+        let Object::Endpoint(reply_endpoint) = reply_cap.object() else {
+            return Err(Error::MissingRight);
+        };
+        // Check everything before sending, so no reply is lost.
+        sched::with_current_space(|space| space.check_user(addr, max, true))
+            .ok_or(Error::BadAddress)??;
+        if process.caps.lock().len() >= MAX_HANDLES {
+            return Err(Error::NoMemory);
+        }
+        if !reply_endpoint.is_idle() {
+            return Err(Error::InUse);
+        }
+        let mut message = Message {
+            data: [0; MAX_MESSAGE],
+            len,
+            cap: Some(reply_cap.derive(cap::SEND)),
+            badge: sent_through.badge(),
+        };
+        sched::with_current_space(|space| space.read_user(addr, &mut message.data[..len]))
+            .ok_or(Error::BadAddress)??;
+        let received = ipc::call(endpoint, message, reply_endpoint).ok_or(Error::UnknownCall)?;
+        deliver(process, received, addr, max)
+    }
+
+    /// Copies a received message out (cut to `max` bytes; the value reports
+    /// the full length) and installs its capability; returns `receive`'s
+    /// value.
+    fn deliver(
+        process: &process::Process,
+        received: ipc::Received,
+        addr: u64,
+        max: usize,
+    ) -> Result<u64, Error> {
+        let message = match received {
+            ipc::Received::Message(message) => message,
+            ipc::Received::Notification(bits) => return Ok(1 << 16 | u64::from(bits) << 32),
+        };
+        let copied = message.len.min(max);
+        sched::with_current_space(|space| space.write_user(addr, &message.data[..copied]))
+            .ok_or(Error::BadAddress)??;
+        let new_handle = match message.cap {
+            Some(cap) => process.caps.lock().insert(cap)?,
+            None => 0,
+        };
+        Ok(message.len as u64 | new_handle << 32 | u64::from(message.badge) << 40)
     }
 
     /// `spawn`: every handle and the limits are checked before anything is
@@ -497,31 +626,15 @@ mod kernel {
                 cap,
                 rights,
                 badge,
-            } => {
-                let sent_through = process.caps.lock().get(handle, cap::SEND)?;
-                let Object::Endpoint(endpoint) = sent_through.object() else {
-                    return Err(Error::MissingRight);
-                };
-                let endpoint = endpoint.clone();
-                let mut message = Message {
-                    data: [0; MAX_MESSAGE],
-                    len,
-                    cap: None,
-                    badge: sent_through.badge(),
-                };
-                sched::with_current_space(|space| space.read_user(addr, &mut message.data[..len]))
-                    .ok_or(Error::BadAddress)??;
-                if cap != 0 {
-                    let passed = process.caps.lock().get(cap, cap::GRANT)?;
-                    if badge > cap::BADGE_MASK {
-                        return Err(Error::TooLarge);
-                    }
-                    message.cap = Some(passed.derive_badged(rights, badge));
-                }
-                drop(process);
-                ipc::send(&endpoint, message);
-                Ok(0)
-            }
+                nonblocking,
+            } => do_send(process, handle, addr, len, cap, rights, badge, nonblocking),
+            Call::Call {
+                handle,
+                addr,
+                len,
+                reply,
+                max,
+            } => do_call(&process, handle, addr, len, reply, max),
             Call::Receive {
                 handle,
                 addr,
@@ -534,22 +647,8 @@ mod kernel {
                 if process.caps.lock().len() >= MAX_HANDLES {
                     return Err(Error::NoMemory);
                 }
-                let message = match ipc::receive(&endpoint).ok_or(Error::UnknownCall)? {
-                    ipc::Received::Message(message) => message,
-                    ipc::Received::Notification(bits) => {
-                        return Ok(1 << 16 | u64::from(bits) << 32);
-                    }
-                };
-                // Longer messages are cut to the buffer; the value reports
-                // the full length.
-                let copied = message.len.min(max_len);
-                sched::with_current_space(|space| space.write_user(addr, &message.data[..copied]))
-                    .ok_or(Error::BadAddress)??;
-                let new_handle = match message.cap {
-                    Some(cap) => process.caps.lock().insert(cap)?,
-                    None => 0,
-                };
-                Ok(message.len as u64 | new_handle << 32 | u64::from(message.badge) << 40)
+                let received = ipc::receive(&endpoint).ok_or(Error::UnknownCall)?;
+                deliver(&process, received, addr, max_len)
             }
             Call::Revoke { handle } => {
                 let cap = process.caps.lock().get(handle, 0)?;
@@ -770,7 +869,33 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(18, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(19, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(
+            decode(18, [2, 0x40_0000, 8, 3, 256, 0]),
+            Ok(Call::Call {
+                handle: 2,
+                addr: 0x40_0000,
+                len: 8,
+                reply: 3,
+                max: 256
+            })
+        );
+        assert_eq!(
+            decode(18, [2, 0x40_0000, 8, 3, 257, 0]),
+            Err(Error::TooLarge)
+        );
+        assert_eq!(
+            decode(18, [2, 0x40_0000, 300, 3, 8, 0]),
+            Err(Error::TooLarge)
+        );
+        assert_eq!(decode(18, [2, 0, 8, 3, 8, 0]), Err(Error::BadAddress));
+        assert!(matches!(
+            decode(3, [1, 0x40_0000, 8, 0, 0, 1]),
+            Ok(Call::Send {
+                nonblocking: true,
+                ..
+            })
+        ));
         assert_eq!(
             decode(17, [5, 6, 31, 9, 9, 9]),
             Ok(Call::IrqNotify {
@@ -898,7 +1023,8 @@ mod tests {
                 len: 8,
                 cap: 2,
                 rights: u32::MAX,
-                badge: 0
+                badge: 0,
+                nonblocking: false
             })
         );
         assert_eq!(
@@ -930,7 +1056,7 @@ mod tests {
         let mut accepted = 0;
         for _ in 0..200_000 {
             // Small numbers and lengths often, huge ones sometimes.
-            let number = next() % 18;
+            let number = next() % 20;
             let args: [u64; 6] = core::array::from_fn(|_| next() >> (next() % 64));
             match decode(number, args) {
                 Ok(
@@ -973,8 +1099,13 @@ mod tests {
                     assert!(count == 0 || user_range_ok(addr, (count * SPAWN_ENTRY) as u64));
                 }
                 Ok(Call::IrqNotify { bit, .. }) => assert!(bit < 32),
+                Ok(Call::Call { addr, len, max, .. }) => {
+                    accepted += 1;
+                    assert!(len <= MAX_MESSAGE && max <= MAX_MESSAGE);
+                    assert!(user_range_ok(addr, len as u64) && user_range_ok(addr, max as u64));
+                }
                 Ok(_) => assert!(matches!(number, 0 | 1 | 5 | 6 | 13 | 14 | 16)),
-                Err(error) => assert!(error as u64 >= 1 && error as u64 <= 10),
+                Err(error) => assert!(error as u64 >= 1 && error as u64 <= 11),
             }
         }
         assert!(accepted > 0, "the generator must reach valid buffers");

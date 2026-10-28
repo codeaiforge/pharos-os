@@ -32,7 +32,7 @@ M2.6 asks for several kernel tasks running interleaved, a preemptive scheduler, 
 
 ### Stacks and contexts (`arch::x86_64::context`)
 
-- Each task stack is 16 KiB of fresh frames in a 32 KiB slot of the stack window at `0xffffc80000000000`; the lower 16 KiB of each slot stays unmapped as a guard area. A stack overflow faults on the guard and is reported as a double fault (IST1). At most 64 stacks for now.
+- Each task stack is 32 KiB of fresh frames in a 64 KiB slot of the stack window at `0xffffc80000000000`; the lower 32 KiB of each slot stays unmapped as a guard area. (16 KiB until M2.10: debug builds of the `call` path overflowed it, #63.) A stack overflow faults on the guard and is reported as a double fault (IST1). At most 64 stacks for now.
 - A `Context` is a saved stack pointer plus the stack it owns. The boot context (task 0) runs on the kernel stack and owns none.
 - The switch routine (`global_asm!`) pushes `rbx`, `rbp`, `r12`–`r15`, stores RSP, loads the next RSP, pops, and returns. The kernel is soft-float, so no FPU or SSE state exists. A new context starts in a trampoline that enables interrupts and calls the scheduler's start function.
 - `context::switch` is a safe function because it checks, and panics otherwise: interrupts are disabled; the source is the running context; the target is neither running nor exited; both are referenced elsewhere during the switch. A running context cannot be dropped.
@@ -51,7 +51,7 @@ An exited task cannot unmap the stack it is running on. Its last switch marks it
 ## 4. Security
 
 - `unsafe` code: the switch routine, the trampoline, and writing a new context's first frame, all in `arch::x86_64::context`. Scheduler logic is safe Rust.
-- Every task stack has a guard area, so an overflow stops the kernel with a report instead of corrupting a neighbour's stack. Limit: one stack frame larger than 16 KiB could jump over it.
+- Every task stack has a guard area, so an overflow stops the kernel with a report instead of corrupting a neighbour's stack. Limit: one stack frame larger than the 32 KiB guard area could jump over it.
 - All tasks are kernel code with full privileges; there is no isolation between them yet (M2.7 adds user processes).
 
 ## 5. Testing

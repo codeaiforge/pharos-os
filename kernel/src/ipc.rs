@@ -128,6 +128,20 @@ impl Endpoint {
         queues.receivers.pop_front()
     }
 
+    /// Hands `message` to a waiting receiver, returned with it; if none
+    /// waits, drops the message without queueing it (non-blocking `send`).
+    pub fn offer_now(&self, message: Message) -> Option<(TaskId, Message)> {
+        let receiver = self.queues.lock().receivers.pop_front()?;
+        Some((receiver, message))
+    }
+
+    /// True if no sender and no notification is pending (`call` needs its
+    /// reply endpoint idle).
+    pub fn is_idle(&self) -> bool {
+        let queues = self.queues.lock();
+        queues.senders.is_empty() && queues.notifications == 0
+    }
+
     /// Threads waiting, `(senders, receivers)`.
     pub fn waiting(&self) -> (usize, usize) {
         let queues = self.queues.lock();
@@ -144,7 +158,7 @@ pub enum Taken {
 }
 
 #[cfg(target_os = "none")]
-pub use kernel::{notify, poll, receive, send};
+pub use kernel::{call, notify, poll, receive, send, try_send};
 
 #[cfg(target_os = "none")]
 mod kernel {
@@ -164,6 +178,49 @@ mod kernel {
             }
             // The receiver that takes the message wakes us.
             None => sched::block_current(),
+        }
+    }
+
+    /// Sends `message` only if a receiver is waiting; returns false (and
+    /// drops the message) otherwise.
+    pub fn try_send(endpoint: &Endpoint, message: Message) -> bool {
+        match endpoint.offer_now(message) {
+            Some((receiver, message)) => {
+                if let Some(process) = process::by_id(receiver) {
+                    *process.inbox.lock() = Some(message);
+                }
+                sched::wake(receiver);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Request and reply (networking.md): registers the running thread as
+    /// a receiver on `reply` (which must be idle) before the request is
+    /// delivered, so a reply can never come too early; sends `message` on
+    /// `endpoint`; then waits for the first event on `reply`.
+    pub fn call(endpoint: &Endpoint, message: Message, reply: &Endpoint) -> Option<Received> {
+        let me = sched::current_id().unwrap_or(0);
+        if let Some(taken) = reply.take(me) {
+            // The caller checked `reply` is idle, with interrupts off since.
+            return Some(match taken {
+                Taken::Notification(bits) => Received::Notification(bits),
+                Taken::Message(sender, message) => {
+                    sched::wake(sender);
+                    Received::Message(message)
+                }
+            });
+        }
+        send(endpoint, message);
+        let inbox = || process::current().and_then(|p| p.inbox.lock().take());
+        if let Some(message) = inbox() {
+            return Some(Received::Message(message));
+        }
+        sched::block_current();
+        match inbox() {
+            Some(message) => Some(Received::Message(message)),
+            None => Some(Received::Notification(reply.take_notifications())),
         }
     }
 
@@ -274,6 +331,21 @@ mod tests {
             .collect();
         assert_eq!(order, [(1, b'a'), (2, b'b'), (3, b'c')]);
         assert_eq!(e.waiting(), (0, 0));
+    }
+
+    #[test]
+    fn offer_now_never_queues_a_sender() {
+        let e = Endpoint::new();
+        assert!(e.offer_now(message(b'x')).is_none(), "nobody waiting");
+        assert_eq!(e.waiting(), (0, 0));
+        assert!(e.is_idle());
+        assert!(e.take(6).is_none());
+        assert_eq!(e.offer_now(message(b'y')).map(|(r, _)| r), Some(6));
+        assert!(e.offer(1, message(b'z')).is_none());
+        assert!(!e.is_idle(), "a sender waits");
+        let f = Endpoint::new();
+        f.signal(1);
+        assert!(!f.is_idle(), "a notification is pending");
     }
 
     #[test]

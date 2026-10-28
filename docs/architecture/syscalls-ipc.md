@@ -31,7 +31,7 @@ The prototype for D-004 showed that QEMU's default CPU under TCG, which CI uses,
   - a capability table;
   - in M2.7, exactly **one thread**.
 - The thread is a scheduler task (D-013) with a user context.
-  - It has its own 16 KiB kernel stack (task stack window, guard area below), used for system calls and for interrupts and exceptions taken in user mode.
+  - It has its own kernel stack (32 KiB since M2.10) (task stack window, guard area below), used for system calls and for interrupts and exceptions taken in user mode.
   - The scheduler loads that stack into the TSS (`rsp0`) and switches CR3 when it switches to a thread of another process. Kernel tasks run on the kernel root.
 - **Creation:** only the kernel creates processes in M2.7. `process::spawn` takes an image (see "Programs"), creates the address space, copies the image, maps a user stack, gives the process its initial capabilities, and queues the thread. There is no spawn system call yet.
 - **End:**
@@ -117,7 +117,8 @@ Implemented in `ipc` (endpoint queues, host-tested) and `syscall` (#41). A block
   - each endpoint has a 32-bit notification word that the kernel sets when a spawned child ends. `receive` returns pending bits first, as bit 16 set and the bits in bits 32–63.
 - **Fairness:** senders and receivers queue first in first out per endpoint. Blocking goes through the scheduler (the thread leaves the ready queue until the rendezvous).
 - **Memory is bounded:** each thread can wait on one endpoint at a time and has one 256-byte buffer. No queue grows with untrusted input.
-- **Not in M2.7:** a combined `call` (send and wait for a reply) and one-shot reply capabilities. They can be added later to save system calls on the round trip if the D-004 budget needs it.
+- **`call` (M2.10, #63):** send a request with a send-only capability on a reply endpoint attached, then wait for the first event on that endpoint. The caller is a receiver there before the request is delivered, so an immediate reply is never lost. The reply endpoint must be idle (`IN_USE` otherwise). One-shot reply capabilities are still not needed.
+- **Non-blocking `send` (M2.10, #63):** bit 0 of the sixth argument; with no receiver waiting, nothing is queued and the call returns `WOULD_BLOCK`. Services reply this way.
 
 ### System calls in M2.7
 
@@ -142,6 +143,7 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 14 | `endpoint_create` (M2.10) | — | new endpoint handle (`SEND`, `RECEIVE`, `GRANT`) | none |
 | 15 | `spawn` (M2.10) | file, argument, capability array, count (≤ 8), endpoint (0 = none), bit | new process handle (`WAIT`, `GRANT`) | file, `READ`; each passed capability, `GRANT`; endpoint, `RECEIVE` |
 | 16 | `process_status` (M2.10) | process handle | 0 while running; else bit 63, plus bit 62 if killed, and the code or vector | process, `WAIT` |
+| 18 | `call` (M2.10) | endpoint, buffer, request length (≤ 256), reply endpoint, reply maximum (≤ 256) | as `receive` | endpoint, `SEND`; reply, `SEND` and `RECEIVE` |
 | 17 | `irq_notify` (M2.10) | interrupt handle, endpoint, bit (0–31) | 0 (after this, `irq_wait` returns `IN_USE`) | interrupt, `WAIT`; endpoint, `RECEIVE` |
 
 Error codes (`rax`):
@@ -158,6 +160,7 @@ Error codes (`rax`):
 | 8 | `NOT_FOUND` | No file with this path (M2.8), no such BAR, or no such MSI-X entry (M2.9) |
 | 9 | `IN_USE` | The user address is already mapped, the MSI-X entry already has an interrupt, or another thread is waiting on it (M2.9) |
 | 10 | `BAD_PROGRAM` | `spawn`: the file is not a valid program (M2.10) |
+| 11 | `WOULD_BLOCK` | Non-blocking `send`: no receiver was waiting; nothing was queued (M2.10) |
 
 ### Programs for tests
 

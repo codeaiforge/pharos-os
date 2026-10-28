@@ -24,8 +24,9 @@ use crate::mm::raw::{IrqMutex, IrqMutexGuard};
 
 /// Start of the virtual window for task stacks (D-013).
 pub const STACK_WINDOW: u64 = 0xffff_c800_0000_0000;
-/// Usable size of a task stack.
-pub const STACK_SIZE: u64 = 16 * 1024;
+/// Usable size of a task stack: 32 KiB since M2.10 (#63, D-013 amended).
+/// Debug builds of the IPC paths (`call`) need more than 16 KiB.
+pub const STACK_SIZE: u64 = 32 * 1024;
 /// Virtual space per stack: an unmapped guard area below, then the stack.
 pub const SLOT_SIZE: u64 = 2 * STACK_SIZE;
 /// ponytail: one bitmap word of stack slots, so at most 64 task stacks;
@@ -59,7 +60,7 @@ impl fmt::Display for StackError {
     }
 }
 
-/// A 16 KiB kernel stack in the stack window with an unmapped guard area
+/// A kernel stack ([`STACK_SIZE`]) in the stack window with an unmapped guard area
 /// below it. Unmaps its pages and frees their frames when dropped.
 pub struct KernelStack {
     slot: u64,

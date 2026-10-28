@@ -257,7 +257,7 @@ fn new_task(entry: Entry, space: Option<AddressSpace>) -> Result<Arc<Task>, Sche
     }))
 }
 
-/// Creates a task that runs `entry` on its own 16 KiB stack, and queues it
+/// Creates a task that runs `entry` on its own 32 KiB stack, and queues it
 /// behind the ready tasks. It exits when `entry` returns.
 pub fn spawn(entry: impl FnOnce() + Send + 'static) -> Result<TaskId, SchedError> {
     queue(new_task(Box::new(entry), None)?)

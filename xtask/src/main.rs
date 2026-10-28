@@ -482,7 +482,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 9] = [
+const USER_PROGRAMS: [&str; 11] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -492,6 +492,8 @@ const USER_PROGRAMS: [&str; 9] = [
     "init",
     "svc",
     "netprobe",
+    "net",
+    "netclient",
 ];
 
 /// A file for a filesystem image: its path and contents.

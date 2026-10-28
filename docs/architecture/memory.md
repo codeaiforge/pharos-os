@@ -79,7 +79,7 @@ References to responses obtained before reclaim must not be used afterwards; thi
 | | Double-fault stack (16 KiB, IST1), guard page below | Writable, no-execute |
 | `0xffffc00000000000` | Kernel heap (4 MiB) | Writable, no-execute |
 | `0x0` – `0x7fffffffffff` | User half: empty in the kernel address space; private in each process address space ([syscalls-ipc.md](syscalls-ipc.md#address-space-layout-per-process)) | Process pages only |
-| `0xffffc80000000000` | Task stacks: 64 slots of 32 KiB, each a 16 KiB stack above an unmapped 16 KiB guard area ([scheduling.md](scheduling.md)) | Writable, no-execute |
+| `0xffffc80000000000` | Task stacks: 64 slots of 64 KiB, each a 32 KiB stack above an unmapped 32 KiB guard area ([scheduling.md](scheduling.md)) | Writable, no-execute |
 | `0xffffd00000000000` | Test page used by test kernels | — |
 
 The HHDM offset is Limine's (`0xffff800000000000` in QEMU), so addresses computed before the switch stay valid. The direct map uses 2 MiB pages where a region's virtual and physical addresses are 2 MiB-aligned and enough of the region remains, 4 KiB elsewhere; edge pages shared by neighbouring regions are mapped once. Segment boundaries come from `linker.ld` symbols; the kernel's physical base comes from Limine's executable-address response. Guard pages are gaps that `linker.ld` leaves between segments and that the kernel never maps.

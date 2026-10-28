@@ -132,9 +132,10 @@ fn run(t: &mut TestRun) {
 
     // The last exited task is reaped by the next scheduling call.
     sched::yield_now();
+    let stack_frames = 3 * (pharos_kernel::arch::x86_64::context::STACK_SIZE / 4096) as usize;
     t.check(
-        "exited tasks returned their 12 stack frames",
-        free_frames() == after_spawn + 12,
+        "exited tasks returned their stack frames (3 stacks)",
+        free_frames() == after_spawn + stack_frames,
     );
 
     // Callee-saved registers survive switches, in tasks and in task 0.

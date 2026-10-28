@@ -30,6 +30,7 @@ pub mod number {
     pub const SPAWN: u64 = 15;
     pub const PROCESS_STATUS: u64 = 16;
     pub const IRQ_NOTIFY: u64 = 17;
+    pub const CALL: u64 = 18;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -61,6 +62,7 @@ pub enum Error {
     NotFound,
     InUse,
     BadProgram,
+    WouldBlock,
     /// A code this library does not know.
     Other(u64),
 }
@@ -78,6 +80,7 @@ impl Error {
             8 => Self::NotFound,
             9 => Self::InUse,
             10 => Self::BadProgram,
+            11 => Self::WouldBlock,
             other => Self::Other(other),
         }
     }
@@ -95,6 +98,7 @@ impl Error {
             Self::NotFound => 8,
             Self::InUse => 9,
             Self::BadProgram => 10,
+            Self::WouldBlock => 11,
             Self::Other(code) => code,
         }
     }
@@ -152,6 +156,38 @@ pub fn send(
         0,
     ];
     call(number::SEND, args)
+}
+
+/// Sends `bytes` on `endpoint` only if a receiver is waiting now;
+/// otherwise nothing is queued and the result is [`Error::WouldBlock`].
+pub fn try_send(endpoint: Handle, bytes: &[u8]) -> Result<u64, Error> {
+    let args = [endpoint, bytes.as_ptr() as u64, bytes.len() as u64, 0, 0, 1];
+    call(number::SEND, args)
+}
+
+/// Request and reply: sends `request` (up to 256 bytes) on `endpoint` with
+/// a send-only capability on `reply` (needs `SEND | RECEIVE`, and nothing
+/// pending on it) attached, then waits for the first event on `reply`. The
+/// reply goes into `buf` (which must hold `request`, too).
+pub fn call_reply(
+    endpoint: Handle,
+    request: &[u8],
+    reply: Handle,
+    buf: &mut [u8],
+) -> Result<Received, Error> {
+    if request.len() > buf.len() {
+        return Err(Error::TooLarge);
+    }
+    buf[..request.len()].copy_from_slice(request);
+    let args = [
+        endpoint,
+        buf.as_mut_ptr() as u64,
+        request.len() as u64,
+        reply,
+        buf.len() as u64,
+        0,
+    ];
+    call(number::CALL, args).map(Received::decode)
 }
 
 /// What [`receive`] got.
@@ -359,7 +395,7 @@ mod tests {
 
     #[test]
     fn error_codes_round_trip() {
-        for code in 1..=11 {
+        for code in 1..=12 {
             assert_eq!(Error::from_code(code).code(), code);
         }
         assert_eq!(result((0, 42)), Ok(42));
