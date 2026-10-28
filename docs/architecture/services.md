@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-28 (M2.10, #59). It follows [D-015](../project/decision-log.md#d-015-network-stack-and-service-model) (as amended on 2026-10-28: badges instead of per-client endpoints), [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism) (IPC), and [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries). Networking is in [networking.md](networking.md).
-- **Implementation:** **planned** (#60, #61, #63).
+- **Implementation:** `endpoint_create`, `spawn`, `process_status`, badges, and endpoint notifications are **implemented** (#60: `cap::Capability::derive_badged`, `ipc::Endpoint::signal`, `process::ProcessRecord`, `pharos_user::{spawn, Grant, Received, Status}`; tested by the `spawn` test kernel with the `spawner` and `child` programs). **Planned:** `init` (#61), `irq_notify` (#62), `call` and non-blocking `send` (#63).
 
 ## 2. Context
 

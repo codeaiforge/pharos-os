@@ -88,7 +88,7 @@ Design: [drivers.md](../architecture/drivers.md) and [D-008](../project/decision
 
 ### Processes and services (M2.10, planned)
 
-Design: [services.md](../architecture/services.md) and [D-015](../project/decision-log.md#d-015-network-stack-and-service-model). Every row is **planned** (#60, #61).
+Design: [services.md](../architecture/services.md) and [D-015](../project/decision-log.md#d-015-network-stack-and-service-model). The first three rows are **implemented** (#60, tested in `spawn`); the others are **planned** (#61).
 
 | Threat | Planned mitigation |
 | --- | --- |

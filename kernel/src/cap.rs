@@ -39,6 +39,9 @@ pub const CONFIG: Rights = 1 << 7;
 /// Wait for an interrupt.
 pub const WAIT: Rights = 1 << 8;
 
+/// Badges are 24 bits (services.md).
+pub const BADGE_MASK: u32 = 0xff_ffff;
+
 /// Largest number of handles a process can hold.
 // ponytail: fixed cap per process; make it a quota when processes need more.
 pub const MAX_HANDLES: usize = 64;
@@ -59,6 +62,9 @@ pub enum Object {
     },
     /// One PCI function handed to a driver (drivers.md).
     Device(Arc<crate::device::DeviceHandle>),
+    /// A process started with `spawn`: observe how it ended (services.md).
+    #[cfg(target_os = "none")]
+    Process(Arc<crate::process::ProcessRecord>),
     /// One MSI-X entry of a device (drivers.md).
     #[cfg(target_os = "none")]
     Interrupt(Arc<crate::irq::Irq>),
@@ -73,6 +79,8 @@ impl fmt::Debug for Object {
             Self::File { fs, file } => write!(f, "File({:p}, {file:?})", Arc::as_ptr(fs)),
             Self::Device(d) => write!(f, "{d:?}"),
             #[cfg(target_os = "none")]
+            Self::Process(p) => write!(f, "Process({})", p.id),
+            #[cfg(target_os = "none")]
             Self::Interrupt(i) => write!(f, "{i:?}"),
         }
     }
@@ -83,6 +91,9 @@ impl fmt::Debug for Object {
 pub struct Capability {
     object: Object,
     rights: Rights,
+    /// Set once when passed on from a capability with badge 0; delivered
+    /// with every message sent through it.
+    badge: u32,
     revoked: AtomicBool,
     children: IrqMutex<Vec<Weak<Capability>>>,
 }
@@ -92,6 +103,7 @@ impl fmt::Debug for Capability {
         f.debug_struct("Capability")
             .field("object", &self.object)
             .field("rights", &self.rights)
+            .field("badge", &self.badge)
             .field("revoked", &self.is_revoked())
             .finish()
     }
@@ -100,18 +112,39 @@ impl fmt::Debug for Capability {
 impl Capability {
     /// A new (original) capability.
     pub fn new(object: Object, rights: Rights) -> Arc<Self> {
-        Arc::new(Self {
-            object,
-            rights,
-            revoked: AtomicBool::new(false),
-            children: IrqMutex::new(Vec::new()),
-        })
+        Self::with_badge(object, rights, 0)
     }
 
     /// A child capability for the same object with this one's rights
     /// limited to `mask`, recorded in the derivation tree.
     pub fn derive(self: &Arc<Self>, mask: Rights) -> Arc<Self> {
-        self.derive_object(self.object.clone(), self.rights & mask)
+        self.derive_badged(mask, 0)
+    }
+
+    /// As [`Self::derive`], and if this capability has badge 0, the child
+    /// gets `badge` (24 bits). A badged capability keeps its badge: it can
+    /// be narrowed and passed on, never re-badged.
+    pub fn derive_badged(self: &Arc<Self>, mask: Rights, badge: u32) -> Arc<Self> {
+        let badge = if self.badge == 0 {
+            badge & BADGE_MASK
+        } else {
+            self.badge
+        };
+        self.adopt(Self::with_badge(
+            self.object.clone(),
+            self.rights & mask,
+            badge,
+        ))
+    }
+
+    fn with_badge(object: Object, rights: Rights, badge: u32) -> Arc<Self> {
+        Arc::new(Self {
+            object,
+            rights,
+            badge,
+            revoked: AtomicBool::new(false),
+            children: IrqMutex::new(Vec::new()),
+        })
     }
 
     /// A child capability for a different `object` reached through this
@@ -119,7 +152,12 @@ impl Capability {
     /// device) with `rights`, which the caller chooses for the new object.
     /// Revoking this capability revokes the child too.
     pub fn derive_object(self: &Arc<Self>, object: Object, rights: Rights) -> Arc<Self> {
-        let child = Self::new(object, rights);
+        self.adopt(Self::new(object, rights))
+    }
+
+    /// Records `child` in the derivation tree (revoked at once if this
+    /// capability is).
+    fn adopt(&self, child: Arc<Self>) -> Arc<Self> {
         if self.is_revoked() {
             child.revoked.store(true, Ordering::Relaxed);
         }
@@ -160,6 +198,11 @@ impl Capability {
     /// The rights held.
     pub fn rights(&self) -> Rights {
         self.rights
+    }
+
+    /// The badge (0 if none).
+    pub fn badge(&self) -> u32 {
+        self.badge
     }
 }
 
@@ -343,6 +386,26 @@ mod tests {
         let grandchild = other.derive(READ);
         assert_eq!(parent.revoke(), 2);
         assert!(other.is_revoked() && grandchild.is_revoked());
+    }
+
+    #[test]
+    fn badges_are_set_once_kept_when_narrowed_and_never_changed() {
+        let root = console(WRITE | GRANT);
+        assert_eq!(root.badge(), 0);
+        let a = root.derive_badged(WRITE | GRANT, 7);
+        assert_eq!((a.badge(), a.rights()), (7, WRITE | GRANT));
+        let narrowed = a.derive(WRITE);
+        assert_eq!(narrowed.badge(), 7, "kept when narrowed");
+        let rebadged = a.derive_badged(WRITE, 9);
+        assert_eq!(rebadged.badge(), 7, "never re-badged");
+        assert_eq!(
+            root.derive_badged(WRITE, 0x1ff_ffff).badge(),
+            BADGE_MASK,
+            "24 bits"
+        );
+        assert_eq!(root.derive(WRITE).badge(), 0, "plain derive sets none");
+        assert_eq!(root.revoke(), 3, "badged children are in the tree");
+        assert!(a.is_revoked() && narrowed.is_revoked() && rebadged.is_revoked());
     }
 
     #[test]

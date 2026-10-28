@@ -8,9 +8,15 @@
 //! first out. Each thread waits on at most one endpoint, so kernel memory
 //! for IPC is bounded by the number of threads.
 //!
-//! Everything here runs inside system calls, with interrupts disabled from
-//! queueing to blocking, so a wake cannot be missed. No lock is held while
-//! a thread blocks.
+//! Each endpoint also has a 32-bit notification word (services.md): the
+//! kernel ORs bits into it (a child ended, an interrupt fired) without
+//! blocking or allocating, and `receive` returns pending bits before any
+//! message.
+//!
+//! Everything here runs inside system calls (or interrupt handlers, for
+//! [`Endpoint::signal`]), with interrupts disabled from queueing to
+//! blocking, so a wake cannot be missed. No lock is held while a thread
+//! blocks.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -26,6 +32,16 @@ pub struct Message {
     pub len: usize,
     /// A capability derived for the receiver, if one was passed.
     pub cap: Option<Arc<Capability>>,
+    /// The badge of the capability the message was sent through.
+    pub badge: u32,
+}
+
+/// What a receive got: a message, or pending notification bits.
+// Returned once and consumed at once; boxing would allocate per message.
+#[allow(clippy::large_enum_variant)]
+pub enum Received {
+    Message(Message),
+    Notification(u32),
 }
 
 impl Message {
@@ -45,6 +61,7 @@ pub struct Endpoint {
 struct Queues {
     senders: VecDeque<(TaskId, Message)>,
     receivers: VecDeque<TaskId>,
+    notifications: u32,
 }
 
 impl Endpoint {
@@ -69,16 +86,39 @@ impl Endpoint {
         }
     }
 
-    /// The receive half: if a sender waits, returns it with its message
-    /// (the sender is then woken); otherwise queues `receiver` and returns
-    /// `None` (the receiver then blocks).
-    pub fn take(&self, receiver: TaskId) -> Option<(TaskId, Message)> {
+    /// The receive half: pending notification bits first (cleared); else
+    /// the first waiting sender with its message (the sender is then
+    /// woken); otherwise queues `receiver` and returns `None` (the receiver
+    /// then blocks).
+    pub fn take(&self, receiver: TaskId) -> Option<Taken> {
         let mut queues = self.queues.lock();
-        let first = queues.senders.pop_front();
-        if first.is_none() {
-            queues.receivers.push_back(receiver);
+        if queues.notifications != 0 {
+            return Some(Taken::Notification(core::mem::take(
+                &mut queues.notifications,
+            )));
         }
-        first
+        match queues.senders.pop_front() {
+            Some((sender, message)) => Some(Taken::Message(sender, message)),
+            None => {
+                queues.receivers.push_back(receiver);
+                None
+            }
+        }
+    }
+
+    /// Takes pending notification bits (0 if none): a receiver woken by
+    /// [`Self::signal`] collects them here.
+    pub fn take_notifications(&self) -> u32 {
+        core::mem::take(&mut self.queues.lock().notifications)
+    }
+
+    /// ORs `bits` into the notification word; returns a waiting receiver to
+    /// wake, if any. Never blocks or allocates, so interrupt handlers may
+    /// call it.
+    pub fn signal(&self, bits: u32) -> Option<TaskId> {
+        let mut queues = self.queues.lock();
+        queues.notifications |= bits;
+        queues.receivers.pop_front()
     }
 
     /// Threads waiting, `(senders, receivers)`.
@@ -88,8 +128,16 @@ impl Endpoint {
     }
 }
 
+/// What [`Endpoint::take`] found.
+// Returned once and consumed at once; boxing would allocate per message.
+#[allow(clippy::large_enum_variant)]
+pub enum Taken {
+    Notification(u32),
+    Message(TaskId, Message),
+}
+
 #[cfg(target_os = "none")]
-pub use kernel::{receive, send};
+pub use kernel::{notify, receive, send};
 
 #[cfg(target_os = "none")]
 mod kernel {
@@ -112,20 +160,33 @@ mod kernel {
         }
     }
 
-    /// Receives the next message on `endpoint` for the running thread,
-    /// waiting if none is there.
-    pub fn receive(endpoint: &Endpoint) -> Option<Message> {
+    /// Receives the next event on `endpoint` for the running thread:
+    /// pending notification bits, else a message, waiting if neither is
+    /// there.
+    pub fn receive(endpoint: &Endpoint) -> Option<Received> {
         let me = sched::current_id().unwrap_or(0);
         match endpoint.take(me) {
-            Some((sender, message)) => {
+            Some(Taken::Notification(bits)) => Some(Received::Notification(bits)),
+            Some(Taken::Message(sender, message)) => {
                 sched::wake(sender);
-                Some(message)
+                Some(Received::Message(message))
             }
             None => {
-                // A sender puts the message in our inbox, then wakes us.
+                // A sender puts the message in our inbox, then wakes us; a
+                // signal wakes us with the bits left on the endpoint.
                 sched::block_current();
-                process::current()?.inbox.lock().take()
+                if let Some(message) = process::current()?.inbox.lock().take() {
+                    return Some(Received::Message(message));
+                }
+                Some(Received::Notification(endpoint.take_notifications()))
             }
+        }
+    }
+
+    /// Sets `bits` on `endpoint` and wakes a waiting receiver.
+    pub fn notify(endpoint: &Endpoint, bits: u32) {
+        if let Some(receiver) = endpoint.signal(bits) {
+            sched::wake(receiver);
         }
     }
 }
@@ -139,7 +200,29 @@ mod tests {
             data: [byte; MAX_MESSAGE],
             len: 1,
             cap: None,
+            badge: 0,
         }
+    }
+
+    fn sender_of(taken: Option<Taken>) -> (TaskId, Message) {
+        match taken {
+            Some(Taken::Message(sender, m)) => (sender, m),
+            _ => panic!("expected a message"),
+        }
+    }
+
+    #[test]
+    fn notifications_come_first_coalesce_and_clear() {
+        let e = Endpoint::new();
+        assert!(e.offer(1, message(b'm')).is_none(), "a sender waits");
+        assert_eq!(e.signal(1 << 3), None, "nobody receiving");
+        assert_eq!(e.signal(1 << 3 | 1), None);
+        assert!(matches!(e.take(9), Some(Taken::Notification(0b1001))));
+        assert_eq!(sender_of(e.take(9)).0, 1, "then the message");
+        assert!(e.take(9).is_none(), "9 now waits");
+        assert_eq!(e.signal(1 << 31), Some(9), "a signal wakes the receiver");
+        assert_eq!(e.take_notifications(), 1 << 31);
+        assert_eq!(e.take_notifications(), 0, "cleared");
     }
 
     #[test]
@@ -160,7 +243,7 @@ mod tests {
         assert_eq!(e.waiting(), (3, 0));
         let order: Vec<_> = (0..3)
             .map(|_| {
-                let (sender, m) = e.take(9).unwrap();
+                let (sender, m) = sender_of(e.take(9));
                 (sender, m.bytes()[0])
             })
             .collect();

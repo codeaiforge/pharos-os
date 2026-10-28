@@ -176,6 +176,7 @@ fn run(t: &mut TestRun) {
             data: [0; MAX_MESSAGE],
             len: 1,
             cap: None,
+            badge: 0,
         },
     );
     sched::sleep(Duration::from_millis(100));
@@ -237,6 +238,7 @@ fn run(t: &mut TestRun) {
             data: [0; MAX_MESSAGE],
             len: 1,
             cap: None,
+            badge: 0,
         },
     );
     sched::sleep(Duration::from_millis(100));

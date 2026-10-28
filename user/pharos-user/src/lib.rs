@@ -26,6 +26,22 @@ pub mod number {
     pub const DMA_ALLOC: u64 = 11;
     pub const IRQ_CREATE: u64 = 12;
     pub const IRQ_WAIT: u64 = 13;
+    pub const ENDPOINT_CREATE: u64 = 14;
+    pub const SPAWN: u64 = 15;
+    pub const PROCESS_STATUS: u64 = 16;
+}
+
+/// Capability rights (syscalls-ipc.md, drivers.md, services.md).
+pub mod rights {
+    pub const SEND: u32 = 1;
+    pub const RECEIVE: u32 = 1 << 1;
+    pub const GRANT: u32 = 1 << 2;
+    pub const WRITE: u32 = 1 << 3;
+    pub const READ: u32 = 1 << 4;
+    pub const MAP: u32 = 1 << 5;
+    pub const IRQ: u32 = 1 << 6;
+    pub const CONFIG: u32 = 1 << 7;
+    pub const WAIT: u32 = 1 << 8;
 }
 
 /// A capability handle in this process's table.
@@ -43,6 +59,7 @@ pub enum Error {
     NoMemory,
     NotFound,
     InUse,
+    BadProgram,
     /// A code this library does not know.
     Other(u64),
 }
@@ -59,6 +76,7 @@ impl Error {
             7 => Self::NoMemory,
             8 => Self::NotFound,
             9 => Self::InUse,
+            10 => Self::BadProgram,
             other => Self::Other(other),
         }
     }
@@ -75,6 +93,7 @@ impl Error {
             Self::NoMemory => 7,
             Self::NotFound => 8,
             Self::InUse => 9,
+            Self::BadProgram => 10,
             Self::Other(code) => code,
         }
     }
@@ -115,25 +134,123 @@ pub fn debug_write(console: Handle, bytes: &[u8]) -> Result<u64, Error> {
 }
 
 /// Sends `bytes` (up to 256) on `endpoint`, passing `cap` (0 = none) with
-/// `rights`.
-pub fn send(endpoint: Handle, bytes: &[u8], cap: Handle, rights: u32) -> Result<u64, Error> {
+/// `rights`, and `badge` if `cap` has none yet.
+pub fn send(
+    endpoint: Handle,
+    bytes: &[u8],
+    cap: Handle,
+    rights: u32,
+    badge: u32,
+) -> Result<u64, Error> {
     let args = [
         endpoint,
         bytes.as_ptr() as u64,
         bytes.len() as u64,
         cap,
-        rights.into(),
+        u64::from(rights) | u64::from(badge) << 32,
         0,
     ];
     call(number::SEND, args)
 }
 
-/// Receives a message on `endpoint` into `buf`; returns the message length
-/// and the handle of a passed capability (0 = none).
-pub fn receive(endpoint: Handle, buf: &mut [u8]) -> Result<(usize, Handle), Error> {
+/// What [`receive`] got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Received {
+    /// A message of `len` bytes (cut to the buffer), a passed capability
+    /// (0 = none), and the badge of the capability it was sent through.
+    Message { len: usize, cap: Handle, badge: u32 },
+    /// Notification bits set by the kernel (a child ended, an interrupt).
+    Notification(u32),
+}
+
+impl Received {
+    fn decode(v: u64) -> Self {
+        if v & 1 << 16 != 0 {
+            return Self::Notification((v >> 32) as u32);
+        }
+        Self::Message {
+            len: (v & 0xffff) as usize,
+            cap: (v >> 32) & 0xff,
+            badge: (v >> 40) as u32,
+        }
+    }
+}
+
+/// Receives on `endpoint`: pending notification bits first, else a
+/// message into `buf`, waiting if neither is there.
+pub fn receive(endpoint: Handle, buf: &mut [u8]) -> Result<Received, Error> {
     let args = [endpoint, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0, 0];
-    let v = call(number::RECEIVE, args)?;
-    Ok(((v & 0xffff_ffff) as usize, v >> 32))
+    call(number::RECEIVE, args).map(Received::decode)
+}
+
+/// Creates an endpoint; the handle has `SEND`, `RECEIVE`, and `GRANT`.
+pub fn endpoint_create() -> Result<Handle, Error> {
+    call(number::ENDPOINT_CREATE, [0; 6])
+}
+
+/// A capability passed to a new process: the caller's `handle` (needs
+/// `GRANT`), narrowed to `rights`, with `badge` if it has none yet.
+#[derive(Clone, Copy, Debug)]
+pub struct Grant {
+    pub handle: Handle,
+    pub rights: u32,
+    pub badge: u32,
+}
+
+/// Most capabilities one [`spawn`] passes.
+pub const MAX_SPAWN_CAPS: usize = 8;
+
+/// Starts the program in `file` (needs `READ`) with `arg`; `caps[i]`
+/// becomes the child's handle `i + 1`. With `notify = Some((endpoint,
+/// bit))` the kernel sets that bit on the endpoint (needs `RECEIVE`) when
+/// the child ends. Returns a process handle for [`process_status`].
+pub fn spawn(
+    file: Handle,
+    arg: u64,
+    caps: &[Grant],
+    notify: Option<(Handle, u32)>,
+) -> Result<Handle, Error> {
+    // Room for one more than the kernel accepts, so passing too many
+    // reaches the kernel's check instead of being cut here.
+    let mut entries = [0u8; 16 * (MAX_SPAWN_CAPS + 1)];
+    if caps.len() > MAX_SPAWN_CAPS + 1 {
+        return Err(Error::TooLarge);
+    }
+    for (entry, grant) in entries.chunks_exact_mut(16).zip(caps) {
+        entry[..8].copy_from_slice(&grant.handle.to_le_bytes());
+        entry[8..12].copy_from_slice(&grant.rights.to_le_bytes());
+        entry[12..].copy_from_slice(&grant.badge.to_le_bytes());
+    }
+    let (endpoint, bit) = notify.unwrap_or((0, 0));
+    let args = [
+        file,
+        arg,
+        entries.as_ptr() as u64,
+        caps.len() as u64,
+        endpoint,
+        bit.into(),
+    ];
+    call(number::SPAWN, args)
+}
+
+/// How a started process is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    Running,
+    Exited(u64),
+    /// Killed by this CPU exception vector.
+    Killed(u64),
+}
+
+/// The status of the process behind `process` (needs `WAIT`).
+pub fn process_status(process: Handle) -> Result<Status, Error> {
+    let v = call(number::PROCESS_STATUS, [process, 0, 0, 0, 0, 0])?;
+    const VALUE: u64 = (1 << 62) - 1;
+    Ok(match (v >> 63, v >> 62 & 1) {
+        (0, _) => Status::Running,
+        (_, 0) => Status::Exited(v & VALUE),
+        _ => Status::Killed(v & VALUE),
+    })
 }
 
 /// Removes `handle` from this process's table.
@@ -232,11 +349,27 @@ mod tests {
 
     #[test]
     fn error_codes_round_trip() {
-        for code in 1..=10 {
+        for code in 1..=11 {
             assert_eq!(Error::from_code(code).code(), code);
         }
         assert_eq!(result((0, 42)), Ok(42));
         assert_eq!(result((8, 0)), Err(Error::NotFound));
+    }
+
+    #[test]
+    fn receive_values_decode() {
+        assert_eq!(
+            Received::decode(9 | 3 << 32 | 0xab_cdef << 40),
+            Received::Message {
+                len: 9,
+                cap: 3,
+                badge: 0xab_cdef
+            }
+        );
+        assert_eq!(
+            Received::decode(1 << 16 | 0x8000_0001 << 32),
+            Received::Notification(0x8000_0001)
+        );
     }
 
     #[test]

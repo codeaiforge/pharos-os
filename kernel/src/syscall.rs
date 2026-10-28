@@ -27,6 +27,9 @@ pub mod number {
     pub const DMA_ALLOC: u64 = 11;
     pub const IRQ_CREATE: u64 = 12;
     pub const IRQ_WAIT: u64 = 13;
+    pub const ENDPOINT_CREATE: u64 = 14;
+    pub const SPAWN: u64 = 15;
+    pub const PROCESS_STATUS: u64 = 16;
 }
 
 /// Largest buffer `debug_write` accepts (and the IPC message size).
@@ -35,6 +38,12 @@ pub const MAX_MESSAGE: usize = 256;
 pub const MAX_PATH: usize = pharos_fs::MAX_PATH;
 /// Largest buffer `read` accepts.
 pub const MAX_READ: usize = 4096;
+/// Most capabilities one `spawn` passes (services.md).
+pub const MAX_SPAWN_CAPS: usize = 8;
+/// Bytes per `spawn` capability entry: handle u64, rights u32, badge u32.
+pub const SPAWN_ENTRY: usize = 16;
+/// Most live processes (services.md).
+pub const MAX_PROCESSES: usize = 32;
 
 /// Error codes returned in `rax` (0 is success).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +58,7 @@ pub enum Error {
     NoMemory = 7,
     NotFound = 8,
     InUse = 9,
+    BadProgram = 10,
 }
 
 impl From<CapError> for Error {
@@ -102,6 +112,8 @@ pub enum Call {
         cap: Handle,
         /// Rights the receiver gets, at most those of `cap`.
         rights: cap::Rights,
+        /// Badge for the passed capability, if it has none yet.
+        badge: u32,
     },
     Receive {
         handle: Handle,
@@ -145,6 +157,20 @@ pub enum Call {
         entry: u16,
     },
     IrqWait {
+        handle: Handle,
+    },
+    EndpointCreate,
+    Spawn {
+        handle: Handle,
+        arg: u64,
+        /// User address of `count` capability entries.
+        addr: u64,
+        count: usize,
+        /// Endpoint to notify when the child ends (0 = none).
+        endpoint: Handle,
+        bit: u32,
+    },
+    ProcessStatus {
         handle: Handle,
     },
 }
@@ -193,8 +219,10 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             addr: args[1],
             len: buffer(args[1], args[2])?,
             cap: args[3],
-            // Rights are a 32-bit mask; higher bits name no right.
+            // Rights in bits 0-31, a badge in bits 32-55: checked by the
+            // handler, after the handles, and only if a capability is passed.
             rights: args[4] as cap::Rights,
+            badge: (args[4] >> 32) as u32,
         }),
         number::RECEIVE => Ok(Call::Receive {
             handle: args[0],
@@ -252,6 +280,32 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
                 .ok_or(Error::NotFound)?,
         }),
         number::IRQ_WAIT => Ok(Call::IrqWait { handle: args[0] }),
+        number::ENDPOINT_CREATE => Ok(Call::EndpointCreate),
+        number::SPAWN => {
+            let (count, bit) = (args[3], args[5]);
+            if count > MAX_SPAWN_CAPS as u64 || bit >= 32 {
+                return Err(Error::TooLarge);
+            }
+            Ok(Call::Spawn {
+                handle: args[0],
+                arg: args[1],
+                addr: args[2],
+                // With no capabilities the array is never read.
+                count: match count {
+                    0 => 0,
+                    _ => {
+                        buffer_up_to(
+                            MAX_SPAWN_CAPS * SPAWN_ENTRY,
+                            args[2],
+                            count * SPAWN_ENTRY as u64,
+                        )? / SPAWN_ENTRY
+                    }
+                },
+                endpoint: args[4],
+                bit: bit as u32,
+            })
+        }
+        number::PROCESS_STATUS => Ok(Call::ProcessStatus { handle: args[0] }),
         _ => Err(Error::UnknownCall),
     }
 }
@@ -266,7 +320,8 @@ pub fn needed_rights(call: &Call) -> cap::Rights {
         Call::ConfigRead { .. } => cap::CONFIG,
         Call::MmioMap { .. } | Call::DmaAlloc { .. } => cap::MAP,
         Call::IrqCreate { .. } => cap::IRQ,
-        Call::IrqWait { .. } => cap::WAIT,
+        Call::IrqWait { .. } | Call::ProcessStatus { .. } => cap::WAIT,
+        Call::Spawn { .. } => cap::READ,
         _ => 0,
     }
 }
@@ -325,6 +380,63 @@ mod kernel {
         }
     }
 
+    /// `spawn`: every handle and the limits are checked before anything is
+    /// allocated; then the program is loaded and checked.
+    fn spawn(
+        process: &process::Process,
+        handle: Handle,
+        arg: u64,
+        addr: u64,
+        count: usize,
+        endpoint: Handle,
+        bit: u32,
+    ) -> Result<u64, Error> {
+        let file = process.caps.lock().get(handle, cap::READ)?;
+        let Object::File { fs, file } = file.object() else {
+            return Err(Error::MissingRight);
+        };
+        let mut entries = [0u8; MAX_SPAWN_CAPS * SPAWN_ENTRY];
+        let entries = &mut entries[..count * SPAWN_ENTRY];
+        sched::with_current_space(|space| space.read_user(addr, entries))
+            .ok_or(Error::BadAddress)??;
+        let mut caps = alloc::vec::Vec::new();
+        for entry in entries.chunks_exact(SPAWN_ENTRY) {
+            let field = |at: usize, len: usize| {
+                entry[at..at + len]
+                    .iter()
+                    .rev()
+                    .fold(0u64, |v, &b| v << 8 | u64::from(b))
+            };
+            let parent = process.caps.lock().get(field(0, 8), cap::GRANT)?;
+            let badge = field(12, 4);
+            if badge > u64::from(cap::BADGE_MASK) {
+                return Err(Error::TooLarge);
+            }
+            caps.push(parent.derive_badged(field(8, 4) as cap::Rights, badge as u32));
+        }
+        let notify = match endpoint {
+            0 => None,
+            handle => Some(self::endpoint(process, handle, cap::RECEIVE)?),
+        };
+        if process.caps.lock().len() >= MAX_HANDLES || process::count() >= MAX_PROCESSES {
+            return Err(Error::NoMemory);
+        }
+        let (space, entry) = process::load_elf_file(fs, *file).map_err(|e| match e {
+            process::ProcessError::Map(_) | process::ProcessError::NoFrameAllocator => {
+                Error::NoMemory
+            }
+            _ => Error::BadProgram,
+        })?;
+        let id = process::start(space, entry - process::USER_BASE, arg, caps)
+            .map_err(|_| Error::NoMemory)?;
+        let record = process::by_id(id).ok_or(Error::NoMemory)?.record.clone();
+        if let Some(endpoint) = notify {
+            record.notify_on_end(endpoint, 1 << bit);
+        }
+        let child = cap::Capability::new(Object::Process(record), cap::WAIT | cap::GRANT);
+        Ok(process.caps.lock().insert(child)?)
+    }
+
     /// The system-call handler (installed by `process::init`). Runs on the
     /// calling thread's kernel stack with interrupts disabled.
     pub fn handle(frame: &mut SyscallFrame) {
@@ -370,18 +482,27 @@ mod kernel {
                 len,
                 cap,
                 rights,
+                badge,
             } => {
-                let endpoint = endpoint(&process, handle, cap::SEND)?;
+                let sent_through = process.caps.lock().get(handle, cap::SEND)?;
+                let Object::Endpoint(endpoint) = sent_through.object() else {
+                    return Err(Error::MissingRight);
+                };
+                let endpoint = endpoint.clone();
                 let mut message = Message {
                     data: [0; MAX_MESSAGE],
                     len,
                     cap: None,
+                    badge: sent_through.badge(),
                 };
                 sched::with_current_space(|space| space.read_user(addr, &mut message.data[..len]))
                     .ok_or(Error::BadAddress)??;
                 if cap != 0 {
                     let passed = process.caps.lock().get(cap, cap::GRANT)?;
-                    message.cap = Some(passed.derive(rights));
+                    if badge > cap::BADGE_MASK {
+                        return Err(Error::TooLarge);
+                    }
+                    message.cap = Some(passed.derive_badged(rights, badge));
                 }
                 drop(process);
                 ipc::send(&endpoint, message);
@@ -399,7 +520,12 @@ mod kernel {
                 if process.caps.lock().len() >= MAX_HANDLES {
                     return Err(Error::NoMemory);
                 }
-                let message = ipc::receive(&endpoint).ok_or(Error::UnknownCall)?;
+                let message = match ipc::receive(&endpoint).ok_or(Error::UnknownCall)? {
+                    ipc::Received::Message(message) => message,
+                    ipc::Received::Notification(bits) => {
+                        return Ok(1 << 16 | u64::from(bits) << 32);
+                    }
+                };
                 // Longer messages are cut to the buffer; the value reports
                 // the full length.
                 let copied = message.len.min(max_len);
@@ -409,7 +535,7 @@ mod kernel {
                     Some(cap) => process.caps.lock().insert(cap)?,
                     None => 0,
                 };
-                Ok(message.len as u64 | new_handle << 32)
+                Ok(message.len as u64 | new_handle << 32 | u64::from(message.badge) << 40)
             }
             Call::Revoke { handle } => {
                 let cap = process.caps.lock().get(handle, 0)?;
@@ -558,6 +684,34 @@ mod kernel {
                 drop((cap, process));
                 Ok(crate::irq::wait(&irq)?)
             }
+            Call::EndpointCreate => {
+                let endpoint = Object::Endpoint(ipc::Endpoint::new());
+                let rights = cap::SEND | cap::RECEIVE | cap::GRANT;
+                Ok(process
+                    .caps
+                    .lock()
+                    .insert(cap::Capability::new(endpoint, rights))?)
+            }
+            Call::Spawn {
+                handle,
+                arg,
+                addr,
+                count,
+                endpoint,
+                bit,
+            } => spawn(&process, handle, arg, addr, count, endpoint, bit),
+            Call::ProcessStatus { handle } => {
+                let cap = process.caps.lock().get(handle, cap::WAIT)?;
+                let Object::Process(record) = cap.object() else {
+                    return Err(Error::MissingRight);
+                };
+                const VALUE: u64 = (1 << 62) - 1;
+                Ok(match record.end() {
+                    None => 0,
+                    Some(process::End::Exited(code)) => 1 << 63 | code & VALUE,
+                    Some(process::End::Killed(vector)) => 1 << 63 | 1 << 62 | vector & VALUE,
+                })
+            }
         }
     }
 }
@@ -589,7 +743,33 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(14, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(17, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(14, [9; 6]), Ok(Call::EndpointCreate));
+        assert_eq!(
+            decode(16, [3, 0, 0, 0, 0, 0]),
+            Ok(Call::ProcessStatus { handle: 3 })
+        );
+        let spawn = |addr, count, bit| decode(15, [2, 7, addr, count, 4, bit]);
+        assert_eq!(
+            spawn(0x40_0000, 8, 31),
+            Ok(Call::Spawn {
+                handle: 2,
+                arg: 7,
+                addr: 0x40_0000,
+                count: 8,
+                endpoint: 4,
+                bit: 31
+            })
+        );
+        assert!(spawn(0, 0, 0).is_ok(), "no capabilities: no buffer");
+        assert_eq!(
+            spawn(0x40_0000, 9, 0),
+            Err(Error::TooLarge),
+            "9 capabilities"
+        );
+        assert_eq!(spawn(0x40_0000, 1, 32), Err(Error::TooLarge), "bit 32");
+        assert_eq!(spawn(0, 1, 0), Err(Error::BadAddress), "null page");
+
         assert_eq!(
             decode(12, [2, 2047, 0, 0, 0, 0]),
             Ok(Call::IrqCreate {
@@ -675,13 +855,14 @@ mod tests {
             "receive checks its buffer"
         );
         assert_eq!(
-            decode(3, [1, 0x40_0000, 8, 2, u64::MAX, 0]),
+            decode(3, [1, 0x40_0000, 8, 2, u64::from(u32::MAX), 0]),
             Ok(Call::Send {
                 handle: 1,
                 addr: 0x40_0000,
                 len: 8,
                 cap: 2,
-                rights: u32::MAX
+                rights: u32::MAX,
+                badge: 0
             })
         );
         assert_eq!(
@@ -713,7 +894,7 @@ mod tests {
         let mut accepted = 0;
         for _ in 0..200_000 {
             // Small numbers and lengths often, huge ones sometimes.
-            let number = next() % 15;
+            let number = next() % 18;
             let args: [u64; 6] = core::array::from_fn(|_| next() >> (next() % 64));
             match decode(number, args) {
                 Ok(
@@ -749,8 +930,14 @@ mod tests {
                     assert!(user_range_ok(addr, pages as u64 * 4096));
                 }
                 Ok(Call::IrqCreate { entry, .. }) => assert!(entry < 2048),
-                Ok(_) => assert!(matches!(number, 0 | 1 | 5 | 6 | 13)),
-                Err(error) => assert!(error as u64 >= 1 && error as u64 <= 9),
+                Ok(Call::Spawn {
+                    addr, count, bit, ..
+                }) => {
+                    assert!(count <= MAX_SPAWN_CAPS && bit < 32);
+                    assert!(count == 0 || user_range_ok(addr, (count * SPAWN_ENTRY) as u64));
+                }
+                Ok(_) => assert!(matches!(number, 0 | 1 | 5 | 6 | 13 | 14 | 16)),
+                Err(error) => assert!(error as u64 >= 1 && error as u64 <= 10),
             }
         }
         assert!(accepted > 0, "the generator must reach valid buffers");

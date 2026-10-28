@@ -112,6 +112,9 @@ Implemented in `ipc` (endpoint queues, host-tested) and `syscall` (#41). A block
 - **`receive(endpoint, buffer, max_len)`:**
   - blocks until a message arrives, then copies it out;
   - returns its length and, if a capability came with it, its new handle (in `rdx` as `len | handle << 32`).
+- **Badges and notifications (M2.10, #60; [services.md](services.md)):**
+  - every message carries the 24-bit badge of the capability it was sent through, in bits 40–63 of `receive`'s value. `send` sets a badge on the capability it passes (bits 32–55 of its rights argument) if that capability has none;
+  - each endpoint has a 32-bit notification word that the kernel sets when a spawned child ends. `receive` returns pending bits first, as bit 16 set and the bits in bits 32–63.
 - **Fairness:** senders and receivers queue first in first out per endpoint. Blocking goes through the scheduler (the thread leaves the ready queue until the rendezvous).
 - **Memory is bounded:** each thread can wait on one endpoint at a time and has one 256-byte buffer. No queue grows with untrusted input.
 - **Not in M2.7:** a combined `call` (send and wait for a reply) and one-shot reply capabilities. They can be added later to save system calls on the round trip if the D-004 budget needs it.
@@ -125,8 +128,8 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 0 | `exit` | code | does not return | none |
 | 1 | `yield` | — | 0 | none |
 | 2 | `debug_write` | handle, buffer, len (≤ 256) | bytes written | debug console, `WRITE` |
-| 3 | `send` | handle, buffer, len (≤ 256), cap handle (0 = none), rights mask | 0 | endpoint, `SEND`; passed capability, `GRANT` |
-| 4 | `receive` | handle, buffer, max len | `len \| new_handle << 32` | endpoint, `RECEIVE` |
+| 3 | `send` | handle, buffer, len (≤ 256), cap handle (0 = none), rights mask (bits 32–55: badge, M2.10) | 0 | endpoint, `SEND`; passed capability, `GRANT` |
+| 4 | `receive` | handle, buffer, max len | `len \| new_handle << 32 \| badge << 40`, or `1 << 16 \| bits << 32` for notifications (M2.10) | endpoint, `RECEIVE` |
 | 5 | `delete` | handle | 0 | none (own handle) |
 | 6 | `revoke` | handle | revoked count | none (own handle) |
 | 7 | `open` (M2.8) | filesystem handle, path buffer, path len (≤ 104) | new file handle | filesystem, `READ` |
@@ -136,6 +139,9 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 11 | `dma_alloc` (M2.9) | device, pages (1–16), user address | physical address | device, `MAP` |
 | 12 | `irq_create` (M2.9) | device, MSI-X entry (< table size) | new interrupt handle | device, `IRQ` |
 | 13 | `irq_wait` (M2.9) | interrupt handle | interrupts since the last wait (≥ 1) | interrupt, `WAIT` |
+| 14 | `endpoint_create` (M2.10) | — | new endpoint handle (`SEND`, `RECEIVE`, `GRANT`) | none |
+| 15 | `spawn` (M2.10) | file, argument, capability array, count (≤ 8), endpoint (0 = none), bit | new process handle (`WAIT`, `GRANT`) | file, `READ`; each passed capability, `GRANT`; endpoint, `RECEIVE` |
+| 16 | `process_status` (M2.10) | process handle | 0 while running; else bit 63, plus bit 62 if killed, and the code or vector | process, `WAIT` |
 
 Error codes (`rax`):
 
@@ -150,6 +156,7 @@ Error codes (`rax`):
 | 7 | `NO_MEMORY` | The kernel could not allocate |
 | 8 | `NOT_FOUND` | No file with this path (M2.8), no such BAR, or no such MSI-X entry (M2.9) |
 | 9 | `IN_USE` | The user address is already mapped, the MSI-X entry already has an interrupt, or another thread is waiting on it (M2.9) |
+| 10 | `BAD_PROGRAM` | `spawn`: the file is not a valid program (M2.10) |
 
 ### Programs for tests
 

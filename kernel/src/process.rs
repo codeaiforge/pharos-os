@@ -125,6 +125,15 @@ const USER_RODATA: Flags = Flags {
 /// failure everything allocated is freed again.
 pub fn load_elf(fs: &crate::fs::Fs, path: &[u8]) -> Result<(AddressSpace, u64), ProcessError> {
     let file = fs.lookup(path).map_err(|_| ProcessError::NoSuchProgram)?;
+    load_elf_file(fs, file)
+}
+
+/// [`load_elf`] for a file already looked up (`spawn` takes a file
+/// capability).
+pub fn load_elf_file(
+    fs: &crate::fs::Fs,
+    file: pharos_fs::FileId,
+) -> Result<(AddressSpace, u64), ProcessError> {
     let size = fs.size(file).map_err(|_| ProcessError::NoSuchProgram)?;
     if size == 0 || size > MAX_PROGRAM {
         return Err(ProcessError::BadImage);
@@ -198,6 +207,8 @@ pub struct Process {
     /// its buffers allocated for as long as the process lives, even if it
     /// deletes its device handles (drivers.md).
     pub pins: IrqMutex<Vec<Arc<crate::device::DeviceHandle>>>,
+    /// How it ended, once it has; whom to notify (services.md).
+    pub record: Arc<ProcessRecord>,
     /// Device register pages mapped so far (at most
     /// [`crate::device::MAX_MMIO_PAGES`]; they and their page tables are
     /// freed only when the process ends).
@@ -226,21 +237,67 @@ pub fn start(
             .insert(cap)
             .map_err(|_| ProcessError::TooManyCapabilities)?;
     }
-    let process = Arc::new(Process {
-        caps: IrqMutex::new(table),
-        inbox: IrqMutex::new(None),
-        pins: IrqMutex::new(Vec::new()),
-        mmio_pages: IrqMutex::new(0),
-    });
     // Register the process before its thread can run (no preemption here).
     without_interrupts(|| {
         let id = sched::spawn_in(space, move || {
             context::enter_user(USER_BASE + entry, STACK_TOP, arg)
         })
         .map_err(ProcessError::Sched)?;
+        let process = Arc::new(Process {
+            caps: IrqMutex::new(table),
+            inbox: IrqMutex::new(None),
+            pins: IrqMutex::new(Vec::new()),
+            mmio_pages: IrqMutex::new(0),
+            record: Arc::new(ProcessRecord {
+                id,
+                end: IrqMutex::new(None),
+                notify: IrqMutex::new(None),
+            }),
+        });
         PROCESSES.lock().insert(id, process);
         Ok(id)
     })
+}
+
+/// How a process ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum End {
+    /// With the `exit` system call and this code.
+    Exited(u64),
+    /// Killed by this CPU exception vector.
+    Killed(u64),
+}
+
+/// What outlives a process for those observing it (a `Process`
+/// capability): how it ended, and the endpoint bit to signal then.
+pub struct ProcessRecord {
+    pub id: TaskId,
+    end: IrqMutex<Option<End>>,
+    notify: IrqMutex<Option<(Arc<crate::ipc::Endpoint>, u32)>>,
+}
+
+impl ProcessRecord {
+    /// How the process ended, or `None` while it runs.
+    pub fn end(&self) -> Option<End> {
+        *self.end.lock()
+    }
+
+    /// Signals `bits` on `endpoint` when the process ends.
+    pub fn notify_on_end(&self, endpoint: Arc<crate::ipc::Endpoint>, bits: u32) {
+        *self.notify.lock() = Some((endpoint, bits));
+    }
+
+    #[cfg_attr(not(target_os = "none"), allow(dead_code))]
+    fn finish(&self, end: End) {
+        *self.end.lock() = Some(end);
+        let notify = self.notify.lock().take();
+        #[cfg(target_os = "none")]
+        if let Some((endpoint, bits)) = notify {
+            crate::ipc::notify(&endpoint, bits);
+        }
+        #[cfg(not(target_os = "none"))]
+        drop(notify);
+    }
 }
 
 /// [`load`] and [`start`] in one step.
@@ -271,11 +328,14 @@ pub fn count() -> usize {
 
 /// Ends the calling process: forgets its state and ends its thread (the
 /// address space is freed when the thread is reaped).
-fn end_current() -> ! {
+fn end_current(end: End) -> ! {
     if let Some(id) = sched::current_id() {
         // Dropped after the table's lock is released: dropping a process may
         // drop device handles, which stop their devices and free memory.
         let process = PROCESSES.lock().remove(&id);
+        if let Some(process) = &process {
+            process.record.finish(end);
+        }
         drop(process);
     }
     sched::exit()
@@ -327,7 +387,7 @@ pub(crate) fn exit_current(code: u64) -> ! {
         code,
         at: crate::time::uptime(),
     });
-    end_current()
+    end_current(End::Exited(code))
 }
 
 /// The newest [`LOG_ENTRIES`] process exits, oldest first.
@@ -400,5 +460,5 @@ fn on_user_fault(frame: &ExceptionFrame) -> ! {
         cs: frame.cs,
         cr2,
     });
-    end_current()
+    end_current(End::Killed(frame.vector))
 }

@@ -146,3 +146,7 @@ harness = false
 [[test]]
 name = "virtio_blk"
 harness = false
+
+[[test]]
+name = "spawn"
+harness = false
