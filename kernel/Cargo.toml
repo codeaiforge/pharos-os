@@ -174,3 +174,7 @@ harness = false
 [[test]]
 name = "user_memory"
 harness = false
+
+[[test]]
+name = "timeouts"
+harness = false

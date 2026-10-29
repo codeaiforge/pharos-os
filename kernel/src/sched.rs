@@ -144,6 +144,14 @@ impl<T> SleepQueue<T> {
         }
     }
 
+    /// Removes every entry for `thread`.
+    pub fn remove(&mut self, thread: &T)
+    where
+        T: PartialEq,
+    {
+        self.sleepers.retain(|(_, t)| t != thread);
+    }
+
     /// Threads sleeping.
     pub fn len(&self) -> usize {
         self.sleepers.len()
@@ -159,6 +167,26 @@ impl<T> Default for SleepQueue<T> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The tick at which a wait of `micros` microseconds that starts at tick
+/// `now` ends (D-016): rounded up to whole ticks plus one, so no wait ends
+/// early. `None` waits forever (`u64::MAX`, or a deadline that would
+/// overflow); 0 has passed already (do not block).
+pub fn deadline_at(now: u64, micros: u64) -> Option<u64> {
+    match micros {
+        u64::MAX => None,
+        0 => Some(0),
+        _ => {
+            let per_tick = 1_000_000 / u64::from(time::TICK_HZ);
+            now.checked_add(micros.div_ceil(per_tick))?.checked_add(1)
+        }
+    }
+}
+
+/// [`deadline_at`] from the current tick.
+pub fn deadline(micros: u64) -> Option<u64> {
+    deadline_at(ticks(), micros)
 }
 
 /// Why a scheduler call failed.
@@ -192,6 +220,8 @@ struct Task {
     context: Arc<Context>,
     /// Taken by the task when it starts.
     entry: IrqMutex<Option<Entry>>,
+    /// Set when its last [`block_until`] ended at the deadline.
+    timed_out: AtomicBool,
 }
 
 struct Scheduler {
@@ -199,6 +229,8 @@ struct Scheduler {
     sleepers: SleepQueue<Arc<Task>>,
     /// Tasks waiting for [`wake`] (for example on an IPC endpoint).
     blocked: BTreeMap<TaskId, Arc<Task>>,
+    /// Deadlines of blocked tasks that wait with a timeout.
+    timeouts: SleepQueue<TaskId>,
     /// The last exited task, freed by the next scheduling call.
     exited: Option<Arc<Task>>,
     next_id: TaskId,
@@ -222,11 +254,13 @@ pub fn init() -> Result<(), SchedError> {
         id: 0,
         context,
         entry: IrqMutex::new(None),
+        timed_out: AtomicBool::new(false),
     });
     *scheduler = Some(Scheduler {
         queue: RunQueue::new(boot),
         sleepers: SleepQueue::new(),
         blocked: BTreeMap::new(),
+        timeouts: SleepQueue::new(),
         exited: None,
         next_id: 1,
         live: 1,
@@ -254,6 +288,7 @@ fn new_task(entry: Entry, space: Option<AddressSpace>) -> Result<Arc<Task>, Sche
         id,
         context,
         entry: IrqMutex::new(Some(entry)),
+        timed_out: AtomicBool::new(false),
     }))
 }
 
@@ -420,6 +455,44 @@ pub fn block_current() {
     });
 }
 
+/// [`block_current`] that also ends at tick `deadline` (`None`: never;
+/// see [`deadline`]). Returns true if [`wake`] ended it, false if the
+/// deadline did (or had passed already, in which case it does not block).
+/// After a timeout the caller must still look for what it waited for: a
+/// waker may have delivered it between the deadline and this thread
+/// running again.
+pub fn block_until(deadline: Option<u64>) -> bool {
+    let Some(deadline) = deadline else {
+        block_current();
+        return true;
+    };
+    without_interrupts(|| {
+        check_no_locks();
+        let mut current = None;
+        let switch = {
+            let passed = SCHEDULER
+                .lock()
+                .as_ref()
+                .is_none_or(|s| deadline <= s.ticks);
+            if passed {
+                return false;
+            }
+            pick_next(Leave::Block, |s| {
+                assert!(s.queue.has_idle(), "blocking needs enable_preemption");
+                let task = s.queue.current().clone();
+                task.timed_out.store(false, Ordering::Relaxed);
+                s.timeouts.insert(deadline, task.id);
+                s.blocked.insert(task.id, task.clone());
+                current = Some(task);
+            })
+        };
+        if let Some(switch) = switch {
+            run_switch(switch);
+        }
+        !current.is_some_and(|t| t.timed_out.load(Ordering::Relaxed))
+    })
+}
+
 /// Makes the blocked task `id` ready again. Returns false if it was not
 /// blocked.
 pub fn wake(id: TaskId) -> bool {
@@ -429,6 +502,7 @@ pub fn wake(id: TaskId) -> bool {
     };
     match scheduler.blocked.remove(&id) {
         Some(task) => {
+            scheduler.timeouts.remove(&id);
             scheduler.queue.push(task);
             true
         }
@@ -441,7 +515,7 @@ pub fn wake(id: TaskId) -> bool {
 /// busy-waits instead.
 pub fn sleep(duration: Duration) {
     let period = Duration::from_secs(1) / time::TICK_HZ;
-    let ticks = duration.as_nanos().div_ceil(period.as_nanos()) as u64;
+    let ticks = u64::try_from(duration.as_nanos().div_ceil(period.as_nanos())).unwrap_or(u64::MAX);
     without_interrupts(|| {
         check_no_locks();
         let preemptive = SCHEDULER
@@ -454,8 +528,9 @@ pub fn sleep(duration: Duration) {
         }
         let switch = pick_next(Leave::Block, |s| {
             // The next tick may be moments away, so wait one more to make
-            // sure at least `duration` passes.
-            let deadline = s.ticks + ticks + 1;
+            // sure at least `duration` passes. Saturates: a huge duration
+            // sleeps forever.
+            let deadline = s.ticks.saturating_add(ticks).saturating_add(1);
             let current = s.queue.current().clone();
             s.sleepers.insert(deadline, current);
         });
@@ -491,6 +566,13 @@ fn on_tick() {
         while let Some(task) = s.sleepers.pop_due(s.ticks) {
             s.queue.push(task);
         }
+        // Waits that reached their deadline: ready again, marked timed out.
+        while let Some(id) = s.timeouts.pop_due(s.ticks) {
+            if let Some(task) = s.blocked.remove(&id) {
+                task.timed_out.store(true, Ordering::Relaxed);
+                s.queue.push(task);
+            }
+        }
     });
     if let Some(switch) = switch {
         run_switch(switch);
@@ -510,7 +592,32 @@ extern "C" fn task_start() -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{Leave, RunQueue, SleepQueue};
+    use super::{Leave, RunQueue, SleepQueue, deadline_at};
+
+    #[test]
+    fn deadlines_round_up_and_never_end_early() {
+        assert_eq!(deadline_at(5, u64::MAX), None, "forever");
+        assert_eq!(deadline_at(5, 0), Some(0), "already passed");
+        assert_eq!(deadline_at(5, 1), Some(7), "1 µs: one tick, plus one");
+        assert_eq!(deadline_at(5, 10_000), Some(7), "exactly one tick");
+        assert_eq!(deadline_at(5, 10_001), Some(8));
+        assert_eq!(deadline_at(u64::MAX - 1, 10_000), None, "overflow: forever");
+        assert_eq!(
+            deadline_at(0, u64::MAX - 1),
+            Some((u64::MAX - 1).div_ceil(10_000) + 1)
+        );
+    }
+
+    #[test]
+    fn removed_sleepers_never_wake() {
+        let mut s = SleepQueue::new();
+        s.insert(10, 1);
+        s.insert(20, 2);
+        s.insert(30, 1);
+        s.remove(&1);
+        assert_eq!(s.pop_due(100), Some(2));
+        assert!(s.is_empty());
+    }
 
     #[test]
     fn yields_rotate_in_order() {

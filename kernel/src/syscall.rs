@@ -34,6 +34,7 @@ pub mod number {
     pub const CALL: u64 = 18;
     pub const MEM_MAP: u64 = 19;
     pub const MEM_UNMAP: u64 = 20;
+    pub const SLEEP: u64 = 21;
 }
 
 /// Largest buffer `debug_write` accepts (and the IPC message size).
@@ -64,6 +65,7 @@ pub enum Error {
     InUse = 9,
     BadProgram = 10,
     WouldBlock = 11,
+    TimedOut = 12,
 }
 
 impl From<CapError> for Error {
@@ -84,6 +86,7 @@ impl From<crate::irq::IrqError> for Error {
             IrqError::NoEntry => Self::NotFound,
             IrqError::InUse => Self::InUse,
             IrqError::NoVector | IrqError::Hardware => Self::NoMemory,
+            IrqError::TimedOut => Self::TimedOut,
         }
     }
 }
@@ -126,6 +129,8 @@ pub enum Call {
         handle: Handle,
         addr: u64,
         max_len: usize,
+        /// Microseconds (`u64::MAX`: forever, 0: do not block).
+        timeout: u64,
     },
     Revoke {
         handle: Handle,
@@ -165,6 +170,7 @@ pub enum Call {
     },
     IrqWait {
         handle: Handle,
+        timeout: u64,
     },
     EndpointCreate,
     Spawn {
@@ -194,6 +200,10 @@ pub enum Call {
         len: usize,
         reply: Handle,
         max: usize,
+        timeout: u64,
+    },
+    Sleep {
+        micros: u64,
     },
     MemMap {
         pages: u64,
@@ -266,6 +276,7 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             handle: args[0],
             addr: args[1],
             max_len: buffer(args[1], args[2])?,
+            timeout: args[3],
         }),
         number::DELETE => Ok(Call::Delete { handle: args[0] }),
         number::REVOKE => Ok(Call::Revoke { handle: args[0] }),
@@ -317,7 +328,11 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
                 .filter(|&e| e < 2048)
                 .ok_or(Error::NotFound)?,
         }),
-        number::IRQ_WAIT => Ok(Call::IrqWait { handle: args[0] }),
+        number::IRQ_WAIT => Ok(Call::IrqWait {
+            handle: args[0],
+            timeout: args[1],
+        }),
+        number::SLEEP => Ok(Call::Sleep { micros: args[0] }),
         number::ENDPOINT_CREATE => Ok(Call::EndpointCreate),
         number::SPAWN => {
             // Capabilities in bits 0-31, the child's page limit in 32-63.
@@ -352,6 +367,7 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             len: buffer(args[1], args[2])?,
             reply: args[3],
             max: buffer(args[1], args[4])?,
+            timeout: args[5],
         }),
         number::IRQ_NOTIFY => match args[2] {
             bit @ 0..32 => Ok(Call::IrqNotify {
@@ -502,6 +518,7 @@ mod kernel {
         len: usize,
         reply: Handle,
         max: usize,
+        timeout: u64,
     ) -> Result<u64, Error> {
         let sent_through = process.caps.lock().get(handle, cap::SEND)?;
         let Object::Endpoint(endpoint) = sent_through.object() else {
@@ -532,7 +549,7 @@ mod kernel {
         };
         sched::with_current_space(|space| space.read_user(addr, &mut message.data[..len]))
             .ok_or(Error::BadAddress)??;
-        let received = ipc::call(endpoint, message, reply_endpoint);
+        let received = ipc::call(endpoint, message, reply_endpoint, sched::deadline(timeout));
         one_shot.revoke();
         deliver(process, received.ok_or(Error::UnknownCall)?, addr, max)
     }
@@ -549,6 +566,7 @@ mod kernel {
         let message = match received {
             ipc::Received::Message(message) => message,
             ipc::Received::Notification(bits) => return Ok(1 << 16 | u64::from(bits) << 32),
+            ipc::Received::TimedOut => return Err(Error::TimedOut),
         };
         let copied = message.len.min(max);
         sched::with_current_space(|space| space.write_user(addr, &message.data[..copied]))
@@ -712,11 +730,13 @@ mod kernel {
                 len,
                 reply,
                 max,
-            } => do_call(&process, handle, addr, len, reply, max),
+                timeout,
+            } => do_call(&process, handle, addr, len, reply, max, timeout),
             Call::Receive {
                 handle,
                 addr,
                 max_len,
+                timeout,
             } => {
                 let endpoint = endpoint(&process, handle, cap::RECEIVE)?;
                 // Check everything before taking a message, so none is lost.
@@ -725,7 +745,8 @@ mod kernel {
                 if process.caps.lock().len() >= MAX_HANDLES {
                     return Err(Error::NoMemory);
                 }
-                let received = ipc::receive(&endpoint).ok_or(Error::UnknownCall)?;
+                let received =
+                    ipc::receive(&endpoint, sched::deadline(timeout)).ok_or(Error::UnknownCall)?;
                 deliver(&process, received, addr, max_len)
             }
             Call::Revoke { handle } => {
@@ -866,14 +887,23 @@ mod kernel {
                 let child = parent.derive_object(Object::Interrupt(irq), rights);
                 Ok(process.caps.lock().insert(child)?)
             }
-            Call::IrqWait { handle } => {
+            Call::IrqWait { handle, timeout } => {
                 let cap = process.caps.lock().get(handle, cap::WAIT)?;
                 let Object::Interrupt(irq) = cap.object() else {
                     return Err(Error::MissingRight);
                 };
                 let irq = irq.clone();
                 drop((cap, process));
-                Ok(crate::irq::wait(&irq)?)
+                Ok(crate::irq::wait(&irq, sched::deadline(timeout))?)
+            }
+            Call::Sleep { micros } => {
+                drop(process);
+                // `sleep` rounds as `deadline` does; 0 does not sleep, and
+                // u64::MAX sleeps forever.
+                if micros != 0 {
+                    sched::sleep(core::time::Duration::from_micros(micros));
+                }
+                Ok(0)
             }
             Call::EndpointCreate => {
                 let endpoint = Object::Endpoint(ipc::Endpoint::new());
@@ -965,13 +995,14 @@ mod tests {
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(24, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(
-            decode(18, [2, 0x40_0000, 8, 3, 256, 0]),
+            decode(18, [2, 0x40_0000, 8, 3, 256, 7]),
             Ok(Call::Call {
                 handle: 2,
                 addr: 0x40_0000,
                 len: 8,
                 reply: 3,
-                max: 256
+                max: 256,
+                timeout: 7
             })
         );
         assert_eq!(
@@ -1048,7 +1079,21 @@ mod tests {
         assert_eq!(decode(12, [2, u64::MAX, 0, 0, 0, 0]), Err(Error::NotFound));
         assert_eq!(
             decode(13, [5, 9, 9, 9, 9, 9]),
-            Ok(Call::IrqWait { handle: 5 })
+            Ok(Call::IrqWait {
+                handle: 5,
+                timeout: 9
+            })
+        );
+        assert!(matches!(
+            decode(4, [1, 0x40_0000, 8, u64::MAX, 0, 0]),
+            Ok(Call::Receive {
+                timeout: u64::MAX,
+                ..
+            })
+        ));
+        assert_eq!(
+            decode(21, [0, 9, 9, 9, 9, 9]),
+            Ok(Call::Sleep { micros: 0 })
         );
         let config = |offset, width| decode(9, [1, offset, width, 0, 0, 0]);
         assert_eq!(
@@ -1192,7 +1237,7 @@ mod tests {
         let mut accepted = 0;
         for _ in 0..200_000 {
             // Small numbers and lengths often, huge ones sometimes.
-            let number = next() % 22;
+            let number = next() % 23;
             let args: [u64; 6] = core::array::from_fn(|_| next() >> (next() % 64));
             match decode(number, args) {
                 Ok(
@@ -1245,8 +1290,8 @@ mod tests {
                     assert!(len <= MAX_MESSAGE && max <= MAX_MESSAGE);
                     assert!(user_range_ok(addr, len as u64) && user_range_ok(addr, max as u64));
                 }
-                Ok(_) => assert!(matches!(number, 0 | 1 | 5 | 6 | 13 | 14 | 16)),
-                Err(error) => assert!(error as u64 >= 1 && error as u64 <= 11),
+                Ok(_) => assert!(matches!(number, 0 | 1 | 5 | 6 | 13 | 14 | 16 | 21)),
+                Err(error) => assert!(error as u64 >= 1 && error as u64 <= 12),
             }
         }
         assert!(accepted > 0, "the generator must reach valid buffers");

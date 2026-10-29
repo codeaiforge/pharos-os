@@ -31,6 +31,8 @@ pub enum IrqError {
     NoVector,
     /// The table entry could not be reached.
     Hardware,
+    /// No interrupt arrived before the deadline.
+    TimedOut,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -150,6 +152,13 @@ impl Vectors {
         }
         slot.waiter = Some(me);
         Ok(None)
+    }
+
+    /// Clears `me` as the waiter on vector `index` (its wait timed out).
+    pub fn cancel(&mut self, index: usize, me: TaskId) {
+        if let Some(slot) = self.slots.get_mut(index).filter(|s| s.waiter == Some(me)) {
+            slot.waiter = None;
+        }
     }
 
     /// Takes the interrupts counted on vector `index`.
@@ -340,23 +349,45 @@ mod kernel {
         }
     }
 
-    /// Waits for `irq` on the running thread; returns the interrupts since
-    /// the last wait (at least 1). Runs inside a system call, with
-    /// interrupts disabled until the thread blocks, so no wake is missed.
-    pub fn wait(irq: &Irq) -> Result<u64, IrqError> {
+    /// Waits for `irq` on the running thread until tick `deadline`
+    /// (`None`: forever); returns the interrupts since the last wait (at
+    /// least 1). Runs inside a system call, with interrupts disabled until
+    /// the thread blocks, so no wake is missed. An interrupt that arrives
+    /// after the deadline but before this thread runs again still counts;
+    /// a timeout leaves the count for the next wait.
+    pub fn wait(irq: &Irq, deadline: Option<u64>) -> Result<u64, IrqError> {
         let me = sched::current_id().unwrap_or(0);
         let started = VECTORS.lock().wait(irq.index, me)?;
         if let Some(count) = started {
             return Ok(count);
         }
-        sched::block_current();
-        Ok(VECTORS.lock().take(irq.index).max(1))
+        let woken = sched::block_until(deadline);
+        let mut vectors = VECTORS.lock();
+        match vectors.take(irq.index) {
+            0 if !woken => {
+                vectors.cancel(irq.index, me);
+                Err(IrqError::TimedOut)
+            }
+            count => Ok(count.max(1)),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancelled_wait_frees_the_slot_for_the_next() {
+        let mut v = Vectors::new();
+        let i = v.alloc(1, 0).unwrap();
+        assert_eq!(v.wait(i, 7), Ok(None));
+        v.cancel(i, 8);
+        assert_eq!(v.wait(i, 8), Err(IrqError::InUse), "only 7's own wait");
+        v.cancel(i, 7);
+        assert_eq!(v.fire(i), Fired::Nothing, "counted, nobody to wake");
+        assert_eq!(v.wait(i, 7), Ok(Some(1)), "the next wait gets it");
+    }
 
     #[test]
     fn vectors_are_allocated_once_per_entry_and_freed() {

@@ -126,7 +126,7 @@ Design: [user-environment.md](../architecture/user-environment.md) and [storage.
 | A malformed save area crashes the kernel (`XRSTOR` fault) | Only the kernel writes save areas; user code cannot reach them |
 | A process exhausts memory | **Implemented (#75):** a page limit per process, set at `spawn` and at most the creator's (`TOO_LARGE`), checked before any frame is allocated; at most 1,024 mappings; no demand paging; unmap and exit free every frame (`user_memory`, mutation-checked). **Limit:** limits are not carved from the creator's until M3.5, and a large `mem_map` holds the CPU with interrupts off while it zeroes its pages |
 | Shared memory widens access | Rights only narrow; read-only mappings have no write bit; mappings are never executable; frames live until the last mapping and capability. **Limit:** revocation does not unmap existing mappings |
-| A timeout loses or misdirects a message | Expiry with interrupts off; a message delivered before expiry is returned, one after it stays queued; a late reply meets a revoked one-shot reply capability |
+| A timeout loses or misdirects a message | **Implemented (#76):** expiry with interrupts off; a message delivered before the waiter runs again is returned, and a waiter leaves the queue only if still in it; an untaken `call` request is withdrawn; a late reply meets a revoked one-shot reply capability (`timeouts` race test: every reply the server delivered reached the client; mutation-checked) |
 | A corrupted or edited disk crashes or misleads the storage service | Every superblock, index, extent, and record checked (CRC-32) before use; shared parser fuzzed; crash consistency tested by cutting every write sequence and by killing QEMU |
 | Audit records are altered on disk | SHA-256 chain over stream records. **Limit:** the chain head is not anchored until M3.4, so someone holding the disk can rewrite the whole chain |
 | A client reads or writes another's files | Namespaces from `init`'s badges, read-only bit, paths checked against escape |
@@ -147,7 +147,7 @@ Phase 2 closes with these limits accepted. Each is carried to the milestone that
 | No KPTI: the kernel half is mapped in every address space (Meltdown class) | M2.7 | M4.2 (security model); required before real-hardware use (M5.2) |
 | One CPU: locking, TLB flushes, and MSI-X routing assume it | from the start | Phase 4; SMP needs a decision record and a re-review of those paths |
 | Revocation does not unmap device registers or DMA buffers; ending the process is the full revocation | M2.9 | M3.4 (revocable agent permissions) |
-| No timeouts on IPC, `call`, pings, or service start | M2.7 | M3.0 (kernel deadlines, D-016); M3.3 (supervision) |
+| No timeouts on pings or service start (`receive`, `call`, `irq_wait`, and `sleep` have them since #76; services do not use them yet) | M2.7 | M3.3 (supervision) |
 | No per-process quotas on processes, handles, or network use | M2.10 | M3.5 (resource accounting and limits) |
 | No network destination policy | M2.10 | M3.4 (D-012) |
 | `rdtsc` in user mode (timing side channels) | M2.7 | M4.2 |

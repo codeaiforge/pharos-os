@@ -33,6 +33,7 @@ pub mod number {
     pub const CALL: u64 = 18;
     pub const MEM_MAP: u64 = 19;
     pub const MEM_UNMAP: u64 = 20;
+    pub const SLEEP: u64 = 21;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -65,6 +66,8 @@ pub enum Error {
     InUse,
     BadProgram,
     WouldBlock,
+    /// Nothing arrived before the timeout.
+    TimedOut,
     /// A code this library does not know.
     Other(u64),
 }
@@ -83,6 +86,7 @@ impl Error {
             9 => Self::InUse,
             10 => Self::BadProgram,
             11 => Self::WouldBlock,
+            12 => Self::TimedOut,
             other => Self::Other(other),
         }
     }
@@ -101,6 +105,7 @@ impl Error {
             Self::InUse => 9,
             Self::BadProgram => 10,
             Self::WouldBlock => 11,
+            Self::TimedOut => 12,
             Self::Other(code) => code,
         }
     }
@@ -167,6 +172,9 @@ pub fn try_send(endpoint: Handle, bytes: &[u8]) -> Result<u64, Error> {
     call(number::SEND, args)
 }
 
+/// Wait forever: the timeout every wrapper passes unless given one.
+pub const FOREVER: u64 = u64::MAX;
+
 /// Request and reply: sends `request` (up to 256 bytes) on `endpoint` with
 /// a send-only capability on `reply` (needs `SEND | RECEIVE`, and nothing
 /// pending on it) attached, then waits for the first event on `reply`. The
@@ -176,6 +184,19 @@ pub fn call_reply(
     request: &[u8],
     reply: Handle,
     buf: &mut [u8],
+) -> Result<Received, Error> {
+    call_timeout(endpoint, request, reply, buf, FOREVER)
+}
+
+/// [`call_reply`] that gives up after `micros` microseconds (rounded up to
+/// the 10 ms tick, plus one) with [`Error::TimedOut`]; a request no server
+/// has taken by then is withdrawn. 0 does not wait.
+pub fn call_timeout(
+    endpoint: Handle,
+    request: &[u8],
+    reply: Handle,
+    buf: &mut [u8],
+    micros: u64,
 ) -> Result<Received, Error> {
     if request.len() > buf.len() {
         return Err(Error::TooLarge);
@@ -187,7 +208,7 @@ pub fn call_reply(
         request.len() as u64,
         reply,
         buf.len() as u64,
-        0,
+        micros,
     ];
     call(number::CALL, args).map(Received::decode)
 }
@@ -218,8 +239,27 @@ impl Received {
 /// Receives on `endpoint`: pending notification bits first, else a
 /// message into `buf`, waiting if neither is there.
 pub fn receive(endpoint: Handle, buf: &mut [u8]) -> Result<Received, Error> {
-    let args = [endpoint, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0, 0];
+    receive_timeout(endpoint, buf, FOREVER)
+}
+
+/// [`receive`] that gives up after `micros` microseconds with
+/// [`Error::TimedOut`]; 0 does not wait.
+pub fn receive_timeout(endpoint: Handle, buf: &mut [u8], micros: u64) -> Result<Received, Error> {
+    let args = [
+        endpoint,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        micros,
+        0,
+        0,
+    ];
     call(number::RECEIVE, args).map(Received::decode)
+}
+
+/// Sleeps for at least `micros` microseconds (rounded up to the 10 ms tick,
+/// plus one); 0 returns at once.
+pub fn sleep(micros: u64) {
+    call(number::SLEEP, [micros, 0, 0, 0, 0, 0]).ok();
 }
 
 /// Creates an endpoint; the handle has `SEND`, `RECEIVE`, and `GRANT`.
@@ -376,7 +416,13 @@ pub fn irq_create(device: Handle, entry: u16) -> Result<Handle, Error> {
 /// Waits for an interrupt (needs `WAIT`); returns how many arrived since
 /// the last wait (at least 1).
 pub fn irq_wait(interrupt: Handle) -> Result<u64, Error> {
-    call(number::IRQ_WAIT, [interrupt, 0, 0, 0, 0, 0])
+    irq_wait_timeout(interrupt, FOREVER)
+}
+
+/// [`irq_wait`] that gives up after `micros` microseconds with
+/// [`Error::TimedOut`], leaving the count for the next wait.
+pub fn irq_wait_timeout(interrupt: Handle, micros: u64) -> Result<u64, Error> {
+    call(number::IRQ_WAIT, [interrupt, micros, 0, 0, 0, 0])
 }
 
 /// Maps `len` bytes (rounded up to whole pages) of zeroed memory and
@@ -422,7 +468,7 @@ mod tests {
 
     #[test]
     fn error_codes_round_trip() {
-        for code in 1..=12 {
+        for code in 1..=13 {
             assert_eq!(Error::from_code(code).code(), code);
         }
         assert_eq!(result((0, 42)), Ok(42));

@@ -12,7 +12,9 @@
 #![no_main]
 
 use pharos_programs::virtio;
-use pharos_user::{Error, debug_write, delete, irq_create, irq_wait, receive, revoke};
+use pharos_user::{
+    Error, debug_write, delete, irq_create, irq_wait, irq_wait_timeout, receive, revoke,
+};
 
 pharos_user::entry!(main);
 
@@ -65,6 +67,18 @@ fn main(_: u64) -> u64 {
     match virtio::Blk::init(DEVICE, 0, BASE) {
         Ok(mut blk) => {
             report(&mut f, "virtio-blk set up", true);
+            // Nothing submitted, so no interrupt: both waits time out, and
+            // the blocking wait below still works (the waiter was cleared).
+            report(
+                &mut f,
+                "nothing submitted: irq_wait times out after 30 ms",
+                irq_wait_timeout(irq, 30_000) == Err(Error::TimedOut),
+            );
+            report(
+                &mut f,
+                "irq_wait with timeout 0 does not block",
+                irq_wait_timeout(irq, 0) == Err(Error::TimedOut),
+            );
             let submitted = blk.submit(0, virtio::SECTOR).is_ok();
             report(
                 &mut f,

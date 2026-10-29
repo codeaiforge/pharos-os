@@ -90,7 +90,7 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
 | 10 | `mmio_map` | device, BAR index, offset in BAR, length, user address | 0 | device, `MAP` |
 | 11 | `dma_alloc` | device, pages (1–16), user address | physical address of the first page | device, `MAP` |
 | 12 | `irq_create` | device, MSI-X entry index | new interrupt handle | device, `IRQ` |
-| 13 | `irq_wait` | interrupt handle | interrupts since the last wait (≥ 1) | interrupt, `WAIT` |
+| 13 | `irq_wait` | interrupt handle, timeout (since M3.0, [user-environment.md](user-environment.md#timeouts)) | interrupts since the last wait (≥ 1) | interrupt, `WAIT` |
 
 **New error code:** `9 IN_USE` (the address is already mapped, the MSI-X entry is already taken, or another thread is waiting).
 

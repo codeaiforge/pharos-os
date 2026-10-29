@@ -46,7 +46,7 @@ Nothing here adds `unsafe` code.
 | 15 | `spawn` | file, argument, capability array, count (≤ 8; since M3.0 bits 32–63 carry the child's page limit, [user-environment.md](user-environment.md#user-memory)), endpoint (0 = none), bit | new process handle | file `READ`; each passed capability `GRANT`; endpoint `RECEIVE` |
 | 16 | `process_status` | process | 0 while running, else how it ended | process `WAIT` |
 | 17 | `irq_notify` | interrupt, endpoint, bit (0–31) | 0 | interrupt `WAIT`; endpoint `RECEIVE` |
-| 18 | `call` | endpoint, buffer, length (≤ 256), reply endpoint, maximum reply length | as `receive` | endpoint `SEND`; reply `SEND`, `RECEIVE` |
+| 18 | `call` | endpoint, buffer, length (≤ 256), reply endpoint, maximum reply length, timeout (since M3.0, [user-environment.md](user-environment.md#timeouts)) | as `receive` | endpoint `SEND`; reply `SEND`, `RECEIVE` |
 
 `send` (3) gains a flags argument (the sixth): bit 0 makes it non-blocking ([networking.md](networking.md#ipc-additions-kernel)).
 

@@ -191,6 +191,7 @@ programs! {
          mov edi, 2
          mov rsi, r13
          mov edx, 256
+         mov r10, -1
          syscall
          test rax, rax
          jnz 4f
@@ -219,6 +220,7 @@ programs! {
          mov edi, 1
          mov rsi, r13
          mov edx, 256
+         mov r10, -1
          syscall
          test rax, rax
          jnz 4f

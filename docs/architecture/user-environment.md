@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-29 (issue #73). It follows [D-016](../project/decision-log.md#d-016-user-execution-environment-simd-state-user-memory-and-timeouts) and item 7 of [D-017](../project/decision-log.md#d-017-writable-persistent-storage-and-audit-integrity), for [M3.0](../project/implementation-roadmap.md#m30--platform-prerequisites-for-hosting-agents).
-- **Implementation:** the user-program build and vector state are **implemented** (#74: `kernel/src/arch/x86_64/fpu.rs`, the context switch, `pharos-user`'s memory functions and probes, `libm`; tested by `vector_state` and `vector_state_avx`). So is user memory (#75: `process::UserMemory`, `mem_map`/`mem_unmap` in `kernel/src/syscall.rs`, the limit in `spawn`, `pharos_user::{mem_map, mem_unmap, spawn_limited}` and the size-class heap; tested by `user_memory` with the `memprobe` program). **Planned:** timeouts (#76), shared memory (#80), and the large-file test (#78).
+- **Implementation:** the user-program build and vector state are **implemented** (#74: `kernel/src/arch/x86_64/fpu.rs`, the context switch, `pharos-user`'s memory functions and probes, `libm`; tested by `vector_state` and `vector_state_avx`). So is user memory (#75: `process::UserMemory`, `mem_map`/`mem_unmap` in `kernel/src/syscall.rs`, the limit in `spawn`, `pharos_user::{mem_map, mem_unmap, spawn_limited}` and the size-class heap; tested by `user_memory` with the `memprobe` program). So are timeouts (#76: `sched::deadline` and `sched::block_until` with expiry in the timer tick, `Endpoint::remove_receiver` and `remove_sender`, `irq::Vectors::cancel`, `sleep`, `pharos_user::{receive_timeout, call_timeout, irq_wait_timeout, sleep}`; tested by `timeouts` with the `timeprobe` program, and in `device_irq`). **Planned:** shared memory (#80), and the large-file test (#78).
 
 ## 2. Context
 
@@ -70,7 +70,8 @@ M3.1 chose an inference engine that needs, from Pharos: floating point and SIMD 
 - **Resolution:** the deadline is converted to timer ticks (10 ms) and rounded up, plus one tick, so no wait ends early; a timeout that would overflow is treated as forever.
 - **No lost messages:** expiry is handled in the timer interrupt with interrupts off. If a message was delivered to the waiting thread before expiry, the call returns it; if not, the thread is removed from the endpoint's queue and gets `TIMED_OUT`, and a message sent later stays queued (or the sender blocks) for the next receiver. A reply to a `call` that timed out meets the one-shot reply capability, already revoked, and the server gets `REVOKED`.
 - **`irq_wait`:** a timeout leaves the interrupt's count untouched; the next wait returns it.
-- **`sleep`** uses the scheduler's sleeping queue, with the same rounding.
+- **`sleep`** uses the scheduler's sleeping queue, with the same rounding; `sleep(0)` returns at once.
+- **Implementation note (#76):** the timer tick makes an expired waiter ready and marks it timed out; the waiter itself then leaves the endpoint's queue when it runs, still with interrupts off. A message or interrupt that reached it between the deadline and that moment is returned instead of `TIMED_OUT`, so nothing is lost. A `call` whose request no server took is withdrawn from the server's queue (with any capability in it).
 
 ### Shared memory (D-017 item 7)
 

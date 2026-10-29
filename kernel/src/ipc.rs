@@ -36,12 +36,14 @@ pub struct Message {
     pub badge: u32,
 }
 
-/// What a receive got: a message, or pending notification bits.
+/// What a receive got: a message, pending notification bits, or nothing
+/// before the deadline.
 // Returned once and consumed at once; boxing would allocate per message.
 #[allow(clippy::large_enum_variant)]
 pub enum Received {
     Message(Message),
     Notification(u32),
+    TimedOut,
 }
 
 impl Message {
@@ -142,6 +144,22 @@ impl Endpoint {
         queues.senders.is_empty() && queues.notifications == 0
     }
 
+    /// Takes `receiver` out of the receiver queue (its wait timed out);
+    /// false if it is not there (a sender or a signal took it first).
+    pub fn remove_receiver(&self, receiver: TaskId) -> bool {
+        let mut queues = self.queues.lock();
+        let at = queues.receivers.iter().position(|&r| r == receiver);
+        at.map(|at| queues.receivers.remove(at)).is_some()
+    }
+
+    /// Takes `sender` and its message out of the sender queue (its wait
+    /// timed out); `None` if a receiver took the message first.
+    pub fn remove_sender(&self, sender: TaskId) -> Option<Message> {
+        let mut queues = self.queues.lock();
+        let at = queues.senders.iter().position(|(s, _)| *s == sender)?;
+        queues.senders.remove(at).map(|(_, message)| message)
+    }
+
     /// Threads waiting, `(senders, receivers)`.
     pub fn waiting(&self) -> (usize, usize) {
         let queues = self.queues.lock();
@@ -196,11 +214,34 @@ mod kernel {
         }
     }
 
+    /// After a receive-side wait on `endpoint` ended (`woken` false: at the
+    /// deadline): a message in the inbox wins, even one that arrived after
+    /// the deadline; else, if this thread is still queued, it leaves the
+    /// queue and the wait timed out; else a signal took it, and the bits
+    /// are on the endpoint. Interrupts are off, so nothing changes between
+    /// these checks.
+    fn finish_wait(endpoint: &Endpoint, me: TaskId, woken: bool) -> Option<Received> {
+        if let Some(message) = process::current()?.inbox.lock().take() {
+            return Some(Received::Message(message));
+        }
+        if !woken && endpoint.remove_receiver(me) {
+            return Some(Received::TimedOut);
+        }
+        Some(Received::Notification(endpoint.take_notifications()))
+    }
+
     /// Request and reply (networking.md): registers the running thread as
     /// a receiver on `reply` (which must be idle) before the request is
     /// delivered, so a reply can never come too early; sends `message` on
-    /// `endpoint`; then waits for the first event on `reply`.
-    pub fn call(endpoint: &Endpoint, message: Message, reply: &Endpoint) -> Option<Received> {
+    /// `endpoint`; then waits for the first event on `reply`. Both waits
+    /// end at tick `deadline` (`None`: never); a request not yet taken by
+    /// then is withdrawn.
+    pub fn call(
+        endpoint: &Endpoint,
+        message: Message,
+        reply: &Endpoint,
+        deadline: Option<u64>,
+    ) -> Option<Received> {
         let me = sched::current_id().unwrap_or(0);
         if let Some(taken) = reply.take(me) {
             // The caller checked `reply` is idle, with interrupts off since.
@@ -212,22 +253,32 @@ mod kernel {
                 }
             });
         }
-        send(endpoint, message);
-        let inbox = || process::current().and_then(|p| p.inbox.lock().take());
-        if let Some(message) = inbox() {
+        match endpoint.offer(me, message) {
+            Some((receiver, message)) => {
+                if let Some(process) = process::by_id(receiver) {
+                    *process.inbox.lock() = Some(message);
+                }
+                sched::wake(receiver);
+            }
+            None => {
+                let woken = sched::block_until(deadline);
+                if !woken && endpoint.remove_sender(me).is_some() {
+                    reply.remove_receiver(me);
+                    return Some(Received::TimedOut);
+                }
+            }
+        }
+        if let Some(message) = process::current()?.inbox.lock().take() {
             return Some(Received::Message(message));
         }
-        sched::block_current();
-        match inbox() {
-            Some(message) => Some(Received::Message(message)),
-            None => Some(Received::Notification(reply.take_notifications())),
-        }
+        let woken = sched::block_until(deadline);
+        finish_wait(reply, me, woken)
     }
 
     /// Receives the next event on `endpoint` for the running thread:
     /// pending notification bits, else a message, waiting if neither is
-    /// there.
-    pub fn receive(endpoint: &Endpoint) -> Option<Received> {
+    /// there, until tick `deadline` (`None`: forever).
+    pub fn receive(endpoint: &Endpoint, deadline: Option<u64>) -> Option<Received> {
         let me = sched::current_id().unwrap_or(0);
         match endpoint.take(me) {
             Some(Taken::Notification(bits)) => Some(Received::Notification(bits)),
@@ -238,11 +289,8 @@ mod kernel {
             None => {
                 // A sender puts the message in our inbox, then wakes us; a
                 // signal wakes us with the bits left on the endpoint.
-                sched::block_current();
-                if let Some(message) = process::current()?.inbox.lock().take() {
-                    return Some(Received::Message(message));
-                }
-                Some(Received::Notification(endpoint.take_notifications()))
+                let woken = sched::block_until(deadline);
+                finish_wait(endpoint, me, woken)
             }
         }
     }
@@ -358,6 +406,22 @@ mod tests {
             e.try_take().map(|(s, m)| (s, m.bytes()[0])),
             Some((4, b'r'))
         );
+    }
+
+    #[test]
+    fn timed_out_waiters_leave_their_queue_only_if_still_there() {
+        let e = Endpoint::new();
+        assert!(e.take(4).is_none());
+        assert!(e.take(5).is_none());
+        assert!(e.remove_receiver(4));
+        assert!(!e.remove_receiver(4), "gone already");
+        assert_eq!(e.offer(1, message(1)).unwrap().0, 5, "5 keeps its place");
+        assert!(e.offer(2, message(b'a')).is_none());
+        assert!(e.offer(3, message(b'b')).is_none());
+        assert_eq!(e.remove_sender(2).map(|m| m.bytes()[0]), Some(b'a'));
+        assert!(e.remove_sender(2).is_none(), "withdrawn once");
+        assert_eq!(sender_of(e.take(9)).0, 3);
+        assert!(e.remove_sender(3).is_none(), "taken by a receiver first");
     }
 
     #[test]

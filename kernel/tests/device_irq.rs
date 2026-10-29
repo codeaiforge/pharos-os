@@ -30,13 +30,15 @@ fn free_frames() -> usize {
 }
 
 /// Steps `irqprobe` must report as passed.
-const STEPS: [&str; 13] = [
+const STEPS: [&str; 15] = [
     "no IRQ right: MISSING_RIGHT",
     "entry past the table: NOT_FOUND",
     "irq_create entry 0",
     "entry taken: IN_USE",
     "waiting on a device handle: MISSING_RIGHT",
     "virtio-blk set up",
+    "nothing submitted: irq_wait times out after 30 ms",
+    "irq_wait with timeout 0 does not block",
     "irq_wait wakes on the completion interrupt",
     "read completed",
     "sector 0 starts with the filesystem magic",

@@ -331,7 +331,7 @@ fn run(t: &mut TestRun) {
         case(
             "receive it as handle 2",
             number::RECEIVE,
-            [1, BUF, 64, 0],
+            [1, BUF, 64, u64::MAX],
             Ok(4 | 2 << 32),
         ),
         case(

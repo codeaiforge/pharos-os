@@ -223,7 +223,7 @@ fn run(t: &mut TestRun) {
         Call(
             "granter: receive the first ack",
             RECEIVE,
-            [2, b(0), 256, 0, 0],
+            [2, b(0), 256, u64::MAX, 0],
             Ok(4),
         ),
         Call(
@@ -236,7 +236,7 @@ fn run(t: &mut TestRun) {
         Call(
             "granter: receive the second ack",
             RECEIVE,
-            [2, b(0x100), 256, 0, 0],
+            [2, b(0x100), 256, u64::MAX, 0],
             Ok(4),
         ),
         Call(
@@ -256,7 +256,7 @@ fn run(t: &mut TestRun) {
         Call(
             "receiver: receive message and capability (handle 3)",
             RECEIVE,
-            [1, b(0), 256, 0, 0],
+            [1, b(0), 256, u64::MAX, 0],
             Ok(9 | 3 << 32),
         ),
         Call(
@@ -280,7 +280,7 @@ fn run(t: &mut TestRun) {
         Call(
             "receiver: receive 'revoked'",
             RECEIVE,
-            [1, b(0x100), 256, 0, 0],
+            [1, b(0x100), 256, u64::MAX, 0],
             Ok(7),
         ),
         Call(
@@ -298,7 +298,7 @@ fn run(t: &mut TestRun) {
         Call(
             "receiver: a 4-byte buffer gets 4 bytes, the value the full 10",
             RECEIVE,
-            [1, b(0x200), 4, 0, 0],
+            [1, b(0x200), 4, u64::MAX, 0],
             Ok(10),
         ),
         Call(
@@ -316,7 +316,7 @@ fn run(t: &mut TestRun) {
         Call(
             "receiver: no RECEIVE on a send-only endpoint",
             RECEIVE,
-            [2, b(0), 16, 0, 0],
+            [2, b(0), 16, u64::MAX, 0],
             Err(Error::MissingRight),
         ),
         Call(
@@ -328,19 +328,19 @@ fn run(t: &mut TestRun) {
         Call(
             "receiver: kernel receive buffer",
             RECEIVE,
-            [1, 0xffff_8000_0000_0000, 16, 0, 0],
+            [1, 0xffff_8000_0000_0000, 16, u64::MAX, 0],
             Err(Error::BadAddress),
         ),
         Call(
             "receiver: read-only receive buffer",
             RECEIVE,
-            [1, USER_BASE, 16, 0, 0],
+            [1, USER_BASE, 16, u64::MAX, 0],
             Err(Error::BadAddress),
         ),
         Call(
             "receiver: unknown handle",
             RECEIVE,
-            [5, b(0), 16, 0, 0],
+            [5, b(0), 16, u64::MAX, 0],
             Err(Error::InvalidHandle),
         ),
     ];
