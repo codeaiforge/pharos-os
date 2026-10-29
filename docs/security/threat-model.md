@@ -177,7 +177,7 @@ Everything below is **planned**; none of it is implemented.
 | --- | --- | --- |
 | Agent escalates privileges or escapes its sandbox | Kernel-enforced isolation; capability-only access; no ambient authority | M2.7, M3.4 |
 | Prompt injection causes harmful tool use | Model output treated as untrusted; per-tool capabilities; user confirmation for sensitive actions; audit log | M3.4, M3.6 |
-| Inference runtime exploit via model file | Runtime runs unprivileged and sandboxed; model integrity checks; memory limits (M3.0) | M3.2, M3.4 |
+| Inference runtime exploit via model file | Runtime runs unprivileged and sandboxed; model integrity checks; memory limits (M3.0). Chosen in M3.1 (D-010): our own engine in safe Rust with no dependencies, whose GGUF parser checks every count, length, offset, and tensor shape before use and is fuzzed (20,000 files, host); models pinned by SHA-256 and repository revision; tokenizer strings and model output treated as untrusted data | M3.2, M3.4 |
 | Resource exhaustion by an agent | Per-agent CPU, memory, storage, and network quotas | M3.5 |
 | Agent data exfiltration over network | Default-deny networking; per-destination grants; logging | M3.4 |
 | Kernel memory-safety bug | Safe Rust by default; reviewed `unsafe`; fuzzing of syscall interfaces | M2.2 onward |

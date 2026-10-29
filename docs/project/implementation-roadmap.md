@@ -322,6 +322,13 @@ Ordering notes:
   - timeouts and cancellation: `receive`, `call`, and `irq_wait` with a deadline, and a user-space sleep (D-016);
   - writable persistent storage: virtio-blk writes and a crash-consistent store for durable state, large files (model files), and append-only records (D-017);
   - QEMU runs with enough memory for the M3.1 target model.
+  - **Targets set by M3.1 (#70, D-010, D-011):**
+    - guest memory 2 GiB for inference runs (other test kernels keep 256 MiB);
+    - user programs built for a target with SSE2 enabled (today's `x86_64-unknown-none` has no SSE, so floating point runs in software), and the kernel saving SSE state, and AVX state when AVX2 is used (D-016);
+    - a process may hold up to 1 GiB (the inference service; measured peak 662 MiB on the host);
+    - a 700 MB model file (Qwen2.5-0.5B-Instruct q8_0, 676 MB) read from disk into one process;
+    - no threads and no `mmap`: the engine is single-threaded and borrows weights from the file in memory;
+    - the math functions the engine needs (`sqrt`, `exp`, `sin`, `cos`, `powf`) provided in user space (D-016).
 - **Prerequisites:** Phase 2 gate; D-016 and D-017 Accepted.
 - **Acceptance criteria:**
   - a user program uses SIMD, and a test shows another process never sees its register state;
@@ -631,7 +638,7 @@ Ordering notes:
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020 on 2026-10-29; D-012 has a recorded direction; D-018 is proposed; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, and D-011 (requirements part) on 2026-10-29; D-012 has a recorded direction; D-018 is proposed; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -644,8 +651,8 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-007 | Filesystem and persistent storage | M2.8 | **Accepted:** read-only RAM disk from a Limine module; small custom format with CRC-32 checksums, one safe `no_std` parser for kernel and host; in the kernel for now, files through capabilities only |
 | D-008 | Driver strategy | M2.9 | **Accepted:** user-space drivers with device, interrupt, MMIO, and DMA capabilities; virtio-blk only in M2.9; PCI through config ports, MSI-X; no IOMMU yet (tracked limit) |
 | D-009 | QEMU automation and debugging | M2.3 | **Accepted:** status 33 + serial marker, 60 s timeout, test kernels via Cargo runner and `cargo xtask test` |
-| D-010 | Inference runtime, model formats, licensing | M3.1 | Licenses, memory safety, performance, portability |
-| D-011 | CPU/GPU support, memory/VRAM | M3.1, M3.2 | Hardware requirements, driver availability |
+| D-010 | Inference runtime, model formats, licensing | M3.1 | **Accepted:** our own `no_std` engine on Pharos; GGUF with Q8_0; Qwen2.5-0.5B-Instruct q8_0 for S1; llama.cpp host-only reference; deterministic output required |
+| D-011 | CPU/GPU support, memory/VRAM | M3.1, M3.2 | **Requirements accepted:** CPU only; SSE2 required, AVX2 used when present; 1 GiB for the inference service, 2 GiB guest; no threads. Implementation part at M3.2 |
 | D-015 | Network stack and service model | M2.10 | **Accepted:** own minimal stack (Ethernet, ARP, IPv4, ICMP echo, UDP; no TCP) inside the virtio-net driver's process; badged capabilities as network capabilities (amended, #59); static slirp addresses; the kernel starts `init`, which starts services |
 | D-014 | IPC model and system-call mechanism | M2.7 | **Accepted:** `syscall`/`sysret`; synchronous endpoints, 256-byte messages plus one capability, bounded per-thread buffers |
 | D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | **Direction:** kernel-enforced capabilities (per-process handle tables, rights, grant over IPC, revocation), policy in user space; final at M3.4 |

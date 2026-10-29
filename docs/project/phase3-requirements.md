@@ -91,9 +91,9 @@ Candidates for the evaluation (#69), not choices. Licenses and use restrictions 
 
 No model is trained in Phase 3. Engines are checked by comparing outputs with an established engine on the same model.
 
-## Provisional targets for M3.0
+## Targets for M3.0
 
-To be confirmed by #69 and #70, which record the final values in the roadmap:
+Provisional here; the final values were set by #70 (D-010, D-011) and are recorded in the [roadmap](implementation-roadmap.md#m30--platform-prerequisites-for-hosting-agents). They differ in two places, both tightened by measurement: the inference service's limit is 1 GiB, not 1.5 GB (measured peak 662 MiB), and the largest model file is 700 MB, not 1 GB (the chosen model is 676 MB).
 
 | M3.0 item | Provisional target | Source |
 | --- | --- | --- |

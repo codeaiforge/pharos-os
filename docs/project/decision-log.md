@@ -573,14 +573,11 @@ Two system calls per direction plus two task switches and two address-space swit
 
 5. **Consequence for M3.0:** it is on the critical path from M3.2 onward. M3.2's engine crate can be built and host-tested in parallel with M3.0, but nothing in M3.2–M3.8 is done until it runs on Pharos.
 
-## Open and proposed decisions
-
-Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
-
 ### D-010: AI inference runtime, model formats, and licensing
 
-- **Status:** Open
+- **Status:** Accepted
 - **Needed by:** M3.1
+- **Date accepted:** 2026-10-29 (issue #70)
 
 **Context.** The inference runtime is large and complex; where and how it runs dominates the security design.
 
@@ -588,14 +585,40 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 **Evaluation criteria.** Runtime license and model licenses (including use restrictions); memory safety and attack surface; CPU performance; portability to Pharos and its effort; deterministic output (replayable inference records); supply-chain verifiability of model files.
 
+**Evidence.** [inference-evaluation.md](inference-evaluation.md) (#69): llama.cpp `b11609` measured on four GGUF models; the native spike `pharos-infer` byte-identical to llama2.c `run.c` on `stories15M`, and on Qwen2.5-0.5B-Instruct q8_0 identical to llama.cpp under one of its two attention settings for each of four prompts, at 13.7–14.6 generated tokens/s on one thread against llama.cpp's 22–23; candle dropped (it needs a full standard library, and system OpenSSL to build its examples).
+
+**Decision.**
+
+1. **Engine on Pharos: our own** (`pharos-infer`, grown in M3.2): `no_std` safe Rust, no dependencies, checked and fuzzed parsers, single-threaded, weights borrowed from the model file. It is the only candidate that runs on Pharos without a C library, threads, `mmap`, or a C++ runtime, and its whole code is reviewable.
+2. **Format: GGUF**, one file with weights, metadata, and the tokenizer; read by our checked parser. **Weights: Q8_0** first (the measured speed meets S1 with margin; the scale model fits the M3.0 memory target). Further quantization types only when memory requires them.
+3. **Models:**
+   - **Tier S (S1 on Pharos): Qwen2.5-0.5B-Instruct q8_0** (Apache-2.0, license text shipped with the model; 676 MB; SHA-256 `ca59ca7f…44e`, pinned by repository revision).
+   - **Tier T (correctness and CI):** generated tiny models in the tests, and `stories15M` (MIT) against `run.c`.
+   - **Tier H (host reference only):** Qwen2.5-1.5B-Instruct q4_k_m.
+4. **Host reference: llama.cpp** (MIT, pinned build) for output comparison and benchmarks, on the host only; never shipped or ported.
+5. **Determinism is a requirement:** the same model, prompt token IDs, and settings give the same tokens, so inference records in the audit trail (M3.4) can be replayed.
+6. **Rejected:** llama.cpp on Pharos (C/C++ trusted code and a POSIX-like environment that M3.0 excludes); candle (needs a full standard library); Llama 3.2 (use restrictions in its license); ONNX and safetensors as the primary format (GGUF already carries quantized weights and the tokenizer in one checked file).
+7. **Left to M3.2:** a GGUF tokenizer (Qwen2's byte-level BPE; prompts come as token IDs until then), batched prompt processing (needed for the 10 s first-token target: token by token, the S1 prompt takes about 16 s), and SIMD kernels. Where `exp`, `sin`, `cos`, `powf`, and `sqrt` come from on Pharos is decided with D-016.
+
+## Open and proposed decisions
+
+Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
+
 ### D-011: CPU/GPU support and memory/VRAM constraints
 
-- **Status:** Open
+- **Status:** Requirements part accepted 2026-10-29 (issue #70); implementation part open until M3.2
 - **Needed by:** M3.1 (requirements), M3.2 (implementation)
 
 **Context.** GPU acceleration on a custom OS requires drivers that may not exist; CPU-only inference limits model size. The reference host's GPU (NVIDIA GTX 1060, 6 GB) has no realistic driver path on Pharos (NVIDIA's drivers are proprietary), so the expected outcome is CPU-only on Pharos for the foreseeable future, with the GPU used for host measurements only.
 
 **Evaluation criteria.** Minimum and recommended RAM/VRAM; CPU-only viability for target models; driver availability and licensing; isolation of GPU memory between agents.
+
+**Decision (requirements part, accepted 2026-10-29).**
+
+1. **CPU only on Pharos.** No GPU support is planned; the GPU is used for host measurements only. Reconsider only if a GPU with an open, documented interface becomes a target.
+2. **CPU: x86-64 with SSE2 required, AVX2 and FMA used when present** (per the Phase 3 requirements). One CPU, as Pharos runs today.
+3. **Memory for tier S:** the model file in memory (676 MB; weights borrowed from it), a key/value cache of 24 KiB per token (24 layers × 2 × 128 values × 4 bytes; 48 MiB for 2,048 tokens), and small activations. Measured peak on the host: 662 MiB for a 233-token prompt and 128 generated tokens. **Limit for the inference service: 1 GiB; guest memory for inference runs: 2 GiB.**
+4. **Threads:** none needed (one CPU); the engine stays single-threaded, which also keeps its output deterministic.
 
 ### D-012: Agent sandboxing, tool permissions, and network isolation
 
