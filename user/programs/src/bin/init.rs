@@ -16,7 +16,7 @@
 use pharos_user::rights::{CONFIG, IRQ, MAP, RECEIVE, SEND, WRITE};
 use pharos_user::{
     Error, Grant, Handle, Received, Status, config_read, debug_write, endpoint_create, open,
-    process_status, receive, send, spawn,
+    process_status, receive, send, spawn_limited,
 };
 
 pharos_user::entry!(main);
@@ -43,6 +43,11 @@ enum Cap {
     Console,
     /// The device with this PCI vendor and device ID.
     Device(u32),
+    /// The second device with this ID (the writable store disk comes after
+    /// the read-only one).
+    SecondDevice(u32),
+    /// The storage service's endpoint, to receive on (the service itself).
+    StoreService,
     /// `init`'s endpoint, badged with the service's number (daemons).
     Report,
     /// The network service's endpoint, to receive on (the service itself).
@@ -60,6 +65,8 @@ struct Service {
     caps: &'static [Cap],
     /// Indexes of services that must have succeeded first.
     after: &'static [usize],
+    /// Pages it may `mem_map` (0: none).
+    limit: u32,
 }
 
 const NET: Service = Service {
@@ -74,7 +81,11 @@ const NET: Service = Service {
         Cap::Report,
     ],
     after: &[],
+    limit: 0,
 };
+
+/// 1 GiB: model files are read through shared buffers (#78).
+const STORE_LIMIT: u32 = 1 << 18;
 
 const BOOT: &[Service] = &[
     Service {
@@ -84,8 +95,23 @@ const BOOT: &[Service] = &[
         kind: Kind::OneShot,
         caps: &[Cap::Console, Cap::Device(VIRTIO_BLK)],
         after: &[],
+        limit: 0,
     },
     NET,
+    Service {
+        name: "store",
+        path: b"bin/store",
+        arg: 0,
+        kind: Kind::Daemon,
+        caps: &[
+            Cap::Console,
+            Cap::SecondDevice(VIRTIO_BLK),
+            Cap::StoreService,
+            Cap::Report,
+        ],
+        after: &[],
+        limit: STORE_LIMIT,
+    },
 ];
 
 const NETWORK: &[Service] = &[
@@ -97,6 +123,7 @@ const NETWORK: &[Service] = &[
         kind: Kind::Daemon,
         caps: &[Cap::Console, Cap::Network(40001), Cap::Report],
         after: &[0],
+        limit: 0,
     },
     Service {
         name: "sender",
@@ -105,6 +132,7 @@ const NETWORK: &[Service] = &[
         kind: Kind::OneShot,
         caps: &[Cap::Console, Cap::Network(40000)],
         after: &[1],
+        limit: 0,
     },
     Service {
         name: "unbadged",
@@ -113,6 +141,7 @@ const NETWORK: &[Service] = &[
         kind: Kind::OneShot,
         caps: &[Cap::Console, Cap::Network(0)],
         after: &[0],
+        limit: 0,
     },
 ];
 
@@ -124,6 +153,7 @@ const TEST: &[Service] = &[
         kind: Kind::OneShot,
         caps: &[Cap::Console],
         after: &[],
+        limit: 0,
     },
     Service {
         name: "daemon",
@@ -132,6 +162,7 @@ const TEST: &[Service] = &[
         kind: Kind::Daemon,
         caps: &[Cap::Console, Cap::Report],
         after: &[0],
+        limit: 0,
     },
     Service {
         name: "crasher",
@@ -140,6 +171,7 @@ const TEST: &[Service] = &[
         kind: Kind::OneShot,
         caps: &[Cap::Console],
         after: &[],
+        limit: 0,
     },
     Service {
         name: "after-crasher",
@@ -148,6 +180,7 @@ const TEST: &[Service] = &[
         kind: Kind::OneShot,
         caps: &[Cap::Console],
         after: &[2],
+        limit: 0,
     },
     Service {
         name: "independent",
@@ -156,6 +189,7 @@ const TEST: &[Service] = &[
         kind: Kind::OneShot,
         caps: &[Cap::Console],
         after: &[],
+        limit: 0,
     },
     Service {
         name: "missing",
@@ -164,6 +198,7 @@ const TEST: &[Service] = &[
         kind: Kind::OneShot,
         caps: &[Cap::Console],
         after: &[],
+        limit: 0,
     },
     Service {
         name: "virtio-blk",
@@ -172,6 +207,7 @@ const TEST: &[Service] = &[
         kind: Kind::OneShot,
         caps: &[Cap::Console, Cap::Device(VIRTIO_BLK)],
         after: &[],
+        limit: 0,
     },
 ];
 
@@ -260,7 +296,8 @@ fn main(arg: u64) -> u64 {
         2 => NETWORK,
         _ => &[],
     };
-    let (Ok(events), Ok(net_service)) = (endpoint_create(), endpoint_create()) else {
+    let endpoints = (endpoint_create(), endpoint_create(), endpoint_create());
+    let (Ok(events), Ok(net_service), Ok(store_service)) = endpoints else {
         let _ = debug_write(CONSOLE, b"init: cannot create an endpoint");
         return 1;
     };
@@ -306,12 +343,21 @@ fn main(arg: u64) -> u64 {
                     rights: RECEIVE,
                     badge: 0,
                 },
+                Cap::StoreService => Grant {
+                    handle: store_service,
+                    rights: RECEIVE,
+                    badge: 0,
+                },
                 Cap::Network(port) => Grant {
                     handle: net_service,
                     rights: SEND,
                     badge: u32::from(*port),
                 },
-                Cap::Device(id) => match devices[..device_count].iter().find(|d| d.1 == *id) {
+                Cap::Device(id) | Cap::SecondDevice(id) => match devices[..device_count]
+                    .iter()
+                    .filter(|d| d.1 == *id)
+                    .nth(usize::from(matches!(cap, Cap::SecondDevice(_))))
+                {
                     Some(&(handle, _)) => Grant {
                         handle,
                         rights: MAP | CONFIG | IRQ,
@@ -330,7 +376,8 @@ fn main(arg: u64) -> u64 {
             continue;
         }
         let caps = &grants[..service.caps.len().min(8)];
-        let process = match spawn(file, service.arg, caps, Some((events, i as u32))) {
+        let notify = Some((events, i as u32));
+        let process = match spawn_limited(file, service.arg, caps, notify, service.limit) {
             Ok(process) => process,
             Err(e) => {
                 say(service.name, "spawn failed, error", Some(e.code()));

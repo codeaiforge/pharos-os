@@ -38,6 +38,7 @@ version = "0.2.0"
 dependencies = [
  "libm",
  "pharos-fs",
+ "pharos-store",
  "pharos-user",
 ]
 

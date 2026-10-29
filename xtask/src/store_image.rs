@@ -69,6 +69,13 @@ impl Device for FileDevice {
     }
 }
 
+/// Writes an empty, formatted store of `blocks` blocks at `path`.
+pub fn fresh(path: &Path, blocks: u64) -> Result<()> {
+    Store::format(FileDevice::create(path, blocks)?)
+        .map(drop)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Regular files under `dir` as (store path, host path), sorted. Links and
 /// special files are refused, as for `fs build`.
 fn files(dir: &Path, prefix: &str, out: &mut Vec<(String, std::path::PathBuf)>) -> Result<()> {

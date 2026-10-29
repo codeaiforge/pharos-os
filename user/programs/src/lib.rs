@@ -4,5 +4,6 @@
 
 pub mod fp;
 pub mod net;
+pub mod store_proto;
 pub mod virtio;
 pub mod virtio_net;

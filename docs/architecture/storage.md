@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-- **Part 8 (writable store, M3.0):** **Accepted**: approved by the maintainer on 2026-10-29 (#73); follows [D-017](../project/decision-log.md#d-017-writable-persistent-storage-and-audit-integrity). The format crate and host tool are **implemented** (#77, part 1: `crates/pharos-store`, `cargo xtask store build` and `store ls`). **Planned:** the storage service, virtio-blk writes, the second disk, and the crash-injection test (#77, after shared memory #80). Parts 1–7 below describe the read-only format and are unchanged.
+- **Part 8 (writable store, M3.0):** **Accepted**: approved by the maintainer on 2026-10-29 (#73); follows [D-017](../project/decision-log.md#d-017-writable-persistent-storage-and-audit-integrity). **Implemented** (#77): the format crate and host tool (`crates/pharos-store`, `cargo xtask store build` and `store ls`), virtio-blk writes and flushes (`virtio::Blk::write`, `flush`, `init_flushing`), the storage service (`user/programs/src/bin/store.rs`, protocol in `pharos_programs::store_proto`, started by `init` at boot), the second, writable disk (`store.img`), and the tests (`store`, and crash injection in `store_crash`). Where the implementation differs from the approved text, it says so below. Parts 1–7 below describe the read-only format and are unchanged.
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.8, #44). It follows [D-007](../project/decision-log.md#d-007-filesystem-and-persistent-storage) (read-only RAM disk, custom checked format, files through capabilities).
 - **Implementation:** the image format, parser, and host tool are **implemented** (#45: `crates/pharos-fs`, `cargo xtask fs build` and `fs ls`). So is the RAM disk (#46: the Limine module request, `storage::record_modules` and `storage::ram_disk`, the slice from `mm::raw::module_bytes`, and the modules in the boot image). So is the kernel filesystem (#47: `fs::mount`, and `fs::mount_root` at boot). So are file capabilities with the `open` and `read` system calls (#48). Every M2.8 interface in this document is now implemented.
 
@@ -225,23 +225,28 @@ All integers are little-endian. Blocks are 4 KiB (8 virtio-blk sectors).
 
 - **Started by `init`** with the writable virtio-blk device, a console, and its endpoint; it reports ready after mounting.
 - **Clients** hold a `SEND` capability on its endpoint, badged by `init`: bits 0–15 a namespace number, bit 16 read-only. The service maps namespace numbers to path prefixes from a table in its source (reviewed code, like `init`'s service table); a client sees only paths under its prefix, given relative to it. Badge 0 and unknown namespaces are refused.
-- **Requests** (by `call`, replies non-blocking, as the network service):
+- **File data moves through one shared buffer per client** (changed in #77). The approved design passed a `Memory` capability with each `read` and `write`, but a `call` carries exactly one capability, its one-shot reply capability. So a client maps a buffer, shares it (`mem_share`), and attaches it once with a plain `send` carrying the capability and the buffer's size; the service maps it writable (replacing an earlier one) and deletes the capability. `read` and `write` then name a range of that buffer. Without a buffer, or with a range outside it, they return the new status `NO_BUFFER`.
+- **Requests** (by `call`, replies non-blocking, as the network service; little-endian fields, a path as a length byte and at most 80 bytes, relative to the namespace):
 
   | Op | Request | Reply |
   | --- | --- | --- |
-  | 1 `stat` | path | status, kind, length |
-  | 2 `read` | path, offset, length, plus a `Memory` capability with `WRITE` (a shared buffer) | status, bytes copied into the buffer |
-  | 3 `write` | path, length, plus a `Memory` capability with `READ` holding the content | status (the file is replaced atomically) |
-  | 4 `append` | stream path, record (≤ 200 bytes inline; larger in a shared buffer) | status, record number, chain head |
-  | 5 `list` | path prefix, start index | status, up to a message of names |
+  | 1 `stat` | path | status, kind (u8), length (u64), records (u64) |
+  | 2 `read` | path, file offset, length, buffer offset (u64 each) | status, bytes copied into the buffer (u64) |
+  | 3 `write` | path, length, buffer offset | status (the file is replaced atomically) |
+  | 4 `append` | stream path, record (1–200 bytes, inline; larger records later, when a client needs them) | status, record number (u64), chain head (32 bytes) |
+  | 5 `list` | path prefix (may be empty), start index (u32) | status, count (u8), more (u8), then each name as a length byte and bytes |
   | 6 `delete` | path | status |
+  | 7 `attach` (a `send`) | buffer size (u64), with the `Memory` capability (`READ` and `WRITE`) | none |
+  | 8 `buffer` | — | status, attached buffer size (u64; 0 if none) |
 
-  Status codes: 0 OK, 1 BAD_REQUEST, 2 NOT_FOUND, 3 NO_SPACE, 4 READ_ONLY, 5 NO_ACCESS, 6 IO_ERROR, 7 CORRUPT.
+  Status codes: 0 OK, 1 BAD_REQUEST, 2 NOT_FOUND, 3 NO_SPACE, 4 READ_ONLY, 5 NO_ACCESS, 6 IO_ERROR, 7 CORRUPT, 8 NO_BUFFER.
+- **Namespaces** (the table in `store_proto`): 1 `test`, 2 `spare`, 3 `models`, 4 `crash`. `init` does not give clients store capabilities yet; the first is the inference service (M3.2). It starts the service with a 1 GiB page limit, for model-file buffers (#78).
+- **Streaming:** `read` and `write` move data a block at a time between the disk and the buffer (`Store::read_with`, `write_with`), so a file never has to fit in the service's memory. A whole-file `read` checks the CRC-32 at the end and returns `CORRUPT` after copying, so the client must not use the bytes then.
 - **One commit at a time**; each write, append, or delete is its own commit (batching later, if measured to matter).
 
 ### QEMU
 
-`cargo xtask` attaches a second virtio-blk disk, writable, from a fresh image under `target/xtask/` for each run (built with `store build`); the existing read-only `disk.img` stays for the M2.9 tests. `init` finds devices in PCI order, so the storage service gets the writable disk by its PCI address.
+`cargo xtask` attaches a second virtio-blk disk, writable: `store.img` next to each image, an empty, formatted store of 16 MiB (a sparse file), fresh whenever the image is built. The read-only `disk.img` stays first for the M2.9 tests. `init` takes the second virtio-blk device in PCI order for the storage service (`Cap::SecondDevice`); the driver negotiates `VIRTIO_BLK_F_FLUSH`.
 
 ### Security
 
@@ -255,7 +260,8 @@ All integers are little-endian. Blocks are 4 KiB (8 virtio-blk sectors).
 | Test | What it checks |
 | --- | --- |
 | Host, `pharos-store` | Format round trips; each corruption of a superblock, index, extent, or record detected with its error; SHA-256 against the FIPS 180-4 test vectors; allocation never reuses a block of the two newest generations; **crash consistency: the write sequence of each commit cut at every block write, including a torn last write, then mounted: the old or the new state, never a mix**; 100,000 fuzzed images that never panic |
-| Host, `xtask` | `store build` and `store ls` |
-| QEMU, `store` | The service mounts the store; files written, read back, replaced, deleted; streams appended with the chain checked; namespaces and read-only enforced; `NO_SPACE` when full |
-| QEMU, crash injection (`cargo xtask test`) | A writer test kernel is killed at random moments during writes, 20 times; after each kill a checker boot mounts the store and finds the old or the new state, checked |
+| Host, `xtask` | `store build` and `store ls`; the store disk in QEMU's arguments |
+| Host, `pharos-programs` | Every request round-trips through `store_proto`; truncated, trailing, unknown, and oversized requests refused; 100,000 random messages never panic; namespaces and joined paths (no escape) |
+| QEMU, `store` | The service mounts the store on the second disk and reports ready; a client attaches a buffer and writes, stats, reads back, partially reads, replaces, appends (record numbers and chain head checked against SHA-256), lists, and deletes; bad paths and ranges are refused; a 17 MiB write gets `NO_SPACE` with nothing written; a read-only client reads but cannot write; another namespace sees nothing; badge 0 and unknown namespaces get `NO_ACCESS` |
+| QEMU, crash injection (`store_crash`) | `cargo xtask runner` boots the crash writer 20 times on one store disk and kills QEMU at a random moment (up to 1.5 s, printed seed `PHAROS_CRASH_SEED`) after it starts writing; each boot first checks the store (a counter file and a log stream that must agree, every CRC and chain value), then a last boot checks, writes, and checks again. Killing QEMU keeps what it already gave the host, so this tests the real driver and device path under interruption; losing unflushed writes is covered by the host crash tests |
 

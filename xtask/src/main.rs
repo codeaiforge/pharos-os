@@ -524,6 +524,11 @@ fn build(paths: &Paths) -> Result<()> {
 
 /// The virtio-blk disk image written next to every ISO.
 const DISK_IMAGE: &str = "disk.img";
+/// The writable store disk written next to every ISO: an empty, formatted
+/// store (storage.md part 8), fresh for each image.
+const STORE_IMAGE: &str = "store.img";
+/// Its size in 4 KiB blocks (16 MiB, a sparse file).
+const STORE_BLOCKS: u64 = 4096;
 
 /// Contents of the test disk: the known `fs-good` filesystem image, padded
 /// to 64 KiB. Must match the virtio-blk tests (drivers.md).
@@ -537,7 +542,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 15] = [
+const USER_PROGRAMS: [&str; 17] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -553,6 +558,8 @@ const USER_PROGRAMS: [&str; 15] = [
     "memprobe",
     "timeprobe",
     "shmprobe",
+    "store",
+    "storeclient",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -716,6 +723,7 @@ fn image(
     let iso = out.join("pharos.iso");
     let disk = out.join(DISK_IMAGE);
     fs::write(&disk, disk_image()).map_err(io_err("cannot write", &disk))?;
+    store_image::fresh(&out.join(STORE_IMAGE), STORE_BLOCKS)?;
     run(
         Command::new("xorriso")
             .env("SOURCE_DATE_EPOCH", epoch.to_string())
@@ -789,6 +797,15 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
     args.extend([
         "-device".into(),
         "virtio-blk-pci,drive=disk0,disable-legacy=on".into(),
+    ]);
+    // The writable store disk, after the read-only one in PCI order (the
+    // storage service takes the second virtio-blk device).
+    let mut store = OsString::from("if=none,id=disk1,format=raw,file=");
+    store.push(iso.with_file_name(STORE_IMAGE));
+    args.extend(["-drive".into(), store]);
+    args.extend([
+        "-device".into(),
+        "virtio-blk-pci,drive=disk1,disable-legacy=on".into(),
     ]);
     args.push("-serial".into());
     args.push(serial.into());
@@ -1120,6 +1137,94 @@ fn runner_timeout(value: Option<&str>) -> Result<Duration> {
     }
 }
 
+/// The test kernel that `runner` first boots [`CRASH_ROUNDS`] times and
+/// kills while it writes the store (storage.md part 8).
+const CRASH_TEST: &str = "store_crash";
+const CRASH_ROUNDS: u32 = 20;
+/// Kills land up to this long after the writer starts.
+const CRASH_WINDOW_MS: u64 = 1500;
+
+/// Crash injection: boots the `store_crash` kernel [`CRASH_ROUNDS`] times
+/// on the same store disk, killing QEMU at a random moment after the
+/// writer reports `store: writing`. Each boot must first find the store
+/// consistent (`store check: ok`), so every round checks the previous
+/// kill. The seed is printed so a failure can be repeated. (Killing QEMU
+/// keeps what it already handed to the host; losing unflushed writes is
+/// covered by `pharos-store`'s host tests.)
+fn crash_rounds(iso: &Path, vars: &Path, logs: &Path, extra: &[OsString]) -> Result<()> {
+    let mut seed = env::var("PHAROS_CRASH_SEED")
+        .ok()
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(1, |d| d.as_nanos() as u64)
+        })
+        | 1;
+    println!("  store crash injection: {CRASH_ROUNDS} rounds, PHAROS_CRASH_SEED={seed:#x}");
+    for round in 1..=CRASH_ROUNDS {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let delay = Duration::from_millis(seed % CRASH_WINDOW_MS);
+        prepare_firmware(vars, false)?;
+        let log = logs.join(format!("test-{CRASH_TEST}-round-{round}.log"));
+        let _ = fs::remove_file(&log);
+        let mut serial = OsString::from("file:");
+        serial.push(&log);
+        let mut args = qemu_args(iso, vars, &serial, false, false);
+        args.extend_from_slice(extra);
+        let mut child = qemu_command(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .map_err(qemu_error)?;
+        let read = || String::from_utf8_lossy(&fs::read(&log).unwrap_or_default()).into_owned();
+        let start = Instant::now();
+        let started = loop {
+            if read().contains("store: writing") {
+                break true;
+            }
+            if child.try_wait().map_err(qemu_error)?.is_some()
+                || start.elapsed() > Duration::from_secs(60)
+            {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        if started {
+            std::thread::sleep(delay);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        let text = read();
+        let check = text
+            .lines()
+            .find(|l| l.contains("store check:"))
+            .unwrap_or("no check line");
+        if !started || !check.contains("store check: ok") {
+            return Err(format!(
+                "store crash round {round}: {} (log: {})",
+                check.trim(),
+                log.display()
+            ));
+        }
+        let finished = if text.contains("store crash: done") {
+            ", writer finished first"
+        } else {
+            ""
+        };
+        println!(
+            "  round {round}: {}; killed {} ms into writing{finished}",
+            check
+                .trim()
+                .trim_start_matches(|c: char| !c.is_ascii_alphabetic()),
+            delay.as_millis()
+        );
+    }
+    Ok(())
+}
+
 /// `cargo xtask runner <ELF>`: Cargo's runner for test kernels. Wraps one
 /// test kernel in its own image and boots it headless under UEFI (D-009).
 fn runner(paths: &Paths, elf: &Path) -> Result<()> {
@@ -1138,6 +1243,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     }
     // Stopped when dropped, after the boot ends or times out.
     let _echo = echo::EchoServer::start(echo::ADDR)?;
+    if name == CRASH_TEST {
+        crash_rounds(&iso, &out.join("ovmf-vars.fd"), &logs, &extra)?;
+    }
     let run = boot_headless(
         &iso,
         &out.join("ovmf-vars.fd"),
@@ -1357,6 +1465,14 @@ mod tests {
             "only the card below"
         );
         assert!(uefi.contains("virtio-net-pci,netdev=net0,disable-legacy=on"));
+        assert!(uefi.contains("id=disk1,format=raw,file=store.img"));
+        assert!(
+            !uefi.contains("readonly=on,file=store.img"),
+            "the store is writable"
+        );
+        let disks: Vec<&str> = uefi.matches("virtio-blk-pci,drive=").collect();
+        assert_eq!(disks.len(), 2, "read-only disk first, then the store");
+        assert!(uefi.find("drive=disk0").unwrap() < uefi.find("drive=disk1").unwrap());
         assert!(uefi.contains(OVMF_CODE) && uefi.contains("file=vars.fd"));
         assert!(!uefi.contains(" -S"));
         assert!(uefi.contains("-serial stdio"));

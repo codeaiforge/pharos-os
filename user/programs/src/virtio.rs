@@ -298,24 +298,48 @@ impl Queue {
 
 /// Bytes per sector.
 pub const SECTOR: usize = 512;
-/// Largest read per request.
+/// Largest read or write per request.
 pub const MAX_READ: usize = 4096;
+/// Feature bit: the device accepts flush requests.
+pub const BLK_F_FLUSH: u32 = 1 << 9;
 // In the first DMA page after the queue: request header and status. Data in
 // the second page.
 const HEADER: usize = 0x400;
 const STATUS: usize = 0x410;
 const DATA: usize = 0x1000;
 const REQUEST_IN: u32 = 0;
+const REQUEST_OUT: u32 = 1;
+const REQUEST_FLUSH: u32 = 4;
 
-/// Judges the used ring for the one request in flight (data length
-/// `len`): `advance` is how far the used index moved, `id` and `used_len`
-/// are the new used element, `status` the request's status byte. All of
-/// them come from the device and are untrusted.
+/// What a request does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Op {
+    Read,
+    Write,
+    Flush,
+}
+
+impl Op {
+    /// Bytes the device writes for a request with `len` data bytes: the
+    /// data (reads only) and the status byte.
+    pub fn used_len(self, len: usize) -> usize {
+        match self {
+            Self::Read => len + 1,
+            Self::Write | Self::Flush => 1,
+        }
+    }
+}
+
+/// Judges the used ring for the one request in flight, for which the
+/// device should have written `expected` bytes ([`Op::used_len`]):
+/// `advance` is how far the used index moved, `id` and `used_len` are the
+/// new used element, `status` the request's status byte. All of them come
+/// from the device and are untrusted.
 pub fn check_used(
     advance: u16,
     id: u32,
     used_len: u32,
-    len: usize,
+    expected: usize,
     status: u8,
 ) -> Result<bool, &'static str> {
     match advance {
@@ -326,7 +350,7 @@ pub fn check_used(
     if id != 0 {
         return Err("unknown descriptor ID");
     }
-    if used_len as usize != len + 1 {
+    if used_len as usize != expected {
         return Err("wrong used length");
     }
     match status {
@@ -341,7 +365,7 @@ pub struct Blk {
     q: Queue,
     mem: Mapped,
     phys: u64,
-    /// Data bytes of the request in flight, if any.
+    /// Bytes the device should write for the request in flight, if any.
     outstanding: Option<usize>,
     /// Disk size in sectors.
     pub capacity: u64,
@@ -352,6 +376,16 @@ impl Blk {
     /// entry `entry`. Uses user addresses `at` to `at + 0x10_2000`. On
     /// failure the device is left with `FAILED` set.
     pub fn init(device: Handle, entry: u16, at: u64) -> Result<Self, &'static str> {
+        Self::init_with(device, entry, at, 0)
+    }
+
+    /// [`Self::init`] that also negotiates [`BLK_F_FLUSH`], for drivers
+    /// that write.
+    pub fn init_flushing(device: Handle, entry: u16, at: u64) -> Result<Self, &'static str> {
+        Self::init_with(device, entry, at, BLK_F_FLUSH)
+    }
+
+    fn init_with(device: Handle, entry: u16, at: u64, features: u32) -> Result<Self, &'static str> {
         if !is_blk(device) {
             return Err("not a virtio-blk device");
         }
@@ -364,7 +398,7 @@ impl Blk {
             }
         };
         let q = match t
-            .negotiate(0)
+            .negotiate(features)
             .and_then(|()| t.queue(0, entry, mem, 0, phys))
         {
             Ok(q) => q,
@@ -388,29 +422,76 @@ impl Blk {
     /// Starts reading `len` bytes (whole sectors, at most [`MAX_READ`])
     /// from `sector`.
     pub fn submit(&mut self, sector: u64, len: usize) -> Result<(), &'static str> {
+        self.start(Op::Read, sector, len)
+    }
+
+    /// Starts request `op`: for reads and writes, `len` bytes (whole
+    /// sectors, at most [`MAX_READ`]) at `sector`, in the data page (a
+    /// write's data must be there already); a flush has no data.
+    fn start(&mut self, op: Op, sector: u64, len: usize) -> Result<(), &'static str> {
         if self.outstanding.is_some() {
             return Err("a request is already in flight");
         }
-        if len == 0 || len > MAX_READ || len % SECTOR != 0 {
-            return Err("bad read length");
+        if op != Op::Flush {
+            if len == 0 || len > MAX_READ || len % SECTOR != 0 {
+                return Err("bad request length");
+            }
+            let end = sector.checked_add((len / SECTOR) as u64);
+            if end.is_none_or(|end| end > self.capacity) {
+                return Err("request past the end of the disk");
+            }
         }
-        let end = sector.checked_add((len / SECTOR) as u64);
-        if end.is_none_or(|end| end > self.capacity) {
-            return Err("read past the end of the disk");
-        }
+        let kind = match op {
+            Op::Read => REQUEST_IN,
+            Op::Write => REQUEST_OUT,
+            Op::Flush => REQUEST_FLUSH,
+        };
         let m = &self.mem;
-        m.write32(HEADER, REQUEST_IN);
+        m.write32(HEADER, kind);
         m.write32(HEADER + 4, 0);
-        m.write64(HEADER + 8, sector);
+        m.write64(HEADER + 8, if op == Op::Flush { 0 } else { sector });
         m.write8(STATUS, 0xff);
         self.q.set(0, self.phys + HEADER as u64, 16, NEXT, 1);
-        self.q
-            .set(1, self.phys + DATA as u64, len as u32, NEXT | WRITE, 2);
-        self.q.set(2, self.phys + STATUS as u64, 1, WRITE, 0);
+        let status = self.phys + STATUS as u64;
+        match op {
+            Op::Flush => self.q.set(1, status, 1, WRITE, 0),
+            _ => {
+                // Reads: the device writes the data; writes: it reads it.
+                let flags = if op == Op::Read { NEXT | WRITE } else { NEXT };
+                self.q.set(1, self.phys + DATA as u64, len as u32, flags, 2);
+                self.q.set(2, status, 1, WRITE, 0);
+            }
+        }
         self.q.offer(0);
-        self.outstanding = Some(len);
+        self.outstanding = Some(op.used_len(len));
         self.q.kick();
         Ok(())
+    }
+
+    /// Waits on `irq` until the request in flight is done.
+    fn wait(&mut self, irq: Handle) -> Result<(), &'static str> {
+        while !self.complete()? {
+            irq_wait(irq).map_err(|_: Error| "irq_wait failed")?;
+        }
+        Ok(())
+    }
+
+    /// Writes `data` (whole sectors, at most [`MAX_READ`]) at `sector`,
+    /// sleeping on `irq` until the device has it (not necessarily durable:
+    /// see [`Self::flush`]).
+    pub fn write(&mut self, irq: Handle, sector: u64, data: &[u8]) -> Result<(), &'static str> {
+        if data.len() > MAX_READ {
+            return Err("bad request length");
+        }
+        self.mem.write_bytes(DATA, data);
+        self.start(Op::Write, sector, data.len())?;
+        self.wait(irq)
+    }
+
+    /// Makes every completed write durable (needs [`Self::init_flushing`]).
+    pub fn flush(&mut self, irq: Handle) -> Result<(), &'static str> {
+        self.start(Op::Flush, 0, 0)?;
+        self.wait(irq)
     }
 
     /// Checks whether the request in flight finished: `Ok(false)` if not
@@ -430,12 +511,8 @@ impl Blk {
     /// `sector`, sleeping on interrupt `irq` until the device is done.
     pub fn read(&mut self, irq: Handle, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
         self.submit(sector, buf.len())?;
-        while !self.complete()? {
-            irq_wait(irq).map_err(|_: Error| "irq_wait failed")?;
-        }
-        for (i, chunk) in buf.chunks_exact_mut(8).enumerate() {
-            chunk.copy_from_slice(&self.mem.read64(DATA + 8 * i).to_le_bytes());
-        }
+        self.wait(irq)?;
+        self.mem.read_bytes(DATA, buf);
         Ok(())
     }
 
@@ -451,21 +528,36 @@ mod tests {
 
     #[test]
     fn used_ring_values_are_checked() {
-        assert_eq!(check_used(0, 9, 9, 512, 9), Ok(false), "not done yet");
-        assert_eq!(check_used(1, 0, 513, 512, 0), Ok(true));
-        assert_eq!(check_used(1, 0, 4097, 4096, 0), Ok(true));
-        assert!(check_used(2, 0, 513, 512, 0).is_err(), "only one in flight");
+        let read = Op::Read.used_len(512);
+        assert_eq!(check_used(0, 9, 9, read, 9), Ok(false), "not done yet");
+        assert_eq!(check_used(1, 0, 513, read, 0), Ok(true));
+        assert_eq!(check_used(1, 0, 4097, Op::Read.used_len(4096), 0), Ok(true));
         assert!(
-            check_used(u16::MAX, 0, 513, 512, 0).is_err(),
+            check_used(2, 0, 513, read, 0).is_err(),
+            "only one in flight"
+        );
+        assert!(
+            check_used(u16::MAX, 0, 513, read, 0).is_err(),
             "index went back"
         );
-        assert!(check_used(1, 1, 513, 512, 0).is_err(), "not our descriptor");
-        assert!(check_used(1, 0, 512, 512, 0).is_err(), "short");
-        assert!(check_used(1, 0, 4097, 512, 0).is_err(), "long");
-        assert!(check_used(1, 0, 513, 512, 1).is_err(), "I/O error");
         assert!(
-            check_used(1, 0, 513, 512, 0xff).is_err(),
+            check_used(1, 1, 513, read, 0).is_err(),
+            "not our descriptor"
+        );
+        assert!(check_used(1, 0, 512, read, 0).is_err(), "short");
+        assert!(check_used(1, 0, 4097, read, 0).is_err(), "long");
+        assert!(check_used(1, 0, 513, read, 1).is_err(), "I/O error");
+        assert!(
+            check_used(1, 0, 513, read, 0xff).is_err(),
             "status not written"
+        );
+        // Writes and flushes: the device writes only the status byte.
+        assert_eq!(Op::Write.used_len(4096), 1);
+        assert_eq!(Op::Flush.used_len(0), 1);
+        assert_eq!(check_used(1, 0, 1, Op::Write.used_len(4096), 0), Ok(true));
+        assert!(
+            check_used(1, 0, 4097, Op::Write.used_len(4096), 0).is_err(),
+            "a write writes no data"
         );
     }
 }

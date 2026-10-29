@@ -609,25 +609,48 @@ impl<D: Device> Store<D> {
     /// returns the bytes read (0 at the end). A read of the whole file
     /// from offset 0 checks its CRC-32 ([`Error::Corrupt`]).
     pub fn read(&mut self, path: &[u8], offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
+        let mut done = 0;
+        let n = self.read_with(path, offset, buf.len() as u64, |bytes| {
+            buf[done..done + bytes.len()].copy_from_slice(bytes);
+            done += bytes.len();
+        })?;
+        Ok(n as usize)
+    }
+
+    /// Reads up to `len` bytes of the file at `path` from `offset`, passing
+    /// them to `f` in order, a block or less at a time; returns how many.
+    /// A read of the whole file checks its CRC-32 at the end
+    /// ([`Error::Corrupt`], after `f` has seen the bytes: callers must not
+    /// trust them then).
+    pub fn read_with(
+        &mut self,
+        path: &[u8],
+        offset: u64,
+        len: u64,
+        mut f: impl FnMut(&[u8]),
+    ) -> Result<u64, Error> {
         let o = self.object(path)?;
         if o.kind != Kind::File {
             return Err(Error::WrongKind);
         }
-        let n = o.len.saturating_sub(offset).min(buf.len() as u64) as usize;
-        let whole = offset == 0 && n as u64 == o.len;
-        let (crc, blocks): (u32, Vec<u64>) = (o.crc, o.blocks().collect());
+        let n = o.len.saturating_sub(offset).min(len);
+        let whole = offset == 0 && n == o.len;
+        let (want, blocks): (u32, Vec<u64>) = (o.crc, o.blocks().collect());
+        let mut crc = Crc32::new();
         let mut block = [0u8; BLOCK];
         let mut done = 0;
         while done < n {
-            let at = offset + done as u64;
+            let at = offset + done;
             let i = (at / BLOCK as u64) as usize;
             let within = (at % BLOCK as u64) as usize;
             self.dev.read(blocks[i], &mut block)?;
-            let k = (BLOCK - within).min(n - done);
-            buf[done..done + k].copy_from_slice(&block[within..within + k]);
-            done += k;
+            let k = (BLOCK - within).min((n - done) as usize);
+            let bytes = &block[within..within + k];
+            crc.update(bytes);
+            f(bytes);
+            done += k as u64;
         }
-        if whole && crc32(&buf[..n]) != crc {
+        if whole && crc.finish() != want {
             return Err(Error::Corrupt);
         }
         Ok(n)
@@ -716,20 +739,23 @@ impl<D: Device> Store<D> {
         objects: Vec<Object>,
         writes: &[(u64, Block)],
     ) -> Result<(), Error> {
-        let index = encode_index(&objects);
-        if index.len() > MAX_INDEX {
-            return Err(Error::TooLarge);
+        let run = plan_index(&mut alloc, &objects)?;
+        for (b, data) in writes {
+            self.dev.write(*b, data)?;
         }
-        let run = alloc.take_run(index.len().div_ceil(BLOCK) as u64)?;
+        self.finish(run, objects)
+    }
+
+    /// The second half of a commit, after the data is written: the index
+    /// at `run`, a flush, the superblock, a flush.
+    fn finish(&mut self, run: Extent, objects: Vec<Object>) -> Result<(), Error> {
+        let index = encode_index(&objects);
         let g = Generation {
             number: self.current.number + 1,
             total: self.current.total,
             index: run,
             objects,
         };
-        for (b, data) in writes {
-            self.dev.write(*b, data)?;
-        }
         for (i, chunk) in index.chunks(BLOCK).enumerate() {
             let mut block = [0u8; BLOCK];
             block[..chunk.len()].copy_from_slice(chunk);
@@ -754,6 +780,24 @@ impl<D: Device> Store<D> {
 
     /// Replaces (or creates) the file at `path` with `data`, atomically.
     pub fn write(&mut self, path: &[u8], data: &[u8]) -> Result<(), Error> {
+        self.write_with(path, data.len() as u64, |offset, block| {
+            let chunk = &data[offset as usize..];
+            let n = chunk.len().min(BLOCK);
+            block[..n].copy_from_slice(&chunk[..n]);
+        })
+    }
+
+    /// Replaces (or creates) the file at `path` with `len` bytes, atomically,
+    /// asking `fill(offset, block)` for each block's bytes in order (the
+    /// block is zeroed; bytes past `len` are ignored). Streams: nothing but
+    /// one block is held in memory. Space is checked before anything is
+    /// written.
+    pub fn write_with(
+        &mut self,
+        path: &[u8],
+        len: u64,
+        mut fill: impl FnMut(u64, &mut Block),
+    ) -> Result<(), Error> {
         if !valid_path(path) {
             return Err(Error::BadPath);
         }
@@ -763,24 +807,39 @@ impl<D: Device> Store<D> {
             }
         }
         let mut alloc = self.alloc();
-        let extents = alloc.take(data.len().div_ceil(BLOCK) as u64, MAX_EXTENTS)?;
+        let extents = alloc.take(len.div_ceil(BLOCK as u64), MAX_EXTENTS)?;
         let object = Object {
             path: path.to_vec(),
             kind: Kind::File,
-            len: data.len() as u64,
-            crc: crc32(data),
+            len,
+            crc: 0,
             records: 0,
             head: [0; 32],
             extents,
         };
-        let mut writes = Vec::new();
-        for (b, chunk) in object.blocks().zip(data.chunks(BLOCK)) {
+        let blocks: Vec<u64> = object.blocks().collect();
+        let mut objects = self.with(object)?;
+        // The CRC does not change the index's size: plan it now.
+        let run = plan_index(&mut alloc, &objects)?;
+        let mut crc = Crc32::new();
+        for (i, &b) in blocks.iter().enumerate() {
+            let offset = i as u64 * BLOCK as u64;
             let mut block = [0u8; BLOCK];
-            block[..chunk.len()].copy_from_slice(chunk);
-            writes.push((b, block));
+            fill(offset, &mut block);
+            let used = (len - offset).min(BLOCK as u64) as usize;
+            block[used..].fill(0);
+            crc.update(&block[..used]);
+            self.dev.write(b, &block)?;
         }
-        let objects = self.with(object)?;
-        self.commit(alloc, objects, &writes)
+        let i = self.find_in(&objects, path);
+        objects[i].crc = crc.finish();
+        self.finish(run, objects)
+    }
+
+    fn find_in(&self, objects: &[Object], path: &[u8]) -> usize {
+        objects
+            .binary_search_by(|o| o.path.as_slice().cmp(path))
+            .unwrap_or(0)
     }
 
     /// Appends a record (1 to [`MAX_RECORD`] bytes) to the stream at
@@ -874,6 +933,15 @@ impl<D: Device> Store<D> {
         objects.remove(i);
         self.commit(self.alloc(), objects, &[])
     }
+}
+
+/// Allocates the index blocks for `objects` (before anything is written).
+fn plan_index(alloc: &mut Alloc, objects: &[Object]) -> Result<Extent, Error> {
+    let len = encode_index(objects).len();
+    if len > MAX_INDEX {
+        return Err(Error::TooLarge);
+    }
+    alloc.take_run(len.div_ceil(BLOCK) as u64)
 }
 
 /// Blocks in order as extents, merging neighbours.

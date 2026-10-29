@@ -182,3 +182,11 @@ harness = false
 [[test]]
 name = "shared_memory"
 harness = false
+
+[[test]]
+name = "store"
+harness = false
+
+[[test]]
+name = "store_crash"
+harness = false

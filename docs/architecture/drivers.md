@@ -144,6 +144,7 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
   - reads past the disk's capacity are refused before submission.
 
   These checks are one pure function (`virtio::check_used`), unit-tested on the host.
+- **Writes and flushes (M3.0, #77):** `Blk::write` (request type `OUT`, the data descriptor device-readable) and `Blk::flush` (type `FLUSH`, no data; needs `VIRTIO_BLK_F_FLUSH`, negotiated by `Blk::init_flushing`). For both the device writes only the status byte, so `check_used` expects a used length of 1 (`Op::used_len`). The storage service is the only writer ([storage.md](storage.md#8-the-writable-store-m30)).
 - **Test service:** the driver reads the disk's blocks into a `pharos-fs` `BlockDevice`, mounts the image with the same parser as the kernel, and reports a file's contents with `debug_write`. It then exits with a code that encodes the outcome (0 success, 1 not virtio-blk, 2 setup failed, 3 read failed, 4 mount failed, 5 file missing or wrong).
 
 ### Startup
