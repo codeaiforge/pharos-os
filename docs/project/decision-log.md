@@ -549,16 +549,16 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 **Context.** The inference runtime is large and complex; where and how it runs dominates the security design.
 
-**Options to evaluate.** Rust-native runtimes versus bindings to established C/C++ runtimes; candidate model formats (e.g. GGUF, ONNX, safetensors). Initially this runs on the Linux host; running on Pharos itself depends on Phase 2 services.
+**Options to evaluate.** Rust-native runtimes versus bindings to established C/C++ runtimes; candidate model formats (e.g. GGUF, ONNX, safetensors). Initially this runs on the Linux host; running on Pharos itself depends on M3.0. Established engines such as llama.cpp need a C library, threads, `mmap`, and a C++ runtime, which Pharos does not plan to provide (M3.0 excludes a POSIX layer). The leading option to test is therefore a small native `no_std` Rust engine on Pharos (safe Rust, fuzzable model parser, single-threaded at first), with existing engines used on the host behind the same provider interface (D-019). Correctness is shown by comparing outputs against an established engine on the same open-weight model, not by training a model.
 
-**Evaluation criteria.** Runtime license and model licenses (including use restrictions); memory safety and attack surface; CPU performance; portability to Pharos; supply-chain verifiability of model files.
+**Evaluation criteria.** Runtime license and model licenses (including use restrictions); memory safety and attack surface; CPU performance; portability to Pharos and its effort; deterministic output (replayable inference records); supply-chain verifiability of model files.
 
 ### D-011: CPU/GPU support and memory/VRAM constraints
 
 - **Status:** Open
 - **Needed by:** M3.1 (requirements), M3.2 (implementation)
 
-**Context.** GPU acceleration on a custom OS requires drivers that may not exist; CPU-only inference limits model size.
+**Context.** GPU acceleration on a custom OS requires drivers that may not exist; CPU-only inference limits model size. The reference host's GPU (NVIDIA GTX 1060, 6 GB) has no realistic driver path on Pharos (NVIDIA's drivers are proprietary), so the expected outcome is CPU-only on Pharos for the foreseeable future, with the GPU used for host measurements only.
 
 **Evaluation criteria.** Minimum and recommended RAM/VRAM; CPU-only viability for target models; driver availability and licensing; isolation of GPU memory between agents.
 

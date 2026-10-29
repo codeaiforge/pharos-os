@@ -306,7 +306,7 @@ Ordering notes:
 - **Acceptance criteria:** Each milestone's criteria; agent isolation verified by adversarial tests.
 - **Validation:** Automated: unit and integration tests; QEMU tests once on Pharos; prompt-injection test suite. Manual: security review.
 - **Risks and mitigations:** AI dominates the TCB → inference stays unprivileged; model output untrusted.
-- **Out of scope:** Training models; cloud or remote inference providers (they need TLS and an outbound network policy, and they open an exfiltration path; reconsider after M3.4 with D-012's per-destination grants); remote agents and federation; agents changing a running Pharos system (M4.3).
+- **Out of scope:** Training or fine-tuning models (a separate research track; correctness of inference engines is shown against open-weight models); cloud or remote inference providers (they need TLS and an outbound network policy, and they open an exfiltration path; reconsider after M3.4 with D-012's per-destination grants); remote agents and federation; agents changing a running Pharos system (M4.3).
 - **Definition of done:** Standard, plus threat model updated for agents and inference.
 - **Gate:** All M3.x gates; agent isolation security review complete.
 
