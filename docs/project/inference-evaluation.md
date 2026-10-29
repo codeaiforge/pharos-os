@@ -1,6 +1,6 @@
 # Inference-runtime evaluation (M3.1)
 
-- **Status:** in progress (issue #69). Engines and models are installed on the reference host. llama.cpp and the native spike are measured; the spike matches `run.c` exactly on `stories15M` and matches llama.cpp on Qwen2.5-0.5B q8_0 as closely as llama.cpp's own settings match each other. candle is not yet measured. Results come only from real runs.
+- **Status:** complete (issue #69), reviewed by the maintainer on 2026-10-29. llama.cpp and the native spike are measured on the reference host; the spike matches `run.c` exactly on `stories15M` and matches llama.cpp on Qwen2.5-0.5B q8_0 as closely as llama.cpp's own settings match each other. candle was dropped (see Engines). All results come from real runs.
 - **Feeds:** D-010 (runtime, formats, licensing), D-011 (CPU/GPU, memory), and the M3.0 targets (#70).
 - **All measurements here are host results** (D-020): they show what an engine does on Linux, not on Pharos.
 - **Inputs:** [phase3-requirements.md](phase3-requirements.md) (scenario S1, model tiers T/S/H, 5 tokens/s target), the harness in [testing.md](../development/testing.md#inference-benchmarks-host).
@@ -10,11 +10,20 @@
 | Engine | Version (pinned) | License | Role | Why |
 | --- | --- | --- | --- | --- |
 | llama.cpp | release `b11609` (2026-10-14), commit `fcac190`, CPU build `llama-b11609-bin-ubuntu-x64.tar.gz` | MIT | Speed baseline and output reference for GGUF models | The established CPU engine; on Pharos it would need a C library, threads, `mmap`, and a C++ runtime, which M3.0 excludes |
-| candle | tag `0.11.0`, commit `3d5f4d9` (examples `llama2-c`, `quantized-qwen2-instruct`) | Apache-2.0 or MIT | An existing Rust engine | What a Rust engine with a standard library needs from the OS |
+| candle | tag `0.11.0`, commit `3d5f4d9` (examples `llama2-c`, `quantized-qwen2-instruct`) | Apache-2.0 or MIT | An existing Rust engine: **dropped**, with the maintainer's agreement | Its examples did not build on the reference host: they need the `candle-datasets` feature and the system OpenSSL headers (for their Hugging Face download helper, unrelated to inference), which would mean installing a system package. On Pharos it would also need a full standard library (threads, files, a C library). The native spike answers the Rust-engine question directly, measured against llama.cpp |
 | llama2.c `run.c` | commit `350e04f` | MIT | Output reference for tier T only | A small C reference for the llama2.c format the spike reads first |
 | **pharos-infer** (native spike) | this repository, `crates/pharos-infer` | Apache-2.0 | The candidate engine for Pharos | `no_std`, safe Rust, no dependencies; the subject of the port-cost question |
 
-Licenses are from each project's repository metadata; the full license texts are read before anything is adopted, and adopted third-party material is recorded in NOTICE.
+**License review (2026-10-29):**
+
+- **llama.cpp:** the `LICENSE` file at `b11609` is the MIT License ("Copyright (c) 2023-2026 The ggml authors"). Used only as a host tool; nothing is copied into Pharos.
+- **llama2.c:** MIT (repository license). Used only as a host reference; `pharos-infer` follows its algorithm and file formats, written independently, with no code copied.
+- **Qwen2.5-0.5B-Instruct and 1.5B-Instruct (GGUF and original repositories):** each ships the Apache License 2.0 text as `LICENSE`; the model cards declare `apache-2.0`. Compatible with Apache-2.0 Pharos; no use restrictions.
+- **SmolLM2-360M-Instruct GGUF:** the model card declares `apache-2.0`; the repository ships no license file.
+- **tinyllamas (`stories15M`):** the model card declares `mit`; no license file.
+- **Llama 3.2 1B:** not evaluated, because its community license carries use restrictions.
+
+No model or third-party code is adopted by this evaluation. Whatever D-010 adopts (model weights shipped in a Pharos image, for example) is recorded in NOTICE with its license text when it is adopted.
 
 ## Models
 
@@ -154,7 +163,7 @@ python3 scripts/bench-inference.py --engine llama --model $M/<model>.gguf --labe
     -- $L/llama-completion -m {model} -p {prompt} -n {n} -t {threads} -s {seed} --temp 0 -no-cnv --simple-io --no-display-prompt
 ```
 
-candle: not yet measured (its first build failed for a missing feature flag; the corrected build step is above).
+candle: not measured (dropped; see Engines).
 
 ## Portability to Pharos
 
