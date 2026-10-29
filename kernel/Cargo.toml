@@ -178,3 +178,7 @@ harness = false
 [[test]]
 name = "timeouts"
 harness = false
+
+[[test]]
+name = "shared_memory"
+harness = false

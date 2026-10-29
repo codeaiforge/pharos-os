@@ -149,11 +149,15 @@ pub fn raw(number: u64, args: [u64; 6]) -> (u64, u64) {
 }
 
 /// Memory the kernel mapped for this process: device registers
-/// ([`crate::mmio_map`]) or a DMA buffer ([`crate::dma_alloc`]). Accesses
-/// are volatile, bounds-checked, and naturally aligned; a bad offset is a
-/// program bug and panics (ending the process). Values are created only
-/// after the kernel confirmed the mapping, which lasts as long as the
-/// process.
+/// ([`crate::mmio_map`]), a DMA buffer ([`crate::dma_alloc`]), or a buffer
+/// that may be shared ([`crate::mem_map_buffer`], [`crate::mem_map_cap`]).
+/// Accesses are volatile, bounds-checked, and naturally aligned; a bad
+/// offset is a program bug and panics (ending the process). Values are
+/// created only after the kernel confirmed the mapping. Device memory stays
+/// mapped as long as the process; a buffer until [`crate::mem_unmap`], after
+/// which using its `Mapped` is a program bug (it faults, or reaches whatever
+/// this process maps there next, never another process's memory). Writing
+/// a read-only shared mapping is a page fault that ends the process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mapped {
     base: usize,
@@ -178,6 +182,45 @@ impl Mapped {
     /// Always false: mappings are at least one page.
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// The start address (for [`crate::mem_share`] and
+    /// [`crate::mem_unmap`]).
+    pub fn addr(&self) -> u64 {
+        self.base as u64
+    }
+
+    /// Copies `buf.len()` bytes from `offset` into `buf` (8 bytes at a time
+    /// where aligned).
+    pub fn read_bytes(&self, offset: usize, buf: &mut [u8]) {
+        let mut i = 0;
+        while i < buf.len() {
+            let at = offset + i;
+            if at % 8 == 0 && buf.len() - i >= 8 {
+                buf[i..i + 8].copy_from_slice(&self.read64(at).to_le_bytes());
+                i += 8;
+            } else {
+                buf[i] = self.read8(at);
+                i += 1;
+            }
+        }
+    }
+
+    /// Copies `bytes` to `offset` (8 bytes at a time where aligned).
+    pub fn write_bytes(&self, offset: usize, bytes: &[u8]) {
+        let mut i = 0;
+        while i < bytes.len() {
+            let at = offset + i;
+            if at % 8 == 0 && bytes.len() - i >= 8 {
+                let mut word = [0u8; 8];
+                word.copy_from_slice(&bytes[i..i + 8]);
+                self.write64(at, u64::from_le_bytes(word));
+                i += 8;
+            } else {
+                self.write8(at, bytes[i]);
+                i += 1;
+            }
+        }
     }
 
     fn at(&self, offset: usize, size: usize) -> usize {

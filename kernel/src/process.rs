@@ -45,6 +45,70 @@ pub const MAX_MAPPINGS: usize = 1024;
 /// The page limit the kernel starts `init` with: 1.5 GiB.
 pub const INIT_MEMORY_LIMIT: u64 = 1536 * 1024 * 1024 / FRAME_SIZE;
 
+/// Frames shared through `Memory` capabilities (user-environment.md): each
+/// mapping and each capability holds a reference, and the frames are freed
+/// when the last is gone.
+// ponytail: one u64 per page on the kernel heap (1.4 MiB for a 700 MB
+// buffer); store runs of frames if more or larger buffers are shared.
+pub struct SharedMemory {
+    frames: Vec<u64>,
+}
+
+/// `SharedMemory` objects alive, and frames they failed to free (already
+/// free: a bug elsewhere freed them early). For tests.
+static SHARED_LIVE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static SHARED_FREE_ERRORS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+impl SharedMemory {
+    /// An object owning `frames` (physical addresses, one per page).
+    pub fn new(frames: Vec<u64>) -> Arc<Self> {
+        SHARED_LIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        Arc::new(Self { frames })
+    }
+
+    /// The frames, in page order.
+    pub fn frames(&self) -> &[u64] {
+        &self.frames
+    }
+}
+
+impl Drop for SharedMemory {
+    /// Frees the frames. Never runs with the frame allocator locked: the
+    /// last reference is dropped by a capability table, a process, or the
+    /// system-call handler after its locks are released.
+    fn drop(&mut self) {
+        SHARED_LIVE.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        #[cfg(target_os = "none")]
+        if let Some(frames) = mm::frames().as_mut() {
+            for &phys in &self.frames {
+                let freed = crate::mm::frame::Frame::from_addr(phys)
+                    .is_some_and(|frame| frames.free(frame).is_ok());
+                if !freed {
+                    SHARED_FREE_ERRORS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+    }
+}
+
+/// Live `SharedMemory` objects.
+pub fn shared_objects() -> usize {
+    SHARED_LIVE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Frames a `SharedMemory` object found already freed (0 unless a bug).
+pub fn shared_free_errors() -> usize {
+    SHARED_FREE_ERRORS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// A shared mapping in a process: where, of what, and whether writable.
+pub struct SharedMapping {
+    pub start: u64,
+    pub memory: Arc<SharedMemory>,
+    pub writable: bool,
+}
+
 /// A process's `mem_map` mappings and its page limit (user-environment.md).
 /// Only the bookkeeping: the system call maps and frees the pages.
 #[derive(Debug, Default)]
@@ -88,6 +152,11 @@ impl UserMemory {
         self.maps.insert(index, (at, pages));
         self.used = used;
         Some(at)
+    }
+
+    /// True if there is a mapping of exactly `pages` at `start`.
+    pub fn contains(&self, start: u64, pages: u64) -> bool {
+        self.maps.contains(&(start, pages))
     }
 
     /// Forgets the mapping of exactly `pages` at `start`; false if there is
@@ -290,6 +359,9 @@ pub struct Process {
     pub mmio_pages: IrqMutex<u64>,
     /// Its `mem_map` mappings and page limit.
     pub memory: IrqMutex<UserMemory>,
+    /// Which of those mappings are shared memory (dropping one may free
+    /// the frames, so it is dropped after the frame allocator's lock).
+    pub shared: IrqMutex<Vec<SharedMapping>>,
 }
 
 /// Live processes by task ID (one thread each).
@@ -337,6 +409,7 @@ pub fn start_limited(
             pins: IrqMutex::new(Vec::new()),
             mmio_pages: IrqMutex::new(0),
             memory: IrqMutex::new(UserMemory::new(limit)),
+            shared: IrqMutex::new(Vec::new()),
             record: Arc::new(ProcessRecord {
                 id,
                 end: IrqMutex::new(None),

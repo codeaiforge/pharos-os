@@ -34,6 +34,8 @@ pub mod number {
     pub const MEM_MAP: u64 = 19;
     pub const MEM_UNMAP: u64 = 20;
     pub const SLEEP: u64 = 21;
+    pub const MEM_SHARE: u64 = 22;
+    pub const MEM_MAP_CAP: u64 = 23;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -438,6 +440,29 @@ pub fn mem_unmap(addr: u64, len: u64) -> Result<u64, Error> {
     call(number::MEM_UNMAP, [addr, len, 0, 0, 0, 0])
 }
 
+/// [`mem_map`] with a [`Mapped`] view of the memory, for buffers to share
+/// or fill through volatile accesses.
+pub fn mem_map_buffer(len: u64) -> Result<Mapped, Error> {
+    let addr = mem_map(len)?;
+    Ok(Mapped::new(addr, len.div_ceil(4096) * 4096))
+}
+
+/// Turns the whole [`mem_map`] mapping at `addr` (`len` bytes as mapped)
+/// into shared memory and returns a `Memory` capability with `READ`,
+/// `GRANT`, and `WRITE` (if the mapping is writable). Pass it with
+/// [`send`], narrowed to `READ` for read-only access.
+pub fn mem_share(addr: u64, len: u64) -> Result<Handle, Error> {
+    call(number::MEM_SHARE, [addr, len, 0, 0, 0, 0])
+}
+
+/// Maps the shared memory behind `memory` (needs `READ`, and `WRITE` if
+/// `writable`); `len` must be its size. The pages count against this
+/// process's limit.
+pub fn mem_map_cap(memory: Handle, writable: bool, len: u64) -> Result<Mapped, Error> {
+    let addr = call(number::MEM_MAP_CAP, [memory, writable.into(), len, 0, 0, 0])?;
+    Ok(Mapped::new(addr, len.div_ceil(4096) * 4096))
+}
+
 /// Exit code a program's panic ends it with.
 pub const PANIC_EXIT: u64 = 0xdead;
 
@@ -504,5 +529,13 @@ mod tests {
         assert!(past.is_err(), "past the end");
         let odd = std::panic::catch_unwind(|| m.read32(2));
         assert!(odd.is_err(), "misaligned");
+        let text: Vec<u8> = (0..37).collect();
+        m.write_bytes(3, &text);
+        let mut back = [0u8; 37];
+        m.read_bytes(3, &mut back);
+        assert_eq!(back[..], text[..], "unaligned start, aligned middle, tail");
+        assert_eq!(m.read8(2), 0, "bytes before are untouched");
+        let past = std::panic::catch_unwind(|| m.write_bytes(4090, &[0; 7]));
+        assert!(past.is_err(), "past the end");
     }
 }

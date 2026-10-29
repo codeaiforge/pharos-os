@@ -68,6 +68,9 @@ pub enum Object {
     /// One MSI-X entry of a device (drivers.md).
     #[cfg(target_os = "none")]
     Interrupt(Arc<crate::irq::Irq>),
+    /// Shared memory: with `READ`, map it read-only; with `WRITE` too,
+    /// writable (user-environment.md).
+    Memory(Arc<crate::process::SharedMemory>),
 }
 
 impl fmt::Debug for Object {
@@ -82,6 +85,7 @@ impl fmt::Debug for Object {
             Self::Process(p) => write!(f, "Process({})", p.id),
             #[cfg(target_os = "none")]
             Self::Interrupt(i) => write!(f, "{i:?}"),
+            Self::Memory(m) => write!(f, "Memory({} pages)", m.frames().len()),
         }
     }
 }

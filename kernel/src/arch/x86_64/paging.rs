@@ -665,6 +665,28 @@ impl AddressSpace {
         Err(MapError::NotMapped)
     }
 
+    /// Marks the 4 KiB user page at `virt` as not owned by this space (the
+    /// `DEVICE` bit, which the MMU ignores), so `destroy` and unmapping
+    /// leave its frame alone; returns the frame's physical address. For
+    /// pages handed to a shared `Memory` object.
+    pub fn disown(&mut self, virt: u64) -> Result<u64, MapError> {
+        let indexes = table_indexes(virt);
+        let mut table = self.root;
+        for &index in &indexes[..3] {
+            let entry = read_entry(table, index);
+            if entry & PRESENT == 0 || entry & HUGE != 0 {
+                return Err(MapError::NotMapped);
+            }
+            table = entry & ADDRESS_MASK;
+        }
+        let leaf = read_entry(table, indexes[3]);
+        if leaf & PRESENT == 0 || !self.user || virt >= USER_END {
+            return Err(MapError::NotMapped);
+        }
+        write_entry(table, indexes[3], leaf | DEVICE);
+        Ok(leaf & ADDRESS_MASK)
+    }
+
     /// Unmaps the page at `virt` and frees its frame, which must belong to
     /// this space (mapped with [`map_new_page`](Self::map_new_page)). Does
     /// nothing for an unmapped page.

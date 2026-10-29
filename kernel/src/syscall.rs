@@ -35,6 +35,8 @@ pub mod number {
     pub const MEM_MAP: u64 = 19;
     pub const MEM_UNMAP: u64 = 20;
     pub const SLEEP: u64 = 21;
+    pub const MEM_SHARE: u64 = 22;
+    pub const MEM_MAP_CAP: u64 = 23;
 }
 
 /// Largest buffer `debug_write` accepts (and the IPC message size).
@@ -212,6 +214,27 @@ pub enum Call {
         addr: u64,
         pages: u64,
     },
+    MemShare {
+        addr: u64,
+        pages: u64,
+    },
+    MemMapCap {
+        handle: Handle,
+        writable: bool,
+        /// Must equal the shared object's size (so the caller knows its
+        /// bounds).
+        pages: u64,
+    },
+}
+
+/// A whole-mapping range in the map region (`mem_unmap`, `mem_share`).
+fn mapping(addr: u64, len: u64) -> Result<(u64, u64), Error> {
+    match map_pages(len) {
+        Some(pages) if addr % 4096 == 0 && crate::process::MAP_REGION.contains(&addr) => {
+            Ok((addr, pages))
+        }
+        _ => Err(Error::BadAddress),
+    }
 }
 
 /// Pages in a `mem_map`/`mem_unmap` length: rounded up, at least one, at
@@ -381,14 +404,22 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             pages: map_pages(args[0]).ok_or(Error::TooLarge)?,
         }),
         number::MEM_UNMAP => {
-            let (addr, region) = (args[0], crate::process::MAP_REGION);
-            match map_pages(args[1]) {
-                Some(pages) if addr % 4096 == 0 && region.contains(&addr) => {
-                    Ok(Call::MemUnmap { addr, pages })
-                }
-                _ => Err(Error::BadAddress),
-            }
+            let (addr, pages) = mapping(args[0], args[1])?;
+            Ok(Call::MemUnmap { addr, pages })
         }
+        number::MEM_SHARE => {
+            let (addr, pages) = mapping(args[0], args[1])?;
+            Ok(Call::MemShare { addr, pages })
+        }
+        number::MEM_MAP_CAP => Ok(Call::MemMapCap {
+            handle: args[0],
+            writable: match args[1] {
+                0 => false,
+                1 => true,
+                _ => return Err(Error::TooLarge),
+            },
+            pages: map_pages(args[2]).ok_or(Error::TooLarge)?,
+        }),
         _ => Err(Error::UnknownCall),
     }
 }
@@ -610,6 +641,107 @@ mod kernel {
             process.memory.lock().release(start, pages);
             return Err(Error::NoMemory);
         }
+        Ok(start)
+    }
+
+    /// `mem_share`: turns one whole `mem_map` mapping into a `Memory`
+    /// object (or returns another capability on it, if already shared) and
+    /// a capability with `READ`, `GRANT`, and `WRITE` if the mapping is
+    /// writable.
+    fn mem_share(process: &process::Process, addr: u64, pages: u64) -> Result<u64, Error> {
+        use alloc::vec::Vec;
+        if !process.memory.lock().contains(addr, pages) {
+            return Err(Error::BadAddress);
+        }
+        if process.caps.lock().len() >= MAX_HANDLES {
+            return Err(Error::NoMemory);
+        }
+        let existing = process
+            .shared
+            .lock()
+            .iter()
+            .find(|s| s.start == addr)
+            .map(|s| (s.memory.clone(), s.writable));
+        let (memory, writable) = match existing {
+            Some(found) => found,
+            None => {
+                let mut frames = Vec::new();
+                frames
+                    .try_reserve_exact(pages as usize)
+                    .map_err(|_| Error::NoMemory)?;
+                // Every page of a recorded mapping is mapped and owned, so
+                // `disown` cannot fail part-way.
+                sched::with_current_space(|space| {
+                    (0..pages)
+                        .try_for_each(|i| space.disown(addr + i * 4096).map(|p| frames.push(p)))
+                })
+                .ok_or(Error::BadAddress)??;
+                let memory = process::SharedMemory::new(frames);
+                process.shared.lock().push(process::SharedMapping {
+                    start: addr,
+                    memory: memory.clone(),
+                    writable: true,
+                });
+                (memory, true)
+            }
+        };
+        let rights = cap::READ | cap::GRANT | if writable { cap::WRITE } else { 0 };
+        let cap = cap::Capability::new(Object::Memory(memory), rights);
+        Ok(process.caps.lock().insert(cap)?)
+    }
+
+    /// `mem_map_cap`: maps a `Memory` object at the first gap of the map
+    /// region, read-only or writable as the capability allows, never
+    /// executable; counted against the caller's limit.
+    fn mem_map_cap(
+        process: &process::Process,
+        handle: Handle,
+        writable: bool,
+        pages: u64,
+    ) -> Result<u64, Error> {
+        use crate::arch::x86_64::paging::Flags;
+        let needed = cap::READ | if writable { cap::WRITE } else { 0 };
+        let memory = match process.caps.lock().get(handle, needed)?.object() {
+            Object::Memory(memory) => memory.clone(),
+            _ => return Err(Error::MissingRight),
+        };
+        if memory.frames().len() as u64 != pages {
+            return Err(Error::TooLarge);
+        }
+        let start = process
+            .memory
+            .lock()
+            .reserve(pages)
+            .ok_or(Error::NoMemory)?;
+        let flags = Flags {
+            writable,
+            executable: false,
+            uncached: false,
+            user: true,
+        };
+        let mapped = sched::with_current_space(|space| {
+            let mut guard = crate::mm::frames();
+            let frames = guard.as_mut()?;
+            for (i, &phys) in memory.frames().iter().enumerate() {
+                let virt = start + i as u64 * 4096;
+                if space.map_device(virt, phys, flags, frames).is_err() {
+                    for j in 0..i as u64 {
+                        let _ = space.unmap(start + j * 4096);
+                    }
+                    return None;
+                }
+            }
+            Some(())
+        });
+        if mapped.flatten().is_none() {
+            process.memory.lock().release(start, pages);
+            return Err(Error::NoMemory);
+        }
+        process.shared.lock().push(process::SharedMapping {
+            start,
+            memory,
+            writable,
+        });
         Ok(start)
     }
 
@@ -927,16 +1059,34 @@ mod kernel {
                 if !process.memory.lock().release(addr, pages) {
                     return Err(Error::BadAddress);
                 }
+                let shared = {
+                    let mut list = process.shared.lock();
+                    let at = list.iter().position(|s| s.start == addr);
+                    at.map(|at| list.remove(at))
+                };
                 sched::with_current_space(|space| {
                     let mut guard = crate::mm::frames();
                     if let Some(frames) = guard.as_mut() {
                         for i in 0..pages {
-                            space.unmap_owned(addr + i * 4096, frames);
+                            match shared {
+                                // The object owns the frames.
+                                Some(_) => drop(space.unmap(addr + i * 4096)),
+                                None => space.unmap_owned(addr + i * 4096, frames),
+                            }
                         }
                     }
                 });
+                // Dropped here, after the frame allocator's lock: this may
+                // have been the last reference.
+                drop(shared);
                 Ok(0)
             }
+            Call::MemShare { addr, pages } => mem_share(&process, addr, pages),
+            Call::MemMapCap {
+                handle,
+                writable,
+                pages,
+            } => mem_map_cap(&process, handle, writable, pages),
             Call::IrqNotify {
                 handle,
                 endpoint,
@@ -994,6 +1144,36 @@ mod tests {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(24, [0; 6]), Err(Error::UnknownCall));
+        let region = crate::process::MAP_REGION;
+        assert_eq!(
+            decode(22, [region.start, 8192, 9, 9, 9, 9]),
+            Ok(Call::MemShare {
+                addr: region.start,
+                pages: 2
+            })
+        );
+        assert_eq!(
+            decode(22, [0x40_0000, 4096, 0, 0, 0, 0]),
+            Err(Error::BadAddress)
+        );
+        assert_eq!(
+            decode(23, [3, 1, 4097, 9, 9, 9]),
+            Ok(Call::MemMapCap {
+                handle: 3,
+                writable: true,
+                pages: 2
+            })
+        );
+        assert_eq!(
+            decode(23, [3, 2, 4096, 0, 0, 0]),
+            Err(Error::TooLarge),
+            "writable is 0 or 1"
+        );
+        assert_eq!(
+            decode(23, [3, 0, 0, 0, 0, 0]),
+            Err(Error::TooLarge),
+            "no length"
+        );
         assert_eq!(
             decode(18, [2, 0x40_0000, 8, 3, 256, 7]),
             Ok(Call::Call {
@@ -1237,7 +1417,7 @@ mod tests {
         let mut accepted = 0;
         for _ in 0..200_000 {
             // Small numbers and lengths often, huge ones sometimes.
-            let number = next() % 23;
+            let number = next() % 25;
             let args: [u64; 6] = core::array::from_fn(|_| next() >> (next() % 64));
             match decode(number, args) {
                 Ok(
@@ -1280,7 +1460,11 @@ mod tests {
                     assert!(count == 0 || user_range_ok(addr, (count * SPAWN_ENTRY) as u64));
                 }
                 Ok(Call::IrqNotify { bit, .. }) => assert!(bit < 32),
-                Ok(Call::MemMap { pages }) => assert!(pages > 0),
+                Ok(Call::MemMap { pages } | Call::MemMapCap { pages, .. }) => assert!(pages > 0),
+                Ok(Call::MemShare { addr, pages }) => {
+                    let region = crate::process::MAP_REGION;
+                    assert!(pages > 0 && addr % 4096 == 0 && region.contains(&addr));
+                }
                 Ok(Call::MemUnmap { addr, pages }) => {
                     let region = crate::process::MAP_REGION;
                     assert!(pages > 0 && addr % 4096 == 0 && region.contains(&addr));
