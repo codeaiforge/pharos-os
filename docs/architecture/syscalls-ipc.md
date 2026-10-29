@@ -117,7 +117,7 @@ Implemented in `ipc` (endpoint queues, host-tested) and `syscall` (#41). A block
   - each endpoint has a 32-bit notification word that the kernel sets when a spawned child ends. `receive` returns pending bits first, as bit 16 set and the bits in bits 32–63.
 - **Fairness:** senders and receivers queue first in first out per endpoint. Blocking goes through the scheduler (the thread leaves the ready queue until the rendezvous).
 - **Memory is bounded:** each thread can wait on one endpoint at a time and has one 256-byte buffer. No queue grows with untrusted input.
-- **`call` (M2.10, #63):** send a request with a send-only capability on a reply endpoint attached, then wait for the first event on that endpoint. The caller is a receiver there before the request is delivered, so an immediate reply is never lost. The reply endpoint must be idle (`IN_USE` otherwise). One-shot reply capabilities are still not needed.
+- **`call` (M2.10, #63):** send a request with a send-only capability on a reply endpoint attached, then wait for the first event on that endpoint. The caller is a receiver there before the request is delivered, so an immediate reply is never lost. The reply endpoint must be idle (`IN_USE` otherwise). The reply capability is one-shot: the kernel revokes it when the call returns, so the server cannot keep it and answer a later call meant for another server (M2.10 review F1; later sends through it fail with `REVOKED`).
 - **Non-blocking `send` (M2.10, #63):** bit 0 of the sixth argument; with no receiver waiting, nothing is queued and the call returns `WOULD_BLOCK`. Services reply this way.
 
 ### System calls in M2.7

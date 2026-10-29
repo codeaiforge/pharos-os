@@ -28,13 +28,15 @@ fn free_frames() -> usize {
 }
 
 /// Steps `spawner` must report as passed.
-const STEPS: [&str; 14] = [
+const STEPS: [&str; 16] = [
     "endpoint_create and open bin/child",
     "spawn a child with two capabilities",
     "the child's message carries badge 7",
     "its end arrives as notification bit 3",
     "process_status: exited with 42",
     "a crashing child is reported killed by a page fault",
+    "call: the server's answer arrives",
+    "call: a second answer on the reply capability is REVOKED",
     "file without READ: MISSING_RIGHT",
     "capability without GRANT: MISSING_RIGHT",
     "notify endpoint without RECEIVE: MISSING_RIGHT",

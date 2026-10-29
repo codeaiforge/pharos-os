@@ -12,8 +12,8 @@
 
 use pharos_user::rights::{RECEIVE, SEND, WRITE};
 use pharos_user::{
-    Error, Grant, Received, Status, debug_write, endpoint_create, open, process_status, receive,
-    send, spawn,
+    Error, Grant, Received, Status, call_reply, debug_write, endpoint_create, open, process_status,
+    receive, send, spawn,
 };
 
 pharos_user::entry!(main);
@@ -87,6 +87,31 @@ fn main(_: u64) -> u64 {
         "a crashing child is reported killed by a page fault",
         note == Ok(Received::Notification(1 << 4))
             && crash.and_then(process_status) == Ok(Status::Killed(14)),
+    );
+
+    // A child serves one call, then answers again through the same reply
+    // capability: that must fail, since replies are one-shot.
+    let (Ok(server), Ok(reply)) = (endpoint_create(), endpoint_create()) else {
+        report(&mut f, "endpoints for the call test", false);
+        return f;
+    };
+    let serve = [Grant {
+        handle: server,
+        rights: RECEIVE,
+        badge: 0,
+    }];
+    let served = spawn(child, 4, &serve, Some((events, 5)));
+    let answer = call_reply(server, b"q", reply, &mut buf);
+    report(
+        &mut f,
+        "call: the server's answer arrives",
+        matches!(answer, Ok(Received::Message { len: 4, .. })) && buf.starts_with(b"once"),
+    );
+    report(
+        &mut f,
+        "call: a second answer on the reply capability is REVOKED",
+        receive(events, &mut buf) == Ok(Received::Notification(1 << 5))
+            && served.and_then(process_status) == Ok(Status::Exited(0)),
     );
 
     report(

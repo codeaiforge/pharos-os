@@ -1,6 +1,6 @@
 # Threat model
 
-**Status:** updated at the M2.9 gate (2026-10-28). It covers what exists today (the host workspace, and a kernel with isolated user processes, a read-only RAM-disk filesystem, and user-space drivers) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
+**Status:** updated at the M2.10 gate, which closes Phase 2 (2026-10-29). It covers what exists today (the host workspace, and a kernel with isolated user processes, a read-only RAM-disk filesystem, user-space drivers, a service manager, and a user-space network service) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
 
 ## Security principles
 
@@ -25,6 +25,7 @@
 - Developer host ↔ the repository's code and scripts.
 - Repository ↔ CI runners (if the repository is hosted).
 - Workspace ↔ third-party crates (none today).
+- QEMU guest ↔ host network: slirp user-mode networking in tests only; the host side is the `cargo xtask` echo server on localhost.
 
 ### Threats and mitigations
 
@@ -53,7 +54,7 @@ User processes run in ring 3 since M2.7. Design: [syscalls-ipc.md](../architectu
 | A malicious system-call argument corrupts the kernel | Every argument is checked, and the kernel never dereferences user addresses: it copies through the direct map after validating range, mapping, and access. `syscalls` passes bad buffers, numbers, and handles. `syscall::decode` is fuzzed on the host with 200,000 random calls |
 | `sysret` to a non-canonical address faults in ring 0 (CVE-2012-0217) | The last user page is never mapped, and the return address is checked before `sysret`. Tested under TCG, and under KVM on an Intel CPU |
 | A process uses an object it was not given | Capabilities only: per-process handle tables, and rights checked on every call. Delegation only with `GRANT`, narrowing rights; revocation through the derivation tree (`ipc`) |
-| A process exhausts kernel memory | IPC uses one 256-byte message and one wait per thread; process creation is kernel-only; kernel logs keep their newest 64 entries (review F2, `hardening`). Limit: a server that never receives blocks its clients forever (no timeouts yet) |
+| A process exhausts kernel memory | IPC uses one 256-byte message and one wait per thread; processes start processes only within the limits in the processes and services section below; kernel logs keep their newest 64 entries (review F2, `hardening`). Limit: a server that never receives blocks its clients forever (no timeouts yet) |
 | A process crashes the kernel with a fault or a privileged instruction | Exceptions from user mode kill only the process. `cli`, `hlt`, `mov cr3`, port I/O, and `int n` (all gates are DPL 0) are killed with general-protection faults (`user_mode`, `hardening`) |
 | User flags leak into the kernel (DF, AC) | Interrupt entry clears DF and AC (review F1); `syscall` clears them through `SFMASK`. Debug builds assert both are clear in every dispatcher (`hardening`) |
 | FPU state leaks between processes | `CR0.EM` makes x87/MMX instructions fault, and SSE/AVX are off, so no process can use registers the kernel does not save (review F3, `hardening`) |
@@ -86,23 +87,25 @@ Design: [drivers.md](../architecture/drivers.md) and [D-008](../project/decision
 | A revoked driver keeps device access | **Limit:** revocation stops new calls, but existing mappings stay until the process ends; ending the process is the full revocation |
 | A device returns bad values | The driver checks every ring index, descriptor ID, length, and status (host-tested); the kernel bounds its capability-list walk and checks BARs |
 
-### Processes and services (M2.10, planned)
+### Processes and services (M2.10)
 
-Design: [services.md](../architecture/services.md) and [D-015](../project/decision-log.md#d-015-network-stack-and-service-model). The first four rows are **implemented** (#60 and #61, tested in `spawn` and `services`), and the last is an accepted limit (the kernel's own 30 s wait turns a stuck `init` into a boot failure).
+Design: [services.md](../architecture/services.md) and [D-015](../project/decision-log.md#d-015-network-stack-and-service-model). Every mitigation below is **implemented** (#60, #61, #63) and was reviewed at the M2.10 gate: [review-m2.10-services-networking.md](review-m2.10-services-networking.md) (finding F1 fixed). Rows marked **Limit** are accepted. Tests: `spawn` and `services`.
 
-| Threat | Planned mitigation |
+| Threat | Mitigation |
 | --- | --- |
 | A process starts programs or passes capabilities it should not | `spawn` takes the program as a file capability (`READ`) and passes only listed capabilities, each derived from one the caller holds with `GRANT`, rights only narrowed; revocation reaches children |
 | A client forges its identity | Badges are set once by the capability's grantor and delivered by the kernel; holders cannot change them |
 | A process exhausts kernel memory by spawning or signalling | 32 live processes, 8 capabilities per spawn, notifications are a fixed word per endpoint; limits checked before allocation |
+| A server keeps a reply capability and answers a later call meant for another server | Replies are one-shot: the kernel revokes the server's reply capability when the call returns, and `call` refuses a reply endpoint with a queued message (review F1, `spawn`) |
 | `init` misuses its authority | `init` holds every boot capability; it is small, its service table is reviewed code, and it passes each service only what the table lists |
-| A stuck service hangs the boot | **Limit:** no timeouts in M2.10; the boot check fails at its time limit instead of passing |
+| A stuck service hangs the boot | **Limit:** no timeouts; the kernel's 30 s wait turns a stuck `init` into a boot failure instead of a pass |
+| One process takes every process slot | **Limit:** no per-process quotas; the 32-process limit is global (M3.5) |
 
-### Networking (M2.10, planned)
+### Networking (M2.10)
 
-Design: [networking.md](../architecture/networking.md). The first four rows are **implemented** (#62, #63: the parser is fuzzed on the host; `network` checks badges, the refused unbadged client, and the counters); the last two are accepted limits.
+Design: [networking.md](../architecture/networking.md). The first four rows are **implemented** (#62–#64: the parser is fuzzed on the host; `network` checks badges, the refused unbadged client, the counters, and a round trip to the host echo server) and were reviewed at the M2.10 gate; the rest are accepted limits.
 
-| Threat | Planned mitigation |
+| Threat | Mitigation |
 | --- | --- |
 | A malformed or hostile packet crashes or corrupts the network service | Every layer is parsed by safe, allocation-free code with checked lengths and checksums, fuzzed on the host; bad frames are dropped and counted |
 | A process uses the network without permission | Network access only through a badged `SEND` capability on the service's endpoint; badge 0 is refused; revocable |
@@ -110,12 +113,29 @@ Design: [networking.md](../architecture/networking.md). The first four rows are 
 | A client blocks or floods the service | Replies are non-blocking sends; per-client queues and outstanding requests are bounded; drops are counted |
 | A client reaches arbitrary hosts | **Limit:** no destination policy in M2.10; per-destination grants come with D-012 (M3.4) |
 | A virtio-net device DMAs anywhere | **Limit:** no IOMMU (D-008) |
+| A forged ARP message redirects traffic | **Limit:** ARP is believed, as in any ARP; on slirp the only other host is the gateway |
+| A guest program reaches beyond the host in tests | **Limit:** slirp's NAT is not restricted (`restrict=on` would also block the echo server); nothing in the guest sends anywhere but `10.0.2.2` |
 
 ### Known limitations
 
 - No automated secret scanning or dependency auditing is configured yet (nothing to audit today).
 - User processes are isolated from the kernel and from each other (see the kernel/user boundary above). Inside the kernel, the protections guard against kernel bugs: one stack frame larger than a guard page could skip it, and all kernel memory is reachable through the writable direct map.
 - One CPU only: the kernel/user boundary's reasoning about system calls and TLB flushes assumes it.
+
+### Open limits carried out of Phase 2
+
+Phase 2 closes with these limits accepted. Each is carried to the milestone that addresses it; none blocks Phase 3, which runs only in QEMU.
+
+| Limit | Since | Carried to |
+| --- | --- | --- |
+| No IOMMU: a driver is trusted with all memory through its device's DMA | M2.9 (D-008) | M4.4 (device management); required before real-hardware use (M5.2) |
+| No KPTI: the kernel half is mapped in every address space (Meltdown class) | M2.7 | M4.2 (security model); required before real-hardware use (M5.2) |
+| One CPU: locking, TLB flushes, and MSI-X routing assume it | from the start | Phase 4; SMP needs a decision record and a re-review of those paths |
+| Revocation does not unmap device registers or DMA buffers; ending the process is the full revocation | M2.9 | M3.4 (revocable agent permissions) |
+| No timeouts on IPC, `call`, pings, or service start | M2.7 | M3.3 (agent lifecycle and supervision) |
+| No per-process quotas on processes, handles, or network use | M2.10 | M3.5 (resource accounting and limits) |
+| No network destination policy | M2.10 | M3.4 (D-012) |
+| `rdtsc` in user mode (timing side channels) | M2.7 | M4.2 |
 
 ## Part 2 — Planned system (Phases 2–5)
 
@@ -161,7 +181,7 @@ Everything below is **planned**; none of it is implemented.
 | Resource exhaustion by an agent | Per-agent CPU, memory, storage, and network quotas | M3.5 |
 | Agent data exfiltration over network | Default-deny networking; per-destination grants; logging | M3.4 |
 | Kernel memory-safety bug | Safe Rust by default; reviewed `unsafe`; fuzzing of syscall interfaces | M2.2 onward |
-| Malicious DMA from devices | IOMMU use where available; limited device set | M2.9 |
+| Malicious DMA from devices | IOMMU use where available; limited device set (M2.9 limits the device set; the IOMMU is still open) | M4.4, M5.2 |
 | Tampered boot chain | Reproducible builds; Secure Boot evaluation | M4.3, M5.5 |
 | Compromised dependency or artifact | Minimal dependencies; license and audit review; reproducible builds | ongoing, M5.5 |
 

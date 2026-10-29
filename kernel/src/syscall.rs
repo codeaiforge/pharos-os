@@ -461,7 +461,7 @@ mod kernel {
 
     /// `call` (networking.md), in its own function: its message buffer
     /// stays off the dispatcher's stack frame, which every system call
-    /// pays for on the 16 KiB kernel stack.
+    /// pays for on the kernel stack (D-013).
     #[inline(never)]
     fn do_call(
         process: &process::Process,
@@ -488,16 +488,21 @@ mod kernel {
         if !reply_endpoint.is_idle() {
             return Err(Error::InUse);
         }
+        // Replies are one-shot: the server's capability is a child of
+        // `one_shot`, revoked as soon as the call returns, so a server
+        // cannot keep it and slip a "reply" into a later call.
+        let one_shot = reply_cap.derive(cap::SEND);
         let mut message = Message {
             data: [0; MAX_MESSAGE],
             len,
-            cap: Some(reply_cap.derive(cap::SEND)),
+            cap: Some(one_shot.derive(cap::SEND)),
             badge: sent_through.badge(),
         };
         sched::with_current_space(|space| space.read_user(addr, &mut message.data[..len]))
             .ok_or(Error::BadAddress)??;
-        let received = ipc::call(endpoint, message, reply_endpoint).ok_or(Error::UnknownCall)?;
-        deliver(process, received, addr, max)
+        let received = ipc::call(endpoint, message, reply_endpoint);
+        one_shot.revoke();
+        deliver(process, received.ok_or(Error::UnknownCall)?, addr, max)
     }
 
     /// Copies a received message out (cut to `max` bytes; the value reports
@@ -683,7 +688,7 @@ mod kernel {
                 };
                 sched::with_current_space(|space| space.check_user(addr, len, true))
                     .ok_or(Error::BadAddress)??;
-                // On the heap: kernel stacks are 16 KiB.
+                // On the heap: kernel stacks are small (32 KiB, D-013).
                 let mut buf = alloc::vec::Vec::new();
                 buf.try_reserve_exact(len).map_err(|_| Error::NoMemory)?;
                 buf.resize(len, 0);

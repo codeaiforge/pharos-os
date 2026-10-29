@@ -97,7 +97,7 @@ All parsing is in `pharos_programs::net`: safe Rust, no allocation per packet, e
   - flag bit 0 in the sixth argument;
   - if no receiver is waiting, the message is not queued and the call returns the new error **11 `WOULD_BLOCK`**;
   - the service sends every reply this way, so a client that is not waiting cannot block it. The reply is dropped and counted.
-- **Deferred replies:** the service keeps the attached reply capability until it answers (at most one per client), then deletes it.
+- **Deferred replies:** the service keeps the attached reply capability until it answers (at most one per client), then deletes it. The kernel revokes it anyway once the client's `call` returns (one-shot replies, M2.10 review F1).
 
 ### QEMU and the host endpoint
 
