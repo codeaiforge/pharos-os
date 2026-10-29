@@ -339,7 +339,7 @@ Ordering notes:
 **Status: Current.**
 
 - **Objective and scope:** Define target use cases, hardware requirements, and choose an inference runtime and model formats.
-- **Deliverables:** Requirements document (target use cases, the first agent scenario, target model sizes); benchmark results on the reference host; accepted D-010, D-011 (requirements part), and D-020; the memory and instruction-set targets for M3.0.
+- **Deliverables:** Requirements document ([phase3-requirements.md](phase3-requirements.md): target use cases, the first agent scenario, target model sizes; approved 2026-10-29, #66); benchmark results on the reference host; accepted D-010, D-011 (requirements part), and D-020; the memory and instruction-set targets for M3.0.
 - **Prerequisites:** Phase 1 gate (can overlap Phase 2).
 - **Acceptance criteria:** At least two runtimes evaluated against the D-010 criteria with measurements (tokens/s, memory use) on documented hardware; license review of runtime and candidate models complete.
 - **Validation:** Manual: reproducible benchmark scripts reviewed.

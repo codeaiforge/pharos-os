@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+### Added
+
+- Phase 3 requirements (`docs/project/phase3-requirements.md`, #66), approved by the maintainer: reference hardware, three use cases, the first agent scenario (summarize a granted file, with seven required failure tests), model needs and candidate sizes, a speed target of 5 tokens/s with the first token within 10 s (binding after #69), SSE2 baseline with optional AVX2, and provisional M3.0 targets.
+
 ### Changed
 
 - Roadmap: Phase 3 gains M3.0 (platform prerequisites for hosting agents: SIMD state, user memory, timeouts, writable storage) and M3.8 (a permission-aware knowledge service with provenance). M3.1–M3.5 and M3.7 are refined for durable tasks, a protected audit trail, an emergency stop that needs no agent, per-group budgets with reserved resources, and agent groups after single agents. M4.1 notes what `init` already delivers; M4.3 adds signed updates and rollback. The control-plane/execution-plane rule is stated in the Phase 3 ordering notes. New decision stubs: D-016, D-017, D-019, D-020 (open) and D-018 (proposed: authority only from capabilities, identity for attribution, a trusted path for human control).
