@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.1 — Requirements and inference-runtime evaluation.** Everything in Phases 3–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.0 — Platform prerequisites for hosting agents.** Everything in Phases 3–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -41,7 +41,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
 | 2 | Core System | Done (v0.2.0) |
-| 3 | AI Agent Platform | **Current** (M3.1) |
+| 3 | AI Agent Platform | **Current** (M3.0; M3.1 done) |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
 
@@ -291,7 +291,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ## Phase 3 — AI Agent Platform
 
-**Status: Current** (M3.1).
+**Status: Current** (M3.0; M3.1 done).
 
 Ordering notes:
 
@@ -312,7 +312,7 @@ Ordering notes:
 
 ### M3.0 — Platform prerequisites for hosting agents
 
-**Status: Planned.** Next on Pharos; may run alongside M3.1, whose measurements set its targets.
+**Status: Current.** M3.1 set its targets (listed under Deliverables).
 
 - **Where it runs (D-020):** Pharos; host tests for on-disk formats and pure logic.
 - **Objective and scope:** Give Pharos what an inference runtime and an agent runtime need from the OS, without which no later Phase 3 milestone can run on Pharos.
@@ -344,7 +344,7 @@ Ordering notes:
 
 ### M3.1 — Requirements and inference-runtime evaluation
 
-**Status: Current.**
+**Status: Done** — gate passed 2026-10-29: D-010 accepted. The requirements ([phase3-requirements.md](phase3-requirements.md), #66) set scenario S1 (summarize a granted file) and its targets; D-020 (#67) put enforcement on Pharos and measurement on the host; the benchmark harness (#68) and the evaluation ([inference-evaluation.md](inference-evaluation.md), #69) measured llama.cpp and our own engine, which matched llama.cpp's output on Qwen2.5-0.5B-Instruct q8_0 at 13.7–14.6 tokens/s on one thread; D-010 and D-011's requirements part (#70) chose our own `no_std` engine, GGUF with Q8_0, and that model, and set the M3.0 targets. CI was green on `main` through the last code change, `49ecb68` ([run 40866848930](https://github.com/codeaiforge/pharos-os/actions/runs/40866848930)). candle was dropped with the maintainer's agreement. Open for M3.2: a tokenizer, batched prompt processing (the S1 prompt takes about 16 s token by token, over the 10 s target), and SIMD.
 
 - **Where it runs (D-020):** Host only (evaluation).
 - **Objective and scope:** Define target use cases, hardware requirements, and choose an inference runtime and model formats.
@@ -665,4 +665,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). The current milestone is **M3.1 — Requirements and inference-runtime evaluation**, on the Linux host; **M3.0 — Platform prerequisites for hosting agents** comes next on Pharos and may run alongside it. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted. The current milestone is **M3.0 — Platform prerequisites for hosting agents**, with targets set by M3.1; it starts with D-016 (user execution environment) and D-017 (writable storage). D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
