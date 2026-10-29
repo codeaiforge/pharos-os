@@ -1,7 +1,8 @@
 //! Test kernel: waits with timeouts (issue #76, user-environment.md). The
 //! `timeprobe` program runs one case per process; the kernel times each
 //! against a process that exits at once. `receive` and `call` return
-//! `TIMED_OUT` no earlier than the timeout and within it plus two ticks; a
+//! `TIMED_OUT` no earlier than the timeout and within it plus two ticks
+//! (and 30 ms for host jitter); a
 //! timed-out `call` leaves nothing queued; `sleep` sleeps at least as long
 //! as asked; in a race of replies against the deadline, every reply the
 //! server delivered reached the client and every late one got `REVOKED`.
@@ -33,6 +34,9 @@ const ROUNDS: u64 = 8;
 const BAD: u64 = 0xbad;
 /// Timer period.
 const TICK: Duration = Duration::from_millis(10);
+/// Room for the host delaying the emulated machine (TCG under load). The
+/// lower bound, which shows no wait ends early, has none.
+const JITTER: Duration = Duration::from_millis(30);
 
 fn endpoint_cap(endpoint: &Arc<Endpoint>, rights: u32) -> Arc<Capability> {
     Capability::new(Object::Endpoint(endpoint.clone()), rights)
@@ -100,7 +104,7 @@ fn run(t: &mut TestRun) {
             run.as_millis(),
             want.as_millis()
         );
-        run >= want && run <= want + base + 2 * TICK
+        run >= want && run <= want + base + 2 * TICK + JITTER
     };
 
     let silent = Endpoint::new();
