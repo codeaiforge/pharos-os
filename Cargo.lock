@@ -42,6 +42,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pharos-store"
+version = "0.2.0"
+dependencies = [
+ "pharos-fs",
+]
+
+[[package]]
 name = "pharos-user"
 version = "0.2.0"
 
@@ -51,4 +58,5 @@ version = "0.2.0"
 dependencies = [
  "pharos-elf",
  "pharos-fs",
+ "pharos-store",
 ]

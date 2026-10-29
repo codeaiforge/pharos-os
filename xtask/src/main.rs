@@ -4,8 +4,8 @@
 //! pinned, checksum-verified Limine release. Unlike the read-only `pharos`
 //! CLI, this tool runs external programs (`cargo`, `curl`, `sha256sum`, `tar`,
 //! `cc`, `xorriso`, `qemu-system-x86_64`). It writes only under the
-//! workspace's `target/` directory (except `fs build`, which writes the
-//! image path it is given) and never needs root. Design: `docs/architecture/boot.md`.
+//! workspace's `target/` directory (except `fs build` and `store build`,
+//! which write the image path they are given) and never needs root. Design: `docs/architecture/boot.md`.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -18,6 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 mod echo;
 mod fs_image;
+mod store_image;
 
 /// Pinned Limine release (D-001). To update the pin, follow
 /// "Updating the Limine pin" in docs/architecture/boot.md.
@@ -88,6 +89,11 @@ COMMANDS:
                             filesystem image (docs/architecture/storage.md).
     fs ls <IMAGE>           Check an image with the kernel's parser and list
                             its files (size, CRC-32, path).
+    store build <DIR> <IMAGE> --blocks <N>
+                            Make a writable store of N 4 KiB blocks holding the
+                            regular files under DIR (storage.md part 8).
+    store ls <IMAGE>        Mount a store with the storage service's code, check
+                            every object, and list them.
     runner <ELF>            Boot one test kernel headless (used by Cargo as the
                             runner for x86_64-unknown-none; see .cargo/config.toml).
     help                    Show this help message
@@ -121,6 +127,14 @@ enum Task {
         image: PathBuf,
     },
     FsLs {
+        image: PathBuf,
+    },
+    StoreBuild {
+        dir: PathBuf,
+        image: PathBuf,
+        blocks: u64,
+    },
+    StoreLs {
         image: PathBuf,
     },
 }
@@ -206,6 +220,41 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                 }
             }
             _ => return Err("fs needs 'build <DIR> <IMAGE>' or 'ls <IMAGE>'".to_owned()),
+        },
+        Some("store") => match args.next().as_deref() {
+            Some("build") => {
+                let usage = "store build needs <DIR> <IMAGE> --blocks <N>";
+                let dir = args.next().ok_or(usage)?;
+                let image = args.next().ok_or(usage)?;
+                if args.next().as_deref() != Some("--blocks") {
+                    return Err(usage.to_owned());
+                }
+                let value = args.next().ok_or(usage)?;
+                let blocks = value
+                    .parse()
+                    .ok()
+                    .filter(|&n| n >= pharos_store::MIN_BLOCKS)
+                    .ok_or(format!(
+                        "--blocks must be a number of at least {}, got '{value}'",
+                        pharos_store::MIN_BLOCKS
+                    ))?;
+                Task::StoreBuild {
+                    dir: PathBuf::from(dir),
+                    image: PathBuf::from(image),
+                    blocks,
+                }
+            }
+            Some("ls") => {
+                let image = args.next().ok_or("store ls needs an image path")?;
+                Task::StoreLs {
+                    image: PathBuf::from(image),
+                }
+            }
+            _ => {
+                return Err(
+                    "store needs 'build <DIR> <IMAGE> --blocks <N>' or 'ls <IMAGE>'".to_owned(),
+                );
+            }
         },
         Some(other) => return Err(format!("unknown command '{other}'")),
     };
@@ -1130,6 +1179,8 @@ fn main() -> ExitCode {
             Task::Runner { elf } => runner(&paths, &elf),
             Task::FsBuild { dir, image } => fs_image::build(&dir, &image),
             Task::FsLs { image } => fs_image::ls(&image),
+            Task::StoreBuild { dir, image, blocks } => store_image::build(&dir, &image, blocks),
+            Task::StoreLs { image } => store_image::ls(&image),
         }
     });
     match result {
@@ -1215,6 +1266,24 @@ mod tests {
         assert!(parse(args(&["image", "--kernel"])).is_err());
         assert!(parse(args(&["image", "--iso"])).is_err());
         assert!(parse(args(&["run", "--uefi"])).is_err());
+        assert_eq!(
+            parse(args(&["store", "build", "d", "s.img", "--blocks", "64"])),
+            Ok(Task::StoreBuild {
+                dir: PathBuf::from("d"),
+                image: PathBuf::from("s.img"),
+                blocks: 64
+            })
+        );
+        assert_eq!(
+            parse(args(&["store", "ls", "s.img"])),
+            Ok(Task::StoreLs {
+                image: PathBuf::from("s.img")
+            })
+        );
+        assert!(parse(args(&["store", "build", "d", "s.img"])).is_err());
+        assert!(parse(args(&["store", "build", "d", "s.img", "--blocks", "3"])).is_err());
+        assert!(parse(args(&["store", "build", "d", "s.img", "--blocks", "x"])).is_err());
+        assert!(parse(args(&["store"])).is_err());
         assert!(parse(args(&["fs"])).is_err());
         assert!(parse(args(&["fs", "build", "dir"])).is_err());
         assert!(parse(args(&["fs", "ls"])).is_err());

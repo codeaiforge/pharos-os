@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-- **Part 8 (writable store, M3.0):** **Accepted**: approved by the maintainer on 2026-10-29 (#73); follows [D-017](../project/decision-log.md#d-017-writable-persistent-storage-and-audit-integrity). Planned, not implemented. Parts 1–7 below describe the read-only format and are unchanged.
+- **Part 8 (writable store, M3.0):** **Accepted**: approved by the maintainer on 2026-10-29 (#73); follows [D-017](../project/decision-log.md#d-017-writable-persistent-storage-and-audit-integrity). The format crate and host tool are **implemented** (#77, part 1: `crates/pharos-store`, `cargo xtask store build` and `store ls`). **Planned:** the storage service, virtio-blk writes, the second disk, and the crash-injection test (#77, after shared memory #80). Parts 1–7 below describe the read-only format and are unchanged.
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.8, #44). It follows [D-007](../project/decision-log.md#d-007-filesystem-and-persistent-storage) (read-only RAM disk, custom checked format, files through capabilities).
 - **Implementation:** the image format, parser, and host tool are **implemented** (#45: `crates/pharos-fs`, `cargo xtask fs build` and `fs ls`). So is the RAM disk (#46: the Limine module request, `storage::record_modules` and `storage::ram_disk`, the slice from `mm::raw::module_bytes`, and the modules in the boot image). So is the kernel filesystem (#47: `fs::mount`, and `fs::mount_root` at boot). So are file capabilities with the `open` and `read` system calls (#48). Every M2.8 interface in this document is now implemented.
 
@@ -194,7 +194,7 @@ Follows [D-017](../project/decision-log.md#d-017-writable-persistent-storage-and
 
 | Component | Where | `unsafe` |
 | --- | --- | --- |
-| Format, commit logic, mount and recovery, SHA-256 | New crate `crates/pharos-store`: `no_std` with `alloc`, no dependencies, `unsafe` forbidden; generic over a block-device trait with `read`, `write`, and `flush` | none |
+| Format, commit logic, mount and recovery, SHA-256 | New crate `crates/pharos-store`: `no_std` with `alloc`, no third-party dependencies (it uses `pharos-fs` for CRC-32 and the path rules), `unsafe` forbidden; generic over a block-device trait with `read`, `write`, and `flush` | none |
 | Storage service | The virtio-blk driver's process (`user/programs/src/bin/store.rs`, built on `pharos_programs::virtio`), as D-015 put the network stack in its driver | none (programs use none) |
 | Host tool | `cargo xtask store build <dir> <image> --blocks <n>` and `store ls <image>` | none |
 | Shared memory for file data | Kernel `Memory` capabilities ([user-environment.md](user-environment.md#shared-memory-d-017-item-7)) | in the kernel's existing modules |
@@ -206,18 +206,19 @@ All integers are little-endian. Blocks are 4 KiB (8 virtio-blk sectors).
 - **Superblock slots: blocks 0 and 1.** Each holds: magic `PHAROSST` (8 bytes); version (u32, 1); block size (u32, 4096); generation (u64); total blocks (u64); index start block (u64), block count (u32), byte length (u32), and CRC-32 (u32); and the slot's own CRC-32 over everything before it. A slot is **valid** if its magic, version, block size, and CRC are right, its numbers are in range, and its index's CRC verifies.
 - **Index:** a header (object count, u32) and one entry per object, sorted by path: path length (u8) and path (at most 104 bytes, the same rules as `pharos-fs`: no empty segments, no `.` or `..`, no NUL); kind (u8: 1 file, 2 stream); length in bytes (u64); content CRC-32 (u32; for streams, of the last block); for streams, the record count (u64) and the chain head (32 bytes); extent count (u16) and extents (start block u64, block count u32). At most 4,096 objects, 64 extents per object, and a 1 MiB index.
 - **Files** are written whole: a write puts the new content in free blocks, and the commit makes the index point to it. Model files are stored this way, normally by the host tool when the image is built.
-- **Streams** hold records of at most 4,032 bytes: length (u32), CRC-32 (u32), and the record's SHA-256 chain value `H(prev ‖ payload)` (32 bytes; `prev` is all zeros for the first record), then the payload. Records do not cross blocks. Appending copies the stream's last block, adds the record, and writes it to a free block (live blocks are never written).
+- **Streams** hold records of 1 to 4,032 bytes (a zero length marks the unused end of a block): length (u32), CRC-32 (u32), and the record's SHA-256 chain value `H(prev ‖ payload)` (32 bytes; `prev` is all zeros for the first record), then the payload. Records do not cross blocks. Appending copies the stream's last block, adds the record, and writes it to a free block (live blocks are never written), preferably the block after the one before it; a stream that would pass 64 extents is moved into one run in the same commit. A stream's length counts whole earlier blocks plus the used part of the last.
 
 ### Commit and recovery
 
-1. Write new data blocks (and a copied stream tail) to free blocks; **flush**.
-2. Write the new index to free blocks; **flush**.
-3. Write the superblock into the **older** slot with generation + 1; **flush**.
+1. Write new data blocks (and a copied stream tail) and the new index to free blocks; **flush**.
+2. Write the superblock into the **older** slot with generation + 1; **flush**.
+
+(The approved design had a third flush between data and index. Implementing it showed it adds nothing: a superblock is valid only if its index's CRC verifies, and the flush before the superblock makes data and index durable together. The crash tests include a write cache that reorders: every pending write landing except the first.)
 
 - **Free blocks** are those referenced by neither of the two valid generations, so the newest commit can always fall back to the previous one. The service builds a bitmap of them at mount.
 - **Mount:** read both slots; take the valid one with the higher generation, or the other if it is not valid; if neither is valid, the store is refused. Then check every extent is in range and no two objects share a block.
 - **Reads** check each object's CRC-32 (files: the whole content when read from start to end; streams: each record's CRC and chain value).
-- **A crash at any point** leaves either the old generation (steps 1–2, or a torn step-3 write that fails its CRC) or the new one (step 3 complete). Nothing else is reachable.
+- **A crash at any point** leaves either the old generation (step 1, or a torn step-2 write that fails its CRC) or the new one (step 2 complete). Nothing else is reachable.
 - **Full store:** a write that does not fit is refused (`NO_SPACE`) before anything is written. A device error fails the operation and the service stops accepting writes until restarted (reads continue).
 
 ### The storage service

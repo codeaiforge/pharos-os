@@ -102,6 +102,7 @@ This runs the same checks as CI ([.github/workflows/ci.yml](.github/workflows/ci
 | `crates/pharos-elf/` | Program format: a validating parser for static ELF64 user programs ([driver design](docs/architecture/drivers.md)) |
 | `user/` | User space: `pharos-user` (system-call library) and `programs/` (Rust user programs, built for the bare-metal target and stored in the boot filesystem) |
 | `crates/pharos-fs/` | Filesystem image format: builder, validating parser, block-device trait, shared by the kernel and `cargo xtask` ([storage design](docs/architecture/storage.md)) |
+| `crates/pharos-store/` | Writable store format: copy-on-write commits with two superblock roots, crash recovery, SHA-256-chained streams, shared by the storage service and `cargo xtask` ([storage design](docs/architecture/storage.md#8-the-writable-store-m30)) |
 | `tools/pharos-cli/` | The `pharos` host-side development CLI |
 | `xtask/` | `cargo xtask`: builds the kernel and boot image ([boot design](docs/architecture/boot.md#build-tool-xtask)) |
 | `docs/` | Project, development, architecture, and security docs ([index](docs/README.md)) |
