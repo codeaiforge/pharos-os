@@ -43,7 +43,7 @@ Nothing here adds `unsafe` code.
 | Number | Name | Arguments | Returns | Needs |
 | --- | --- | --- | --- | --- |
 | 14 | `endpoint_create` | — | new endpoint handle | none |
-| 15 | `spawn` | file, argument, capability array, count (≤ 8), endpoint (0 = none), bit | new process handle | file `READ`; each passed capability `GRANT`; endpoint `RECEIVE` |
+| 15 | `spawn` | file, argument, capability array, count (≤ 8; since M3.0 bits 32–63 carry the child's page limit, [user-environment.md](user-environment.md#user-memory)), endpoint (0 = none), bit | new process handle | file `READ`; each passed capability `GRANT`; endpoint `RECEIVE` |
 | 16 | `process_status` | process | 0 while running, else how it ended | process `WAIT` |
 | 17 | `irq_notify` | interrupt, endpoint, bit (0–31) | 0 | interrupt `WAIT`; endpoint `RECEIVE` |
 | 18 | `call` | endpoint, buffer, length (≤ 256), reply endpoint, maximum reply length | as `receive` | endpoint `SEND`; reply `SEND`, `RECEIVE` |

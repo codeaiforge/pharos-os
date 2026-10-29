@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-29 (issue #73). It follows [D-016](../project/decision-log.md#d-016-user-execution-environment-simd-state-user-memory-and-timeouts) and item 7 of [D-017](../project/decision-log.md#d-017-writable-persistent-storage-and-audit-integrity), for [M3.0](../project/implementation-roadmap.md#m30--platform-prerequisites-for-hosting-agents).
-- **Implementation:** the user-program build and vector state are **implemented** (#74: `kernel/src/arch/x86_64/fpu.rs`, the context switch, `pharos-user`'s memory functions and probes, `libm`; tested by `vector_state` and `vector_state_avx`). **Planned:** user memory (#75), timeouts (#76), shared memory (#80), and the large-file test (#78).
+- **Implementation:** the user-program build and vector state are **implemented** (#74: `kernel/src/arch/x86_64/fpu.rs`, the context switch, `pharos-user`'s memory functions and probes, `libm`; tested by `vector_state` and `vector_state_avx`). So is user memory (#75: `process::UserMemory`, `mem_map`/`mem_unmap` in `kernel/src/syscall.rs`, the limit in `spawn`, `pharos_user::{mem_map, mem_unmap, spawn_limited}` and the size-class heap; tested by `user_memory` with the `memprobe` program). **Planned:** timeouts (#76), shared memory (#80), and the large-file test (#78).
 
 ## 2. Context
 
@@ -51,7 +51,7 @@ M3.1 chose an inference engine that needs, from Pharos: floating point and SIMD 
 `pharos-user`'s global allocator (in its `syscall` module, replacing the bump heap):
 
 - **Small allocations** (up to 32 KiB, rounded up to a power of two from 16 bytes) come from size-class free lists. Their memory comes first from the existing 256 KiB static area in the program image, then from 64 KiB chunks obtained with `mem_map`; chunks are kept for reuse, not returned.
-- **Large allocations** (above 32 KiB) are their own `mem_map` mapping, unmapped when freed, so a model file or a key/value cache returns to the kernel.
+- **Large allocations** (above 32 KiB) are their own `mem_map` mapping, unmapped when freed, so a model file or a key/value cache returns to the kernel. If `mem_map` refuses (a program started without a limit) while the static area still has room, the block is carved from it and never reused, as with the old bump heap, so programs that never had a limit keep working (#75).
 - **Out of memory** (the limit reached) is a null return, which Rust turns into the allocation-error path (a panic, so the process ends with a report).
 - **Alignment** up to 4 KiB is honoured; larger alignments are refused (null).
 - Host-tested: the size-class logic runs on the host with a fake `mem_map`.

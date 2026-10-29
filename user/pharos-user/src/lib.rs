@@ -31,6 +31,8 @@ pub mod number {
     pub const PROCESS_STATUS: u64 = 16;
     pub const IRQ_NOTIFY: u64 = 17;
     pub const CALL: u64 = 18;
+    pub const MEM_MAP: u64 = 19;
+    pub const MEM_UNMAP: u64 = 20;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -256,6 +258,18 @@ pub fn spawn(
     caps: &[Grant],
     notify: Option<(Handle, u32)>,
 ) -> Result<Handle, Error> {
+    spawn_limited(file, arg, caps, notify, 0)
+}
+
+/// [`spawn`], letting the child [`mem_map`] up to `limit` pages (at most
+/// this process's own limit, else [`Error::TooLarge`]).
+pub fn spawn_limited(
+    file: Handle,
+    arg: u64,
+    caps: &[Grant],
+    notify: Option<(Handle, u32)>,
+    limit: u32,
+) -> Result<Handle, Error> {
     // Room for one more than the kernel accepts, so passing too many
     // reaches the kernel's check instead of being cut here.
     let mut entries = [0u8; 16 * (MAX_SPAWN_CAPS + 1)];
@@ -272,7 +286,7 @@ pub fn spawn(
         file,
         arg,
         entries.as_ptr() as u64,
-        caps.len() as u64,
+        caps.len() as u64 | u64::from(limit) << 32,
         endpoint,
         bit.into(),
     ];
@@ -363,6 +377,19 @@ pub fn irq_create(device: Handle, entry: u16) -> Result<Handle, Error> {
 /// the last wait (at least 1).
 pub fn irq_wait(interrupt: Handle) -> Result<u64, Error> {
     call(number::IRQ_WAIT, [interrupt, 0, 0, 0, 0, 0])
+}
+
+/// Maps `len` bytes (rounded up to whole pages) of zeroed memory and
+/// returns its address. Fails with [`Error::NoMemory`] beyond this process's
+/// page limit.
+pub fn mem_map(len: u64) -> Result<u64, Error> {
+    call(number::MEM_MAP, [len, 0, 0, 0, 0, 0])
+}
+
+/// Unmaps one whole earlier [`mem_map`] mapping (`addr` and `len` as
+/// mapped); anything else is [`Error::BadAddress`].
+pub fn mem_unmap(addr: u64, len: u64) -> Result<u64, Error> {
+    call(number::MEM_UNMAP, [addr, len, 0, 0, 0, 0])
 }
 
 /// Exit code a program's panic ends it with.

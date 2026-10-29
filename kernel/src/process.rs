@@ -37,6 +37,70 @@ pub const MAX_IMAGE: usize = 1024 * 1024;
 pub const PROGRAM_RANGE: core::ops::Range<u64> = USER_BASE..USER_BASE + 16 * 1024 * 1024;
 /// Largest ELF program file.
 pub const MAX_PROGRAM: u64 = 4 * 1024 * 1024;
+/// Where `mem_map` places mappings (user-environment.md): 16 TiB clear of
+/// the program and the stack.
+pub const MAP_REGION: core::ops::Range<u64> = 0x0000_1000_0000_0000..0x0000_2000_0000_0000;
+/// Most `mem_map` mappings one process has at once.
+pub const MAX_MAPPINGS: usize = 1024;
+/// The page limit the kernel starts `init` with: 1.5 GiB.
+pub const INIT_MEMORY_LIMIT: u64 = 1536 * 1024 * 1024 / FRAME_SIZE;
+
+/// A process's `mem_map` mappings and its page limit (user-environment.md).
+/// Only the bookkeeping: the system call maps and frees the pages.
+#[derive(Debug, Default)]
+pub struct UserMemory {
+    /// Most pages mapped at once.
+    pub limit: u64,
+    /// Pages mapped now.
+    pub used: u64,
+    /// Mappings as (start, pages), sorted by start.
+    maps: Vec<(u64, u64)>,
+}
+
+impl UserMemory {
+    pub fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            ..Self::default()
+        }
+    }
+
+    /// Records a mapping of `pages` at the first gap in [`MAP_REGION`] that
+    /// fits and returns its start; `None` if the limit, the mapping count,
+    /// or the region does not allow it.
+    pub fn reserve(&mut self, pages: u64) -> Option<u64> {
+        let used = self.used.checked_add(pages)?;
+        if pages == 0 || used > self.limit || self.maps.len() >= MAX_MAPPINGS {
+            return None;
+        }
+        let len = pages.checked_mul(FRAME_SIZE)?;
+        let (mut at, mut index) = (MAP_REGION.start, 0);
+        for &(start, n) in &self.maps {
+            if start - at >= len {
+                break;
+            }
+            at = start + n * FRAME_SIZE;
+            index += 1;
+        }
+        if MAP_REGION.end - at < len {
+            return None;
+        }
+        self.maps.insert(index, (at, pages));
+        self.used = used;
+        Some(at)
+    }
+
+    /// Forgets the mapping of exactly `pages` at `start`; false if there is
+    /// none.
+    pub fn release(&mut self, start: u64, pages: u64) -> bool {
+        let Some(i) = self.maps.iter().position(|&m| m == (start, pages)) else {
+            return false;
+        };
+        self.maps.remove(i);
+        self.used -= pages;
+        true
+    }
+}
 
 /// Why a process could not be created.
 #[derive(Debug, PartialEq, Eq)]
@@ -190,8 +254,19 @@ pub fn spawn_elf(
     arg: u64,
     caps: Vec<Arc<Capability>>,
 ) -> Result<TaskId, ProcessError> {
+    spawn_elf_limited(fs, path, arg, caps, 0)
+}
+
+/// [`spawn_elf`] with a `mem_map` limit of `limit` pages.
+pub fn spawn_elf_limited(
+    fs: &crate::fs::Fs,
+    path: &[u8],
+    arg: u64,
+    caps: Vec<Arc<Capability>>,
+    limit: u64,
+) -> Result<TaskId, ProcessError> {
     let (space, entry) = load_elf(fs, path)?;
-    start(space, entry - USER_BASE, arg, caps)
+    start_limited(space, entry - USER_BASE, arg, caps, limit)
 }
 
 /// Kernel-side state of a process (its thread and address space belong to
@@ -213,6 +288,8 @@ pub struct Process {
     /// [`crate::device::MAX_MMIO_PAGES`]; they and their page tables are
     /// freed only when the process ends).
     pub mmio_pages: IrqMutex<u64>,
+    /// Its `mem_map` mappings and page limit.
+    pub memory: IrqMutex<UserMemory>,
 }
 
 /// Live processes by task ID (one thread each).
@@ -221,12 +298,23 @@ static PROCESSES: IrqMutex<BTreeMap<TaskId, Arc<Process>>> = IrqMutex::new(BTree
 /// Runs the process in `space` (from [`load`], possibly with more pages
 /// mapped) as a new thread entering user mode at `USER_BASE + entry`, with
 /// `arg` in `rdi` and `caps` under handles 1, 2, ... The thread owns
-/// `space`.
+/// `space`. It may not `mem_map` ([`start_limited`] allows it).
 pub fn start(
     space: AddressSpace,
     entry: u64,
     arg: u64,
     caps: Vec<Arc<Capability>>,
+) -> Result<TaskId, ProcessError> {
+    start_limited(space, entry, arg, caps, 0)
+}
+
+/// [`start`] with a `mem_map` limit of `limit` pages.
+pub fn start_limited(
+    space: AddressSpace,
+    entry: u64,
+    arg: u64,
+    caps: Vec<Arc<Capability>>,
+    limit: u64,
 ) -> Result<TaskId, ProcessError> {
     if space.translate(USER_BASE.saturating_add(entry)).is_none() {
         return Err(ProcessError::BadEntry);
@@ -248,6 +336,7 @@ pub fn start(
             inbox: IrqMutex::new(None),
             pins: IrqMutex::new(Vec::new()),
             mmio_pages: IrqMutex::new(0),
+            memory: IrqMutex::new(UserMemory::new(limit)),
             record: Arc::new(ProcessRecord {
                 id,
                 end: IrqMutex::new(None),
@@ -494,4 +583,50 @@ fn on_user_fault(frame: &ExceptionFrame) -> ! {
         cr2,
     });
     end_current(End::Killed(frame.vector))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PAGE: u64 = FRAME_SIZE;
+
+    #[test]
+    fn mappings_fill_gaps_and_respect_the_limit() {
+        let mut m = UserMemory::new(10);
+        let a = m.reserve(2).unwrap();
+        let b = m.reserve(3).unwrap();
+        let c = m.reserve(1).unwrap();
+        assert_eq!((a, b, c), (MAP_REGION.start, a + 2 * PAGE, a + 5 * PAGE));
+        assert_eq!(m.reserve(5), None, "11 pages > limit 10");
+        assert_eq!(m.used, 6, "a refusal changes nothing");
+        assert_eq!(m.reserve(0), None);
+        assert!(!m.release(b, 2), "only the whole mapping");
+        assert!(!m.release(b + PAGE, 2));
+        assert!(m.release(b, 3));
+        assert_eq!(m.used, 3);
+        assert_eq!(m.reserve(2), Some(b), "first gap that fits");
+        assert_eq!(
+            m.reserve(2),
+            Some(c + PAGE),
+            "the rest of the gap is 1 page"
+        );
+        assert_eq!(m.reserve(1), Some(b + 2 * PAGE), "now it fits");
+    }
+
+    #[test]
+    fn mapping_count_and_region_are_bounded() {
+        let mut m = UserMemory::new(u64::MAX);
+        for _ in 0..MAX_MAPPINGS {
+            assert!(m.reserve(1).is_some());
+        }
+        assert_eq!(m.reserve(1), None, "1,024 mappings");
+        let mut m = UserMemory::new(u64::MAX);
+        let region = (MAP_REGION.end - MAP_REGION.start) / PAGE;
+        assert_eq!(m.reserve(region + 1), None, "larger than the region");
+        assert_eq!(m.reserve(region), Some(MAP_REGION.start));
+        assert_eq!(m.reserve(1), None, "region full");
+        assert_eq!(UserMemory::new(5).reserve(u64::MAX), None, "no overflow");
+        assert_eq!(UserMemory::new(0).reserve(1), None, "limit 0");
+    }
 }

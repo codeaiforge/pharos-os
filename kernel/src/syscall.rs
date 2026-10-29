@@ -32,6 +32,8 @@ pub mod number {
     pub const PROCESS_STATUS: u64 = 16;
     pub const IRQ_NOTIFY: u64 = 17;
     pub const CALL: u64 = 18;
+    pub const MEM_MAP: u64 = 19;
+    pub const MEM_UNMAP: u64 = 20;
 }
 
 /// Largest buffer `debug_write` accepts (and the IPC message size).
@@ -174,6 +176,8 @@ pub enum Call {
         /// Endpoint to notify when the child ends (0 = none).
         endpoint: Handle,
         bit: u32,
+        /// The child's `mem_map` limit in pages.
+        limit: u64,
     },
     ProcessStatus {
         handle: Handle,
@@ -191,6 +195,20 @@ pub enum Call {
         reply: Handle,
         max: usize,
     },
+    MemMap {
+        pages: u64,
+    },
+    MemUnmap {
+        addr: u64,
+        pages: u64,
+    },
+}
+
+/// Pages in a `mem_map`/`mem_unmap` length: rounded up, at least one, at
+/// most the whole map region.
+fn map_pages(len: u64) -> Option<u64> {
+    let region = crate::process::MAP_REGION.end - crate::process::MAP_REGION.start;
+    (len != 0 && len <= region).then(|| len.div_ceil(4096))
 }
 
 /// A page-aligned user range of `len` bytes (at least one page).
@@ -302,7 +320,8 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
         number::IRQ_WAIT => Ok(Call::IrqWait { handle: args[0] }),
         number::ENDPOINT_CREATE => Ok(Call::EndpointCreate),
         number::SPAWN => {
-            let (count, bit) = (args[3], args[5]);
+            // Capabilities in bits 0-31, the child's page limit in 32-63.
+            let (count, limit, bit) = (args[3] & 0xffff_ffff, args[3] >> 32, args[5]);
             if count > MAX_SPAWN_CAPS as u64 || bit >= 32 {
                 return Err(Error::TooLarge);
             }
@@ -323,6 +342,7 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
                 },
                 endpoint: args[4],
                 bit: bit as u32,
+                limit,
             })
         }
         number::PROCESS_STATUS => Ok(Call::ProcessStatus { handle: args[0] }),
@@ -341,6 +361,18 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             }),
             _ => Err(Error::TooLarge),
         },
+        number::MEM_MAP => Ok(Call::MemMap {
+            pages: map_pages(args[0]).ok_or(Error::TooLarge)?,
+        }),
+        number::MEM_UNMAP => {
+            let (addr, region) = (args[0], crate::process::MAP_REGION);
+            match map_pages(args[1]) {
+                Some(pages) if addr % 4096 == 0 && region.contains(&addr) => {
+                    Ok(Call::MemUnmap { addr, pages })
+                }
+                _ => Err(Error::BadAddress),
+            }
+        }
         _ => Err(Error::UnknownCall),
     }
 }
@@ -528,8 +560,44 @@ mod kernel {
         Ok(message.len as u64 | new_handle << 32 | u64::from(message.badge) << 40)
     }
 
+    /// `mem_map`: the limit is checked before any frame is allocated; on
+    /// failure nothing stays mapped.
+    // ponytail: maps page by page with interrupts disabled, so a 1 GiB
+    // mapping holds the CPU for its whole zeroing; map in batches with
+    // preemption points if latency matters.
+    fn mem_map(process: &process::Process, pages: u64) -> Result<u64, Error> {
+        use crate::arch::x86_64::paging::Flags;
+        let start = process
+            .memory
+            .lock()
+            .reserve(pages)
+            .ok_or(Error::NoMemory)?;
+        let mapped = sched::with_current_space(|space| {
+            let mut guard = crate::mm::frames();
+            let frames = guard.as_mut()?;
+            for i in 0..pages {
+                if space
+                    .map_new_page(start + i * 4096, Flags::USER_DATA, &[], frames)
+                    .is_err()
+                {
+                    for j in 0..i {
+                        space.unmap_owned(start + j * 4096, frames);
+                    }
+                    return None;
+                }
+            }
+            Some(())
+        });
+        if mapped.flatten().is_none() {
+            process.memory.lock().release(start, pages);
+            return Err(Error::NoMemory);
+        }
+        Ok(start)
+    }
+
     /// `spawn`: every handle and the limits are checked before anything is
     /// allocated; then the program is loaded and checked.
+    #[allow(clippy::too_many_arguments)]
     fn spawn(
         process: &process::Process,
         handle: Handle,
@@ -538,6 +606,7 @@ mod kernel {
         count: usize,
         endpoint: Handle,
         bit: u32,
+        limit: u64,
     ) -> Result<u64, Error> {
         let file = process.caps.lock().get(handle, cap::READ)?;
         let Object::File { fs, file } = file.object() else {
@@ -566,6 +635,10 @@ mod kernel {
             0 => None,
             handle => Some(self::endpoint(process, handle, cap::RECEIVE)?),
         };
+        // Not carved out of the creator's limit: per-agent quotas are M3.5.
+        if limit > process.memory.lock().limit {
+            return Err(Error::TooLarge);
+        }
         if process.caps.lock().len() >= MAX_HANDLES || process::count() >= MAX_PROCESSES {
             return Err(Error::NoMemory);
         }
@@ -575,7 +648,7 @@ mod kernel {
             }
             _ => Error::BadProgram,
         })?;
-        let id = process::start(space, entry - process::USER_BASE, arg, caps)
+        let id = process::start_limited(space, entry - process::USER_BASE, arg, caps, limit)
             .map_err(|_| Error::NoMemory)?;
         let record = process::by_id(id).ok_or(Error::NoMemory)?.record.clone();
         if let Some(endpoint) = notify {
@@ -817,7 +890,23 @@ mod kernel {
                 count,
                 endpoint,
                 bit,
-            } => spawn(&process, handle, arg, addr, count, endpoint, bit),
+                limit,
+            } => spawn(&process, handle, arg, addr, count, endpoint, bit, limit),
+            Call::MemMap { pages } => mem_map(&process, pages),
+            Call::MemUnmap { addr, pages } => {
+                if !process.memory.lock().release(addr, pages) {
+                    return Err(Error::BadAddress);
+                }
+                sched::with_current_space(|space| {
+                    let mut guard = crate::mm::frames();
+                    if let Some(frames) = guard.as_mut() {
+                        for i in 0..pages {
+                            space.unmap_owned(addr + i * 4096, frames);
+                        }
+                    }
+                });
+                Ok(0)
+            }
             Call::IrqNotify {
                 handle,
                 endpoint,
@@ -874,7 +963,7 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(19, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(24, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(
             decode(18, [2, 0x40_0000, 8, 3, 256, 0]),
             Ok(Call::Call {
@@ -924,8 +1013,20 @@ mod tests {
                 addr: 0x40_0000,
                 count: 8,
                 endpoint: 4,
-                bit: 31
+                bit: 31,
+                limit: 0
             })
+        );
+        assert!(
+            matches!(
+                spawn(0x40_0000, 1 | 256 << 32, 0),
+                Ok(Call::Spawn {
+                    count: 1,
+                    limit: 256,
+                    ..
+                })
+            ),
+            "the limit rides in bits 32-63"
         );
         assert!(spawn(0, 0, 0).is_ok(), "no capabilities: no buffer");
         assert_eq!(
@@ -987,6 +1088,36 @@ mod tests {
         assert_eq!(dma(0, 0x2000_0000), Err(Error::TooLarge));
         assert_eq!(dma(17, 0x2000_0000), Err(Error::TooLarge));
         assert_eq!(dma(1, 0), Err(Error::BadAddress), "null page");
+        let region = crate::process::MAP_REGION;
+        let map = |len| decode(19, [len, 9, 9, 9, 9, 9]);
+        assert_eq!(map(1), Ok(Call::MemMap { pages: 1 }));
+        assert_eq!(map(4097), Ok(Call::MemMap { pages: 2 }));
+        assert_eq!(map(0), Err(Error::TooLarge));
+        assert_eq!(map(u64::MAX), Err(Error::TooLarge));
+        let unmap = |addr, len| decode(20, [addr, len, 9, 9, 9, 9]);
+        assert_eq!(
+            unmap(region.start, 4097),
+            Ok(Call::MemUnmap {
+                addr: region.start,
+                pages: 2
+            })
+        );
+        assert_eq!(
+            unmap(region.start + 8, 4096),
+            Err(Error::BadAddress),
+            "unaligned"
+        );
+        assert_eq!(unmap(region.start, 0), Err(Error::BadAddress), "empty");
+        assert_eq!(
+            unmap(region.end, 4096),
+            Err(Error::BadAddress),
+            "past the region"
+        );
+        assert_eq!(
+            unmap(0x40_0000, 4096),
+            Err(Error::BadAddress),
+            "the program"
+        );
         let open = |addr, len| decode(7, [1, addr, len, 0, 0, 0]);
         assert_eq!(
             open(0x40_0000, 104),
@@ -1061,7 +1192,7 @@ mod tests {
         let mut accepted = 0;
         for _ in 0..200_000 {
             // Small numbers and lengths often, huge ones sometimes.
-            let number = next() % 20;
+            let number = next() % 22;
             let args: [u64; 6] = core::array::from_fn(|_| next() >> (next() % 64));
             match decode(number, args) {
                 Ok(
@@ -1104,6 +1235,11 @@ mod tests {
                     assert!(count == 0 || user_range_ok(addr, (count * SPAWN_ENTRY) as u64));
                 }
                 Ok(Call::IrqNotify { bit, .. }) => assert!(bit < 32),
+                Ok(Call::MemMap { pages }) => assert!(pages > 0),
+                Ok(Call::MemUnmap { addr, pages }) => {
+                    let region = crate::process::MAP_REGION;
+                    assert!(pages > 0 && addr % 4096 == 0 && region.contains(&addr));
+                }
                 Ok(Call::Call { addr, len, max, .. }) => {
                     accepted += 1;
                     assert!(len <= MAX_MESSAGE && max <= MAX_MESSAGE);

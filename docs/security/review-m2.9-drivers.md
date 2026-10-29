@@ -74,7 +74,7 @@ All of it stays in the allowed modules (AGENTS.md) and has a `// SAFETY:` commen
 | `idt` device stubs and gates | Vectors 48–63 | Same common entry path as every other vector; gates written before `lidt` | OK |
 | `pharos-user` `_start`, `raw` | Entry stub, `syscall` | Aligns the stack and calls the safe `pharos_main`; `syscall` clobbers only `rcx`, `r11`, and the declared registers | OK |
 | `pharos-user` `Mapped` | Volatile reads and writes | Built only by the wrappers after the kernel confirmed the mapping, which lasts for the process's life; every access is bounds-checked and aligned | OK |
-| `pharos-user` heap (`Bump`) | `GlobalAlloc`, a static arena | Hands out disjoint, aligned ranges claimed atomically; never frees. Host-tested | OK |
+| `pharos-user` heap (`Bump`) | `GlobalAlloc`, a static arena | Hands out disjoint, aligned ranges claimed atomically; never frees. Host-tested | OK (replaced in M3.0, #75; reviewed at the M3.0 gate) |
 | `pharos-user` `entry!` | `#[unsafe(no_mangle)]` | Names the entry symbol; the function body is safe | OK |
 
 ## Accepted limits (tracked)

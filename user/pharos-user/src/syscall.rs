@@ -585,69 +585,219 @@ pub mod vector {
     }
 }
 
-/// The heap: a bump allocator, installed as the global allocator on the
-/// bare-metal target.
-// Host builds only run its unit test.
+/// The heap (user-environment.md): size-class free lists for allocations
+/// up to 32 KiB, carved from the static arena and then from 64 KiB
+/// `mem_map` chunks; larger ones are their own mapping, unmapped when freed.
+// Host builds only run its unit tests.
 #[cfg_attr(not(pharos_user), allow(dead_code))]
 mod heap {
-    /// Bytes of heap each program has (in its `.bss`).
+    use core::alloc::Layout;
+    use core::ptr::null_mut;
+
+    /// Bytes of heap each program has before it needs `mem_map` (in its
+    /// `.bss`).
     pub const HEAP_SIZE: usize = 256 * 1024;
+    /// Largest size-class allocation; larger ones get their own mapping.
+    pub const LARGE: usize = 32 * 1024;
+    /// Bytes `mem_map`ped at a time for small allocations.
+    pub const CHUNK: usize = 64 * 1024;
+    const PAGE: usize = 4096;
+    /// Size classes 16, 32, ..., [`LARGE`] bytes.
+    const CLASSES: usize = 12;
 
-    #[repr(C, align(4096))]
-    struct Arena(core::cell::UnsafeCell<[u8; HEAP_SIZE]>);
+    /// Maps `len` bytes (a multiple of 4096) and returns the address, or 0.
+    pub type Map = fn(usize) -> usize;
+    /// Unmaps a mapping [`Map`] returned.
+    pub type Unmap = fn(usize, usize);
 
-    // SAFETY: `Bump::alloc` hands out disjoint ranges of the arena (each byte
-    // at most once, claimed through the atomic `NEXT`), so threads never share
-    // a byte through it.
-    unsafe impl Sync for Arena {}
+    /// The allocator's state. Free blocks hold the address of the next free
+    /// block of their class in their first word (0 ends the list).
+    // ponytail: chunks are never returned and blocks never split or merge,
+    // so memory freed in one class serves only that class; return empty
+    // chunks if a long-running service's footprint matters.
+    pub struct Heap {
+        free: [usize; CLASSES],
+        /// The unused part of the current chunk.
+        next: usize,
+        end: usize,
+        /// The static arena's bounds.
+        arena: (usize, usize),
+        map: Map,
+        unmap: Unmap,
+    }
 
-    static ARENA: Arena = Arena(core::cell::UnsafeCell::new([0; HEAP_SIZE]));
-    /// Offset of the first unclaimed arena byte.
-    static NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    /// Size class of `layout`, or `None` for a large allocation. A block of
+    /// class size `s` is aligned to `min(s, 4096)`, so rounding the size up
+    /// to the alignment honours it.
+    fn class(layout: Layout) -> Option<usize> {
+        let size = layout
+            .size()
+            .max(layout.align())
+            .max(16)
+            .next_power_of_two();
+        (size <= LARGE).then(|| size.trailing_zeros() as usize - 4)
+    }
 
-    /// A bump allocator over a fixed arena: allocation claims the next aligned
-    /// range; nothing is ever freed.
-    // ponytail: never frees, fine for short-lived programs that allocate once
-    // (mounting an image); add a free list when a long-running service needs one.
-    pub struct Bump;
-
-    // SAFETY: `alloc` returns either null or a range of `layout.size()` bytes
-    // aligned to `layout.align()` inside the static arena that no other call
-    // returned (the compare-exchange claims it exactly once). `dealloc` does
-    // nothing, which is always allowed.
-    unsafe impl core::alloc::GlobalAlloc for Bump {
-        unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-            use core::sync::atomic::Ordering::Relaxed;
-            let base = ARENA.0.get().cast::<u8>();
-            let mut next = NEXT.load(Relaxed);
-            loop {
-                // Align the address, not the offset (the arena is page-aligned,
-                // so the two agree for every alignment up to 4096).
-                let Some(start) = (base as usize + next)
-                    .checked_next_multiple_of(layout.align())
-                    .map(|a| a - base as usize)
-                else {
-                    return core::ptr::null_mut();
-                };
-                let end = match start.checked_add(layout.size()) {
-                    Some(end) if end <= HEAP_SIZE => end,
-                    _ => return core::ptr::null_mut(),
-                };
-                match NEXT.compare_exchange_weak(next, end, Relaxed, Relaxed) {
-                    // SAFETY: `start <= end <= HEAP_SIZE`, so the pointer stays
-                    // inside the arena.
-                    Ok(_) => return unsafe { base.add(start) },
-                    Err(current) => next = current,
-                }
+    impl Heap {
+        /// A heap that first carves `arena` (`len` bytes at page-aligned
+        /// `base`, unused by anything else).
+        pub const fn new(base: usize, len: usize, map: Map, unmap: Unmap) -> Self {
+            Self {
+                free: [0; CLASSES],
+                next: base,
+                end: base + len,
+                arena: (base, base + len),
+                map,
+                unmap,
             }
         }
 
-        unsafe fn dealloc(&self, _: *mut u8, _: core::alloc::Layout) {}
+        /// A block for `layout`, or null when out of memory or the
+        /// alignment is above 4096.
+        ///
+        /// # Safety
+        /// Every block on the free lists must be one this heap handed out
+        /// and was given back with [`dealloc`](Self::dealloc), unused since.
+        pub unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
+            if layout.align() > PAGE {
+                return null_mut();
+            }
+            let Some(class) = class(layout) else {
+                let Some(len) = layout.size().checked_next_multiple_of(PAGE) else {
+                    return null_mut();
+                };
+                let mapped = (self.map)(len);
+                if mapped != 0 {
+                    return mapped as *mut u8;
+                }
+                // No `mem_map` (a program started without a limit): carve
+                // it from the arena while the arena lasts, as the old bump
+                // heap did, so such programs keep working.
+                let start = self.next.next_multiple_of(PAGE);
+                if !self.in_arena(self.next) || start + len > self.end {
+                    return null_mut();
+                }
+                self.next = start + len;
+                return start as *mut u8;
+            };
+            let head = self.free[class];
+            if head != 0 {
+                // SAFETY: `head` is a free block of this class (the caller's
+                // contract), at least 16 bytes and aligned, holding the next
+                // free block's address.
+                self.free[class] = unsafe { *(head as *const usize) };
+                return head as *mut u8;
+            }
+            let size = 16 << class;
+            let mut start = self.next.next_multiple_of(size.min(PAGE));
+            // User addresses are below 2^47, so this cannot overflow.
+            if start + size > self.end {
+                let chunk = (self.map)(CHUNK);
+                if chunk == 0 {
+                    return null_mut();
+                }
+                (start, self.end) = (chunk, chunk + CHUNK);
+            }
+            self.next = start + size;
+            start as *mut u8
+        }
+
+        fn in_arena(&self, addr: usize) -> bool {
+            (self.arena.0..self.arena.1).contains(&addr)
+        }
+
+        /// Gives back a block [`alloc`](Self::alloc) returned for `layout`.
+        ///
+        /// # Safety
+        /// `ptr` came from `alloc` on this heap with the same `layout`, and
+        /// is not used after this call.
+        pub unsafe fn dealloc(&mut self, ptr: *mut u8, layout: Layout) {
+            match class(layout) {
+                // ponytail: large blocks carved from the arena are never
+                // reused; give programs that need more a limit.
+                None if self.in_arena(ptr as usize) => {}
+                None => (self.unmap)(ptr as usize, layout.size().next_multiple_of(PAGE)),
+                Some(class) => {
+                    // SAFETY: the block is ours again (the caller's contract)
+                    // and holds at least one aligned word.
+                    unsafe { *(ptr as *mut usize) = self.free[class] };
+                    self.free[class] = ptr as usize;
+                }
+            }
+        }
     }
 
     #[cfg(pharos_user)]
-    #[global_allocator]
-    static ALLOCATOR: Bump = Bump;
+    mod global {
+        use super::*;
+        use core::cell::UnsafeCell;
+        use core::sync::atomic::{AtomicBool, Ordering};
+
+        #[repr(C, align(4096))]
+        struct Arena(UnsafeCell<[u8; HEAP_SIZE]>);
+
+        // SAFETY: only `Heap` touches the arena, under `LOCK`.
+        unsafe impl Sync for Arena {}
+
+        static ARENA: Arena = Arena(UnsafeCell::new([0; HEAP_SIZE]));
+
+        fn map(len: usize) -> usize {
+            crate::mem_map(len as u64).map_or(0, |addr| addr as usize)
+        }
+
+        fn unmap(addr: usize, len: usize) {
+            let _ = crate::mem_unmap(addr as u64, len as u64);
+        }
+
+        struct Locked {
+            lock: AtomicBool,
+            heap: UnsafeCell<Option<Heap>>,
+        }
+
+        // SAFETY: `heap` is reached only while `lock` is held.
+        unsafe impl Sync for Locked {}
+
+        impl Locked {
+            fn with<R>(&self, f: impl FnOnce(&mut Heap) -> R) -> R {
+                while self
+                    .lock
+                    .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_err()
+                {
+                    core::hint::spin_loop();
+                }
+                // SAFETY: the lock gives this call the only reference.
+                let slot = unsafe { &mut *self.heap.get() };
+                let heap = slot.get_or_insert_with(|| {
+                    Heap::new(ARENA.0.get() as usize, HEAP_SIZE, map, unmap)
+                });
+                let result = f(heap);
+                self.lock.store(false, Ordering::Release);
+                result
+            }
+        }
+
+        // SAFETY: `Heap` hands out disjoint, aligned blocks of at least the
+        // requested size (or null), and only blocks given back through
+        // `dealloc` return to its free lists.
+        unsafe impl core::alloc::GlobalAlloc for Locked {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                // SAFETY: only this allocator fills the free lists.
+                self.with(|heap| unsafe { heap.alloc(layout) })
+            }
+
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                // SAFETY: `GlobalAlloc`'s contract is `Heap::dealloc`'s.
+                self.with(|heap| unsafe { heap.dealloc(ptr, layout) })
+            }
+        }
+
+        #[global_allocator]
+        static ALLOCATOR: Locked = Locked {
+            lock: AtomicBool::new(false),
+            heap: UnsafeCell::new(None),
+        };
+    }
 }
 
 #[cfg(test)]
@@ -668,25 +818,130 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bump_allocator_aligns_never_overlaps_and_runs_out() {
-        use core::alloc::{GlobalAlloc, Layout};
-        let heap = Bump;
-        let mut ranges = Vec::new();
-        for (size, align) in [(1, 1), (24, 8), (3, 1), (100, 64), (4096, 4096), (8, 16)] {
-            let layout = Layout::from_size_align(size, align).unwrap();
-            // SAFETY: a valid, non-zero-size layout.
-            let p = unsafe { heap.alloc(layout) } as usize;
-            assert!(p != 0 && p % align == 0, "size {size} align {align}");
-            ranges.push(p..p + size);
+    // A fake `mem_map`: page-aligned host memory, with live mappings
+    // counted.
+    static MAPPED: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
+    static FAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    fn fake_map(len: usize) -> usize {
+        if FAIL.load(std::sync::atomic::Ordering::Relaxed) {
+            return 0;
         }
-        for (i, a) in ranges.iter().enumerate() {
-            for b in &ranges[i + 1..] {
-                assert!(a.end <= b.start || b.end <= a.start, "overlap");
+        let layout = std::alloc::Layout::from_size_align(len, 4096).unwrap();
+        // SAFETY: a valid, non-zero-size layout.
+        let addr = unsafe { std::alloc::alloc_zeroed(layout) } as usize;
+        if addr != 0 {
+            MAPPED.lock().unwrap().push((addr, len));
+        }
+        addr
+    }
+
+    fn fake_unmap(addr: usize, len: usize) {
+        let mut mapped = MAPPED.lock().unwrap();
+        let i = mapped
+            .iter()
+            .position(|&m| m == (addr, len))
+            .expect("whole mapping");
+        mapped.remove(i);
+        let layout = std::alloc::Layout::from_size_align(len, 4096).unwrap();
+        // SAFETY: allocated by `fake_map` with this layout.
+        unsafe { std::alloc::dealloc(addr as *mut u8, layout) };
+    }
+
+    /// The heap under test, with safe calls: every test block is given
+    /// back at most once, with its own layout, and never used after.
+    struct Test(Heap);
+
+    impl Test {
+        fn alloc(&mut self, size: usize, align: usize) -> usize {
+            let layout = core::alloc::Layout::from_size_align(size, align).unwrap();
+            // SAFETY: only `free` below fills the free lists.
+            unsafe { self.0.alloc(layout) as usize }
+        }
+
+        fn free(&mut self, p: usize, size: usize, align: usize) {
+            let layout = core::alloc::Layout::from_size_align(size, align).unwrap();
+            // SAFETY: the tests pass blocks `alloc` returned for this layout,
+            // once, and do not touch them again.
+            unsafe { self.0.dealloc(p as *mut u8, layout) }
+        }
+    }
+
+    #[test]
+    fn heap_aligns_reuses_maps_large_and_runs_out() {
+        let arena = Box::leak(Box::new(Page([0; 8192])));
+        let base = arena.0.as_mut_ptr() as usize;
+        let mut heap = Test(Heap::new(base, 8192, fake_map, fake_unmap));
+        let mut blocks = Vec::new();
+        for (size, align) in [
+            (1, 1),
+            (24, 8),
+            (3, 1),
+            (100, 64),
+            (4096, 4096),
+            (8, 16),
+            (5000, 8),
+        ] {
+            let p = heap.alloc(size, align);
+            assert!(p != 0 && p % align == 0, "size {size} align {align}");
+            blocks.push((p, size));
+        }
+        for (i, a) in blocks.iter().enumerate() {
+            for b in &blocks[i + 1..] {
+                assert!(a.0 + a.1 <= b.0 || b.0 + b.1 <= a.0, "overlap");
             }
         }
-        let too_big = Layout::from_size_align(HEAP_SIZE, 1).unwrap();
-        // SAFETY: as above.
-        assert!(unsafe { heap.alloc(too_big) }.is_null(), "exhausted");
+        let mapped = || MAPPED.lock().unwrap().clone();
+        assert_eq!(mapped().len(), 1, "the arena ran out: one chunk");
+        // Freed blocks come back for the same class.
+        let (p, _) = blocks[1];
+        heap.free(p, 24, 8);
+        assert_eq!(heap.alloc(20, 4), p, "reused");
+        // Large allocations are their own mapping, unmapped when freed.
+        let big = heap.alloc(LARGE + 1, 8);
+        assert!(big != 0 && big % 4096 == 0);
+        assert!(mapped().contains(&(big, LARGE + 4096)));
+        heap.free(big, LARGE + 1, 8);
+        assert_eq!(mapped().len(), 1, "unmapped");
+        assert_eq!(heap.alloc(8, 8192), 0, "alignment above 4096");
+        assert_eq!(heap.alloc(isize::MAX as usize - 4096, 1), 0, "too large");
+        FAIL.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            heap.alloc(LARGE + 1, 8),
+            0,
+            "mem_map refused, arena used up"
+        );
+        let fill = (0..3).all(|_| heap.alloc(LARGE, 8) != 0);
+        assert!(!fill, "no chunk: the class runs out");
+        FAIL.store(false, std::sync::atomic::Ordering::Relaxed);
     }
+
+    #[test]
+    fn without_mem_map_large_blocks_come_from_the_arena() {
+        fn refuse(_: usize) -> usize {
+            0
+        }
+        fn never(_: usize, _: usize) {
+            panic!("an arena block was unmapped");
+        }
+        let arena = Box::leak(Box::new(Big([0; 2 * LARGE])));
+        let base = arena.0.as_mut_ptr() as usize;
+        let mut heap = Test(Heap::new(base, 2 * LARGE, refuse, never));
+        let small = heap.alloc(16, 8);
+        let big = heap.alloc(LARGE + 1, 8);
+        assert!(big >= base + 4096 && big % 4096 == 0 && big > small);
+        heap.free(big, LARGE + 1, 8);
+        assert_eq!(
+            heap.alloc(LARGE + 1, 8),
+            0,
+            "not reused; the arena is used up"
+        );
+        assert_ne!(heap.alloc(16, 8), 0, "small blocks still fit");
+    }
+
+    #[repr(C, align(4096))]
+    struct Big([u8; 2 * LARGE]);
+
+    #[repr(C, align(4096))]
+    struct Page([u8; 8192]);
 }

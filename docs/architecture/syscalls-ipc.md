@@ -141,10 +141,12 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 12 | `irq_create` (M2.9) | device, MSI-X entry (< table size) | new interrupt handle | device, `IRQ` |
 | 13 | `irq_wait` (M2.9) | interrupt handle | interrupts since the last wait (≥ 1) | interrupt, `WAIT` |
 | 14 | `endpoint_create` (M2.10) | — | new endpoint handle (`SEND`, `RECEIVE`, `GRANT`) | none |
-| 15 | `spawn` (M2.10) | file, argument, capability array, count (≤ 8), endpoint (0 = none), bit | new process handle (`WAIT`, `GRANT`) | file, `READ`; each passed capability, `GRANT`; endpoint, `RECEIVE` |
+| 15 | `spawn` (M2.10) | file, argument, capability array, count (bits 0–31, ≤ 8; bits 32–63: the child's `mem_map` limit in pages, at most the caller's, since M3.0), endpoint (0 = none), bit | new process handle (`WAIT`, `GRANT`) | file, `READ`; each passed capability, `GRANT`; endpoint, `RECEIVE` |
 | 16 | `process_status` (M2.10) | process handle | 0 while running; else bit 63, plus bit 62 if killed, and the code or vector | process, `WAIT` |
 | 18 | `call` (M2.10) | endpoint, buffer, request length (≤ 256), reply endpoint, reply maximum (≤ 256) | as `receive` | endpoint, `SEND`; reply, `SEND` and `RECEIVE` |
 | 17 | `irq_notify` (M2.10) | interrupt handle, endpoint, bit (0–31) | 0 (after this, `irq_wait` returns `IN_USE`) | interrupt, `WAIT`; endpoint, `RECEIVE` |
+| 19 | `mem_map` (M3.0) | length in bytes (> 0, rounded up to pages) | start address in the map region | none (the caller's page limit; [user-environment.md](user-environment.md#user-memory)) |
+| 20 | `mem_unmap` (M3.0) | start address, length (one whole earlier mapping) | 0 | none (the caller's own mapping) |
 
 Error codes (`rax`):
 
@@ -155,8 +157,8 @@ Error codes (`rax`):
 | 3 | `REVOKED` | The capability was revoked |
 | 4 | `MISSING_RIGHT` | The capability lacks a needed right |
 | 5 | `BAD_ADDRESS` | A buffer is outside user space, unmapped, or lacks access |
-| 6 | `TOO_LARGE` | A length exceeds the call's limit |
-| 7 | `NO_MEMORY` | The kernel could not allocate |
+| 6 | `TOO_LARGE` | A length exceeds the call's limit, or a `spawn` page limit exceeds the caller's (M3.0) |
+| 7 | `NO_MEMORY` | The kernel could not allocate, or a `mem_map` would pass the page limit or 1,024 mappings (M3.0) |
 | 8 | `NOT_FOUND` | No file with this path (M2.8), no such BAR, or no such MSI-X entry (M2.9) |
 | 9 | `IN_USE` | The user address is already mapped, the MSI-X entry already has an interrupt, or another thread is waiting on it (M2.9) |
 | 10 | `BAD_PROGRAM` | `spawn`: the file is not a valid program (M2.10) |

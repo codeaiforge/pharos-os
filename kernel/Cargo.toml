@@ -170,3 +170,7 @@ harness = false
 [[test]]
 name = "vector_state_avx"
 harness = false
+
+[[test]]
+name = "user_memory"
+harness = false

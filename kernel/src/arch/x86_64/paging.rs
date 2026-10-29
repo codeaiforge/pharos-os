@@ -665,6 +665,15 @@ impl AddressSpace {
         Err(MapError::NotMapped)
     }
 
+    /// Unmaps the page at `virt` and frees its frame, which must belong to
+    /// this space (mapped with [`map_new_page`](Self::map_new_page)). Does
+    /// nothing for an unmapped page.
+    pub fn unmap_owned(&mut self, virt: u64, frames: &mut FrameAllocator<'_>) {
+        if let Some(frame) = self.unmap(virt).ok().and_then(Frame::from_addr) {
+            let _ = frames.free(frame);
+        }
+    }
+
     /// Where `virt` is mapped, if it is.
     pub fn translate(&self, virt: u64) -> Option<Translation> {
         let indexes = table_indexes(virt);

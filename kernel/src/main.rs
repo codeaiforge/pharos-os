@@ -210,7 +210,7 @@ extern "C" fn kernel_main() -> ! {
     };
     let report = ipc::Endpoint::new();
     let caps = process::init_capabilities(root.clone(), report.clone(), true);
-    match process::spawn_elf(&root, b"bin/init", 0, caps) {
+    match process::spawn_elf_limited(&root, b"bin/init", 0, caps, process::INIT_MEMORY_LIMIT) {
         Ok(id) => kprintln!("  init:       started (process {id})"),
         Err(error) => fail(format_args!("cannot start init: {error}")),
     }

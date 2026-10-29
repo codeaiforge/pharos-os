@@ -1,0 +1,157 @@
+//! Maps memory for the `user_memory` test kernel (issue #75,
+//! user-environment.md).
+//!
+//! - Argument 0: started with a limit of [`LIMIT`] pages and handles 1 the
+//!   debug console (`WRITE | GRANT`), 2 the file `bin/memprobe` (`READ`).
+//!   Each step prints `ok <step>` or `FAIL <step>`; the exit code is the
+//!   number of failures.
+//! - Argument 1: a child given the same limit: maps all of it, then one
+//!   page more. Exits 0 if the first works and the second fails.
+//! - Argument 2: a child given no limit. Exits 0 if it cannot map a page.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+use pharos_user::rights::WRITE;
+use pharos_user::{
+    Error, Grant, Received, Status, debug_write, endpoint_create, mem_map, mem_unmap,
+    process_status, receive, spawn, spawn_limited,
+};
+
+pharos_user::entry!(main);
+
+const CONSOLE: u64 = 1;
+const SELF: u64 = 2;
+/// The page limit the test kernel starts this program with: 32 MiB.
+pub const LIMIT: u32 = 8192;
+const MIB: u64 = 1024 * 1024;
+const REGION: u64 = 0x0000_1000_0000_0000;
+
+fn report(failures: &mut u64, step: &str, ok: bool) {
+    let mut line = [0u8; 96];
+    let prefix: &[u8] = if ok { b"ok " } else { b"FAIL " };
+    let n = (prefix.len() + step.len()).min(line.len());
+    line[..prefix.len()].copy_from_slice(prefix);
+    line[prefix.len()..n].copy_from_slice(&step.as_bytes()[..n - prefix.len()]);
+    let _ = debug_write(CONSOLE, &line[..n]);
+    if !ok {
+        *failures += 1;
+    }
+}
+
+/// Starts this program with `arg` and `limit` and waits for its exit code.
+fn child(arg: u64, limit: Option<u32>) -> Option<u64> {
+    let events = endpoint_create().ok()?;
+    let caps = [Grant {
+        handle: CONSOLE,
+        rights: WRITE,
+        badge: 0,
+    }];
+    let notify = Some((events, 0));
+    let process = match limit {
+        Some(limit) => spawn_limited(SELF, arg, &caps, notify, limit),
+        None => spawn(SELF, arg, &caps, notify),
+    }
+    .ok()?;
+    let mut buf = [0u8; 8];
+    receive(events, &mut buf)
+        .ok()
+        .filter(|r| *r == Received::Notification(1))?;
+    match process_status(process) {
+        Ok(Status::Exited(code)) => Some(code),
+        _ => None,
+    }
+}
+
+fn main(arg: u64) -> u64 {
+    let all = u64::from(LIMIT) * 4096;
+    match arg {
+        1 => return u64::from(mem_map(all).is_err() || mem_map(4096) != Err(Error::NoMemory)),
+        2 => return u64::from(mem_map(4096) != Err(Error::NoMemory)),
+        _ => {}
+    }
+    let mut f = 0;
+    let (a, b) = (mem_map(16 * MIB), mem_map(16 * MIB));
+    report(&mut f, "mem_map up to the limit", a.is_ok() && b.is_ok());
+    let (a, b) = (a.unwrap_or(0), b.unwrap_or(0));
+    report(
+        &mut f,
+        "one page past the limit: NO_MEMORY",
+        mem_map(4096) == Err(Error::NoMemory),
+    );
+    report(
+        &mut f,
+        "mappings are placed in the map region",
+        a == REGION && b == REGION + 16 * MIB,
+    );
+    report(
+        &mut f,
+        "length 0: TOO_LARGE",
+        mem_map(0) == Err(Error::TooLarge),
+    );
+    report(
+        &mut f,
+        "part of a mapping: BAD_ADDRESS",
+        mem_unmap(a, 4096) == Err(Error::BadAddress)
+            && mem_unmap(a + 4096, 16 * MIB - 4096) == Err(Error::BadAddress),
+    );
+    report(
+        &mut f,
+        "no mapping there: BAD_ADDRESS",
+        mem_unmap(REGION + 1024 * MIB, 4096) == Err(Error::BadAddress)
+            && mem_unmap(0x40_0000, 4096) == Err(Error::BadAddress),
+    );
+    report(
+        &mut f,
+        "unmapping (length rounded up) returns the limit",
+        mem_unmap(a, 16 * MIB).is_ok()
+            && mem_unmap(b, 16 * MIB - 100).is_ok()
+            && mem_map(all).and_then(|c| mem_unmap(c, all)).is_ok(),
+    );
+    report(
+        &mut f,
+        "a refused unmap changed nothing",
+        mem_unmap(a, 16 * MIB) == Err(Error::BadAddress),
+    );
+    // 16 x 32 MiB is twice the machine's 256 MiB: frames must come back.
+    let rounds = (0..16).all(|_| mem_map(all).and_then(|c| mem_unmap(c, all)).is_ok());
+    report(&mut f, "16 rounds of 32 MiB: frames are freed", rounds);
+
+    // The allocator: 8 MiB vectors are their own mapping, freed each round.
+    let large = (0..16u8).all(|round| {
+        let v = vec![round; 8 * MIB as usize];
+        v.iter().all(|&x| x == round)
+    });
+    report(&mut f, "allocator: 16 large vectors of 8 MiB", large);
+    // 100 x 640 KiB of small blocks is twice the limit: blocks are reused.
+    let small = (0..100u64).all(|round| {
+        let blocks: Vec<Box<[u64; 8]>> = (0..10_000).map(|i| Box::new([round ^ i; 8])).collect();
+        blocks
+            .iter()
+            .enumerate()
+            .all(|(i, b)| b[7] == round ^ i as u64)
+    });
+    report(&mut f, "allocator: small blocks are reused", small);
+
+    report(
+        &mut f,
+        "spawn with a limit above its own: TOO_LARGE",
+        spawn_limited(SELF, 1, &[], None, LIMIT + 1) == Err(Error::TooLarge),
+    );
+    report(
+        &mut f,
+        "a child with its own limit maps it all, and no more",
+        child(1, Some(LIMIT)) == Some(0),
+    );
+    report(
+        &mut f,
+        "a child without a limit cannot map",
+        child(2, None) == Some(0),
+    );
+    f
+}
