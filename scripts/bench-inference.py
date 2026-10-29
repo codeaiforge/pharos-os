@@ -13,9 +13,9 @@ Everything after `--` is the engine's command line. The placeholders {model},
 flags against your build of the engine.
 
 Engines (how their output is read):
-    llama   llama.cpp tools that print `llama_perf_context_print:` (or the
-            older `llama_print_timings:`) lines: prompt and generation
-            timings, and the load time when printed.
+    llama   llama.cpp tools that print `common_perf_print:` (build b11609),
+            `llama_perf_context_print:`, or `llama_print_timings:` lines:
+            prompt and generation timings, and the load time when printed.
     native  Pharos's own engine: its last stdout line is one JSON object with
             load_ms, prompt_tokens, prompt_ms, gen_tokens, gen_ms.
 
@@ -75,9 +75,12 @@ PROMPTS = [
     ("summary", "Summarize the following report in three sentences.\n\n" + REPORT),
 ]
 
+# Older builds print `llama_print_timings:`, documented ones
+# `llama_perf_context_print:`, and build b11609 `common_perf_print:` after a
+# timestamp and level. The decimal separator follows the locale (`337,46`).
 TIMING = re.compile(
-    r"^(?:llama_perf_context_print|llama_print_timings):\s*"
-    r"(?P<what>load time|prompt eval time|eval time)\s*=\s*(?P<ms>[\d.]+) ms"
+    r"(?:^|\s)(?:llama_perf_context_print|llama_print_timings|common_perf_print):\s*"
+    r"(?P<what>load time|prompt eval time|eval time)\s*=\s*(?P<ms>\d+(?:[.,]\d+)?) ms"
     r"(?:\s*/\s*(?P<count>\d+) (?:tokens|runs))?"
 )
 
@@ -93,12 +96,13 @@ def parse_llama(output):
     """Timings from llama.cpp's performance lines (stdout and stderr)."""
     found = {}
     for line in output.splitlines():
-        m = TIMING.match(line.strip())
+        m = TIMING.search(line.strip())
         if m:
-            found[m["what"]] = (float(m["ms"]), int(m["count"]) if m["count"] else None)
+            ms = float(m["ms"].replace(",", "."))
+            found[m["what"]] = (ms, int(m["count"]) if m["count"] else None)
     if "prompt eval time" not in found or "eval time" not in found:
         raise BenchError(
-            "no llama.cpp timing lines (llama_perf_context_print: prompt eval time "
+            "no llama.cpp timing lines (common_perf_print: or llama_perf_context_print: prompt eval time "
             "and eval time) in the output; is this a llama.cpp tool, and did it finish?"
         )
     prompt_ms, prompt_tokens = found["prompt eval time"]
@@ -205,6 +209,17 @@ def host_info():
     return info
 
 
+def selected(names):
+    """The prompts to run: all, or those named (in the given order)."""
+    if not names:
+        return PROMPTS
+    known = dict(PROMPTS)
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise BenchError(f"unknown prompt {unknown[0]!r}; choose from {', '.join(known)}")
+    return [(n, known[n]) for n in names]
+
+
 def run(args):
     model = pathlib.Path(args.model)
     if not model.is_file():
@@ -218,7 +233,7 @@ def run(args):
         except OSError as e:
             raise BenchError(f"version command failed: {e}") from None
     results = []
-    for name, prompt in PROMPTS:
+    for name, prompt in selected(args.prompt):
         for i in range(args.runs):
             cmd = fill(args.command, {"model": model, "prompt": prompt, "n": args.n, "threads": args.threads, "seed": SEED})
             code, wall, rss, out, err = measure(cmd)
@@ -254,7 +269,7 @@ def run(args):
 
 def summary(record):
     lines = [f"{record['engine']} / {record['label']} ({record['threads']} threads, n={record['n']})"]
-    for name, _ in PROMPTS:
+    for name in dict.fromkeys(r["prompt"] for r in record["results"]):
         rows = [r for r in record["results"] if r["prompt"] == name]
 
         def med(key):
@@ -279,6 +294,7 @@ def main(argv=None):
     p.add_argument("--runs", type=int, default=3)
     p.add_argument("-n", type=int, default=128, help="tokens to generate")
     p.add_argument("--version-cmd", help="command that prints the engine's version")
+    p.add_argument("--prompt", action="append", help="run only this prompt (repeatable): short, summary")
     p.add_argument("--out-dir", default=str(OUT_DIR))
     p.add_argument("command", nargs=argparse.REMAINDER, help="-- then the engine command")
     args = p.parse_args(argv)

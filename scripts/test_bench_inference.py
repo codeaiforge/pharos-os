@@ -40,6 +40,17 @@ llama_perf_context_print:        eval time =    1686.13 ms /    31 runs   ( 54.3
 llama_perf_context_print:       total time =    6266.30 ms /   228 tokens
 """
 
+# Recorded on the reference host with llama.cpp build b11609
+# (llama-completion, Qwen2.5-0.5B-Instruct q8_0, 1 thread, LC_NUMERIC=el_GR).
+LLAMA_B11609 = """\
+0.02.040.469 I common_perf_print:    sampling time =       8,69 ms
+0.02.040.470 I common_perf_print:    samplers time =       3,48 ms /    40 tokens
+0.02.040.473 I common_perf_print:        load time =     337,46 ms
+0.02.040.474 I common_perf_print: prompt eval time =     111,25 ms /     8 tokens (   13,91 ms per token,    71,91 tokens per second)
+0.02.040.474 I common_perf_print:        eval time =    1286,72 ms /    31 runs   (   41,51 ms per token,    24,09 tokens per second)
+0.02.040.475 I common_perf_print:       total time =    1407,62 ms /    39 tokens
+"""
+
 # A stand-in engine for end-to-end runs: echoes its prompt's first word,
 # allocates `alloc` MiB, and prints a native timing line.
 FAKE = textwrap.dedent("""\
@@ -69,6 +80,13 @@ class Parsing(unittest.TestCase):
         self.assertEqual((t["prompt_tokens"], t["gen_tokens"]), (197, 31))
         self.assertAlmostEqual(t["gen_tok_s"], 18.39, places=2)
 
+    def test_llama_b11609_with_timestamps_and_decimal_commas(self):
+        t = bench.parse_llama(LLAMA_B11609)
+        self.assertEqual(t["load_ms"], 337.46)
+        self.assertEqual((t["prompt_tokens"], t["prompt_ms"]), (8, 111.25))
+        self.assertEqual((t["gen_tokens"], t["gen_ms"]), (31, 1286.72))
+        self.assertAlmostEqual(t["gen_tok_s"], 24.09, places=2)
+
     def test_llama_without_timings_is_an_error(self):
         with self.assertRaisesRegex(bench.BenchError, "no llama.cpp timing lines"):
             bench.parse_llama("some text\nllama_perf_context_print: total time = 1 ms\n")
@@ -97,6 +115,12 @@ class Commands(unittest.TestCase):
 
     def test_other_braces_pass_through(self):
         self.assertEqual(bench.fill(['{"a": 1}', "{model}"], {"model": "m"}), ['{"a": 1}', "m"])
+
+    def test_prompts_can_be_selected(self):
+        self.assertEqual([n for n, _ in bench.selected(["summary"])], ["summary"])
+        self.assertEqual(bench.selected(None), bench.PROMPTS)
+        with self.assertRaisesRegex(bench.BenchError, "unknown prompt 'long'"):
+            bench.selected(["long"])
 
     def test_missing_binary_is_named(self):
         with self.assertRaisesRegex(bench.BenchError, "engine binary not found: /nonexistent/llama"):
@@ -141,7 +165,7 @@ class Measuring(unittest.TestCase):
             model.write_bytes(b"m")
             args = bench.argparse.Namespace(
                 engine="native", model=str(model), label="x", threads=1, runs=1, n=4,
-                version_cmd=None, out_dir=d, command=[sys.executable, "-c", "import sys; sys.exit(3)"])
+                version_cmd=None, prompt=None, out_dir=d, command=[sys.executable, "-c", "import sys; sys.exit(3)"])
             with self.assertRaisesRegex(bench.BenchError, "exited with status 3"):
                 bench.run(args)
 
