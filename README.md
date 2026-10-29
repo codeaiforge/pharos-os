@@ -7,7 +7,7 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 
 ## Status
 
-**Phase 2 — Core System.** M2.2 to M2.9 are done: a minimal kernel boots in QEMU on UEFI and BIOS with one command (`cargo xtask run`), reports CPU exceptions (including stack overflows) over serial, receives local APIC timer interrupts, and manages memory (a frame allocator, its own page tables with write protection, no-execute, and guard pages, reclaimed bootloader memory, and a heap for `alloc`), schedules kernel tasks preemptively on a calibrated 100 Hz timer, and runs user processes in ring 3, each in its own address space, with a small system-call interface and synchronous IPC that passes capabilities, lets processes read files from a checked, read-only filesystem image on a boot RAM disk through capabilities, and runs drivers in user space: a Rust virtio-blk driver reaches its device only through capabilities (registers, DMA memory, MSI-X interrupts) and mounts the filesystem image on the disk; CI boots it and runs kernel tests inside QEMU on every push. The current milestone is M2.10: networking and basic system services. See the [implementation roadmap](docs/project/implementation-roadmap.md), the [boot design](docs/architecture/boot.md), [exceptions and interrupts](docs/architecture/interrupts.md), [memory management](docs/architecture/memory.md), [scheduling](docs/architecture/scheduling.md), [system calls and IPC](docs/architecture/syscalls-ipc.md), [storage](docs/architecture/storage.md), and [drivers](docs/architecture/drivers.md).
+**Phase 2 — Core System is done (v0.2.0).** a minimal kernel boots in QEMU on UEFI and BIOS with one command (`cargo xtask run`), reports CPU exceptions (including stack overflows) over serial, receives local APIC timer interrupts, and manages memory (a frame allocator, its own page tables with write protection, no-execute, and guard pages, reclaimed bootloader memory, and a heap for `alloc`), schedules kernel tasks preemptively on a calibrated 100 Hz timer, and runs user processes in ring 3, each in its own address space, with a small system-call interface and synchronous IPC that passes capabilities, lets processes read files from a checked, read-only filesystem image on a boot RAM disk through capabilities, and runs drivers in user space: a Rust virtio-blk driver reaches its device only through capabilities (registers, DMA memory, MSI-X interrupts) and mounts the filesystem image on the disk; at boot `init` starts the services, among them a user-space network service with its own small stack (Ethernet, ARP, IPv4, ICMP, UDP) that processes reach only through badged capabilities; CI boots it and runs 34 test kernels inside QEMU on every push. Phase 3 (AI agent platform) is next, starting with M3.1: requirements and inference-runtime evaluation. See the [implementation roadmap](docs/project/implementation-roadmap.md), the [boot design](docs/architecture/boot.md), [exceptions and interrupts](docs/architecture/interrupts.md), [memory management](docs/architecture/memory.md), [scheduling](docs/architecture/scheduling.md), [system calls and IPC](docs/architecture/syscalls-ipc.md), [storage](docs/architecture/storage.md), and [drivers](docs/architecture/drivers.md), [services](docs/architecture/services.md), and [networking](docs/architecture/networking.md).
 
 | Area | Status |
 | --- | --- |
@@ -22,7 +22,8 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 | Read-only storage in the kernel (RAM disk, filesystem, file capabilities) | Implemented |
 | Rust user programs loaded from the filesystem (ELF loader, system-call library) | Implemented |
 | PCI discovery, device capabilities (MMIO, DMA, MSI-X interrupts), user-space virtio-blk driver | Implemented |
-| Networking, writable storage, more drivers | Planned |
+| Service manager (`init`), user-space network service (UDP, ICMP) with badged network capabilities | Implemented |
+| Writable storage, TCP, more drivers | Planned |
 | Local AI inference and agent platform | Planned |
 
 ## Vision
@@ -67,12 +68,12 @@ The serial output shows `init` starting the services, then ends with `PHAROS: bo
 
 ```console
 $ cargo run -q -p pharos-cli -- version
-pharos 0.1.0
+pharos 0.2.0
 
 $ cargo run -q -p pharos-cli -- info
-Pharos OS 0.1.0
+Pharos OS 0.2.0
 Project of: CodeAIForge
-Stage:      Phase 2 - Core System (M2.9 complete, M2.10 next)
+Stage:      Phase 3 - AI Agent Platform (Phase 2 complete, M3.1 next)
 ...
 
 $ cargo run -q -p pharos-cli -- doctor

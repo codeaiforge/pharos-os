@@ -4,8 +4,13 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-29
+
+Phase 2 (Core System) is complete. Pharos OS boots in QEMU (UEFI and BIOS) as a capability-based microkernel with isolated user processes, IPC, a read-only filesystem, user-space drivers, a service manager, and a user-space network service. Experimental: QEMU only; see the threat model for the open limits (no IOMMU, no KPTI, one CPU).
+
 ### Added
 
+- M2.10 (networking and basic system services) and Phase 2 are done: CI runs 34 test kernels, including `spawn`, `services`, `virtio_net`, and `network` with a round trip to the host echo server; a UDP parser accepting short headers failed CI. The security review was approved by the maintainer. Phase 3 (M3.1) is current. `pharos info` shows the new stage and lists services and networking as implemented. The workspace version is 0.2.0.
 - M2.10 security review (`docs/security/review-m2.10-services-networking.md`, #65) of process creation, `init`, `call`, the virtio-net driver, the network stack and capability, and the host echo server; no new `unsafe`. Fix from it: reply capabilities are one-shot, so the kernel revokes the server's reply capability when `call` returns (F1, tested in `spawn`). The threat model is updated for Phase 2 and lists the open limits carried into Phases 3 and 4.
 - A host endpoint for the network tests (#64): `cargo xtask runner` runs a UDP echo server on `127.0.0.1:47000` while each test kernel boots (host-tested: echo, stop, taken port), which the guest reaches through slirp at `10.0.2.2:47000`; the `network` test kernel exchanges a datagram with it. `PHAROS_PCAP=1` records each test kernel's network traffic to `target/xtask/logs/test-<name>.pcap`; debugging.md explains reading it.
 - The network service (#63): `user/programs/src/bin/net.rs` runs the virtio-net driver and our own stack (`pharos_programs::net`: Ethernet II, ARP with an 8-entry cache, IPv4 without options or fragments, ICMP echo, UDP; every check host-tested, 100,000 fuzzed frames) and serves clients whose network capability is a `SEND` capability on its endpoint, badged with their UDP port. Requests use the new `call` system call (18); replies use the new non-blocking `send` (flag bit 0, error `WOULD_BLOCK` 11). `init` starts it at boot (the boot now has 2 services). New program `netclient` and test kernel `network`. Task kernel stacks grow from 16 to 32 KiB (D-013 amended): debug builds of `call` overflowed 16 KiB.
@@ -163,5 +168,6 @@ Initial scaffold, completing Phase 1 (Foundation). Pharos OS is not bootable; th
 - Private vulnerability reporting through GitHub, documented in `SECURITY.md`.
 - Issue and pull-request templates, editor configuration, and optional VS Code recommendations.
 
-[Unreleased]: https://github.com/codeaiforge/pharos-os/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/codeaiforge/pharos-os/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/codeaiforge/pharos-os/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/codeaiforge/pharos-os/releases/tag/v0.1.0

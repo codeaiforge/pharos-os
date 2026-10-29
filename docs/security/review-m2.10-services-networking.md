@@ -10,7 +10,7 @@
   - every new `unsafe` block.
 - **Design under review:** [services.md](../architecture/services.md), [networking.md](../architecture/networking.md), D-015, D-013 (amended: 32 KiB task stacks).
 - **Date:** 2026-10-29, issue #65. Reviewer: AI-assisted (Claude Code), with code reading and a test for each claim; the finding was fixed in the same issue.
-- **Status:** awaiting the maintainer's approval (M2.10 and Phase 2 gate, #65).
+- **Status:** **approved** by the maintainer on 2026-10-29 (M2.10 and Phase 2 gate, #65).
 
 ## Method
 
@@ -85,4 +85,4 @@ None. `kernel/src` and `user/` gained no `unsafe` blocks; `pharos_programs::net`
 
 ## Approval
 
-Pending: the maintainer approves or requests changes at the M2.10 gate (#65).
+Approved by the maintainer on 2026-10-29, as part of the M2.10 gate (#65), which closes Phase 2. The accepted limits above are tracked in the [threat model](threat-model.md#open-limits-carried-out-of-phase-2) with the milestones that address them.

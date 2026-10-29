@@ -4,19 +4,19 @@ version = 4
 
 [[package]]
 name = "pharos-cli"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "pharos-elf"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "pharos-fs"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "pharos-kernel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pharos-elf",
  "pharos-fs",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "pharos-programs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pharos-fs",
  "pharos-user",
@@ -32,11 +32,11 @@ dependencies = [
 
 [[package]]
 name = "pharos-user"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pharos-elf",
  "pharos-fs",

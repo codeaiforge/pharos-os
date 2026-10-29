@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation is done (released as v0.1.0). Current milestone: M2.10 — Networking and basic system services.** Everything in Phases 2–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.1 — Requirements and inference-runtime evaluation.** Everything in Phases 3–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -39,8 +39,8 @@ The phases are not strictly sequential. These tracks run through every phase:
 | Phase | Name | Status |
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
-| 2 | Core System | **Current** (M2.10) |
-| 3 | AI Agent Platform | Planned |
+| 2 | Core System | Done (v0.2.0) |
+| 3 | AI Agent Platform | **Current** (M3.1) |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
 
@@ -134,7 +134,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ## Phase 2 — Core System
 
-**Status: Current.**
+**Status: Done** — gate passed 2026-10-29 with the M2.10 gate: every M2.x gate passed, and the threat model was updated for everything Phase 2 built, with its open limits carried into Phases 3 and 4 ([threat model](../security/threat-model.md#open-limits-carried-out-of-phase-2)). Prepared for release as v0.2.0.
 
 - **Objective and scope:** A minimal x86-64 kernel that boots in QEMU and grows, milestone by milestone, into a system with memory management, scheduling, isolated processes, IPC, storage, drivers, and networking.
 - **Deliverables:** M2.1–M2.10.
@@ -274,7 +274,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ### M2.10 — Networking and basic system services
 
-**Status: Current.** D-015 accepted on 2026-10-28 (#58): our own minimal stack (no TCP) inside the virtio-net driver's process, badged capabilities as network capabilities (amended from per-client endpoints, #59), and `init` started by the kernel.
+**Status: Done** — gate passed 2026-10-29: the CI `qemu` job passed on `main` at `ed4d1cb` ([run 40835736689](https://github.com/codeaiforge/pharos-os/actions/runs/40835736689)) with 34 test kernels, among them `spawn`, `services`, `virtio_net`, and `network`, whose client exchanges a UDP datagram with the host echo server at `10.0.2.2:47000`. At boot the kernel starts `init`, which starts the virtio-blk driver and the network service in order and reports each start and failure; the boot passes only if every service succeeded. A UDP parser that accepted headers shorter than 8 bytes failed CI on a throwaway branch ([run 40835882010](https://github.com/codeaiforge/pharos-os/actions/runs/40835882010)): the host tests failed, also on Rust 1.85, while the QEMU job passed, since QEMU never sends such a segment. Every CI run on `main` during M2.10 passed on its first attempt. The security review ([review-m2.10-services-networking.md](../security/review-m2.10-services-networking.md)) found and fixed one issue (reply capabilities now one-shot), recorded a test gap the broken-branch check exposed, and was approved by the maintainer on 2026-10-29. Delivered: D-015 (#58), services and networking design (#59), `spawn` with badges and notifications (#60), `init` (#61), the virtio-net driver (#62), the network service (#63), the host test endpoint (#64), CI gate and security review (#65). Design: [services.md](../architecture/services.md), [networking.md](../architecture/networking.md).
 
 - **Objective and scope:** A minimal network stack and basic user-space services (for example a service manager and logging).
 - **Deliverables:** Network stack (implementation or library choice recorded as a decision); basic services.
@@ -290,7 +290,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ## Phase 3 — AI Agent Platform
 
-**Status: Planned.**
+**Status: Current** (M3.1).
 
 Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5) come before tool integration and agent communication (M3.6, M3.7)**, so that no agent gets tools or channels without enforcement already in place.
 
@@ -306,7 +306,7 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 ### M3.1 — Requirements and inference-runtime evaluation
 
-**Status: Planned.**
+**Status: Current.**
 
 - **Objective and scope:** Define target use cases, hardware requirements, and choose an inference runtime and model formats.
 - **Deliverables:** Requirements document; benchmark results on the reference host; accepted D-010 and D-011 (requirements part).
@@ -592,4 +592,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, and M2.9 on 2026-10-28. The current milestone is **M2.10 — Networking and basic system services**, with D-015 (network stack and service model) accepted on 2026-10-28. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). The current milestone is **M3.1 — Requirements and inference-runtime evaluation**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
