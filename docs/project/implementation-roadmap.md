@@ -638,7 +638,7 @@ Ordering notes:
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, and D-011 (requirements part) on 2026-10-29; D-012 has a recorded direction; D-018 is proposed; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), and D-016 on 2026-10-29; D-012 has a recorded direction; D-018 is proposed; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -656,7 +656,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-015 | Network stack and service model | M2.10 | **Accepted:** own minimal stack (Ethernet, ARP, IPv4, ICMP echo, UDP; no TCP) inside the virtio-net driver's process; badged capabilities as network capabilities (amended, #59); static slirp addresses; the kernel starts `init`, which starts services |
 | D-014 | IPC model and system-call mechanism | M2.7 | **Accepted:** `syscall`/`sysret`; synchronous endpoints, 256-byte messages plus one capability, bounded per-thread buffers |
 | D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | **Direction:** kernel-enforced capabilities (per-process handle tables, rights, grant over IPC, revocation), policy in user space; final at M3.4 |
-| D-016 | User execution environment: SIMD state, user memory, timeouts | M3.0 | Context-switch cost, state-leak safety, limits checked before allocation, deadline semantics |
+| D-016 | User execution environment: SIMD state, user memory, timeouts | M3.0 | **Accepted:** user programs built for `x86_64-unknown-linux-gnu` as `no_std` static programs; eager XSAVE/FXSAVE per thread; `mem_map`/`mem_unmap` with a per-process limit; timeout argument and `TIMED_OUT`; `libm` in user space |
 | D-017 | Writable persistent storage and audit integrity | M3.0, M3.4 | Crash consistency, checksums, copy-on-write (per D-007), append-only records, behaviour when storage fails |
 | D-018 | Authority model: capabilities, identity, human control | M3.3 | **Proposed:** authority only from capabilities; identity for attribution and audit; delegation narrows; a trusted path for emergency stop and revocation that needs no agent or model |
 | D-019 | Service interfaces and versioning | M3.2, M3.3 | Typed, versioned contracts over IPC; discovery grants no permission; compatibility checks; structured errors |

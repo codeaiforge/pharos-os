@@ -538,6 +538,34 @@ Two system calls per direction plus two task switches and two address-space swit
 - Without TCP, Phase 2 networking is datagrams only. Phase 3 needs (for example model downloads, if any) decide whether TCP or `smoltcp` comes next.
 - Badges, endpoint notifications, `call`, and a non-blocking `send` extend the D-014 IPC model ([services.md](../architecture/services.md), [networking.md](../architecture/networking.md)). Each service waits at one blocking point.
 
+## Accepted decisions (M3.0)
+
+### D-016: User execution environment: SIMD state, user memory, and timeouts
+
+- **Status:** Accepted
+- **Needed by:** M3.0
+- **Date accepted:** 2026-10-29 (issue #71)
+
+**Context.** Phase 2 user programs cannot use x87, SSE, or AVX (`CR0.EM` makes them fault, because the kernel saves no vector state), get a 256 KiB bump heap that never frees, and have no timeouts on IPC or interrupt waits. An inference runtime needs all three.
+
+**Options to evaluate.** Vector state: eager save and restore on every switch, or lazy (on first use after a switch); `XSAVE`/`XSAVEOPT` or `FXSAVE`; which instruction sets to expose (SSE2 baseline, AVX2 if present). User memory: an anonymous-memory map/unmap system call with a per-process page limit, or memory capabilities that a parent grants. Timeouts: a deadline argument on `receive`, `call`, and `irq_wait`, or a separate timer object that sends a notification.
+
+**Evaluation criteria.** No register state visible across processes (including after a kill); context-switch cost measured; every limit checked before allocation; timeouts that cannot leave a half-delivered message; the smallest change to the M2.7 boundary.
+
+**Evidence (2026-10-29, rustc 1.99.1).**
+
+- Building for `x86_64-unknown-none` with `-C target-feature=+sse,+sse2` compiles, but the engine's inner loops still call software routines (`__mulsf3`, `__addsf3`: 24 calls, no SSE instructions): the target also enables LLVM's `soft-float`. Adding `-soft-float` produces SSE code (63 SSE float and 28 integer SIMD instructions, no software calls) but the compiler warns that disabling `soft-float` "will become a hard error in a future release".
+- A `no_std`, `no_main` program built for `x86_64-unknown-linux-gnu` and linked with `-nostartfiles -nostdlib -static` and our own linker script is a static ELF with no dynamic section, uses SSE float and integer SIMD instructions, and needs only `memcpy` (and the other memory functions) and a `rust_eh_personality` symbol from us; nothing else from a C library.
+- `libm` 0.2.16: MIT, in `rust-lang/compiler-builtins`, no runtime dependencies, minimum Rust 1.63.
+
+**Decision.**
+
+1. **User programs are built for `x86_64-unknown-linux-gnu` as `no_std` static programs** (hard-float calling convention, SSE2 baseline): `-C relocation-model=static` and `-nostartfiles -nostdlib -static -T user.ld`, set by `cargo xtask`. `pharos-user` supplies `memcpy`, `memmove`, `memset`, `memcmp`, and `bcmp` (with `rep movsb`/`rep stosb`, so the compiler cannot turn them into calls to themselves) and an empty `rust_eh_personality`, all in its `syscall` module. No C library is linked, so any accidental libc reference fails at link time. The kernel stays on `x86_64-unknown-none` (soft-float). Rejected: SSE flags on `x86_64-unknown-none` (no effect while `soft-float` is forced, and disabling it is being phased out); a custom target or `x86_64-unknown-linux-none` (both need nightly `build-std`); the UEFI target (PE files, not ELF).
+2. **Vector state is saved eagerly on every thread switch**, never lazily: lazy switching (`CR0.TS` and a fault on first use) leaked state between processes on affected CPUs (LazyFP, CVE-2018-3665) and adds a fault path. `XSAVE` with `XCR0` = x87, SSE, and AVX when the CPU has `XSAVE` and AVX; `FXSAVE` otherwise. AVX-512 is not enabled. One save area per thread, 64-byte aligned, sized from CPUID leaf 0xD (refused above 4 KiB). A new process starts from a clean image (`FNINIT` state, `MXCSR` 0x1F80 with all exceptions masked, zero registers). The kernel never uses vector registers, so system calls and interrupts save nothing. SIMD floating-point exceptions (vector 19) and x87 errors kill the process. `CR0.EM` cleared, `CR0.MP` and `NE` set; `CR4.OSFXSR`, `OSXMMEXCPT`, and `OSXSAVE` when used. Tested on QEMU's default CPU (the `FXSAVE` path) and `-cpu max` (`XSAVE` with AVX).
+3. **User memory: `mem_map(len)` and `mem_unmap(addr, len)`**: anonymous, zeroed, writable, non-executable, page-granular memory at an address the kernel chooses in a per-process region; unmap only of whole earlier mappings. Frames are allocated when mapped (no demand paging, so no new page-fault path). **A per-process page limit**, set by the creator at `spawn` and at most the creator's own; checked before any frame is allocated. Limits are not carved out of the creator's (that is M3.5, as the M2.10 review recorded). `pharos-user`'s allocator: power-of-two size classes up to 32 KiB from 64 KiB chunks, and larger allocations mapped directly and unmapped when freed, so large buffers (a model file, the key/value cache) return to the kernel. It replaces the bump heap. Rejected: memory capabilities granted by a parent (more objects now; revisit with M3.5 quotas).
+4. **Timeouts are an argument**, relative, in microseconds (`u64::MAX`: wait forever; 0: do not block), on `receive`, `call`, and `irq_wait`; a new error `TIMED_OUT`; a `sleep` system call. Resolution is one timer tick, rounded up, so no wait ends early. Expiry removes the waiter with interrupts off, so a message delivered before expiry is returned and one arriving after stays queued; a reply to a timed-out `call` meets the revoked one-shot reply capability (`REVOKED` at the server). Rejected: timer objects (another object type; can be added for periodic timers later).
+5. **Math functions from `libm`** (MIT), in user space only, behind `pharos-infer`'s `Math` trait; the dependency is reviewed under AGENTS.md section 6 in #74. Its results are compared with the host's through `pharos-infer`'s output. Rejected: our own implementations (more code and tests for accuracy `libm` already provides).
+
 ## Accepted decisions (M3.1)
 
 ### D-020: Where Phase 3 runs first
@@ -647,17 +675,6 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
    - revocation as designed in #37.
 
    Memory, process, and interrupt capabilities follow with their milestones.
-
-### D-016: User execution environment: SIMD state, user memory, and timeouts
-
-- **Status:** Open
-- **Needed by:** M3.0
-
-**Context.** Phase 2 user programs cannot use x87, SSE, or AVX (`CR0.EM` makes them fault, because the kernel saves no vector state), get a 256 KiB bump heap that never frees, and have no timeouts on IPC or interrupt waits. An inference runtime needs all three.
-
-**Options to evaluate.** Vector state: eager save and restore on every switch, or lazy (on first use after a switch); `XSAVE`/`XSAVEOPT` or `FXSAVE`; which instruction sets to expose (SSE2 baseline, AVX2 if present). User memory: an anonymous-memory map/unmap system call with a per-process page limit, or memory capabilities that a parent grants. Timeouts: a deadline argument on `receive`, `call`, and `irq_wait`, or a separate timer object that sends a notification.
-
-**Evaluation criteria.** No register state visible across processes (including after a kill); context-switch cost measured; every limit checked before allocation; timeouts that cannot leave a half-delivered message; the smallest change to the M2.7 boundary.
 
 ### D-017: Writable persistent storage and audit integrity
 
