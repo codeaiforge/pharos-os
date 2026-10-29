@@ -566,6 +566,43 @@ Two system calls per direction plus two task switches and two address-space swit
 4. **Timeouts are an argument**, relative, in microseconds (`u64::MAX`: wait forever; 0: do not block), on `receive`, `call`, and `irq_wait`; a new error `TIMED_OUT`; a `sleep` system call. Resolution is one timer tick, rounded up, so no wait ends early. Expiry removes the waiter with interrupts off, so a message delivered before expiry is returned and one arriving after stays queued; a reply to a timed-out `call` meets the revoked one-shot reply capability (`REVOKED` at the server). Rejected: timer objects (another object type; can be added for periodic timers later).
 5. **Math functions from `libm`** (MIT), in user space only, behind `pharos-infer`'s `Math` trait; the dependency is reviewed under AGENTS.md section 6 in #74. Its results are compared with the host's through `pharos-infer`'s output. Rejected: our own implementations (more code and tests for accuracy `libm` already provides).
 
+### D-017: Writable persistent storage and audit integrity
+
+- **Status:** Accepted
+- **Needed by:** M3.0 (storage), M3.4 (audit records)
+- **Date accepted:** 2026-10-29 (issue #72)
+
+**Context.** D-007 chose a read-only RAM disk and named copy-on-write as the future write strategy. Durable tasks (M3.3), the audit trail (M3.4), the knowledge service (M3.8), and model files need writable storage that survives crashes.
+
+**Options to evaluate.** Extending the `pharos-fs` format with copy-on-write, or a separate log-structured store for records; a storage service in user space over the virtio-blk driver, or in the kernel; append-only audit records with a hash chain, or with periodic signed checkpoints.
+
+**Evaluation criteria.** Crash consistency proven by fault injection; checksums on everything read; one safe parser shared with the host tool; tamper evidence for audit records; defined behaviour when storage is full or failing (consequential actions refused rather than unaudited); capability-only access.
+
+**Findings that shape the choice.**
+
+- **Bulk data does not fit IPC.** A 676 MB model file in 256-byte messages is about 2.6 million messages: seconds under KVM, minutes under the emulation CI uses. Giving the inference service its own disk device instead would hand DMA, and with no IOMMU all of memory, to the process that parses untrusted model files. A way to share memory between processes is needed.
+- **Precedent:** D-015 put the network stack in the virtio-net driver's process, so one process owns the device and parses what comes from it; the same shape fits storage.
+- **Media are untrusted** (D-007): a disk can be corrupted, swapped, or edited offline, so every block read is checked, and the parser is shared with the host tool and fuzzed.
+
+**Decision.**
+
+1. **A new store, `pharos-store`, separate from `pharos-fs`.** `pharos-fs` stays the packed read-only image for boot modules. The store is a `no_std`, safe-Rust crate (no dependencies) used by the storage service and by `cargo xtask` to build and inspect images.
+2. **Format: copy-on-write with two roots.**
+   - 4 KiB blocks. Blocks 0 and 1 are superblock slots, each with a magic value, the format version, a generation number, the location and checksum of the index, and its own checksum.
+   - Live data is never overwritten: a commit writes new data blocks, then a new index (every object with its extents, length, and checksum), then the superblock in the older slot with the next generation.
+   - Blocks referenced by either of the two newest generations stay intact, so the store can always fall back one generation; all other blocks are free and reused.
+   - Limits fixed in the format (for example 4,096 objects, paths of at most 104 bytes as in `pharos-fs`).
+3. **Objects:** named files written whole (create or replace atomically, any size; model files are stored this way, normally by the host tool when the image is built), and **append-only streams** of records (audit, task logs).
+4. **Crash consistency:** write data, flush (virtio-blk `FLUSH`), write the index, flush, write the superblock, flush. On mount, the newest superblock whose index and checksums verify wins; otherwise the previous one. Every block read is checksummed (CRC-32, as `pharos-fs`). Proven two ways: a **host test** that cuts the write sequence at every point (including torn blocks) and mounts, expecting the old or the new state and never a mix; and a **QEMU fault-injection test** that kills QEMU at random points while writing, reboots, and checks the same.
+5. **Audit records:** each stream record carries a SHA-256 hash chained to the previous one (our own SHA-256, checked against the FIPS 180-4 test vectors). This makes changes detectable relative to a known chain head. Anchoring the head (keeping it where an attacker with the disk cannot rewrite it, or signing it) is M3.4 work. When the store is full or failing, writes return errors, and M3.4 refuses consequential actions then.
+6. **Where it runs: in the virtio-blk driver's process** (a storage service, as D-015 did for networking). Clients get a `SEND` capability on its endpoint, badged by `init` with a namespace (a path prefix) and read-only or read-write; a client sees only its namespace.
+7. **Bulk data: shared-memory capabilities** (a kernel addition beside D-016's memory calls): `mem_share` turns a whole `mem_map` mapping into a `Memory` capability (rights: read, write, grant), passed over IPC like any capability; `mem_map_cap` maps it in the receiver, read-only or read-write within its rights. Frames are freed when the last mapping and capability are gone; mapped pages count against the mapper's limit; revocation stops new mappings but does not unmap existing ones, the same limit as device memory. A client reads a file by sharing a buffer with the storage service, which copies blocks into it from its DMA buffers.
+8. **QEMU:** a second, writable virtio-blk disk (a fresh image under `target/` for each run, built by `cargo xtask`), so existing tests keep their read-only disk.
+
+**Rejected:** a storage service in the kernel (trusted code for parsing untrusted media); copy-on-write inside `pharos-fs` (a packed image with a different purpose); a log-structured store with a segment cleaner (more code for the same guarantees at M3.0 sizes); signed checkpoints (need key management, M3.4 or later); file data over IPC messages (millions of messages for a model); a disk device granted to the inference service (DMA to all memory for the process parsing untrusted models).
+
+**Limits (accepted):** one commit at a time; the index is rewritten on every commit, which is fine for thousands of objects but not millions; no encryption at rest; the hash chain is not anchored until M3.4.
+
 ## Accepted decisions (M3.1)
 
 ### D-020: Where Phase 3 runs first
@@ -675,17 +712,6 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
    - revocation as designed in #37.
 
    Memory, process, and interrupt capabilities follow with their milestones.
-
-### D-017: Writable persistent storage and audit integrity
-
-- **Status:** Open
-- **Needed by:** M3.0 (storage), M3.4 (audit records)
-
-**Context.** D-007 chose a read-only RAM disk and named copy-on-write as the future write strategy. Durable tasks (M3.3), the audit trail (M3.4), the knowledge service (M3.8), and model files need writable storage that survives crashes.
-
-**Options to evaluate.** Extending the `pharos-fs` format with copy-on-write, or a separate log-structured store for records; a storage service in user space over the virtio-blk driver, or in the kernel; append-only audit records with a hash chain, or with periodic signed checkpoints.
-
-**Evaluation criteria.** Crash consistency proven by fault injection; checksums on everything read; one safe parser shared with the host tool; tamper evidence for audit records; defined behaviour when storage is full or failing (consequential actions refused rather than unaudited); capability-only access.
 
 ### D-018: Authority model: capabilities, identity, and human control
 

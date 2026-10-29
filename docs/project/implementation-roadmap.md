@@ -321,6 +321,7 @@ Ordering notes:
   - user memory: map and unmap anonymous memory under a per-process limit, and a freeing user allocator in place of the bump heap (D-016);
   - timeouts and cancellation: `receive`, `call`, and `irq_wait` with a deadline, and a user-space sleep (D-016);
   - writable persistent storage: virtio-blk writes and a crash-consistent store for durable state, large files (model files), and append-only records (D-017);
+  - shared-memory capabilities (`mem_share`, `mem_map_cap`) so large files move between processes without IPC copies (D-017);
   - QEMU runs with enough memory for the M3.1 target model.
   - **Targets set by M3.1 (#70, D-010, D-011):**
     - guest memory 2 GiB for inference runs (other test kernels keep 256 MiB);
@@ -638,7 +639,7 @@ Ordering notes:
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), and D-016 on 2026-10-29; D-012 has a recorded direction; D-018 is proposed; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-012 has a recorded direction; D-018 is proposed; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -657,7 +658,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-014 | IPC model and system-call mechanism | M2.7 | **Accepted:** `syscall`/`sysret`; synchronous endpoints, 256-byte messages plus one capability, bounded per-thread buffers |
 | D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | **Direction:** kernel-enforced capabilities (per-process handle tables, rights, grant over IPC, revocation), policy in user space; final at M3.4 |
 | D-016 | User execution environment: SIMD state, user memory, timeouts | M3.0 | **Accepted:** user programs built for `x86_64-unknown-linux-gnu` as `no_std` static programs; eager XSAVE/FXSAVE per thread; `mem_map`/`mem_unmap` with a per-process limit; timeout argument and `TIMED_OUT`; `libm` in user space |
-| D-017 | Writable persistent storage and audit integrity | M3.0, M3.4 | Crash consistency, checksums, copy-on-write (per D-007), append-only records, behaviour when storage fails |
+| D-017 | Writable persistent storage and audit integrity | M3.0, M3.4 | **Accepted:** new `pharos-store` crate; copy-on-write with two superblock roots; whole-file objects and append-only streams; SHA-256-chained audit records; storage service in the virtio-blk driver's process; shared-memory capabilities for bulk data |
 | D-018 | Authority model: capabilities, identity, human control | M3.3 | **Proposed:** authority only from capabilities; identity for attribution and audit; delegation narrows; a trusted path for emergency stop and revocation that needs no agent or model |
 | D-019 | Service interfaces and versioning | M3.2, M3.3 | Typed, versioned contracts over IPC; discovery grants no permission; compatibility checks; structured errors |
 | D-020 | Where Phase 3 runs first | M3.1 | **Accepted:** one codebase of `no_std` crates tested on the host and run on Pharos; measurements on the host; enforcement shown only on Pharos; M3.0 on the critical path from M3.2 |
