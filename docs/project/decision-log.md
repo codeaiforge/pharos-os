@@ -538,6 +538,41 @@ Two system calls per direction plus two task switches and two address-space swit
 - Without TCP, Phase 2 networking is datagrams only. Phase 3 needs (for example model downloads, if any) decide whether TCP or `smoltcp` comes next.
 - Badges, endpoint notifications, `call`, and a non-blocking `send` extend the D-014 IPC model ([services.md](../architecture/services.md), [networking.md](../architecture/networking.md)). Each service waits at one blocking point.
 
+## Accepted decisions (M3.1)
+
+### D-020: Where Phase 3 runs first
+
+- **Status:** Accepted
+- **Needed by:** M3.1
+- **Date accepted:** 2026-10-29 (issue #67)
+
+**Context.** The roadmap allows Phase 3 prototypes on the Linux host. Choosing per milestone what runs on the host and what must run on Pharos decides how much the M3.1 evaluation transfers and when M3.0 must be finished.
+
+**Options to evaluate.** Host-first for inference and the agent runtime, then port behind the same interfaces; Pharos-first, with M3.0 on the critical path; a split, for example inference evaluated on the host while the enforcement milestones (M3.4, M3.5) are built only on Pharos.
+
+**Evaluation criteria.** Enforcement claims are tested where enforcement happens (on Pharos, not on Linux); interfaces stay identical across host and Pharos; host results are labelled as such and never presented as running on Pharos; M3.0's scope follows from what must run on Pharos.
+
+**Decision (split, one codebase).**
+
+1. **One codebase, no parallel Linux prototype.** Agent and inference logic is written as `no_std` crates, as Phase 2 did for `pharos-fs`, `pharos-elf`, and `pharos_programs::net`. They are unit-tested and fuzzed on the Linux host, and the same code runs on Pharos as user programs. A Linux-only service that would later be rewritten is not built.
+2. **Measurement on the host.** Runtime evaluation, benchmarks, and output comparison against established engines (llama.cpp) run on the host, and their results are labelled as host results.
+3. **Enforcement on Pharos only.** Anything that claims to enforce something (the emergency stop, capabilities, audit, budgets, tool-call refusal, channel isolation) counts as done only when a QEMU test on Pharos shows it. A host test of the same logic is supporting evidence, never the proof.
+4. **Per milestone:**
+
+   | Milestone | Host (Linux) | Pharos (QEMU) |
+   | --- | --- | --- |
+   | M3.0 | Host tests of on-disk formats and pure logic | Everything it delivers |
+   | M3.1 | All of it (evaluation) | — |
+   | M3.2 | The engine crate: unit tests, fuzzing of the model parser, output comparison with llama.cpp; the service interface's codecs | The inference service as a user program, with tier T in CI and tier S under KVM |
+   | M3.3 | Task-state and manifest logic (host tests) | Lifecycle, restart recovery, emergency stop |
+   | M3.4 | Audit-record format and checks (host tests) | Capabilities, sandbox, audit trail |
+   | M3.5 | Accounting logic (host tests) | Budgets, reservations, exhaustion tests |
+   | M3.6 | Tool-call validator (host tests, fuzzing, injection corpus) | Tool calls with capability checks and confirmation |
+   | M3.7 | Message codecs and group-state logic (host tests) | Channels, groups, isolation |
+   | M3.8 | Data model and provenance logic (host tests) | Access control on stored knowledge |
+
+5. **Consequence for M3.0:** it is on the critical path from M3.2 onward. M3.2's engine crate can be built and host-tested in parallel with M3.0, but nothing in M3.2–M3.8 is done until it runs on Pharos.
+
 ## Open and proposed decisions
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
@@ -640,14 +675,3 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 **Options to evaluate.** A small interface description with generated Rust encoders and decoders, or hand-written codecs with shared host-tested types; a service registry, or capabilities handed out by a manager; how versions are negotiated; how large payloads travel (shared memory capabilities or chunked messages).
 
 **Evaluation criteria.** Every message checked by generated or shared code, fuzzed on the host; finding a service grants no permission; incompatible versions refused with a clear error; structured errors, timeouts, and cancellation in every contract; no new dependency without the AGENTS.md review.
-
-### D-020: Where Phase 3 runs first
-
-- **Status:** Open
-- **Needed by:** M3.1
-
-**Context.** The roadmap allows Phase 3 prototypes on the Linux host. Choosing per milestone what runs on the host and what must run on Pharos decides how much the M3.1 evaluation transfers and when M3.0 must be finished.
-
-**Options to evaluate.** Host-first for inference and the agent runtime, then port behind the same interfaces; Pharos-first, with M3.0 on the critical path; a split, for example inference evaluated on the host while the enforcement milestones (M3.4, M3.5) are built only on Pharos.
-
-**Evaluation criteria.** Enforcement claims are tested where enforcement happens (on Pharos, not on Linux); interfaces stay identical across host and Pharos; host results are labelled as such and never presented as running on Pharos; M3.0's scope follows from what must run on Pharos.

@@ -33,7 +33,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | Documentation | M1.5 | Docs updated in the same change as code. |
 | Architecture decisions | M2.1 | Decisions recorded before the milestone that depends on them (see [Open decisions](#open-decisions)). |
 | Governed development | M1.1 | Agent-assisted development of this repository follows [AGENTS.md](../../AGENTS.md): focused changes, tests and CI as evidence (an agent's claim that a change works is not evidence), maintainer approval, and no agent commits to shared history, tags, pushes, or publishes without explicit authorization. This is separate from a running Pharos system updating itself, which is M4.3. |
-| Host-side prototyping | Phase 3 | Inference and agent-runtime prototypes can run on the Linux host before the kernel can host them, so Phase 3 evaluation may overlap Phase 2. Prototypes must not be presented as running on Pharos. Where each Phase 3 milestone runs first is decided by D-020. |
+| Host-side prototyping | Phase 3 | Inference and agent-runtime prototypes can run on the Linux host before the kernel can host them, so Phase 3 evaluation may overlap Phase 2. Prototypes must not be presented as running on Pharos. D-020 (accepted): one codebase of `no_std` crates, host-tested and fuzzed on Linux and run unchanged on Pharos; measurements on the host; enforcement counts only when shown on Pharos. |
 
 ## Phase overview
 
@@ -314,6 +314,7 @@ Ordering notes:
 
 **Status: Planned.** Next on Pharos; may run alongside M3.1, whose measurements set its targets.
 
+- **Where it runs (D-020):** Pharos; host tests for on-disk formats and pure logic.
 - **Objective and scope:** Give Pharos what an inference runtime and an agent runtime need from the OS, without which no later Phase 3 milestone can run on Pharos.
 - **Deliverables:**
   - SIMD for user programs: the kernel saves and restores FPU, SSE, and AVX state per thread (XSAVE where available), with state leaks between processes tested (D-016);
@@ -338,8 +339,9 @@ Ordering notes:
 
 **Status: Current.**
 
+- **Where it runs (D-020):** Host only (evaluation).
 - **Objective and scope:** Define target use cases, hardware requirements, and choose an inference runtime and model formats.
-- **Deliverables:** Requirements document ([phase3-requirements.md](phase3-requirements.md): target use cases, the first agent scenario, target model sizes; approved 2026-10-29, #66); benchmark results on the reference host; accepted D-010, D-011 (requirements part), and D-020; the memory and instruction-set targets for M3.0.
+- **Deliverables:** Requirements document ([phase3-requirements.md](phase3-requirements.md): target use cases, the first agent scenario, target model sizes; approved 2026-10-29, #66); benchmark results on the reference host; accepted D-010, D-011 (requirements part), and D-020 (accepted 2026-10-29, #67); the memory and instruction-set targets for M3.0.
 - **Prerequisites:** Phase 1 gate (can overlap Phase 2).
 - **Acceptance criteria:** At least two runtimes evaluated against the D-010 criteria with measurements (tokens/s, memory use) on documented hardware; license review of runtime and candidate models complete.
 - **Validation:** Manual: reproducible benchmark scripts reviewed.
@@ -352,9 +354,10 @@ Ordering notes:
 
 **Status: Planned.**
 
+- **Where it runs (D-020):** Engine crate host-tested, fuzzed, and compared with llama.cpp on the host, in parallel with M3.0; done only when the service runs on Pharos.
 - **Objective and scope:** Run inference locally as an unprivileged service (host prototype first, then on Pharos, per D-020).
 - **Deliverables:** Inference service behind a stable provider interface (D-019), so the agent runtime is not bound to one runtime or model; model capability discovery; model and runtime versions recorded with every result; model loading with integrity verification (checksums).
-- **Prerequisites:** M3.1; for Pharos: M3.0.
+- **Prerequisites:** M3.1; for Pharos: M3.0 (the engine crate can start before M3.0 is done).
 - **Acceptance criteria:** A supported model produces output through the service; an unsupported model or configuration is refused with a clear error; a model file failing integrity checks is refused; memory use stays within a configured limit; the service has no privileges beyond its granted capabilities; when the service is down, callers get an error, not a hang.
 - **Validation:** Automated: integration tests with a small test model; malformed-model tests. Manual: resource monitoring.
 - **Risks and mitigations:** Parser exploits in model loaders → sandbox the service; fuzz loaders where possible.
@@ -366,6 +369,7 @@ Ordering notes:
 
 **Status: Planned.**
 
+- **Where it runs (D-020):** Pharos; task-state and manifest logic host-tested.
 - **Objective and scope:** Start, stop, supervise, and restart agents, and keep their work durable across restarts.
 - **Deliverables:**
   - agent runtime; agent manifest format (D-019); lifecycle states and events;
@@ -384,6 +388,7 @@ Ordering notes:
 
 **Status: Planned.**
 
+- **Where it runs (D-020):** Pharos; audit-record format host-tested.
 - **Objective and scope:** Enforce explicit, least-privilege capabilities for agents, sandbox them, and record grants and sensitive actions in a protected audit trail.
 - **Deliverables:**
   - capability grant and revoke mechanism (per D-012 and D-018): authority comes only from capabilities; identities (agent, model, tool, user) are recorded for attribution and never grant access by themselves; delegation only narrows rights;
@@ -402,6 +407,7 @@ Ordering notes:
 
 **Status: Planned.**
 
+- **Where it runs (D-020):** Pharos; accounting logic host-tested.
 - **Objective and scope:** Per-agent and per-group limits on CPU, memory, storage, network, and inference usage, with resources reserved for essential system functions.
 - **Deliverables:** Accounting attributed to each agent and group; enforcement; admission control for inference requests; reservations for the kernel, trusted services, and the emergency-stop path; limit configuration; usage reporting.
 - **Prerequisites:** M3.4.
@@ -416,6 +422,7 @@ Ordering notes:
 
 **Status: Planned.**
 
+- **Where it runs (D-020):** Pharos; the tool-call validator host-tested and fuzzed.
 - **Objective and scope:** Let agents invoke defined tools only through capability checks.
 - **Deliverables:** Tool interface; initial tool set (for example read a granted file); validation of model-generated tool calls.
 - **Prerequisites:** M3.4, M3.5.
@@ -430,6 +437,7 @@ Ordering notes:
 
 **Status: Planned.**
 
+- **Where it runs (D-020):** Pharos; codecs and group-state logic host-tested.
 - **Objective and scope:** Agents communicate only through granted channels, and groups of agents work toward a shared goal under explicit authority and budgets.
 - **Deliverables:** Message channels built on IPC with typed messages (D-019); coordination patterns (for example supervisor and worker); agent groups with a goal, completion criteria, tasks, delegation, and a group budget, built on M3.3 durable tasks.
 - **Prerequisites:** M3.4, M3.5, M3.6.
@@ -444,6 +452,7 @@ Ordering notes:
 
 **Status: Planned.**
 
+- **Where it runs (D-020):** Pharos; data model and provenance logic host-tested.
 - **Objective and scope:** A shared, permission-aware knowledge service with provenance, separate from each agent's private memory.
 - **Deliverables:** A small, versioned data model and stable interface (D-019) on the M3.0 store; provenance on every entry (source, author, time, version and scope, verification status); private agent memory kept separate, with promotion to shared knowledge explicit and policy-checked; history kept, so corrections never rewrite the evidence behind earlier decisions.
 - **Prerequisites:** M3.4, M3.5; M3.0 for Pharos.
@@ -622,7 +631,7 @@ Ordering notes:
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-012 has a recorded direction; D-018 is proposed; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020 on 2026-10-29; D-012 has a recorded direction; D-018 is proposed; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -644,7 +653,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-017 | Writable persistent storage and audit integrity | M3.0, M3.4 | Crash consistency, checksums, copy-on-write (per D-007), append-only records, behaviour when storage fails |
 | D-018 | Authority model: capabilities, identity, human control | M3.3 | **Proposed:** authority only from capabilities; identity for attribution and audit; delegation narrows; a trusted path for emergency stop and revocation that needs no agent or model |
 | D-019 | Service interfaces and versioning | M3.2, M3.3 | Typed, versioned contracts over IPC; discovery grants no permission; compatibility checks; structured errors |
-| D-020 | Where Phase 3 runs first | M3.1 | Host prototype then port, or Pharos-first; evidence that host results transfer; no host result presented as running on Pharos |
+| D-020 | Where Phase 3 runs first | M3.1 | **Accepted:** one codebase of `no_std` crates tested on the host and run on Pharos; measurements on the host; enforcement shown only on Pharos; M3.0 on the critical path from M3.2 |
 | D-013 | Scheduling model | M2.6 | **Accepted:** preemptive round-robin on one CPU, 10 ms slice, kernel threads on guarded stacks, no lock held across a switch |
 
 ## Next milestone

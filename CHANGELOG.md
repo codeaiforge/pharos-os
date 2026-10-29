@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- D-020 accepted (#67): one codebase of `no_std` crates, unit-tested and fuzzed on the Linux host and run unchanged on Pharos, with no throwaway Linux prototype; runtime measurements and output comparison on the host; enforcement counts as done only when a QEMU test on Pharos shows it. Each Phase 3 milestone in the roadmap now says where it runs.
 - Phase 3 requirements (`docs/project/phase3-requirements.md`, #66), approved by the maintainer: reference hardware, three use cases, the first agent scenario (summarize a granted file, with seven required failure tests), model needs and candidate sizes, a speed target of 5 tokens/s with the first token within 10 s (binding after #69), SSE2 baseline with optional AVX2, and provisional M3.0 targets.
 
 ### Changed
