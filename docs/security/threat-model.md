@@ -116,6 +116,21 @@ Design: [networking.md](../architecture/networking.md). The first four rows are 
 | A forged ARP message redirects traffic | **Limit:** ARP is believed, as in any ARP; on slirp the only other host is the gateway |
 | A guest program reaches beyond the host in tests | **Limit:** slirp's NAT is not restricted (`restrict=on` would also block the echo server); nothing in the guest sends anywhere but `10.0.2.2` |
 
+### User environment and storage (M3.0, planned)
+
+Design: [user-environment.md](../architecture/user-environment.md) and [storage.md part 8](../architecture/storage.md#8-the-writable-store-m30), from D-016 and D-017. Every row is **planned** (#74–#78 and the shared-memory issue) and reviewed at the M3.0 gate.
+
+| Threat | Planned mitigation |
+| --- | --- |
+| A process reads another's floating-point or vector registers | Eager save and restore on every switch, a clean image for new threads, no lazy switching (LazyFP); tested across preemption and after a kill, with `FXSAVE` and with `XSAVE` and AVX |
+| A malformed save area crashes the kernel (`XRSTOR` fault) | Only the kernel writes save areas; user code cannot reach them |
+| A process exhausts memory | A page limit per process, set at `spawn` and at most the creator's, checked before any frame is allocated; at most 1,024 mappings; no demand paging. **Limit:** limits are not carved from the creator's until M3.5 |
+| Shared memory widens access | Rights only narrow; read-only mappings have no write bit; mappings are never executable; frames live until the last mapping and capability. **Limit:** revocation does not unmap existing mappings |
+| A timeout loses or misdirects a message | Expiry with interrupts off; a message delivered before expiry is returned, one after it stays queued; a late reply meets a revoked one-shot reply capability |
+| A corrupted or edited disk crashes or misleads the storage service | Every superblock, index, extent, and record checked (CRC-32) before use; shared parser fuzzed; crash consistency tested by cutting every write sequence and by killing QEMU |
+| Audit records are altered on disk | SHA-256 chain over stream records. **Limit:** the chain head is not anchored until M3.4, so someone holding the disk can rewrite the whole chain |
+| A client reads or writes another's files | Namespaces from `init`'s badges, read-only bit, paths checked against escape |
+
 ### Known limitations
 
 - No automated secret scanning or dependency auditing is configured yet (nothing to audit today).

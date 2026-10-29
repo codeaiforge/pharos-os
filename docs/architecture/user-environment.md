@@ -1,0 +1,125 @@
+# The user execution environment
+
+## 1. Status
+
+- **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-29 (issue #73). It follows [D-016](../project/decision-log.md#d-016-user-execution-environment-simd-state-user-memory-and-timeouts) and item 7 of [D-017](../project/decision-log.md#d-017-writable-persistent-storage-and-audit-integrity), for [M3.0](../project/implementation-roadmap.md#m30--platform-prerequisites-for-hosting-agents).
+- **Implementation:** **planned**: SSE2 and vector state (#74), user memory (#75), timeouts (#76), shared memory (the extra M3.0 issue), and the large-file test (#78). Nothing here is implemented yet.
+
+## 2. Context
+
+M3.1 chose an inference engine that needs, from Pharos: floating point and SIMD in user programs, up to 1 GiB of memory in one process, a 700 MB model file in that memory, and calls that do not block forever (D-010, D-011). Today user programs are built for `x86_64-unknown-none`, which has no SSE; `CR0.EM` makes any x87 or SSE instruction fault; a program has a 256 KiB bump heap that never frees and cannot map memory; and no system call has a timeout.
+
+## 3. Design
+
+### Building user programs
+
+- **Target:** `x86_64-unknown-linux-gnu`, as `#![no_std]`, `#![no_main]` static programs. This target uses hardware floating point and SSE2; no C library and no Linux code is involved, because nothing from `std` is used and nothing from a C library is linked. Any accidental libc reference fails at link time.
+- **Flags, set by `cargo xtask` only when it builds `pharos-programs`:** `-C relocation-model=static`, `-C panic=abort` (already the profile setting), link arguments `-nostartfiles -nostdlib -static -T user/programs/user.ld`, and `--cfg pharos_user` (declared to `check-cfg`). They are **not** put in `.cargo/config.toml`: the host also builds for `x86_64-unknown-linux-gnu`, and host tools and tests must not get them. User programs build into their own target directory (`target/user/`), so host artifacts are never rebuilt with these flags.
+- **`cfg(target_os = "none")` becomes `cfg(pharos_user)`** in `pharos-user` and `pharos-programs` for the entry stub, the panic handler, and the global allocator. Host unit tests of both crates keep working without the flag.
+- **What `pharos-user` supplies** (in its `syscall` module, the one user-space module allowed `unsafe`, D-008):
+  - `memcpy` and `memmove` with `rep movsb` (`memmove` copies backwards with the direction flag when the regions overlap, and clears it again), `memset` with `rep stosb`, and `memcmp` and `bcmp` as byte loops. Inline assembly keeps the compiler from turning these into calls to themselves.
+  - An empty `rust_eh_personality`: the prebuilt `core` for this target refers to it, although `panic = "abort"` never unwinds.
+- **The build checks itself:** `cargo xtask` rejects a user program that has a dynamic section, an interpreter, or undefined symbols, and the vector-state test kernel checks that SSE instructions run.
+- **Lints:** `scripts/check.sh` and CI run Clippy on `pharos-programs` for `x86_64-unknown-linux-gnu` with `--cfg pharos_user`, in place of `x86_64-unknown-none`.
+- **The kernel does not change target:** it stays on `x86_64-unknown-none` (soft-float), so it never touches vector registers.
+
+### Vector state
+
+- **Enabling:** at boot the kernel clears `CR0.EM`, sets `CR0.MP` and `CR0.NE`, and sets `CR4.OSFXSR` and `CR4.OSXMMEXCPT`. If CPUID reports `XSAVE` and AVX, it also sets `CR4.OSXSAVE` and writes `XCR0` = x87 | SSE | AVX (bits 0–2) with `XSETBV`; AVX-512 and other state components are never enabled. Otherwise it uses `FXSAVE`/`FXRSTOR` (x87 and SSE). The boot log names the mode.
+- **Save area:** one per thread, 64-byte aligned, allocated from the kernel heap when the thread is created: 512 bytes for `FXSAVE`, or the size CPUID leaf 0xD reports for the enabled components (refused above 4 KiB; 832 bytes expected with AVX). Thread creation fails with `NO_MEMORY` if the area cannot be allocated.
+- **Clean state for a new thread:** the area is initialized to the state after `FNINIT` (x87 control word 0x037F), `MXCSR` 0x1F80 (all SIMD exceptions masked, round to nearest), and zero registers, and for `XSAVE` an `XSTATE_BV` covering the enabled components so every register is loaded from it. A new process never sees another's registers.
+- **Switching (eager, D-016):** the context switch in `arch::x86_64::context` saves the outgoing thread's state into its area and restores the incoming thread's, on every switch between threads. Kernel threads have areas too (holding the clean state), so every switch is the same. System calls and interrupts save nothing: the kernel never uses vector registers, and a thread's registers stay in the CPU until the next switch.
+- **Exceptions:** SIMD floating-point exceptions (vector 19, `#XM`) and x87 errors (vector 16, `#MF`) from user mode kill the process, like other exceptions. They can only occur if a program unmasks them in `MXCSR` or the x87 control word.
+- **`unsafe`:** the `FXSAVE`, `FXRSTOR`, `XSAVE`, `XRSTOR`, `XSETBV`, and control-register writes are `unsafe` and live in the hardware layer (`arch::x86_64`), each with a `// SAFETY:` comment. `XRSTOR` faults on a malformed area; the kernel builds every area itself and user code never writes one.
+- **Cost:** the context switch is measured before and after with the existing tasks test, and recorded in scheduling.md.
+
+### User memory
+
+| # | Call | Arguments | Returns | Needs |
+| --- | --- | --- | --- | --- |
+| 19 | `mem_map` | length in bytes (rounded up to pages, > 0) | the start address | none (the caller's own limit) |
+| 20 | `mem_unmap` | start address, length | 0 | none (the caller's own mapping) |
+
+- **Mappings** are anonymous, zeroed, user, writable, and non-executable, at an address the kernel chooses in the **map region**, `0x0000_1000_0000_0000` to `0x0000_2000_0000_0000` (16 TiB, clear of the program at `USER_BASE` and the stack below `STACK_TOP`). The kernel keeps each process's mappings in a list (at most 1,024 mappings) and places a new one at the first gap that fits.
+- **Frames are allocated at `mem_map`** (no demand paging, so no new page-fault path). The page count is checked against the process's limit before any frame is allocated; on failure nothing is mapped and the error is `NO_MEMORY`. Page tables created for a mapping count as kernel overhead, as for program loading.
+- **`mem_unmap`** takes exactly one whole earlier mapping (start and length as mapped, after rounding); anything else is `BAD_ADDRESS` and changes nothing. It unmaps, flushes the TLB entries, and frees the frames (or drops the reference for a shared mapping).
+- **The limit:** each process has a page limit. `spawn` takes it in bits 32–63 of its `count` argument, in pages (bits 0–31 keep the capability count, at most 8); it must not exceed the creator's own limit (`TOO_LARGE` otherwise). The limit is not carved out of the creator's: per-agent quotas are M3.5, as the M2.10 review recorded. Processes started by the kernel get their limit from the kernel (`init`: 1.5 GiB, so it can give the inference service 1 GiB and the storage service its share). Mappings from `mem_map_cap` count against the mapping process's limit. Existing programs are unaffected: limit 0 means no mappings, and a program that never calls `mem_map` keeps working.
+- **Exit and kill** unmap everything and free every frame, as for program pages today.
+
+### The user allocator
+
+`pharos-user`'s global allocator (in its `syscall` module, replacing the bump heap):
+
+- **Small allocations** (up to 32 KiB, rounded up to a power of two from 16 bytes) come from size-class free lists. Their memory comes first from the existing 256 KiB static area in the program image, then from 64 KiB chunks obtained with `mem_map`; chunks are kept for reuse, not returned.
+- **Large allocations** (above 32 KiB) are their own `mem_map` mapping, unmapped when freed, so a model file or a key/value cache returns to the kernel.
+- **Out of memory** (the limit reached) is a null return, which Rust turns into the allocation-error path (a panic, so the process ends with a report).
+- **Alignment** up to 4 KiB is honoured; larger alignments are refused (null).
+- Host-tested: the size-class logic runs on the host with a fake `mem_map`.
+
+### Timeouts
+
+| # | Call | Change |
+| --- | --- | --- |
+| 4 | `receive` | new 4th argument: timeout |
+| 18 | `call` | new 6th argument: timeout |
+| 13 | `irq_wait` | new 2nd argument: timeout |
+| 21 | `sleep` | new call: duration in microseconds; returns 0 |
+
+- **Timeout encoding (D-016):** microseconds, relative to the call; `u64::MAX` waits forever; 0 does not block (returns `TIMED_OUT` at once if nothing is ready). **Every `pharos-user` wrapper passes `u64::MAX` unless the caller gives a timeout**, so existing programs keep blocking as before; programs that put other values in unused registers must be updated (the `syscalls` test does, on purpose, and is changed to pass explicit values).
+- **New error 12, `TIMED_OUT`.**
+- **Resolution:** the deadline is converted to timer ticks (10 ms) and rounded up, plus one tick, so no wait ends early; a timeout that would overflow is treated as forever.
+- **No lost messages:** expiry is handled in the timer interrupt with interrupts off. If a message was delivered to the waiting thread before expiry, the call returns it; if not, the thread is removed from the endpoint's queue and gets `TIMED_OUT`, and a message sent later stays queued (or the sender blocks) for the next receiver. A reply to a `call` that timed out meets the one-shot reply capability, already revoked, and the server gets `REVOKED`.
+- **`irq_wait`:** a timeout leaves the interrupt's count untouched; the next wait returns it.
+- **`sleep`** uses the scheduler's sleeping queue, with the same rounding.
+
+### Shared memory (D-017 item 7)
+
+| # | Call | Arguments | Returns | Needs |
+| --- | --- | --- | --- | --- |
+| 22 | `mem_share` | start address, length (one whole `mem_map` mapping) | a new `Memory` handle with `READ`, `WRITE`, and `GRANT` | none (the caller's own mapping) |
+| 23 | `mem_map_cap` | `Memory` handle, writable (0 or 1) | the start address in the caller's map region | `READ`; `WRITE` when writable |
+
+- **The `Memory` object** holds the frames of the shared mapping. `mem_share` moves the frames' ownership from the address space to the object; the sharer's mapping stays, now holding a reference. Each mapping and each capability keeps the object alive; the frames are freed when the last of them is gone. A `SHARED` page-table bit (like M2.9's `DEVICE` bit) keeps `destroy` from freeing the frames directly.
+- **Rights narrow only**, as for every capability: a holder passes on `READ` alone to give read-only access. A read-only mapping is mapped without the write bit, so a write is a page fault that kills the process. Mappings are never executable.
+- **Revocation** stops new mappings; existing mappings stay until unmapped or the process ends (the limit already recorded for device memory).
+- **Only `mem_map` memory can be shared**, not program pages, the stack, device memory, or DMA buffers.
+
+### Large files in one process
+
+A client reads a 700 MB file from the storage service (storage.md, part 8) by mapping a buffer of the file's size, sharing it with `WRITE`, and asking the service to fill it; the service copies blocks into it from its DMA buffers. `cargo xtask` runs the tests that need it with 2 GiB of guest memory (a list in `xtask`; other test kernels keep 256 MiB).
+
+### Math functions
+
+`pharos-programs` depends on `libm` (MIT, no runtime dependencies; reviewed under AGENTS.md section 6 in #74) and implements `pharos-infer`'s `Math` trait with it. The kernel does not use it.
+
+## 4. Security
+
+- **Vector-state leaks:** eager save and restore on every switch, a clean image for new threads, and no lazy switching (LazyFP, CVE-2018-3665). Tested with two processes and after a kill.
+- **Malformed save areas:** only the kernel writes them; user code cannot reach them.
+- **Memory exhaustion:** per-process page limits checked before allocation, at most 1,024 mappings per process, no demand paging. Not yet: limits carved from the creator's (M3.5); a process can still use its whole limit of frames.
+- **Shared memory:** rights only narrow; read-only mappings are not writable; frames live until the last user; revocation does not unmap (recorded limit).
+- **Timeouts:** cannot lose or duplicate a message; a late reply cannot reach a later call.
+- **New trusted code:** the vector-state instructions in the hardware layer, the memory functions and allocator in `pharos-user`'s `syscall` module, and the `Memory` object in the kernel. AGENTS.md's list of what `pharos-user`'s `syscall` module may contain gains the memory functions and the new allocator.
+
+## 5. Testing
+
+| Test | What it checks |
+| --- | --- |
+| Host, `pharos-user` | The allocator's size classes, reuse, large-allocation mapping and unmapping (fake `mem_map`), alignment; the new wrappers' argument encoding |
+| Host, `syscall` | Decoding of calls 19–23, the timeout arguments, and the limit in `spawn`; the fuzz test covers them |
+| QEMU, `vector_state` (default CPU: `FXSAVE`) and `vector_state_avx` (`-cpu max`: `XSAVE` with AVX) | Two processes keep their own SSE (and AVX) values across many preemptions; a process never reads another's values, including after the other is killed; floating-point results match the host's for fixed inputs; a new process starts with clean state |
+| QEMU, `user_memory` | Mapping up to the limit and `NO_MEMORY` beyond it; bad or partial unmaps refused; frames reused after unmapping and all returned after exit; the allocator frees and reuses; `spawn` refuses a limit above the creator's |
+| QEMU, `shared_memory` | Writes visible both ways; a read-only grant cannot be mapped writable and a write is killed; rights cannot widen; the receiver's limit applies; every frame returns whichever process ends first |
+| QEMU, `timeouts` | A `call` to a silent server returns `TIMED_OUT` within the deadline plus one tick; a reply racing the deadline is never lost; a late reply gets `REVOKED`; `irq_wait` and `sleep` |
+| QEMU, `large_file` (2 GiB) | A 676 MB file read into one process through shared memory, its SHA-256 checked, parsed by `pharos-infer`'s GGUF reader |
+
+Each fix and each check is mutation-tested as in earlier milestones.
+
+## 6. Alternatives
+
+Recorded in D-016 and D-017: SSE flags on `x86_64-unknown-none` (no effect while `soft-float` is forced, and disabling it is being phased out), a custom target (nightly), lazy vector switching (LazyFP), memory capabilities instead of a limit (M3.5), timer objects, file data over IPC.
+
+## 7. Open questions
+
+- Context-switch cost with `XSAVE` on real hardware (measured under QEMU first).
+- Whether `XSAVEOPT` or `XSAVES` is worth using (only if the measurement shows the save matters).

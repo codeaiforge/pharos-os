@@ -2,6 +2,7 @@
 
 ## 1. Status
 
+- **Part 8 (writable store, M3.0):** **Accepted**: approved by the maintainer on 2026-10-29 (#73); follows [D-017](../project/decision-log.md#d-017-writable-persistent-storage-and-audit-integrity). Planned, not implemented. Parts 1–7 below describe the read-only format and are unchanged.
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.8, #44). It follows [D-007](../project/decision-log.md#d-007-filesystem-and-persistent-storage) (read-only RAM disk, custom checked format, files through capabilities).
 - **Implementation:** the image format, parser, and host tool are **implemented** (#45: `crates/pharos-fs`, `cargo xtask fs build` and `fs ls`). So is the RAM disk (#46: the Limine module request, `storage::record_modules` and `storage::ram_disk`, the slice from `mm::raw::module_bytes`, and the modules in the boot image). So is the kernel filesystem (#47: `fs::mount`, and `fs::mount_root` at boot). So are file capabilities with the `open` and `read` system calls (#48). Every M2.8 interface in this document is now implemented.
 
@@ -179,8 +180,81 @@ Two new kernel objects, and one new right (`READ = 1 << 4`):
 
 ## 7. Open questions
 
-- **Writes:** the direction is copy-on-write (D-007). It needs a design before any write code, and a writable device (virtio-blk, M2.9).
+- **Writes:** designed in part 8 (M3.0, D-017): a separate copy-on-write store in user space; this read-only format stays for boot modules.
 - **Moving the filesystem to a user-space server:** needs program loading from storage, shared memory, and bulk IPC.
 - **Image authentication:** signatures or hashes checked by the bootloader, with secure boot.
 - **Listing directories from user space:** a `list` call or a prefix search, when a service needs it.
 - **Larger images:** more than 16 MiB, or more than 1024 entries, needs a new format version.
+
+## 8. The writable store (M3.0)
+
+Follows [D-017](../project/decision-log.md#d-017-writable-persistent-storage-and-audit-integrity). Durable task state (M3.3), the audit trail (M3.4), the knowledge service (M3.8), and model files (D-010) need storage that is written at run time and survives crashes. The read-only format above stays for boot modules; the store is separate.
+
+### Components
+
+| Component | Where | `unsafe` |
+| --- | --- | --- |
+| Format, commit logic, mount and recovery, SHA-256 | New crate `crates/pharos-store`: `no_std` with `alloc`, no dependencies, `unsafe` forbidden; generic over a block-device trait with `read`, `write`, and `flush` | none |
+| Storage service | The virtio-blk driver's process (`user/programs/src/bin/store.rs`, built on `pharos_programs::virtio`), as D-015 put the network stack in its driver | none (programs use none) |
+| Host tool | `cargo xtask store build <dir> <image> --blocks <n>` and `store ls <image>` | none |
+| Shared memory for file data | Kernel `Memory` capabilities ([user-environment.md](user-environment.md#shared-memory-d-017-item-7)) | in the kernel's existing modules |
+
+### On-disk format, version 1
+
+All integers are little-endian. Blocks are 4 KiB (8 virtio-blk sectors).
+
+- **Superblock slots: blocks 0 and 1.** Each holds: magic `PHAROSST` (8 bytes); version (u32, 1); block size (u32, 4096); generation (u64); total blocks (u64); index start block (u64), block count (u32), byte length (u32), and CRC-32 (u32); and the slot's own CRC-32 over everything before it. A slot is **valid** if its magic, version, block size, and CRC are right, its numbers are in range, and its index's CRC verifies.
+- **Index:** a header (object count, u32) and one entry per object, sorted by path: path length (u8) and path (at most 104 bytes, the same rules as `pharos-fs`: no empty segments, no `.` or `..`, no NUL); kind (u8: 1 file, 2 stream); length in bytes (u64); content CRC-32 (u32; for streams, of the last block); for streams, the record count (u64) and the chain head (32 bytes); extent count (u16) and extents (start block u64, block count u32). At most 4,096 objects, 64 extents per object, and a 1 MiB index.
+- **Files** are written whole: a write puts the new content in free blocks, and the commit makes the index point to it. Model files are stored this way, normally by the host tool when the image is built.
+- **Streams** hold records of at most 4,032 bytes: length (u32), CRC-32 (u32), and the record's SHA-256 chain value `H(prev ‖ payload)` (32 bytes; `prev` is all zeros for the first record), then the payload. Records do not cross blocks. Appending copies the stream's last block, adds the record, and writes it to a free block (live blocks are never written).
+
+### Commit and recovery
+
+1. Write new data blocks (and a copied stream tail) to free blocks; **flush**.
+2. Write the new index to free blocks; **flush**.
+3. Write the superblock into the **older** slot with generation + 1; **flush**.
+
+- **Free blocks** are those referenced by neither of the two valid generations, so the newest commit can always fall back to the previous one. The service builds a bitmap of them at mount.
+- **Mount:** read both slots; take the valid one with the higher generation, or the other if it is not valid; if neither is valid, the store is refused. Then check every extent is in range and no two objects share a block.
+- **Reads** check each object's CRC-32 (files: the whole content when read from start to end; streams: each record's CRC and chain value).
+- **A crash at any point** leaves either the old generation (steps 1–2, or a torn step-3 write that fails its CRC) or the new one (step 3 complete). Nothing else is reachable.
+- **Full store:** a write that does not fit is refused (`NO_SPACE`) before anything is written. A device error fails the operation and the service stops accepting writes until restarted (reads continue).
+
+### The storage service
+
+- **Started by `init`** with the writable virtio-blk device, a console, and its endpoint; it reports ready after mounting.
+- **Clients** hold a `SEND` capability on its endpoint, badged by `init`: bits 0–15 a namespace number, bit 16 read-only. The service maps namespace numbers to path prefixes from a table in its source (reviewed code, like `init`'s service table); a client sees only paths under its prefix, given relative to it. Badge 0 and unknown namespaces are refused.
+- **Requests** (by `call`, replies non-blocking, as the network service):
+
+  | Op | Request | Reply |
+  | --- | --- | --- |
+  | 1 `stat` | path | status, kind, length |
+  | 2 `read` | path, offset, length, plus a `Memory` capability with `WRITE` (a shared buffer) | status, bytes copied into the buffer |
+  | 3 `write` | path, length, plus a `Memory` capability with `READ` holding the content | status (the file is replaced atomically) |
+  | 4 `append` | stream path, record (≤ 200 bytes inline; larger in a shared buffer) | status, record number, chain head |
+  | 5 `list` | path prefix, start index | status, up to a message of names |
+  | 6 `delete` | path | status |
+
+  Status codes: 0 OK, 1 BAD_REQUEST, 2 NOT_FOUND, 3 NO_SPACE, 4 READ_ONLY, 5 NO_ACCESS, 6 IO_ERROR, 7 CORRUPT.
+- **One commit at a time**; each write, append, or delete is its own commit (batching later, if measured to matter).
+
+### QEMU
+
+`cargo xtask` attaches a second virtio-blk disk, writable, from a fresh image under `target/xtask/` for each run (built with `store build`); the existing read-only `disk.img` stays for the M2.9 tests. `init` finds devices in PCI order, so the storage service gets the writable disk by its PCI address.
+
+### Security
+
+- **Media are untrusted:** every superblock, index, extent, and record is checked before use; the parser is shared with the host tool and fuzzed.
+- **Tamper evidence:** CRC-32 detects accidental corruption only; the SHA-256 chain makes changes to a stream's records detectable relative to a known chain head. Keeping that head where someone holding the disk cannot rewrite it (or signing it) is M3.4.
+- **Access:** namespaces from `init`'s badges; read-only clients cannot write; paths cannot escape a prefix (no `..`, checked like `pharos-fs`).
+- **Limits (accepted):** one commit at a time; the index is rewritten on each commit (fine for thousands of objects); no encryption at rest; the chain head is not anchored until M3.4; the storage service has DMA through its device, as every driver (no IOMMU, D-008).
+
+### Testing
+
+| Test | What it checks |
+| --- | --- |
+| Host, `pharos-store` | Format round trips; each corruption of a superblock, index, extent, or record detected with its error; SHA-256 against the FIPS 180-4 test vectors; allocation never reuses a block of the two newest generations; **crash consistency: the write sequence of each commit cut at every block write, including a torn last write, then mounted: the old or the new state, never a mix**; 100,000 fuzzed images that never panic |
+| Host, `xtask` | `store build` and `store ls` |
+| QEMU, `store` | The service mounts the store; files written, read back, replaced, deleted; streams appended with the chain checked; namespaces and read-only enforced; `NO_SPACE` when full |
+| QEMU, crash injection (`cargo xtask test`) | A writer test kernel is killed at random moments during writes, 20 times; after each kill a checker boot mounts the store and finds the old or the new state, checked |
+
