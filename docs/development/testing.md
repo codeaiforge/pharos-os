@@ -108,6 +108,26 @@ Debugging a program with GDB: [debugging.md](debugging.md#debug-a-rust-user-prog
 In CI the first run with kernel tests (2026-10-27, [run 40476613340](https://github.com/codeaiforge/pharos-os/actions/runs/40476613340)) took 9 s for the boot check and the `boot_info` test kernel. The job itself took 555 s that time because Ubuntu's package mirror delivered the QEMU packages at 44 kB/s (8.5 minutes); the earlier run took 44 s in total. Slow mirrors kept recurring, so the job now caches the packages per runner image version and installs them without contacting the mirror on a cache hit. At the end of M2.4 (2026-10-27, [run 40507039495](https://github.com/codeaiforge/pharos-os/actions/runs/40507039495)) the job took 97 s: 16 s for packages, 71 s for the boot check and six test kernels (about 3 s each in CI), and the reproducibility check. At the end of M2.5 ([run 40516480215](https://github.com/codeaiforge/pharos-os/actions/runs/40516480215)) it took 113 s with 13 test kernels (3–4 s each in CI). At the end of M2.6 ([run 40530704211](https://github.com/codeaiforge/pharos-os/actions/runs/40530704211)) it took 117 s with 16 test kernels; the timing-based `timer` and `preemption` kernels took 4.0 and 4.3 s and passed on every M2.6 run without retries. At the end of M2.7 ([run 40564446336](https://github.com/codeaiforge/pharos-os/actions/runs/40564446336)) it took 146 s with 22 test kernels, 28 s of it installing packages; the isolation kernels (`address_spaces`, `user_mode`, `syscalls`, `ipc`, `hardening`) took 3.0–3.7 s each. At the end of M2.8 ([run 40576869275](https://github.com/codeaiforge/pharos-os/actions/runs/40576869275)) it took 249 s with 25 test kernels on a slower runner (about 5.5 s per kernel, the storage kernels `ramdisk`, `fs`, and `files` included); the packages came from the cache, with no download from the mirror. At the end of M2.9 ([run 40713610670](https://github.com/codeaiforge/pharos-os/actions/runs/40713610670)) it took 140 s with 31 test kernels: 9 s for packages from the cache, 120 s for the boot check and the kernels (about 3.9 s each, the driver kernels `device_caps`, `device_irq`, and `virtio_blk` included), and the reproducibility check. At the end of M2.10, which closed Phase 2 ([run 40835736689](https://github.com/codeaiforge/pharos-os/actions/runs/40835736689)), it took 227 s with 34 test kernels: 12 s for packages from the cache, 209 s for the boot check and the kernels (about 4.7 s each, the service and network kernels `spawn`, `services`, `virtio_net`, and `network` included; `network` also exchanges a datagram with the host echo server), and the reproducibility check.
 
 
+## Inference benchmarks (host)
+
+`scripts/bench-inference.py` measures an inference engine's command-line tool on the Linux host, for the runtime evaluation in M3.1 (#68, #69). Results are host results (D-020): they say nothing about Pharos until the engine runs there.
+
+- **What it runs:** two fixed prompts (a short one, and the S1 scenario's "summarize this report" with a one-page text written for the harness), each `--runs` times, with seed 42 and the given thread count.
+- **What it records**, per run: the engine's load time and prompt and generation tokens per second, the process's wall time and peak resident memory (from `wait4`), the generated text and its SHA-256, the model file's size and SHA-256, the engine version, and the host's CPU, SIMD flags, and memory. It prints medians and whether the output was identical across runs (determinism), and writes JSON to `target/bench/` (never committed).
+- **Engines:** `llama` reads llama.cpp's `llama_perf_context_print:` lines (and the older `llama_print_timings:` form); `native` reads one JSON line, `{"load_ms", "prompt_tokens", "prompt_ms", "gen_tokens", "gen_ms"}`, which Pharos's own engine prints last. Other engines get a parser when their real output has been recorded.
+- **It installs and downloads nothing.** A missing engine binary or model file stops it with a message naming what is missing.
+
+The engine command follows `--`; `{model}`, `{prompt}`, `{n}`, `{threads}`, and `{seed}` are filled in, and other text (including braces) is passed unchanged. For example, with llama.cpp's `llama-completion` (check the flags against `--help` of your build):
+
+```sh
+python3 scripts/bench-inference.py --engine llama --model models/model.gguf \
+    --label "model q4_k_m" --threads 1 --runs 3 \
+    --version-cmd "llama.cpp/build/bin/llama-completion --version" \
+    -- llama.cpp/build/bin/llama-completion -m {model} -p {prompt} -n {n} -t {threads} -s {seed} --temp 0
+```
+
+Host tests (`scripts/test_bench_inference.py`, in `check.sh` and CI): parsing of llama.cpp's timing lines in both forms (quoted from llama.cpp's documentation, not recorded here), the native JSON line and malformed ones, placeholder filling, peak memory of a process that allocates 64 MiB, a missing binary or model, a failing engine, and an end-to-end run with a stand-in engine.
+
 ## Quality gates
 
 Run `scripts/check.sh` before every pull request. It runs these commands, the same ones as CI's `check` job, and stops at the first failure:
@@ -124,6 +144,7 @@ cargo clippy -p pharos-programs --target x86_64-unknown-none --locked -- -D warn
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude pharos-kernel --exclude pharos-programs --no-deps --locked
 RUSTDOCFLAGS="-D warnings" cargo doc -p pharos-kernel --target x86_64-unknown-none --no-deps --locked
 python3 scripts/check-links.py
+python3 -m unittest -q scripts/test_bench_inference.py
 ```
 
 Why the split: the kernel targets bare metal (`x86_64-unknown-none`, decision D-003), so it is excluded from host checks and linted for its own target. Its target-independent logic is unit-tested on the host through the library. CI's `msrv` job also builds and tests the host crates and the kernel library on Rust 1.85. `scripts/check.sh` repeats those three commands (`cargo +1.85 build`/`test`) when Rust 1.85 is installed (`rustup toolchain install 1.85 --profile minimal`), and says it skipped them otherwise. Newer language features, such as let chains (Rust 1.88), fail only there: four M2.7 commits passed every local check yet failed CI's `msrv` job for that reason, fixed in #42.

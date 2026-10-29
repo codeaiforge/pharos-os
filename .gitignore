@@ -17,3 +17,6 @@
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
+
+# Python bytecode from the scripts/ host tests
+__pycache__/

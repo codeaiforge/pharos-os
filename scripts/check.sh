@@ -23,6 +23,7 @@ run cargo clippy -p pharos-programs --target x86_64-unknown-none --locked -- -D 
 run env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude pharos-kernel --exclude pharos-programs --no-deps --locked
 run env RUSTDOCFLAGS="-D warnings" cargo doc -p pharos-kernel --target x86_64-unknown-none --no-deps --locked
 run python3 scripts/check-links.py
+run python3 -m unittest -q scripts/test_bench_inference.py
 
 # The CI `msrv` job: the same host builds and tests on the minimum supported
 # Rust. Runs only if that toolchain is installed (rustup toolchain install

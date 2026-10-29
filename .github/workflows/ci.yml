@@ -76,6 +76,9 @@ jobs:
       - name: Check Markdown links
         run: python3 scripts/check-links.py
 
+      - name: Test the inference benchmark harness
+        run: python3 -m unittest -q scripts/test_bench_inference.py
+
   msrv:
     name: minimum supported Rust (1.85)
     runs-on: ubuntu-latest

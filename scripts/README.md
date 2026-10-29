@@ -8,6 +8,7 @@ This directory is reserved for small helper scripts for development tasks, such 
 | --- | --- | --- |
 | `check.sh` | Runs the same checks as the CI `check` job, in order, and stops at the first failure. Run: `scripts/check.sh` | Rust toolchain from `rust-toolchain.toml`, Python 3 |
 | `ra-check.sh` | rust-analyzer's on-save check (set in `.vscode/settings.json`): Clippy on host crates and on the kernel for `x86_64-unknown-none`, as JSON diagnostics. Avoids false kernel errors from a plain `--workspace` check | Rust toolchain from `rust-toolchain.toml` |
+| `bench-inference.py` | Benchmarks an inference engine's command-line tool on the host (M3.1): load time, prompt and generation tokens per second, peak memory, and the generated text for comparison between engines, for a fixed prompt set, seed, and thread count. Writes JSON to `target/bench/`. Installs and downloads nothing. Run: `python3 scripts/bench-inference.py --help`; tests: `python3 -m unittest scripts/test_bench_inference.py` (also in `check.sh` and CI). See [testing.md](../docs/development/testing.md#inference-benchmarks-host) | Python 3.9+ (standard library only), Linux (`/proc`, `wait4`); the engine and model files |
 | `check-links.py` | Checks relative links and `#anchors` in all Markdown files; exits 1 if any are broken. Read-only; external URLs are not checked. Run: `python3 scripts/check-links.py` | Python 3.9+ (standard library only) |
 
 Everything else is a plain Cargo command (see [docs/development/workflow.md](../docs/development/workflow.md)).
