@@ -17,6 +17,7 @@ M2.6 asks for several kernel tasks running interleaved, a preemptive scheduler, 
 - `sched::spawn(closure)` creates a task with its own stack and queues it behind the ready tasks; IDs count up from 1. The task runs the closure with interrupts enabled and exits when it returns.
 - `sched::yield_now()` lets the next ready task run and returns when this task's turn comes again (at once if nothing else is ready). `sched::exit()` ends the running task.
 - `sched::block_current()` takes the running task off the CPU until `sched::wake(id)` makes it ready again (IPC, #41). The caller records its ID where the waker finds it, with interrupts disabled until it blocks, so a wake cannot be missed.
+- `sched::block_until(deadline)` (M3.0, #76) is `block_current` that also ends at a tick: the task is recorded in a second `SleepQueue` of deadlines. On the tick that reaches it, the handler moves the task back to the ready queue and marks it timed out; a `wake` first removes its deadline. `sched::deadline(micros)` turns a system-call timeout into that tick: rounded up to whole ticks plus one, `u64::MAX` (or an overflow) never, 0 already passed (the call does not block). The caller cleans up after a timeout (it leaves the endpoint queue itself, [user-environment.md](user-environment.md#timeouts)).
 - `sched::sleep(duration)` blocks the task for at least `duration`, rounded up to whole ticks plus one (the next tick may be moments away). Before preemption is enabled it busy-waits instead.
 - Every switch also loads the incoming thread's kernel stack top into TSS `rsp0` (#39), the stack for interrupts and exceptions that arrive while it runs in user mode. A user thread enters ring 3 with `context::enter_user` (via `process::start`); its preemption works the same way, inside the timer handler on its kernel stack.
 - `sched::spawn_in(space, closure)` runs the task in a process address space (#38). The switch loads that space's root into CR3, and back to the kernel root for kernel tasks. The task's context owns the space and destroys it when the task is reaped.
@@ -25,7 +26,7 @@ M2.6 asks for several kernel tasks running interleaved, a preemptive scheduler, 
 ### Preemption and idle
 
 - `sched::enable_preemption()` (after `time::init`) creates the idle task, installs the scheduler as the APIC tick handler, starts the 100 Hz tick, and enables interrupts.
-- **Time slice: one tick (10 ms).** On every tick the handler (interrupt context, interrupts disabled, after EOI) counts the tick, moves due sleepers to the ready queue, and switches to the next ready task if there is one. The switch happens inside the handler: the preempted task's interrupt frame stays on its own stack, and the task continues through the handler's `iretq` when it runs again.
+- **Time slice: one tick (10 ms).** On every tick the handler (interrupt context, interrupts disabled, after EOI) counts the tick, moves due sleepers and waits past their deadline to the ready queue, and switches to the next ready task if there is one. The switch happens inside the handler: the preempted task's interrupt frame stays on its own stack, and the task continues through the handler's `iretq` when it runs again.
 - **Idle task:** runs only when no task is ready, never waits in the queue, and halts (`hlt`) with interrupts enabled. The next tick that finds a ready task switches away from it.
 - `sched::set_trace(true)` prints each switch over serial ([debugging guide](../development/debugging.md#trace-task-switches)).
 - The scheduler state is a singleton behind an `IrqMutex` (one CPU; allowed by D-004 constraint 6).
@@ -56,7 +57,7 @@ An exited task cannot unmap the stack it is running on. Its last switch marks it
 
 ## 5. Testing
 
-- Host unit tests: round-robin order, blocking leaving the queue, a single task keeps running, the idle thread runs only when nothing is ready and is never queued, sleepers wake in deadline order.
+- Host unit tests: round-robin order, blocking leaving the queue, a single task keeps running, the idle thread runs only when nothing is ready and is never queued, sleepers wake in deadline order, removed sleepers never wake, and timeout deadlines round as above.
 - Test kernels: `tasks` (three tasks interleave as `abcabcabc`, own stacks in the stack window, interrupts enabled in tasks, IDs, callee-saved registers survive switches, exited tasks return their stack frames, closures run with captured values, yielding while holding a lock panics) `task_overflow` (a task's stack overflow is a double fault with RSP at the bottom of its stack), and `preemption` (sleepers wake in deadline order and never early; with a task that spins forever and two workers that never yield, task 0 still wakes from a 300 ms sleep within 2 s, every busy task keeps making progress, and workers see at most 10 ticks between turns, in practice 3–4). Each was checked to fail with a register lost in the switch, a mapped guard area, no reaping, unsorted sleepers, or no time slice (task 0 then never wakes and the run times out).
 
 ## 6. Alternatives
