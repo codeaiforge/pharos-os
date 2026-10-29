@@ -488,7 +488,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 11] = [
+const USER_PROGRAMS: [&str; 12] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -500,18 +500,41 @@ const USER_PROGRAMS: [&str; 11] = [
     "netprobe",
     "net",
     "netclient",
+    "vecprobe",
 ];
 
 /// A file for a filesystem image: its path and contents.
 type ImageFile = (String, Vec<u8>);
 
-/// Builds the user programs for the bare-metal target (release) and
-/// returns them as `bin/<name>` files.
+/// Target for user programs: `no_std` static programs with hardware floating
+/// point and SSE2 (D-016, user-environment.md). The kernel stays on
+/// [`KERNEL_TARGET`].
+const USER_TARGET: &str = "x86_64-unknown-linux-gnu";
+/// Where user programs are loaded (`kernel/src/process.rs`: `PROGRAM_RANGE`).
+const USER_PROGRAM_RANGE: std::ops::Range<u64> = 0x40_0000..0x40_0000 + 16 * 1024 * 1024;
+
+/// Compiler flags for user programs, given only to their build: the host
+/// builds for the same target triple and must not get them.
+fn user_rustflags(root: &Path) -> String {
+    let script = root.join("user").join("programs").join("user.ld");
+    format!(
+        "-C relocation-model=static -C panic=abort -C link-arg=-nostartfiles -C link-arg=-nostdlib \
+         -C link-arg=-static -C link-arg=-T{} --cfg pharos_user",
+        script.display()
+    )
+}
+
+/// Builds the user programs (release) in their own target directory, checks
+/// each is a static program the kernel can load, and returns them as
+/// `bin/<name>` files.
 fn build_user_programs(paths: &Paths) -> Result<Vec<ImageFile>> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let target_dir = paths.target.join("user");
     run(
         Command::new(cargo)
             .current_dir(&paths.root)
+            .env("CARGO_TARGET_DIR", &target_dir)
+            .env("RUSTFLAGS", user_rustflags(&paths.root))
             .args([
                 "build",
                 "--release",
@@ -519,18 +542,29 @@ fn build_user_programs(paths: &Paths) -> Result<Vec<ImageFile>> {
                 "--package",
                 "pharos-programs",
             ])
-            .args(["--target", KERNEL_TARGET]),
+            .args(["--target", USER_TARGET]),
         false,
     )?;
-    let dir = paths.target.join(KERNEL_TARGET).join("release");
+    let dir = target_dir.join(USER_TARGET).join("release");
     USER_PROGRAMS
         .iter()
         .map(|name| {
             let path = dir.join(name);
             let bytes = fs::read(&path).map_err(io_err("cannot read", &path))?;
+            check_user_program(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
             Ok((format!("bin/{name}"), bytes))
         })
         .collect()
+}
+
+/// The kernel's checks for a program (`pharos-elf`): a static ELF64
+/// executable with no interpreter, dynamic section, or TLS, loaded inside
+/// the program range.
+fn check_user_program(bytes: &[u8]) -> Result<()> {
+    let head = &bytes[..bytes.len().min(4096)];
+    pharos_elf::parse(head, bytes.len() as u64, USER_PROGRAM_RANGE)
+        .map(|_| ())
+        .map_err(|e| format!("not a program the kernel can load: {e}"))
 }
 
 /// Modules for the kernel: the filesystem image `root`, packed from
@@ -835,16 +869,14 @@ fn boot_headless(
     log: &Path,
     bios: bool,
     timeout: Duration,
-    pcap: Option<&Path>,
+    extra: &[OsString],
 ) -> Result<BootRun> {
     prepare_firmware(vars, bios)?;
     let _ = fs::remove_file(log);
     let mut serial = OsString::from("file:");
     serial.push(log);
     let mut args = qemu_args(iso, vars, &serial, bios, false);
-    if let Some(path) = pcap {
-        args.extend(pcap_args(path));
-    }
+    args.extend_from_slice(extra);
     let start = Instant::now();
     let mut child = qemu_command(args)
         .stdin(std::process::Stdio::null())
@@ -859,6 +891,15 @@ fn boot_headless(
         log: String::from_utf8_lossy(&bytes).into_owned(),
         elapsed: start.elapsed(),
     })
+}
+
+/// Extra QEMU arguments for test kernels that need a different machine:
+/// `vector_state_avx` runs on `-cpu max` (XSAVE and AVX, D-016).
+fn test_qemu_args(name: &str) -> Vec<OsString> {
+    match name {
+        "vector_state_avx" => vec!["-cpu".into(), "max".into()],
+        _ => Vec::new(),
+    }
 }
 
 /// QEMU arguments that write the network card's traffic to `path` (pcap).
@@ -980,7 +1021,7 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
         let name = firmware_name(bios);
         let log = logs.join(format!("boot-{name}.log"));
         let vars = logs.join(format!("boot-{name}-ovmf-vars.fd"));
-        let run = boot_headless(&iso, &vars, &log, bios, timeout, None)?;
+        let run = boot_headless(&iso, &vars, &log, bios, timeout, &[])?;
         let label = format!("boot check ({name})");
         match evaluate_boot(&run, BOOT_MARKER, timeout) {
             Ok(()) => println!("{label}: PASS in {:.1} s", run.elapsed.as_secs_f32()),
@@ -1039,8 +1080,10 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     let logs = paths.logs_dir();
     fs::create_dir_all(&logs).map_err(io_err("cannot create", &logs))?;
     let log = logs.join(format!("test-{name}.log"));
-    let pcap =
-        (env::var(PCAP_ENV).as_deref() == Ok("1")).then(|| logs.join(format!("test-{name}.pcap")));
+    let mut extra = test_qemu_args(&name);
+    if env::var(PCAP_ENV).as_deref() == Ok("1") {
+        extra.extend(pcap_args(&logs.join(format!("test-{name}.pcap"))));
+    }
     // Stopped when dropped, after the boot ends or times out.
     let _echo = echo::EchoServer::start(echo::ADDR)?;
     let run = boot_headless(
@@ -1049,7 +1092,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         &log,
         false,
         timeout,
-        pcap.as_deref(),
+        &extra,
     )?;
     let label = format!("test kernel {name} (uefi)");
     match evaluate_boot(&run, TESTS_MARKER, timeout) {
@@ -1203,6 +1246,13 @@ mod tests {
             })
         );
         assert!(parse(args(&["run", "--kernel"])).is_err());
+    }
+
+    #[test]
+    fn test_kernels_get_their_machine() {
+        assert_eq!(test_qemu_args("vector_state_avx"), ["-cpu", "max"]);
+        assert!(test_qemu_args("vector_state").is_empty());
+        assert!(test_qemu_args("network").is_empty());
     }
 
     #[test]

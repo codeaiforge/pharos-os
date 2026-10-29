@@ -8,7 +8,7 @@
 
 mod syscall;
 
-pub use syscall::Mapped;
+pub use syscall::{Mapped, vector};
 
 /// Call numbers (syscalls-ipc.md, storage.md).
 pub mod number {
@@ -383,7 +383,7 @@ macro_rules! entry {
     };
 }
 
-#[cfg(target_os = "none")]
+#[cfg(pharos_user)]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     exit(PANIC_EXIT)

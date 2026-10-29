@@ -80,7 +80,8 @@ programs! {
          mov al, 0x11
          out dx, al";
     X87, pharos_up_x87, pharos_up_x87_end,
-        "Loads 1.0 onto the x87 stack (the FPU is disabled for processes).",
+        "Loads 1.0 onto the x87 stack. Since M3.0 the FPU works for processes \
+         (D-016), so this runs and the `ud2` after it faults.",
         "fld1";
     Int3, pharos_up_int3, pharos_up_int3_end,
         "Raises a breakpoint with `int3` (IDT gates are kernel-only).",

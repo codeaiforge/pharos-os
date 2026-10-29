@@ -22,7 +22,7 @@ This document fixes the interfaces for all four, and the virtio-blk subset the f
 | Component | Where | `unsafe` |
 | --- | --- | --- |
 | System-call library | New crate `user/pharos-user`: `no_std`, safe wrappers | only its `syscall` module (the `syscall` instruction) |
-| User programs | `user/programs/` (binaries for `x86_64-unknown-none`, linked at `USER_BASE`) | none |
+| User programs | `user/programs/` (`no_std` static programs for `x86_64-unknown-linux-gnu` since M3.0, linked at `USER_BASE`; [user-environment.md](user-environment.md)) | none |
 | ELF parser | New crate `crates/pharos-elf`: `no_std`, no dependencies, `unsafe` forbidden, fuzzed | none |
 | Program loading | `kernel/src/process.rs` (`spawn_elf`) | none |
 | PCI configuration access | `kernel/src/arch/x86_64/pci.rs` (ports `0xCF8`/`0xCFC`) | hardware layer |
@@ -36,7 +36,7 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
 
 ### User programs
 
-- **Build:** `cargo xtask` builds `user/programs/*` for `x86_64-unknown-none` with `panic = "abort"` and a linker script that places the image at `USER_BASE` (`0x400000`). The executables go into the boot filesystem image as `bin/<name>`. The user crates are workspace members, checked for the bare-metal target like the kernel, and excluded from host builds.
+- **Build:** `cargo xtask` builds `user/programs/*` for `x86_64-unknown-none` with `panic = "abort"` and a linker script that places the image at `USER_BASE` (`0x400000`). The executables go into the boot filesystem image as `bin/<name>`. The user crates are workspace members, checked for the bare-metal target like the kernel, and excluded from host builds. Since M3.0 they are built for `x86_64-unknown-linux-gnu` instead, with hardware floating point (user-environment.md).
 - **Start-up contract:** unchanged from M2.7 (syscalls-ipc.md):
   - entry with `rdi` = the argument the starter chose;
   - the stack top below `0x7fff_ff80_0000`, 64 KiB;

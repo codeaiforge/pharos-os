@@ -2,6 +2,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod fp;
 pub mod net;
 pub mod virtio;
 pub mod virtio_net;

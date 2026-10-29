@@ -202,14 +202,14 @@ Verified on 2026-10-27 (GDB 15.1, QEMU 8.2.2, UEFI). The breakpoint in the handl
 
 ### Debug a Rust user program or driver
 
-Rust user programs (`user/programs`, M2.9) are ELF files with a symbol table. xtask builds them in release mode into `target/x86_64-unknown-none/release/<name>` and copies them into the boot image as `bin/<name>`. Load that file's symbols next to the kernel's, and set *hardware* breakpoints on its functions: the code is mapped read-only in the process, and a hardware breakpoint writes nothing. The process's address space is loaded whenever it runs, so its addresses resolve while it is on the CPU.
+Rust user programs (`user/programs`, M2.9) are ELF files with a symbol table. xtask builds them in release mode into `target/user/x86_64-unknown-linux-gnu/release/<name>` (M3.0; earlier `target/x86_64-unknown-none/release/<name>`) and copies them into the boot image as `bin/<name>`. Load that file's symbols next to the kernel's, and set *hardware* breakpoints on its functions: the code is mapped read-only in the process, and a hardware breakpoint writes nothing. The process's address space is loaded whenever it runs, so its addresses resolve while it is on the CPU.
 
 ```text
 $ cargo test -p pharos-kernel --target x86_64-unknown-none --test virtio_blk --no-run
 $ cargo xtask run --kernel target/x86_64-unknown-none/debug/deps/virtio_blk-<hash> --gdb
 $ gdb target/x86_64-unknown-none/debug/deps/virtio_blk-<hash>   # second terminal
 (gdb) target remote localhost:1234
-(gdb) add-symbol-file target/x86_64-unknown-none/release/virtio-blk
+(gdb) add-symbol-file target/user/x86_64-unknown-linux-gnu/release/virtio-blk
 (gdb) hbreak virtio_blk::main
 Hardware assisted breakpoint 1 at 0x401280
 (gdb) continue
@@ -224,7 +224,7 @@ $1 = 0x33
 (gdb) continue
 ```
 
-Verified on 2026-10-28 (GDB 15.1, QEMU 8.2.2, UEFI): the breakpoint stopped in the driver's first run, and after `continue` the test kernel passed (QEMU status 33). Addresses differ between builds; `nm -C target/x86_64-unknown-none/release/<name>` lists the functions. Release builds inline small functions, so a breakpoint on one may never be hit; break on its caller.
+Verified on 2026-10-28 (GDB 15.1, QEMU 8.2.2, UEFI): the breakpoint stopped in the driver's first run, and after `continue` the test kernel passed (QEMU status 33). Addresses differ between builds; `nm -C target/x86_64-unknown-none/release/<name>` lists the functions. Release builds inline small functions, so a breakpoint on one may never be hit; break on its caller. Since M3.0 the programs come from `target/user/x86_64-unknown-linux-gnu/release/`; this walkthrough has not been repeated with that build.
 
 Other ways to see what a driver does:
 

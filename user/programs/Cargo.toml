@@ -1,6 +1,6 @@
 [package]
 name = "pharos-programs"
-description = "Pharos OS user programs, built for x86_64-unknown-none and stored in the boot filesystem (D-008, drivers.md)."
+description = "Pharos OS user programs, built by cargo xtask for x86_64-unknown-linux-gnu as no_std static programs and stored in the boot filesystem (D-008, D-016, user-environment.md)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Math functions for floating point in user space (D-016; MIT, no runtime
+# dependencies, maintained in rust-lang/compiler-builtins).
+libm = "0.2.16"
 pharos-fs = { path = "../../crates/pharos-fs" }
 pharos-user = { path = "../pharos-user" }
 
@@ -15,3 +18,5 @@ pharos-user = { path = "../pharos-user" }
 # its `no_mangle` attribute; programs themselves use none.
 [lints.rust]
 unsafe_code = "deny"
+# Set by `cargo xtask` when it builds user programs (user-environment.md).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(pharos_user)"] }

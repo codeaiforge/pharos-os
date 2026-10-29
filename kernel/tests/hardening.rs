@@ -80,14 +80,15 @@ fn run(t: &mut TestRun) {
         first > 0 && count() > first && process::kills().is_empty(),
     );
 
-    // The x87 FPU (F3: its state is not saved per process), port I/O, and
-    // software interrupts from user mode.
+    // The x87 FPU (allowed since M3.0, its state saved per thread, D-016;
+    // the program's `ud2` faults after it), port I/O, and software
+    // interrupts from user mode.
     let attempts = [
         (
             TestProgram::X87,
-            7,
+            6,
             0,
-            "x87 instruction: device not available (#NM)",
+            "x87 instruction runs; the ud2 after it: #UD",
         ),
         (TestProgram::PortOut, 13, 0, "out to QEMU's exit port: #GP"),
         (

@@ -24,14 +24,14 @@
 
 - Developer host ↔ the repository's code and scripts.
 - Repository ↔ CI runners (if the repository is hosted).
-- Workspace ↔ third-party crates (none today).
+- Workspace ↔ third-party crates: one, `libm` (user programs only, D-016).
 - QEMU guest ↔ host network: slirp user-mode networking in tests only; the host side is the `cargo xtask` echo server on localhost.
 
 ### Threats and mitigations
 
 | Threat | Mitigation |
 | --- | --- |
-| A dependency is malicious or compromised | No third-party dependencies; `Cargo.lock` committed; CI uses `--locked`; dependency policy in AGENTS.md. |
+| A dependency is malicious or compromised | One third-party crate, `libm` 0.2.16 (MIT, no dependencies of its own, maintained by the Rust project), used only by user programs, never the kernel; reviewed under AGENTS.md section 6 (#74); `Cargo.lock` committed with its checksum; CI uses `--locked`; dependency policy in AGENTS.md. |
 | CI workflow is abused to write to the repository or leak tokens | `permissions: contents: read`; `persist-credentials: false`; `actions/checkout` pinned to a verified commit SHA; no secrets used; no publish or deploy steps. The QEMU job installs Ubuntu packages on the disposable runner only. |
 | Tooling damages the host | The CLI is read-only: no external commands, no privileges, no file writes. `xtask` runs build tools and QEMU without privileges and writes only under `target/`. Scripts policy forbids `sudo` and device writes. |
 | Vulnerabilities disclosed publicly before a fix | GitHub private vulnerability reporting is enabled; [SECURITY.md](../../SECURITY.md) directs reporters to it. |
@@ -57,7 +57,7 @@ User processes run in ring 3 since M2.7. Design: [syscalls-ipc.md](../architectu
 | A process exhausts kernel memory | IPC uses one 256-byte message and one wait per thread; processes start processes only within the limits in the processes and services section below; kernel logs keep their newest 64 entries (review F2, `hardening`). Limit: a server that never receives blocks its clients forever (no timeouts yet) |
 | A process crashes the kernel with a fault or a privileged instruction | Exceptions from user mode kill only the process. `cli`, `hlt`, `mov cr3`, port I/O, and `int n` (all gates are DPL 0) are killed with general-protection faults (`user_mode`, `hardening`) |
 | User flags leak into the kernel (DF, AC) | Interrupt entry clears DF and AC (review F1); `syscall` clears them through `SFMASK`. Debug builds assert both are clear in every dispatcher (`hardening`) |
-| FPU state leaks between processes | `CR0.EM` makes x87/MMX instructions fault, and SSE/AVX are off, so no process can use registers the kernel does not save (review F3, `hardening`) |
+| FPU state leaks between processes | Since M3.0 (D-016) processes use x87, SSE, and AVX, and every thread switch saves and restores them eagerly (`FXSAVE`, or `XSAVE` with AVX), with a clean state for new threads (`vector_state`, `vector_state_avx`). Until then `CR0.EM` made x87 fault (review F3) |
 | A stale TLB entry keeps a freed kernel page reachable | Kernel-space unmaps always flush, even while a process space is active (review F4, `address_spaces`) |
 | Speculative execution leaks kernel memory (Meltdown class) | **Limit:** not mitigated (no KPTI); revisit before real-hardware use |
 | Timing side channels | **Limit:** `rdtsc` is available in user mode |
@@ -122,7 +122,7 @@ Design: [user-environment.md](../architecture/user-environment.md) and [storage.
 
 | Threat | Planned mitigation |
 | --- | --- |
-| A process reads another's floating-point or vector registers | Eager save and restore on every switch, a clean image for new threads, no lazy switching (LazyFP); tested across preemption and after a kill, with `FXSAVE` and with `XSAVE` and AVX |
+| A process reads another's floating-point or vector registers | **Implemented (#74):** eager save and restore on every switch, a clean image for new threads, no lazy switching (LazyFP); `vector_state` and `vector_state_avx` check values survive preemption, a new process switched in from one holding a marker never sees it, and `MXCSR` is clean; mutation-checked |
 | A malformed save area crashes the kernel (`XRSTOR` fault) | Only the kernel writes save areas; user code cannot reach them |
 | A process exhausts memory | A page limit per process, set at `spawn` and at most the creator's, checked before any frame is allocated; at most 1,024 mappings; no demand paging. **Limit:** limits are not carved from the creator's until M3.5 |
 | Shared memory widens access | Rights only narrow; read-only mappings have no write bit; mappings are never executable; frames live until the last mapping and capability. **Limit:** revocation does not unmap existing mappings |

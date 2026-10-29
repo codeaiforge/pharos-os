@@ -18,8 +18,9 @@ run cargo test -p pharos-programs --lib --locked
 # Kernel: host-testable library logic, then the bare-metal target.
 run cargo test -p pharos-kernel --lib --locked
 run cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --test '*' --locked -- -D warnings
-# User programs: bare-metal binaries, like the kernel (drivers.md).
-run cargo clippy -p pharos-programs --target x86_64-unknown-none --locked -- -D warnings
+# User programs: no_std static programs for x86_64-unknown-linux-gnu, as
+# cargo xtask builds them (user-environment.md).
+run env CARGO_TARGET_DIR=target/user RUSTFLAGS="--cfg pharos_user -C panic=abort" cargo clippy -p pharos-programs --target x86_64-unknown-linux-gnu --locked -- -D warnings
 run env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude pharos-kernel --exclude pharos-programs --no-deps --locked
 run env RUSTDOCFLAGS="-D warnings" cargo doc -p pharos-kernel --target x86_64-unknown-none --no-deps --locked
 run python3 scripts/check-links.py

@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-29 (issue #73). It follows [D-016](../project/decision-log.md#d-016-user-execution-environment-simd-state-user-memory-and-timeouts) and item 7 of [D-017](../project/decision-log.md#d-017-writable-persistent-storage-and-audit-integrity), for [M3.0](../project/implementation-roadmap.md#m30--platform-prerequisites-for-hosting-agents).
-- **Implementation:** **planned**: SSE2 and vector state (#74), user memory (#75), timeouts (#76), shared memory (the extra M3.0 issue), and the large-file test (#78). Nothing here is implemented yet.
+- **Implementation:** the user-program build and vector state are **implemented** (#74: `kernel/src/arch/x86_64/fpu.rs`, the context switch, `pharos-user`'s memory functions and probes, `libm`; tested by `vector_state` and `vector_state_avx`). **Planned:** user memory (#75), timeouts (#76), shared memory (#80), and the large-file test (#78).
 
 ## 2. Context
 
@@ -14,24 +14,24 @@ M3.1 chose an inference engine that needs, from Pharos: floating point and SIMD 
 ### Building user programs
 
 - **Target:** `x86_64-unknown-linux-gnu`, as `#![no_std]`, `#![no_main]` static programs. This target uses hardware floating point and SSE2; no C library and no Linux code is involved, because nothing from `std` is used and nothing from a C library is linked. Any accidental libc reference fails at link time.
-- **Flags, set by `cargo xtask` only when it builds `pharos-programs`:** `-C relocation-model=static`, `-C panic=abort` (already the profile setting), link arguments `-nostartfiles -nostdlib -static -T user/programs/user.ld`, and `--cfg pharos_user` (declared to `check-cfg`). They are **not** put in `.cargo/config.toml`: the host also builds for `x86_64-unknown-linux-gnu`, and host tools and tests must not get them. User programs build into their own target directory (`target/user/`), so host artifacts are never rebuilt with these flags.
+- **Flags, set by `cargo xtask` only when it builds `pharos-programs`:** `-C relocation-model=static`, `-C panic=abort` (this target unwinds by default; the bare-metal one aborted), link arguments `-nostartfiles -nostdlib -static -T user/programs/user.ld`, and `--cfg pharos_user` (declared to `check-cfg`). They are **not** put in `.cargo/config.toml`: the host also builds for `x86_64-unknown-linux-gnu`, and host tools and tests must not get them. User programs build into their own target directory (`target/user/`), so host artifacts are never rebuilt with these flags.
 - **`cfg(target_os = "none")` becomes `cfg(pharos_user)`** in `pharos-user` and `pharos-programs` for the entry stub, the panic handler, and the global allocator. Host unit tests of both crates keep working without the flag.
 - **What `pharos-user` supplies** (in its `syscall` module, the one user-space module allowed `unsafe`, D-008):
   - `memcpy` and `memmove` with `rep movsb` (`memmove` copies backwards with the direction flag when the regions overlap, and clears it again), `memset` with `rep stosb`, and `memcmp` and `bcmp` as byte loops. Inline assembly keeps the compiler from turning these into calls to themselves.
   - An empty `rust_eh_personality`: the prebuilt `core` for this target refers to it, although `panic = "abort"` never unwinds.
-- **The build checks itself:** `cargo xtask` rejects a user program that has a dynamic section, an interpreter, or undefined symbols, and the vector-state test kernel checks that SSE instructions run.
+- **The build checks itself:** `cargo xtask` runs the kernel's ELF checks (`pharos-elf`) on every built program, so one with a dynamic section, an interpreter, or TLS is rejected before it reaches an image; undefined symbols already fail the static link. The vector-state test kernels check that SSE (and AVX) instructions run.
 - **Lints:** `scripts/check.sh` and CI run Clippy on `pharos-programs` for `x86_64-unknown-linux-gnu` with `--cfg pharos_user`, in place of `x86_64-unknown-none`.
 - **The kernel does not change target:** it stays on `x86_64-unknown-none` (soft-float), so it never touches vector registers.
 
 ### Vector state
 
 - **Enabling:** at boot the kernel clears `CR0.EM`, sets `CR0.MP` and `CR0.NE`, and sets `CR4.OSFXSR` and `CR4.OSXMMEXCPT`. If CPUID reports `XSAVE` and AVX, it also sets `CR4.OSXSAVE` and writes `XCR0` = x87 | SSE | AVX (bits 0–2) with `XSETBV`; AVX-512 and other state components are never enabled. Otherwise it uses `FXSAVE`/`FXRSTOR` (x87 and SSE). The boot log names the mode.
-- **Save area:** one per thread, 64-byte aligned, allocated from the kernel heap when the thread is created: 512 bytes for `FXSAVE`, or the size CPUID leaf 0xD reports for the enabled components (refused above 4 KiB; 832 bytes expected with AVX). Thread creation fails with `NO_MEMORY` if the area cannot be allocated.
+- **Save area:** one per thread, 1 KiB and 64-byte aligned, inside the thread's `Context` (so it is allocated with it, not separately). `FXSAVE` uses 512 bytes; `XSAVE` uses the size CPUID leaf 0xD reports for x87 | SSE | AVX (832 bytes expected). If that size exceeded 1 KiB, the kernel would turn AVX back off and use `FXSAVE`.
 - **Clean state for a new thread:** the area is initialized to the state after `FNINIT` (x87 control word 0x037F), `MXCSR` 0x1F80 (all SIMD exceptions masked, round to nearest), and zero registers, and for `XSAVE` an `XSTATE_BV` covering the enabled components so every register is loaded from it. A new process never sees another's registers.
 - **Switching (eager, D-016):** the context switch in `arch::x86_64::context` saves the outgoing thread's state into its area and restores the incoming thread's, on every switch between threads. Kernel threads have areas too (holding the clean state), so every switch is the same. System calls and interrupts save nothing: the kernel never uses vector registers, and a thread's registers stay in the CPU until the next switch.
 - **Exceptions:** SIMD floating-point exceptions (vector 19, `#XM`) and x87 errors (vector 16, `#MF`) from user mode kill the process, like other exceptions. They can only occur if a program unmasks them in `MXCSR` or the x87 control word.
 - **`unsafe`:** the `FXSAVE`, `FXRSTOR`, `XSAVE`, `XRSTOR`, `XSETBV`, and control-register writes are `unsafe` and live in the hardware layer (`arch::x86_64`), each with a `// SAFETY:` comment. `XRSTOR` faults on a malformed area; the kernel builds every area itself and user code never writes one.
-- **Cost:** the context switch is measured before and after with the existing tasks test, and recorded in scheduling.md.
+- **Cost:** measured under KVM with the IPC round trip (two switches each), recorded in [scheduling.md](scheduling.md): no measurable difference. The measurement also showed the round trip is over D-004's budget, independently of this change ([syscalls-ipc.md](syscalls-ipc.md#7-open-questions)).
 
 ### User memory
 

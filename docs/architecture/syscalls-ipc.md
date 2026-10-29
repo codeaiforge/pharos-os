@@ -234,5 +234,7 @@ Planned test kernels (QEMU under TCG, run in CI):
   - fewer lock acquisitions on the IPC path.
 
   Global kernel pages (#41) already cut it from about 2.9 µs to 2.65 µs in the 1,000-round-trip test (which includes starting the process).
+
+  **Over budget since M2.10** (found in #74, 2026-10-29): the same measurement now gives 2.10–2.19 µs without saving vector state, and 2.12–2.34 µs with it (the vector-state switch adds no measurable time). The increase came between M2.7 and M3.0, most likely from M2.10's IPC changes (badges, notifications, `call`); it was not noticed because the measurement is a manual local run. Recorded for a follow-up issue with the candidates above.
 - SMP: per-CPU scratch slots (`swapgs`), and locking for mappings during copies.
 - KPTI or other mitigations for speculative-execution attacks on real hardware.

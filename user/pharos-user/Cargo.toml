@@ -14,6 +14,8 @@ publish.workspace = true
 [lints.rust]
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"
+# Set by `cargo xtask` when it builds user programs (user-environment.md).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(pharos_user)"] }
 
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"

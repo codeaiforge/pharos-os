@@ -104,6 +104,19 @@ extern "C" fn kernel_main() -> ! {
         Ok(tables) => kprintln!("  paging:     kernel page tables active ({tables} table frames)"),
         Err(error) => fail(format_args!("paging setup failed: {error}")),
     }
+    // The CPU setup that switched page tables also enabled floating point
+    // for processes (D-016).
+    {
+        use pharos_kernel::arch::x86_64::fpu::{Mode, mode};
+        kprintln!(
+            "  vectors:    {}",
+            match mode() {
+                Mode::Fxsave => "x87 and SSE, saved with FXSAVE",
+                Mode::XsaveAvx => "x87, SSE, and AVX, saved with XSAVE",
+                Mode::Off => "not enabled",
+            }
+        );
+    }
 
     if let Err(error) = apic::init(hhdm.offset) {
         fail(format_args!("local APIC setup failed: {error}"));

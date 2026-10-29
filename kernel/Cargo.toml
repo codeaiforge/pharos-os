@@ -162,3 +162,11 @@ harness = false
 [[test]]
 name = "network"
 harness = false
+
+[[test]]
+name = "vector_state"
+harness = false
+
+[[test]]
+name = "vector_state_avx"
+harness = false

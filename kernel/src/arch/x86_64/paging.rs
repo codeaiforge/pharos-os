@@ -844,26 +844,19 @@ fn read_cr4() -> u64 {
     cr4
 }
 
-const CR0_EM: u64 = 1 << 2;
-
 /// CPU settings that protect the kernel and processes:
 ///
-/// - `CR0.EM`: x87 and MMX instructions fault (security review F3, #42).
-///   The kernel is soft-float and never saves FPU state on a task switch,
-///   so a usable FPU would leak and corrupt registers between processes.
-///   A process that uses one is killed (`#NM`).
+/// - x87, SSE, and AVX for processes, with their state saved and restored
+///   on every thread switch ([`super::fpu`], D-016). Until M3.0 `CR0.EM`
+///   made x87 instructions fault instead, because no state was saved
+///   (security review F3, #42).
 /// - SMEP and SMAP when CPUID reports them (syscalls-ipc.md): the kernel
 ///   then faults if it executes or touches a user page by accident. Defence
 ///   in depth: the kernel never accesses user pages directly, and QEMU's
 ///   default CPU (used by CI) has neither feature.
 #[allow(unused_unsafe)] // `__cpuid_count` is safe in recent Rust, `unsafe` in 1.85
 fn enable_cpu_protections() {
-    let cr0: u64;
-    // SAFETY: reading CR0 has no side effects.
-    unsafe { asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags)) };
-    // SAFETY: setting EM only makes x87/MMX instructions fault; the kernel
-    // (soft-float target) never executes them.
-    unsafe { asm!("mov cr0, {}", in(reg) cr0 | CR0_EM, options(nostack, preserves_flags)) };
+    super::fpu::init();
     // SAFETY: CPUID exists on every x86-64 CPU and has no side effects.
     let leaf7 = unsafe { core::arch::x86_64::__cpuid_count(7, 0) };
     let mut cr4 = read_cr4();

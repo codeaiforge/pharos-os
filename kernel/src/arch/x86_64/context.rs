@@ -5,7 +5,9 @@
 //! switch routine pushes the callee-saved registers (System V AMD64: `rbx`,
 //! `rbp`, `r12`–`r15`), stores the stack pointer, loads the next one, pops,
 //! and returns, so on both sides it looks like an ordinary function call.
-//! The kernel is soft-float: there is no FPU or SSE state to save.
+//! The kernel is soft-float, but processes use x87, SSE, and AVX: each
+//! context owns a save area, saved and restored on every switch
+//! ([`super::fpu`], D-016).
 //!
 //! [`switch`] is safe because it checks at run time what would otherwise be
 //! memory errors: the source is the running context, the target is neither
@@ -18,6 +20,7 @@ use core::arch::global_asm;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use super::fpu;
 use super::paging::{self, AddressSpace, Flags, MapError, PageSize};
 use crate::mm::frame::{FRAME_SIZE, Frame};
 use crate::mm::raw::{IrqMutex, IrqMutexGuard};
@@ -136,6 +139,8 @@ pub struct Context {
     space: Option<IrqMutex<AddressSpace>>,
     /// Root table of `space`; 0 for the kernel address space.
     root: u64,
+    /// x87/SSE/AVX registers while not running (D-016).
+    vector: IrqMutex<fpu::Area>,
 }
 
 /// Set once the boot context has been handed out.
@@ -251,6 +256,7 @@ impl Context {
             stack: None,
             space: None,
             root: 0,
+            vector: IrqMutex::new(fpu::Area::clean()),
         }))
     }
 
@@ -300,6 +306,7 @@ impl Context {
             stack: Some(stack),
             root: space.as_ref().map_or(0, AddressSpace::root),
             space: space.map(IrqMutex::new),
+            vector: IrqMutex::new(fpu::Area::clean()),
         })
     }
 
@@ -372,6 +379,11 @@ fn do_switch(from: Arc<Context>, to: Arc<Context>) {
     if let Some((_, top)) = to.stack_bounds() {
         super::gdt::set_kernel_stack(top);
     }
+    // Eager vector-state switch (D-016): the outgoing thread's registers go
+    // to its area, the incoming thread's come back from its own. The kernel
+    // touches none of them in between.
+    fpu::save(&mut from.vector.lock());
+    fpu::restore(&to.vector.lock());
     // Other references keep both contexts alive (checked), and nothing else
     // runs until the switch completes (interrupts are disabled, one CPU).
     drop(from);

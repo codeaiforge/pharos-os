@@ -62,9 +62,10 @@ jobs:
         # Library, kernel binary, and test kernels (not the library's host unit tests).
         run: cargo clippy -p pharos-kernel --target x86_64-unknown-none --lib --bins --test '*' --locked -- -D warnings
 
-      # User programs are bare-metal binaries too (drivers.md).
-      - name: Clippy, user programs for x86_64-unknown-none (warnings are errors)
-        run: cargo clippy -p pharos-programs --target x86_64-unknown-none --locked -- -D warnings
+      # User programs: no_std static programs for x86_64-unknown-linux-gnu with
+      # hardware floats, built by xtask with --cfg pharos_user (user-environment.md).
+      - name: Clippy, user programs (warnings are errors)
+        run: env CARGO_TARGET_DIR=target/user RUSTFLAGS="--cfg pharos_user -C panic=abort" cargo clippy -p pharos-programs --target x86_64-unknown-linux-gnu --locked -- -D warnings
 
       - name: Rustdoc (warnings are errors)
         run: |
