@@ -1,6 +1,6 @@
 # Inference-runtime evaluation (M3.1)
 
-- **Status:** in progress (issue #69). Engines and models are installed on the reference host; llama.cpp and the native spike are measured, and the spike matches `run.c` exactly on `stories15M`. candle is not yet measured. Results come only from real runs.
+- **Status:** in progress (issue #69). Engines and models are installed on the reference host. llama.cpp and the native spike are measured; the spike matches `run.c` exactly on `stories15M` and matches llama.cpp on Qwen2.5-0.5B q8_0 as closely as llama.cpp's own settings match each other. candle is not yet measured. Results come only from real runs.
 - **Feeds:** D-010 (runtime, formats, licensing), D-011 (CPU/GPU, memory), and the M3.0 targets (#70).
 - **All measurements here are host results** (D-020): they show what an engine does on Linux, not on Pharos.
 - **Inputs:** [phase3-requirements.md](phase3-requirements.md) (scenario S1, model tiers T/S/H, 5 tokens/s target), the harness in [testing.md](../development/testing.md#inference-benchmarks-host).
@@ -75,7 +75,10 @@ About 3.4 GB in total. The GPU (GTX 1060) is measured only if the Vulkan build i
 - Tests: grouped-query attention equals the same model with key/value heads copied out per head (exact), every position up to the context length, deterministic output, the tokenizer's merges (the highest-scoring pair wins), byte fallback, and decoding. Five mutations were each caught.
 - `pharos-infer <model> <tokenizer> <prompt> <n>` prints the text as `run.c` does and the harness's JSON timing line; a prompt longer than the model's context is refused with a message.
 
-**Not yet:** GGUF, quantized weights (Q8_0, Q4_K), Qwen2 (attention biases, its RoPE layout), the GPT-2-style byte-level tokenizer, SIMD kernels. Those are needed for tier S and are the next step after tier T matches `run.c`.
+- **Qwen2 from GGUF with Q8_0 weights** (tier S): a checked, zero-copy GGUF reader (weights borrow the file), half-precision conversion (all 65,536 values round-trip), Q8_0 matrix-vector products with the input quantized as llama.cpp's AVX2 path does (scale `127/max`, round half to even), and llama.cpp's Qwen2 graph: attention biases, NeoX rotary embeddings, grouped-query attention, SwiGLU. Byte-level (GPT-2) decoding of token strings; control tokens hidden; generation stops at the end-of-text tokens. 13 more tests (24 in all), including hand-computed rotary values and 20,000 fuzzed GGUF files; four more mutations caught.
+- `pharos-infer <model.gguf> <token IDs> <n>` runs it.
+
+**Not yet:** a tokenizer for GGUF models (prompts come as token IDs from llama.cpp's `llama-tokenize`; Qwen2's byte-level BPE with its pre-tokenizer is M3.2 work), other quantization types (Q4_K), batched prompt processing, and hand-written SIMD kernels.
 
 ## Output comparison
 
@@ -89,9 +92,20 @@ About 3.4 GB in total. The GPU (GTX 1060) is measured only if the Vulkan build i
 
 Byte-for-byte identical text, both engines stopping at the same end-of-story token. In those runs `run.c` (`cc -O3`, no `-march`) reported 84 tokens per second and `pharos-infer` (release build, no target CPU flags) about 78, both single-threaded; the harness measurements below are the comparable numbers.
 
+**`pharos-infer` against llama.cpp `llama-completion` on Qwen2.5-0.5B-Instruct q8_0, greedy, 64 tokens, 1 thread**, same prompt token IDs (from `llama-tokenize`), run on 2026-10-29. llama.cpp was run twice: with its defaults (f16 key/value cache, flash attention "auto") and with `-ctk f32 -ctv f32 -fa off` (f32 attention, closer to ours):
+
+| Prompt | Against llama.cpp defaults | Against llama.cpp with f32 attention |
+| --- | --- | --- |
+| "Write one sentence about lighthouses." | Identical | Same first 17 bytes |
+| "The capital of France is" | Identical | Same first 64 bytes |
+| "def fibonacci(n):" | Identical | Identical |
+| "Explain what an operating system kernel does." | Same first 56 bytes | Identical |
+
+On every prompt the output is identical to one of llama.cpp's two configurations, and wherever it differs from one, llama.cpp's two configurations also differ from each other. These are near-ties between the two most likely tokens, which rounding differences (f16 versus f32 attention, summation order) flip; after a flip the texts continue differently. Bit-exact agreement with llama.cpp is not a goal: its AVX2 kernels use their own summation order and vectorized `exp`.
+
 ## Findings so far
 
-1. **The bare-metal target has no SSE.** `rustc --print cfg --target x86_64-unknown-none` lists only `fxsr`: SSE is off, so f32 arithmetic is compiled to software routines. Pharos user programs are built for that target today, so the engine would run on software floating point. **M3.0 needs a user-program target with SSE2 enabled** (a custom target specification or target features, decided in D-016), alongside the kernel saving vector state. The kernel itself stays on the soft-float target.
+1. **The bare-metal target has no SSE.** `rustc --print cfg --target x86_64-unknown-none` lists only `fxsr`: SSE is off, so f32 arithmetic is compiled to software routines, and the integer SIMD the compiler uses for the Q8_0 dot products on the host (SSE2) is not available either. Pharos user programs are built for that target today, so the engine would run on software floating point. **M3.0 needs a user-program target with SSE2 enabled** (a custom target specification or target features, decided in D-016), alongside the kernel saving vector state. The kernel itself stays on the soft-float target.
 2. **Math functions are a port decision.** `core` has no `sqrt`, `exp`, `sin`, `cos`, or `powf`. On Pharos they come either from a reviewed dependency (for example `libm`, MIT/Apache-2.0) or from our own implementations; output comparison with `run.c` will show how much accuracy matters. `sqrt` can be exact with SSE2 (`sqrtss`).
 3. **Long prompts need a long context.** `stories15M` has a 256-token context. The S1 summary prompt (about 230 words) probably exceeds it once tokenized (to be confirmed with the real tokenizer), so tier T runs only the short prompt; S1 needs tier S.
 
@@ -102,6 +116,8 @@ Run on 2026-10-29 on the reference host (i9-10900K, AVX2/FMA, 125 GB) with `scri
 | Engine | Model | Threads | Prompt | Gen tok/s | Prompt tok/s | Load | Peak RSS | Same output, 3 runs |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | pharos-infer | stories15M f32 | 1 | short | 77.6 | 78.6 | 50 ms | 118 MiB | yes |
+| pharos-infer | Qwen2.5-0.5B q8_0 | 1 | short | 14.6 | 14.5 | 241 ms | 657 MiB | yes |
+| pharos-infer | Qwen2.5-0.5B q8_0 | 1 | summary | 13.7 | 14.4 | 240 ms | 662 MiB | yes |
 | llama.cpp | Qwen2.5-0.5B q8_0 | 1 | short | 23.0 | 71.3 | 342 ms | 1,091 MiB | yes |
 | llama.cpp | Qwen2.5-0.5B q8_0 | 1 | summary | 21.9 | 95.0 | 356 ms | 1,105 MiB | yes |
 | llama.cpp | Qwen2.5-0.5B q8_0 | 10 | summary | 45.4 | 744 | 304 ms | 1,105 MiB | yes |
@@ -119,7 +135,9 @@ Short-prompt rows for llama.cpp at 10 threads are in the JSON results; they are 
 - **The S1 target is reachable on one CPU.** Pharos runs on one CPU; single-threaded llama.cpp generates 22–23 tokens/s with Qwen2.5-0.5B and 12 with Qwen2.5-1.5B, against the 5 tokens/s target, and reads the 233-token S1 prompt in 2.5 s (0.5B q8_0) to 5.6 s (1.5B q4_k_m), so the first token arrives within the 10 s target. This is on the host, with AVX2; Pharos under KVM should come close if the engine uses SIMD (finding 1).
 - **Output is deterministic** for both engines at fixed seed and thread count: every configuration produced identical text in its three runs, at 1 and at 10 threads.
 - **Memory:** peak RSS is 1.7 to 2.5 times the model file for llama.cpp (it maps the file and allocates its context and buffers at its default context length), and 2 times for `pharos-infer`, which copies the f32 weights into memory. The M3.0 targets of 2 GB guest memory and 1.5 GB for the service fit Qwen2.5-0.5B; Qwen2.5-1.5B would need about 3 GB.
-- **The native engine's speed per parameter.** `pharos-infer` is scalar f32 code: 78 tokens/s for a 15 M-parameter model, while llama.cpp runs a 494 M-parameter model at 22 tokens/s with 8-bit weights and AVX2. Scaling `pharos-infer` linearly by parameter count gives about 2–3 tokens/s for Qwen2.5-0.5B (an estimate, not a measurement), below the 5 tokens/s target. **To meet S1, the native engine needs quantized weights (Q8_0 at least) and SIMD kernels** (SSE2 baseline, AVX2 when present).
+- **The native engine on the same model.** With Q8_0 weights, `pharos-infer` generates 13.7–14.6 tokens/s on one thread, 60–65% of llama.cpp's speed and almost three times the 5 tokens/s target, with no hand-written SIMD (the compiler vectorizes the 8-bit dot products with SSE2, the host target's baseline). An earlier estimate in this report, 2–3 tokens/s scaled from the f32 `stories15M` run, was wrong: it ignored that 8-bit weights quarter the memory traffic.
+- **Prompt processing is the native engine's gap.** It reads the prompt one token at a time, about 14 tokens/s, against llama.cpp's 95 tokens/s with batched matrix products. The 233-token S1 prompt would take about 16 s, **over the 10 s first-token target**; batched prompt processing (one pass over each weight matrix for many tokens) is needed in M3.2.
+- **Memory:** the native engine's peak is about the model file (660 MiB for 676 MB), since it reads the file once and computes from it; llama.cpp's is 1.7 times.
 
 Runner (results in `target/bench/`, never committed):
 
@@ -128,6 +146,9 @@ L=~/pharos-eval/llama.cpp/llama-b11609; M=~/pharos-eval/models
 python3 scripts/bench-inference.py --engine native --model $M/stories15M.bin --label "stories15M f32 t1" \
     --threads 1 --runs 3 -n 128 --prompt short \
     -- target/release/pharos-infer {model} ~/pharos-eval/llama2.c/tokenizer.bin {prompt} {n}
+python3 scripts/bench-inference.py --engine native --model $M/qwen2.5-0.5b-instruct-q8_0.gguf --label "qwen2.5-0.5b q8_0 t1" \
+    --threads 1 --runs 3 -n 128 -- ./native-gguf.sh {model} {prompt} {n}
+#   native-gguf.sh: ids=$(llama-tokenize -m "$1" -p "$2" --ids --log-disable | tail -1); exec pharos-infer "$1" "$ids" "$3"
 python3 scripts/bench-inference.py --engine llama --model $M/<model>.gguf --label "<model> t<T>" \
     --threads <T> --runs 3 -n 128 --version-cmd "$L/llama-completion --version" \
     -- $L/llama-completion -m {model} -p {prompt} -n {n} -t {threads} -s {seed} --temp 0 -no-cnv --simple-io --no-display-prompt
@@ -137,4 +158,4 @@ candle: not yet measured (its first build failed for a missing feature flag; the
 
 ## Portability to Pharos
 
-To be completed per engine: what it needs from the OS (threads, `mmap`, SIMD level, allocator, file I/O, C library), mapped to M3.0 deliverables, with an estimate of the port effort. The native spike's needs so far: an allocator (the M3.0 freeing allocator), SSE2 in user mode (finding 1), whole-file reads of the model (M3.0 storage), and the math functions (finding 2); no threads and no `mmap`.
+To be completed per engine: what it needs from the OS (threads, `mmap`, SIMD level, allocator, file I/O, C library), mapped to M3.0 deliverables, with an estimate of the port effort. The native spike's needs so far: an allocator (the M3.0 freeing allocator), SSE2 in user mode (finding 1), the whole model file in memory (about 680 MB for tier S, read from the M3.0 store; weights are borrowed from it, not copied), and the math functions (finding 2); no threads and no `mmap`.

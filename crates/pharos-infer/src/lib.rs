@@ -4,7 +4,9 @@
 //! It runs Llama-architecture models in the llama2.c checkpoint format
 //! (f32 weights) with greedy decoding, following the reference `run.c` from
 //! github.com/karpathy/llama2.c (MIT) so its output can be compared token by
-//! token. The question it answers is what the smallest inference core costs
+//! token; and Qwen2 models from GGUF files with Q8_0 weights ([`gguf`],
+//! [`quant`], [`qwen2`]), following llama.cpp's Qwen2 graph for comparison
+//! with llama.cpp. The question it answers is what the smallest inference core costs
 //! to port to Pharos (D-020: built and tested on the host, later run
 //! unchanged on Pharos).
 //!
@@ -23,6 +25,10 @@
 extern crate alloc;
 #[cfg(test)]
 extern crate std;
+
+pub mod gguf;
+pub mod quant;
+pub mod qwen2;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -62,6 +68,12 @@ pub enum Error {
     BadTokenizer,
     /// More bytes than the declared contents (only for exact formats).
     TrailingBytes,
+    /// Not a supported file format or version, or a malformed field.
+    BadFormat,
+    /// A tensor the model needs is missing.
+    MissingTensor,
+    /// A tensor type this engine does not compute with.
+    UnsupportedType,
 }
 
 impl fmt::Display for Error {
@@ -71,6 +83,11 @@ impl fmt::Display for Error {
             Self::BadConfig => "model dimensions are invalid or above the engine's limits",
             Self::BadTokenizer => "tokenizer file is invalid or does not match the model",
             Self::TrailingBytes => "file has bytes after its declared contents",
+            Self::BadFormat => "not a supported file format, or a malformed field",
+            Self::MissingTensor => "a tensor the model needs is missing",
+            Self::UnsupportedType => {
+                "a tensor has a type this engine does not support (only F32 and Q8_0)"
+            }
         })
     }
 }
@@ -596,3 +613,5 @@ pub fn generate(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_gguf;
