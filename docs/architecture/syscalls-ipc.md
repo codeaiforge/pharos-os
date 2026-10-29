@@ -188,7 +188,7 @@ Error codes (`rax`):
   - the kernel never touches user virtual addresses, and copies through the direct map after validation;
   - SMEP and SMAP are on where the CPU has them.
 - **Isolation between processes:** separate user halves. A process names objects only through its own capability table, and capabilities move only with `GRANT`. Revocation can cut off everything derived from a capability.
-- **Resource limits:** bounded per-thread IPC memory. Process creation is kernel-only, so a process cannot multiply itself; quotas are M3.5.
+- **Resource limits:** bounded per-thread IPC memory. Since M2.10 processes can start processes (`spawn`), within a global limit of 32 live processes; per-process quotas are M3.5.
 - **Limits:**
   - **Meltdown-class leaks:** the kernel half is mapped (supervisor-only) in every address space, so speculative-execution attacks on affected CPUs could read it. KPTI is out of scope for M2.7 (not relevant under TCG; revisit for real hardware).
   - **`rdtsc` stays available in user mode**, so timing side channels are possible.

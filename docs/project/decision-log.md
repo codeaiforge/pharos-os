@@ -589,3 +589,65 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
    - revocation as designed in #37.
 
    Memory, process, and interrupt capabilities follow with their milestones.
+
+### D-016: User execution environment: SIMD state, user memory, and timeouts
+
+- **Status:** Open
+- **Needed by:** M3.0
+
+**Context.** Phase 2 user programs cannot use x87, SSE, or AVX (`CR0.EM` makes them fault, because the kernel saves no vector state), get a 256 KiB bump heap that never frees, and have no timeouts on IPC or interrupt waits. An inference runtime needs all three.
+
+**Options to evaluate.** Vector state: eager save and restore on every switch, or lazy (on first use after a switch); `XSAVE`/`XSAVEOPT` or `FXSAVE`; which instruction sets to expose (SSE2 baseline, AVX2 if present). User memory: an anonymous-memory map/unmap system call with a per-process page limit, or memory capabilities that a parent grants. Timeouts: a deadline argument on `receive`, `call`, and `irq_wait`, or a separate timer object that sends a notification.
+
+**Evaluation criteria.** No register state visible across processes (including after a kill); context-switch cost measured; every limit checked before allocation; timeouts that cannot leave a half-delivered message; the smallest change to the M2.7 boundary.
+
+### D-017: Writable persistent storage and audit integrity
+
+- **Status:** Open
+- **Needed by:** M3.0 (storage), M3.4 (audit records)
+
+**Context.** D-007 chose a read-only RAM disk and named copy-on-write as the future write strategy. Durable tasks (M3.3), the audit trail (M3.4), the knowledge service (M3.8), and model files need writable storage that survives crashes.
+
+**Options to evaluate.** Extending the `pharos-fs` format with copy-on-write, or a separate log-structured store for records; a storage service in user space over the virtio-blk driver, or in the kernel; append-only audit records with a hash chain, or with periodic signed checkpoints.
+
+**Evaluation criteria.** Crash consistency proven by fault injection; checksums on everything read; one safe parser shared with the host tool; tamper evidence for audit records; defined behaviour when storage is full or failing (consequential actions refused rather than unaudited); capability-only access.
+
+### D-018: Authority model: capabilities, identity, and human control
+
+- **Status:** Proposed
+- **Needed by:** M3.3 (final with D-012 at M3.4)
+
+**Context.** Agent platforms often authorize by identity ("this agent may do X"). In a capability system that brings back ambient authority and confused-deputy bugs. Agents, models, tools, and users also need identities for attribution. And the user needs controls that work when every agent is wrong or compromised; Pharos is headless today, so no trusted path to a human exists.
+
+**Recommendation.**
+
+1. **Authority comes only from capabilities.** A request is allowed because the caller holds a capability with the right, never because of who it claims to be. Badges (M2.10) identify a client to a server, as granted by whoever handed out the capability.
+2. **Identity is for attribution.** Agent, model, tool, and user identities are recorded in audit records and task state, and are kept separate from each other; they never grant access by themselves.
+3. **Delegation only narrows** rights (as `GRANT` does today), may carry an expiry, and is revocable through the derivation tree.
+4. **Failure to establish authority means denial.** There is no fallback to broader access.
+5. **A trusted path for the user:** a console or device that only the kernel and a small trusted service read, with commands to stop an agent or group, revoke its capabilities, deny a release, and enter safe mode. It works without any agent or model cooperating, and agents cannot reach it.
+6. **Human approval** is required for: granting capabilities beyond an agent's manifest, applying system updates (M4.3), and anything a policy marks sensitive.
+
+**Evaluation criteria.** No ambient authority; revocation independent of the holder; attribution of every consequential action; emergency controls that survive a hung agent runtime; usability of approvals.
+
+### D-019: Service interfaces and versioning
+
+- **Status:** Open
+- **Needed by:** M3.2 (inference interface), M3.3 (agent runtime)
+
+**Context.** Today's IPC carries untyped 256-byte messages, and each service hand-encodes its requests (for example the network service in M2.10). Agents and services that discover and compose each other need typed, versioned contracts.
+
+**Options to evaluate.** A small interface description with generated Rust encoders and decoders, or hand-written codecs with shared host-tested types; a service registry, or capabilities handed out by a manager; how versions are negotiated; how large payloads travel (shared memory capabilities or chunked messages).
+
+**Evaluation criteria.** Every message checked by generated or shared code, fuzzed on the host; finding a service grants no permission; incompatible versions refused with a clear error; structured errors, timeouts, and cancellation in every contract; no new dependency without the AGENTS.md review.
+
+### D-020: Where Phase 3 runs first
+
+- **Status:** Open
+- **Needed by:** M3.1
+
+**Context.** The roadmap allows Phase 3 prototypes on the Linux host. Choosing per milestone what runs on the host and what must run on Pharos decides how much the M3.1 evaluation transfers and when M3.0 must be finished.
+
+**Options to evaluate.** Host-first for inference and the agent runtime, then port behind the same interfaces; Pharos-first, with M3.0 on the critical path; a split, for example inference evaluated on the host while the enforcement milestones (M3.4, M3.5) are built only on Pharos.
+
+**Evaluation criteria.** Enforcement claims are tested where enforcement happens (on Pharos, not on Linux); interfaces stay identical across host and Pharos; host results are labelled as such and never presented as running on Pharos; M3.0's scope follows from what must run on Pharos.

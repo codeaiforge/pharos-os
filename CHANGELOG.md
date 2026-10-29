@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+### Changed
+
+- Roadmap: Phase 3 gains M3.0 (platform prerequisites for hosting agents: SIMD state, user memory, timeouts, writable storage) and M3.8 (a permission-aware knowledge service with provenance). M3.1–M3.5 and M3.7 are refined for durable tasks, a protected audit trail, an emergency stop that needs no agent, per-group budgets with reserved resources, and agent groups after single agents. M4.1 notes what `init` already delivers; M4.3 adds signed updates and rollback. The control-plane/execution-plane rule is stated in the Phase 3 ordering notes. New decision stubs: D-016, D-017, D-019, D-020 (open) and D-018 (proposed: authority only from capabilities, identity for attribution, a trusted path for human control).
+
 ## [0.2.0] - 2026-10-29
 
 Phase 2 (Core System) is complete. Pharos OS boots in QEMU (UEFI and BIOS) as a capability-based microkernel with isolated user processes, IPC, a read-only filesystem, user-space drivers, a service manager, and a user-space network service. Experimental: QEMU only; see the threat model for the open limits (no IOMMU, no KPTI, one CPU).

@@ -32,7 +32,8 @@ The phases are not strictly sequential. These tracks run through every phase:
 | Security | M1.1 | Threat model updated at every phase gate. Privilege boundaries designed at M2.1, before code depends on them. Agent permissions designed before agents get tools. |
 | Documentation | M1.5 | Docs updated in the same change as code. |
 | Architecture decisions | M2.1 | Decisions recorded before the milestone that depends on them (see [Open decisions](#open-decisions)). |
-| Host-side prototyping | Phase 3 | Inference and agent-runtime prototypes can run on the Linux host before the kernel can host them, so Phase 3 evaluation may overlap Phase 2. Prototypes must not be presented as running on Pharos. |
+| Governed development | M1.1 | Agent-assisted development of this repository follows [AGENTS.md](../../AGENTS.md): focused changes, tests and CI as evidence (an agent's claim that a change works is not evidence), maintainer approval, and no agent commits to shared history, tags, pushes, or publishes without explicit authorization. This is separate from a running Pharos system updating itself, which is M4.3. |
+| Host-side prototyping | Phase 3 | Inference and agent-runtime prototypes can run on the Linux host before the kernel can host them, so Phase 3 evaluation may overlap Phase 2. Prototypes must not be presented as running on Pharos. Where each Phase 3 milestone runs first is decided by D-020. |
 
 ## Phase overview
 
@@ -292,24 +293,53 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 **Status: Current** (M3.1).
 
-Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5) come before tool integration and agent communication (M3.6, M3.7)**, so that no agent gets tools or channels without enforcement already in place.
+Ordering notes:
+
+- **M3.0 comes before anything runs on Pharos.** Phase 2 left Pharos unable to host an inference runtime or an agent: user programs cannot use SIMD, have a 256 KiB heap that never frees, no writable storage, and no timeouts. M3.1 runs on the Linux host alongside M3.0 and sets its targets (model sizes, memory, instruction sets).
+- **Permissions and resource limits (M3.4, M3.5) come before tool integration, agent communication, and the knowledge service (M3.6–M3.8)**, so that no agent gets tools, channels, or shared knowledge without enforcement already in place.
+- **One agent before many:** groups of agents (M3.7) come only after a single agent is enforced, audited, budgeted, and stoppable (M3.3–M3.5).
+- **The control plane proposes; the execution plane decides.** Agents, plans, and model output are untrusted proposals. The kernel and trusted services enforce capabilities, quotas, and audit, and keep working when every agent or model is unavailable or wrong. No agent can gain authority by changing a plan, delegating, writing to shared knowledge, or composing services.
 
 - **Objective and scope:** Local inference and an agent runtime in which agents are untrusted, isolated, resource-limited, and use only granted capabilities. Early milestones may be prototyped on the Linux host.
-- **Deliverables:** M3.1–M3.7.
-- **Prerequisites:** M3.1 can start during Phase 2. Running on Pharos requires the Phase 2 gate.
+- **Deliverables:** M3.0–M3.8.
+- **Prerequisites:** Phase 2 gate. M3.1 runs on the Linux host; running anything on Pharos requires M3.0.
 - **Acceptance criteria:** Each milestone's criteria; agent isolation verified by adversarial tests.
 - **Validation:** Automated: unit and integration tests; QEMU tests once on Pharos; prompt-injection test suite. Manual: security review.
 - **Risks and mitigations:** AI dominates the TCB → inference stays unprivileged; model output untrusted.
-- **Out of scope:** Training models; cloud inference as a requirement.
+- **Out of scope:** Training models; cloud or remote inference providers (they need TLS and an outbound network policy, and they open an exfiltration path; reconsider after M3.4 with D-012's per-destination grants); remote agents and federation; agents changing a running Pharos system (M4.3).
 - **Definition of done:** Standard, plus threat model updated for agents and inference.
 - **Gate:** All M3.x gates; agent isolation security review complete.
+
+### M3.0 — Platform prerequisites for hosting agents
+
+**Status: Planned.** Next on Pharos; may run alongside M3.1, whose measurements set its targets.
+
+- **Objective and scope:** Give Pharos what an inference runtime and an agent runtime need from the OS, without which no later Phase 3 milestone can run on Pharos.
+- **Deliverables:**
+  - SIMD for user programs: the kernel saves and restores FPU, SSE, and AVX state per thread (XSAVE where available), with state leaks between processes tested (D-016);
+  - user memory: map and unmap anonymous memory under a per-process limit, and a freeing user allocator in place of the bump heap (D-016);
+  - timeouts and cancellation: `receive`, `call`, and `irq_wait` with a deadline, and a user-space sleep (D-016);
+  - writable persistent storage: virtio-blk writes and a crash-consistent store for durable state, large files (model files), and append-only records (D-017);
+  - QEMU runs with enough memory for the M3.1 target model.
+- **Prerequisites:** Phase 2 gate; D-016 and D-017 Accepted.
+- **Acceptance criteria:**
+  - a user program uses SIMD, and a test shows another process never sees its register state;
+  - a process maps memory up to its limit and is refused beyond it, and freed memory returns to the kernel;
+  - a `call` to a server that never answers returns a timeout error;
+  - data written to the store survives a QEMU kill at random points (fault injection) without corruption: either the old or the new state is read back, checked;
+  - a model file of the M3.1 target size is read from disk into a process.
+- **Validation:** Automated: QEMU test kernels, fault-injection runs, host tests and fuzzing for the store's on-disk format.
+- **Risks and mitigations:** Saving vector state adds context-switch cost and a new leak path → measure, test for leaks, keep the save in the hardware layer; storage corruption → checksums, copy-on-write (per D-007), and fault injection in CI.
+- **Out of scope:** Multiple CPUs, user threads (one CPU makes them useless for throughput; reconsider with SMP), GPU drivers (D-011), a general POSIX layer.
+- **Definition of done:** Standard, plus a security review of the new kernel paths and the threat model updated.
+- **Gate:** Prerequisite tests pass in CI; security review approved.
 
 ### M3.1 — Requirements and inference-runtime evaluation
 
 **Status: Current.**
 
 - **Objective and scope:** Define target use cases, hardware requirements, and choose an inference runtime and model formats.
-- **Deliverables:** Requirements document; benchmark results on the reference host; accepted D-010 and D-011 (requirements part).
+- **Deliverables:** Requirements document (target use cases, the first agent scenario, target model sizes); benchmark results on the reference host; accepted D-010, D-011 (requirements part), and D-020; the memory and instruction-set targets for M3.0.
 - **Prerequisites:** Phase 1 gate (can overlap Phase 2).
 - **Acceptance criteria:** At least two runtimes evaluated against the D-010 criteria with measurements (tokens/s, memory use) on documented hardware; license review of runtime and candidate models complete.
 - **Validation:** Manual: reproducible benchmark scripts reviewed.
@@ -322,10 +352,10 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 **Status: Planned.**
 
-- **Objective and scope:** Run inference locally as an unprivileged service (host prototype first, then on Pharos).
-- **Deliverables:** Inference service with a defined request/response interface; model loading with integrity verification (checksums).
-- **Prerequisites:** M3.1; for Pharos: M2.7, M2.8.
-- **Acceptance criteria:** A supported model produces output through the service; a model file failing integrity checks is refused; memory use stays within a configured limit; the service has no privileges beyond its granted capabilities.
+- **Objective and scope:** Run inference locally as an unprivileged service (host prototype first, then on Pharos, per D-020).
+- **Deliverables:** Inference service behind a stable provider interface (D-019), so the agent runtime is not bound to one runtime or model; model capability discovery; model and runtime versions recorded with every result; model loading with integrity verification (checksums).
+- **Prerequisites:** M3.1; for Pharos: M3.0.
+- **Acceptance criteria:** A supported model produces output through the service; an unsupported model or configuration is refused with a clear error; a model file failing integrity checks is refused; memory use stays within a configured limit; the service has no privileges beyond its granted capabilities; when the service is down, callers get an error, not a hang.
 - **Validation:** Automated: integration tests with a small test model; malformed-model tests. Manual: resource monitoring.
 - **Risks and mitigations:** Parser exploits in model loaders → sandbox the service; fuzz loaders where possible.
 - **Out of scope:** GPU acceleration unless D-011 supports it.
@@ -336,12 +366,16 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 **Status: Planned.**
 
-- **Objective and scope:** Start, stop, supervise, and restart agents.
-- **Deliverables:** Agent runtime; agent manifest format; lifecycle states and events.
-- **Prerequisites:** M3.2; permission-model design (M3.4) started.
-- **Acceptance criteria:** Agents can be started and stopped deterministically; a crashed agent is detected and handled per policy; agents start with zero capabilities.
-- **Validation:** Automated: lifecycle tests including crash and hang cases.
-- **Risks and mitigations:** Runaway agents → hard stop always available to the user.
+- **Objective and scope:** Start, stop, supervise, and restart agents, and keep their work durable across restarts.
+- **Deliverables:**
+  - agent runtime; agent manifest format (D-019); lifecycle states and events;
+  - durable tasks: task state, dependencies, checkpoints, and bounded retries kept in the M3.0 store, with idempotency keys for consequential operations (no exactly-once promise);
+  - timeouts and cancellation for every agent request;
+  - emergency stop: the user stops an agent and revokes its capabilities through the trusted path (D-018), which works without any agent or model cooperating.
+- **Prerequisites:** M3.0 for Pharos; M3.2; D-018 and D-019 Accepted; permission-model design (M3.4) started.
+- **Acceptance criteria:** Agents can be started and stopped deterministically; a crashed or hung agent is detected and handled per policy; agents start with zero capabilities; after an agent or runtime restart, task state is recovered and a consequential operation is not repeated (its idempotency key is checked); a stopped agent leaves no running work behind; the emergency stop works while the agent runtime itself is hung.
+- **Validation:** Automated: lifecycle tests including crash, hang, and restart cases; fault injection during task checkpoints.
+- **Risks and mitigations:** Runaway agents → hard stop always available to the user, outside the agent runtime.
 - **Out of scope:** Tool use.
 - **Definition of done:** Standard.
 - **Gate:** Lifecycle tests pass.
@@ -350,10 +384,14 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 **Status: Planned.**
 
-- **Objective and scope:** Enforce explicit, least-privilege capabilities for agents, sandbox them, and log grants and sensitive actions.
-- **Deliverables:** Capability grant and revoke mechanism (per D-012); sandbox; audit log; `docs/architecture/capabilities.md`.
-- **Prerequisites:** M3.3; M2.7 (for kernel enforcement on Pharos).
-- **Acceptance criteria:** Adversarial tests show an agent cannot access files, processes, devices, or network endpoints without a capability; revocation takes effect immediately; every grant and revocation appears in the audit log.
+- **Objective and scope:** Enforce explicit, least-privilege capabilities for agents, sandbox them, and record grants and sensitive actions in a protected audit trail.
+- **Deliverables:**
+  - capability grant and revoke mechanism (per D-012 and D-018): authority comes only from capabilities; identities (agent, model, tool, user) are recorded for attribution and never grant access by themselves; delegation only narrows rights;
+  - sandbox;
+  - audit as a trusted service: append-only, integrity-checked records in the M3.0 store (D-017), linking each consequential action to who initiated it, the capability used, the services invoked, and the outcome; consequential actions are refused while the audit trail cannot be written;
+  - `docs/architecture/capabilities.md`.
+- **Prerequisites:** M3.3; M2.7 (for kernel enforcement on Pharos); D-017 and D-018 Accepted.
+- **Acceptance criteria:** Adversarial tests show an agent cannot access files, processes, devices, or network endpoints without a capability, whatever it claims to be; revocation takes effect immediately; every grant and revocation appears in the audit log; tampering with an audit record is detected; an investigator can reconstruct a consequential operation from the audit trail alone.
 - **Validation:** Automated: adversarial test suite. Manual: security review.
 - **Risks and mitigations:** Permission fatigue → sensible grouped grants; clear prompts.
 - **Out of scope:** Multi-user policy.
@@ -364,10 +402,10 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 **Status: Planned.**
 
-- **Objective and scope:** Per-agent limits on CPU, memory, storage, network, and inference usage.
-- **Deliverables:** Accounting and enforcement; limit configuration; usage reporting.
+- **Objective and scope:** Per-agent and per-group limits on CPU, memory, storage, network, and inference usage, with resources reserved for essential system functions.
+- **Deliverables:** Accounting attributed to each agent and group; enforcement; admission control for inference requests; reservations for the kernel, trusted services, and the emergency-stop path; limit configuration; usage reporting.
 - **Prerequisites:** M3.4.
-- **Acceptance criteria:** An agent exceeding a limit is throttled or stopped per policy without affecting other agents or the system.
+- **Acceptance criteria:** An agent or group exceeding a limit is throttled or stopped per policy without affecting other agents or the system; under full load the emergency stop and trusted services still respond; every unit of usage is attributed to an agent or a system component.
 - **Validation:** Automated: resource-exhaustion tests.
 - **Risks and mitigations:** Accounting overhead → measure and document.
 - **Out of scope:** Billing.
@@ -392,14 +430,28 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 **Status: Planned.**
 
-- **Objective and scope:** Agents communicate only through granted channels.
-- **Deliverables:** Message channels built on IPC; coordination patterns (for example supervisor and worker).
-- **Prerequisites:** M3.4, M3.6.
-- **Acceptance criteria:** Agents without a shared channel cannot communicate; messages are logged per policy; a compromised agent cannot gain another agent's capabilities through messaging.
+- **Objective and scope:** Agents communicate only through granted channels, and groups of agents work toward a shared goal under explicit authority and budgets.
+- **Deliverables:** Message channels built on IPC with typed messages (D-019); coordination patterns (for example supervisor and worker); agent groups with a goal, completion criteria, tasks, delegation, and a group budget, built on M3.3 durable tasks.
+- **Prerequisites:** M3.4, M3.5, M3.6.
+- **Acceptance criteria:** Agents without a shared channel cannot communicate; messages are logged per policy; a compromised agent cannot gain another agent's capabilities through messaging; joining a group grants nothing, and delegation only narrows authority; a group stays within its budget; a failed or timed-out worker is handled, and stopping a group leaves no running work; results are checked by a non-agent verifier before they count as done.
 - **Validation:** Automated: isolation and confused-deputy tests.
 - **Risks and mitigations:** Capability leakage via messages → capabilities are not transferable unless explicitly allowed.
 - **Out of scope:** Cross-machine agents.
 - **Definition of done:** Standard.
+- **Gate:** Coordination and isolation tests pass.
+
+### M3.8 — Knowledge service
+
+**Status: Planned.**
+
+- **Objective and scope:** A shared, permission-aware knowledge service with provenance, separate from each agent's private memory.
+- **Deliverables:** A small, versioned data model and stable interface (D-019) on the M3.0 store; provenance on every entry (source, author, time, version and scope, verification status); private agent memory kept separate, with promotion to shared knowledge explicit and policy-checked; history kept, so corrections never rewrite the evidence behind earlier decisions.
+- **Prerequisites:** M3.4, M3.5; M3.0 for Pharos.
+- **Acceptance criteria:** Reads and writes need capabilities, and a query or summary never returns content whose evidence the caller cannot read; verified facts, unverified claims, stale entries, and conflicting entries remain distinguishable; stored content is never treated as instructions or policy (prompt-injection tests); an update is attributable and audited.
+- **Validation:** Automated: access-control, provenance, staleness, and injection tests. Manual: security review.
+- **Risks and mitigations:** Poisoned knowledge → provenance and verification status on every entry, and no authority from content; premature technology choices → no graph database or semantic search until real queries justify one, recorded in a decision.
+- **Out of scope:** Distributed or federated knowledge; semantic retrieval unless justified by measured needs.
+- **Definition of done:** Standard, plus threat model updated.
 - **Gate:** Phase 3 gate.
 
 ---
@@ -420,8 +472,8 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 ### M4.1 — Integration of kernel and user-space services
 
-- **Objective and scope:** Boot into a complete user space with services started by a service manager. **Status: Planned.**
-- **Deliverables:** Init and service manager; integrated system image.
+- **Objective and scope:** Boot into a complete user space with services started by a service manager. **Status: Planned** (partly delivered: M2.10's `init` starts services in a fixed order and reports each failure).
+- **Deliverables:** Service manager with declared dependencies and restart policies, building on `init`; integrated system image.
 - **Prerequisites:** Phase 2 gate.
 - **Acceptance criteria:** System reaches a defined "ready" state in QEMU; each service failure is reported.
 - **Validation:** Automated: end-to-end boot test to ready state.
@@ -444,10 +496,10 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 ### M4.3 — Reliable boot and recovery
 
-- **Objective and scope:** Detect failed boots and recover to a known-good state. **Status: Planned.**
-- **Deliverables:** Recovery mode; known-good image fallback; Secure Boot evaluation.
-- **Prerequisites:** M4.1.
-- **Acceptance criteria:** Simulated corrupted system image leads to recovery, not an unbootable system.
+- **Objective and scope:** Detect failed boots and updates and recover to a known-good state. Agents may diagnose and propose repairs, but recovery never depends on them. **Status: Planned.**
+- **Deliverables:** Recovery mode and safe mode reachable through the trusted path (D-018); known-good image fallback (for example A/B images); signed system updates with rollback; detection of restart and repair loops; Secure Boot evaluation.
+- **Prerequisites:** M4.1; M3.0 (writable storage).
+- **Acceptance criteria:** Simulated corrupted system image leads to recovery, not an unbootable system; a rejected or failing update is rolled back; an update proposed by an agent cannot be applied without the required approval; a malfunctioning agent cannot disable recovery or the emergency stop.
 - **Validation:** Automated: fault-injection boot tests.
 - **Risks and mitigations:** Recovery path untested → test it in CI.
 - **Out of scope:** Over-the-air updates.
@@ -570,7 +622,7 @@ Ordering note: within this phase, **permissions and resource limits (M3.4, M3.5)
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-012 has a recorded direction; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-012 has a recorded direction; D-018 is proposed; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -588,8 +640,13 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-015 | Network stack and service model | M2.10 | **Accepted:** own minimal stack (Ethernet, ARP, IPv4, ICMP echo, UDP; no TCP) inside the virtio-net driver's process; badged capabilities as network capabilities (amended, #59); static slirp addresses; the kernel starts `init`, which starts services |
 | D-014 | IPC model and system-call mechanism | M2.7 | **Accepted:** `syscall`/`sysret`; synchronous endpoints, 256-byte messages plus one capability, bounded per-thread buffers |
 | D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | **Direction:** kernel-enforced capabilities (per-process handle tables, rights, grant over IPC, revocation), policy in user space; final at M3.4 |
+| D-016 | User execution environment: SIMD state, user memory, timeouts | M3.0 | Context-switch cost, state-leak safety, limits checked before allocation, deadline semantics |
+| D-017 | Writable persistent storage and audit integrity | M3.0, M3.4 | Crash consistency, checksums, copy-on-write (per D-007), append-only records, behaviour when storage fails |
+| D-018 | Authority model: capabilities, identity, human control | M3.3 | **Proposed:** authority only from capabilities; identity for attribution and audit; delegation narrows; a trusted path for emergency stop and revocation that needs no agent or model |
+| D-019 | Service interfaces and versioning | M3.2, M3.3 | Typed, versioned contracts over IPC; discovery grants no permission; compatibility checks; structured errors |
+| D-020 | Where Phase 3 runs first | M3.1 | Host prototype then port, or Pharos-first; evidence that host results transfer; no host result presented as running on Pharos |
 | D-013 | Scheduling model | M2.6 | **Accepted:** preemptive round-robin on one CPU, 10 ms slice, kernel threads on guarded stacks, no lock held across a switch |
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). The current milestone is **M3.1 — Requirements and inference-runtime evaluation**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). The current milestone is **M3.1 — Requirements and inference-runtime evaluation**, on the Linux host; **M3.0 — Platform prerequisites for hosting agents** comes next on Pharos and may run alongside it. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

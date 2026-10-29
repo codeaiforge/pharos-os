@@ -132,7 +132,7 @@ Phase 2 closes with these limits accepted. Each is carried to the milestone that
 | No KPTI: the kernel half is mapped in every address space (Meltdown class) | M2.7 | M4.2 (security model); required before real-hardware use (M5.2) |
 | One CPU: locking, TLB flushes, and MSI-X routing assume it | from the start | Phase 4; SMP needs a decision record and a re-review of those paths |
 | Revocation does not unmap device registers or DMA buffers; ending the process is the full revocation | M2.9 | M3.4 (revocable agent permissions) |
-| No timeouts on IPC, `call`, pings, or service start | M2.7 | M3.3 (agent lifecycle and supervision) |
+| No timeouts on IPC, `call`, pings, or service start | M2.7 | M3.0 (kernel deadlines, D-016); M3.3 (supervision) |
 | No per-process quotas on processes, handles, or network use | M2.10 | M3.5 (resource accounting and limits) |
 | No network destination policy | M2.10 | M3.4 (D-012) |
 | `rdtsc` in user mode (timing side channels) | M2.7 | M4.2 |
@@ -177,7 +177,7 @@ Everything below is **planned**; none of it is implemented.
 | --- | --- | --- |
 | Agent escalates privileges or escapes its sandbox | Kernel-enforced isolation; capability-only access; no ambient authority | M2.7, M3.4 |
 | Prompt injection causes harmful tool use | Model output treated as untrusted; per-tool capabilities; user confirmation for sensitive actions; audit log | M3.4, M3.6 |
-| Inference runtime exploit via model file | Runtime runs unprivileged and sandboxed; model integrity checks; memory limits | M3.2, M3.4 |
+| Inference runtime exploit via model file | Runtime runs unprivileged and sandboxed; model integrity checks; memory limits (M3.0) | M3.2, M3.4 |
 | Resource exhaustion by an agent | Per-agent CPU, memory, storage, and network quotas | M3.5 |
 | Agent data exfiltration over network | Default-deny networking; per-destination grants; logging | M3.4 |
 | Kernel memory-safety bug | Safe Rust by default; reviewed `unsafe`; fuzzing of syscall interfaces | M2.2 onward |
