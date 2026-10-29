@@ -260,6 +260,28 @@ sched: tick 11: task 1 -> task 0
 
 Each task goes to sleep in turn and the idle task (1) runs. The 10 ms sleeper (3) wakes at tick 2, the 30 ms one (4) at tick 4, the 50 ms one (2) at tick 6, and task 0 at tick 11. A sleep waits one extra tick, so it never ends early. Tracing prints from the timer interrupt, so a trace left on while tasks are busy slows them down noticeably.
 
+### Capture network traffic
+
+Every QEMU run has one virtio-net card on slirp user-mode networking (guest `10.0.2.15`, gateway and host `10.0.2.2`, networking.md). To record a test kernel's packets, set `PHAROS_PCAP=1`:
+
+```sh
+PHAROS_PCAP=1 cargo test -p pharos-kernel --target x86_64-unknown-none --test network
+tcpdump -nr target/xtask/logs/test-network.pcap
+```
+
+The runner adds `-object filter-dump,id=dump0,netdev=net0,file=target/xtask/logs/test-<name>.pcap`, which records frames in both directions. Any pcap reader works (`tcpdump -nr`, add `-X` for the bytes, or Wireshark). A passing `network` run looks like this:
+
+```text
+ARP, Request who-has 10.0.2.2 tell 10.0.2.15, length 28
+ARP, Reply 10.0.2.2 is-at 52:55:0a:00:02:02, length 50
+IP 10.0.2.15 > 10.0.2.2: ICMP echo request, id 40000, seq 1, length 14
+IP 10.0.2.2 > 10.0.2.15: ICMP echo reply, id 40000, seq 1, length 14
+IP 10.0.2.15.40000 > 10.0.2.2.47000: UDP, length 7
+IP 10.0.2.2.47000 > 10.0.2.15.40000: UDP, length 7
+```
+
+The ICMP identifier is the client's port. Datagrams between clients on `10.0.2.15` never reach the card, so they are not in the capture. An IPv6 multicast listener report from `::` at the start comes from before the kernel runs (most likely the OVMF firmware). If a frame is missing, the guest never sent it; if it is there but the client saw nothing, the network service dropped it, and its `stats` counters say why (`dropped`, `no port`, `queue full`). Captures stay under `target/` and are never committed.
+
 ### Useful QEMU options
 
 `cargo xtask run` already uses `-serial stdio`, `-display none`, `-no-reboot`, `isa-debug-exit`, and (with `--gdb`) `-s -S`; `--kernel <ELF>` boots another kernel, such as a test kernel. Other options for manual runs:
@@ -272,6 +294,7 @@ Each task goes to sleep in turn and the idle task (1) runs. The 10 ms sleeper (3
 | Interrupt/exception log | Diagnose faults | `-d int,cpu_reset -D qemu.log` |
 | GDB stub | Breakpoints and stepping in the kernel | `-s -S`, then `gdb` with `target remote :1234` |
 | Debug exit device | Report test results via QEMU exit code | `-device isa-debug-exit,iobase=0xf4,iosize=0x04` |
+| Packet capture | Record the network card's frames | `-object filter-dump,id=dump0,netdev=net0,file=net.pcap` |
 | QEMU monitor | Inspect registers and memory | `-monitor stdio` (`info registers`, `info mem`, `info tlb`), or `monitor <command>` from GDB |
 
 Rules for kernel debugging:

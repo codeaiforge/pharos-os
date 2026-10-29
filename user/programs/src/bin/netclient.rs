@@ -3,8 +3,9 @@
 //! service endpoint, badged by `init` with this client's UDP port), 3
 //! `init`'s report endpoint (the echoer only).
 //!
-//! - Argument 1, port 40000: pings the gateway, sends a datagram to port
-//!   40001 on our own address and gets `pong` back, sends one to a port no
+//! - Argument 1, port 40000: pings the gateway, exchanges a datagram with
+//!   the host echo server at `10.0.2.2:47000` (run by `cargo xtask`, issue
+//!   #64), sends a datagram to port 40001 on our own address and gets `pong` back, sends one to a port no
 //!   client holds, and checks the service's counters.
 //! - Argument 2, port 40001: registers, reports ready, answers one
 //!   datagram with `pong`, then idles.
@@ -25,6 +26,8 @@ pharos_user::entry!(main);
 const CONSOLE: u64 = 1;
 const NET: u64 = 2;
 const REPORT: u64 = 3;
+/// The UDP echo server `cargo xtask` runs on the host (networking.md).
+const HOST_ECHO_PORT: u16 = 47000;
 
 fn report(failures: &mut u64, step: &str, ok: bool) {
     let mut line = [0u8; 96];
@@ -67,6 +70,19 @@ fn main(arg: u64) -> u64 {
                 &mut f,
                 "sender: ping 10.0.2.2 answered",
                 ping(NET, reply, GATEWAY, 1) == Ok(OK),
+            );
+            report(
+                &mut f,
+                "sender: datagram to the host echo server accepted",
+                send_to(NET, reply, GATEWAY, HOST_ECHO_PORT, b"echo me") == Ok(OK),
+            );
+            let got = recv(NET, reply, &mut buf);
+            report(
+                &mut f,
+                "sender: echo from 10.0.2.2:47000",
+                got.is_ok_and(|(s, ip, port, n)| {
+                    s == OK && ip == GATEWAY && port == HOST_ECHO_PORT && &buf[..n] == b"echo me"
+                }),
             );
             report(
                 &mut f,

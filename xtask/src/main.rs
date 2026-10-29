@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode};
 use std::time::{Duration, Instant, SystemTime};
 
+mod echo;
 mod fs_image;
 
 /// Pinned Limine release (D-001). To update the pin, follow
@@ -47,6 +48,8 @@ const BOOT_MARKER: &str = "PHAROS: boot ok";
 const TESTS_MARKER: &str = "PHAROS: tests ok";
 /// Environment variable `test` uses to pass its time limit to `runner`.
 const TEST_TIMEOUT_ENV: &str = "PHAROS_TEST_TIMEOUT";
+/// Set to `1` to make `runner` capture each test kernel's network traffic.
+const PCAP_ENV: &str = "PHAROS_PCAP";
 /// Default time limit per headless boot under TCG (D-009).
 const DEFAULT_BOOT_TIMEOUT_SECS: u64 = 60;
 /// Log lines shown when a headless boot fails.
@@ -77,7 +80,10 @@ COMMANDS:
                             kernel in kernel/tests/ under UEFI. A boot passes only
                             if QEMU exits with status 33 and the serial log shows
                             the expected marker within the time limit (default
-                            60 s). Logs: target/xtask/logs/.
+                            60 s). Logs: target/xtask/logs/. Test kernels
+                            reach a UDP echo server on 127.0.0.1:47000 (from the
+                            guest: 10.0.2.2:47000); PHAROS_PCAP=1 also writes
+                            each test kernel's packets to test-<name>.pcap there.
     fs build <DIR> <IMAGE>  Pack the regular files under DIR into a Pharos
                             filesystem image (docs/architecture/storage.md).
     fs ls <IMAGE>           Check an image with the kernel's parser and list
@@ -829,13 +835,18 @@ fn boot_headless(
     log: &Path,
     bios: bool,
     timeout: Duration,
+    pcap: Option<&Path>,
 ) -> Result<BootRun> {
     prepare_firmware(vars, bios)?;
     let _ = fs::remove_file(log);
     let mut serial = OsString::from("file:");
     serial.push(log);
+    let mut args = qemu_args(iso, vars, &serial, bios, false);
+    if let Some(path) = pcap {
+        args.extend(pcap_args(path));
+    }
     let start = Instant::now();
-    let mut child = qemu_command(qemu_args(iso, vars, &serial, bios, false))
+    let mut child = qemu_command(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .spawn()
@@ -848,6 +859,13 @@ fn boot_headless(
         log: String::from_utf8_lossy(&bytes).into_owned(),
         elapsed: start.elapsed(),
     })
+}
+
+/// QEMU arguments that write the network card's traffic to `path` (pcap).
+fn pcap_args(path: &Path) -> [OsString; 2] {
+    let mut dump = OsString::from("filter-dump,id=dump0,netdev=net0,file=");
+    dump.push(path);
+    ["-object".into(), dump]
 }
 
 /// Decides whether a headless boot passed (D-009): QEMU exit status 33 and
@@ -962,7 +980,7 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
         let name = firmware_name(bios);
         let log = logs.join(format!("boot-{name}.log"));
         let vars = logs.join(format!("boot-{name}-ovmf-vars.fd"));
-        let run = boot_headless(&iso, &vars, &log, bios, timeout)?;
+        let run = boot_headless(&iso, &vars, &log, bios, timeout, None)?;
         let label = format!("boot check ({name})");
         match evaluate_boot(&run, BOOT_MARKER, timeout) {
             Ok(()) => println!("{label}: PASS in {:.1} s", run.elapsed.as_secs_f32()),
@@ -1021,7 +1039,18 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     let logs = paths.logs_dir();
     fs::create_dir_all(&logs).map_err(io_err("cannot create", &logs))?;
     let log = logs.join(format!("test-{name}.log"));
-    let run = boot_headless(&iso, &out.join("ovmf-vars.fd"), &log, false, timeout)?;
+    let pcap =
+        (env::var(PCAP_ENV).as_deref() == Ok("1")).then(|| logs.join(format!("test-{name}.pcap")));
+    // Stopped when dropped, after the boot ends or times out.
+    let _echo = echo::EchoServer::start(echo::ADDR)?;
+    let run = boot_headless(
+        &iso,
+        &out.join("ovmf-vars.fd"),
+        &log,
+        false,
+        timeout,
+        pcap.as_deref(),
+    )?;
     let label = format!("test kernel {name} (uefi)");
     match evaluate_boot(&run, TESTS_MARKER, timeout) {
         Ok(()) => {
@@ -1174,6 +1203,16 @@ mod tests {
             })
         );
         assert!(parse(args(&["run", "--kernel"])).is_err());
+    }
+
+    #[test]
+    fn pcap_args_dump_the_network_card() {
+        let args = pcap_args(Path::new("logs/test-network.pcap"));
+        assert_eq!(args[0], "-object");
+        assert_eq!(
+            args[1],
+            "filter-dump,id=dump0,netdev=net0,file=logs/test-network.pcap"
+        );
     }
 
     #[test]

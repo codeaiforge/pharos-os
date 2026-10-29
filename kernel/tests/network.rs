@@ -1,7 +1,8 @@
 //! Test kernel: `init` starts the network service and three clients from
 //! its network table (issue #63, networking.md). Clients reach the network
-//! only through badged capabilities: one pings the slirp gateway and
-//! exchanges datagrams with another over our own address, a datagram to a
+//! only through badged capabilities: one pings the slirp gateway, exchanges
+//! a datagram with the `cargo xtask` echo server on the host (#64), and
+//! trades datagrams with another over our own address, a datagram to a
 //! port nobody holds is counted, and an unbadged client is refused. Runs
 //! under UEFI (D-009).
 
@@ -20,10 +21,12 @@ use pharos_kernel::{fs, ipc, kprintln, mm, pci, process, sched, storage, time};
 pharos_kernel::test_kernel!(run);
 
 /// Client steps that must pass.
-const STEPS: [&str; 10] = [
+const STEPS: [&str; 12] = [
     "echoer: registered",
     "sender: non-blocking send with nobody waiting: WOULD_BLOCK",
     "sender: ping 10.0.2.2 answered",
+    "sender: datagram to the host echo server accepted",
+    "sender: echo from 10.0.2.2:47000",
     "sender: datagram to 10.0.2.15:40001 accepted",
     "echoer: hello from 10.0.2.15:40000",
     "echoer: pong sent",
