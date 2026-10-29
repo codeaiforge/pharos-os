@@ -540,6 +540,35 @@ mod tests {
         };
         frag[24..26].copy_from_slice(&c.to_be_bytes());
         assert_eq!(classify(&frag[..n], MAC), Err(Drop::Fragment));
+
+        // A valid IPv4 header around a UDP segment shorter than its 8-byte
+        // header (the fuzzer cannot reach this: it needs the IP checksum).
+        let with_total = |total: usize| {
+            let mut g = f;
+            g[16..18].copy_from_slice(&(total as u16).to_be_bytes());
+            g[24..26].copy_from_slice(&[0, 0]);
+            let c = checksum(&g[14..34]);
+            g[24..26].copy_from_slice(&c.to_be_bytes());
+            g
+        };
+        for short in 0..UDP {
+            let g = with_total(IP + short);
+            assert_eq!(
+                classify(&g[..14 + IP + short], MAC),
+                Err(Drop::Short),
+                "{short}-byte UDP segment"
+            );
+        }
+        // The UDP length field below its header or past the segment.
+        for len in [0u16, 7, 14] {
+            let mut g = f;
+            g[38..40].copy_from_slice(&len.to_be_bytes());
+            assert_eq!(
+                classify(&g[..n], MAC),
+                Err(Drop::UdpLength),
+                "UDP length {len}"
+            );
+        }
     }
 
     #[test]

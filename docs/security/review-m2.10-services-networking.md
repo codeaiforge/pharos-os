@@ -28,7 +28,10 @@
 | --- | --- | --- | --- |
 | F1 | Medium | A reply capability outlived its call. `call` gave the server a `SEND` capability on the caller's reply endpoint, and it stayed valid after the reply. A server could keep it and, during a later `call` from the same client to a *different* server, send first: the client would take that message as the other server's reply, and nothing in it tells them apart. Today the network service is the only server, so no second server existed to impersonate. | **Fixed:** replies are one-shot. The server's capability is a child of one derived just for the call, which the kernel revokes as soon as the call returns; a later send through it fails with `REVOKED`. Until the caller resumes, a second send can only queue a message (the caller no longer waits), and `call` refuses a reply endpoint with a queued message (`IN_USE`), so it is never taken as a reply. `spawn` test: a child serves one call, yields, and answers again; the second answer must fail with `REVOKED`. Mutation-checked (no revoke: the check fails). |
 
-Also fixed: two kernel comments still described 16 KiB task stacks (D-013 now says 32 KiB).
+Also fixed:
+
+- **A test gap in the UDP parser, found by the gate's broken-branch check.** Weakening the "segment at least 8 bytes" check left every host test passing. The fuzzer cannot reach that case, because it needs a valid IPv4 header checksum around the short segment. With the check weakened, a 4-byte UDP segment makes the parser read past it and panic, which in the network service would let one packet stop the service. The code was correct; the test now builds checksummed frames with UDP segments of 0–7 bytes (`Short`) and UDP length fields below 8 or past the segment (`UdpLength`), and it fails with the check weakened.
+- Two kernel comments still described 16 KiB task stacks (D-013 now says 32 KiB).
 
 ## System calls
 
