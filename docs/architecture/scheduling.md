@@ -27,7 +27,7 @@ M2.6 asks for several kernel tasks running interleaved, a preemptive scheduler, 
 
 - `sched::enable_preemption()` (after `time::init`) creates the idle task, installs the scheduler as the APIC tick handler, starts the 100 Hz tick, and enables interrupts.
 - **Time slice: one tick (10 ms).** On every tick the handler (interrupt context, interrupts disabled, after EOI) counts the tick, moves due sleepers and waits past their deadline to the ready queue, and switches to the next ready task if there is one. The switch happens inside the handler: the preempted task's interrupt frame stays on its own stack, and the task continues through the handler's `iretq` when it runs again.
-- **Idle task:** runs only when no task is ready, never waits in the queue, and halts (`hlt`) with interrupts enabled. The next tick that finds a ready task switches away from it.
+- **Idle task:** runs only when no task is ready and never waits in the queue. With interrupts disabled it checks the ready queue; if it is empty, it enables interrupts and halts in one step (`sti; hlt`, so an interrupt pending since the check still wakes it), then yields. A task woken by a device interrupt therefore runs at once, not at the next tick (#78: before, every disk request of the storage service waited for the tick).
 - `sched::set_trace(true)` prints each switch over serial ([debugging guide](../development/debugging.md#trace-task-switches)).
 - The scheduler state is a singleton behind an `IrqMutex` (one CPU; allowed by D-004 constraint 6).
 

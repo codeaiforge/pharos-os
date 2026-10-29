@@ -26,7 +26,7 @@ use core::time::Duration;
 use crate::arch::x86_64::context::{self, Context, KernelStack, StackError};
 use crate::arch::x86_64::paging::AddressSpace;
 use crate::arch::x86_64::{
-    apic, disable_interrupts, enable_interrupts, wait_for_interrupt, without_interrupts,
+    apic, disable_interrupts, enable_and_wait_for_interrupt, enable_interrupts, without_interrupts,
 };
 use crate::kprintln;
 use crate::mm::raw::{IrqMutex, irq_locks_held};
@@ -323,9 +323,21 @@ fn queue(task: Arc<Task>) -> Result<TaskId, SchedError> {
 pub fn enable_preemption() -> Result<(), SchedError> {
     let idle = new_task(
         Box::new(|| {
-            // Runs with interrupts enabled; halts until the next interrupt.
+            // Halts until an interrupt, then runs whatever it made ready (a
+            // driver its device woke) without waiting for the next tick.
+            // Checked with interrupts disabled so no wake-up is missed.
             loop {
-                wait_for_interrupt();
+                disable_interrupts();
+                let ready = SCHEDULER
+                    .lock()
+                    .as_ref()
+                    .is_some_and(|s| s.queue.ready_len() > 0);
+                if ready {
+                    enable_interrupts();
+                } else {
+                    enable_and_wait_for_interrupt();
+                }
+                yield_now();
             }
         }),
         None,

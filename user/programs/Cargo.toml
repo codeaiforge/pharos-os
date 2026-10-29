@@ -12,6 +12,7 @@ publish.workspace = true
 # dependencies, maintained in rust-lang/compiler-builtins).
 libm = "0.2.16"
 pharos-fs = { path = "../../crates/pharos-fs" }
+pharos-infer = { path = "../../crates/pharos-infer" }
 pharos-store = { path = "../../crates/pharos-store" }
 pharos-user = { path = "../pharos-user" }
 

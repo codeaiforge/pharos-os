@@ -164,6 +164,66 @@ pub fn ls(image: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Size of the M3.1 target model, Qwen2.5-0.5B-Instruct q8_0
+/// (inference-evaluation.md).
+pub const MODEL_LEN: usize = 675_710_816;
+
+/// A GGUF file of at least [`MODEL_LEN`] bytes: one Q8_0 tensor of
+/// pseudo-random bytes (not zeros, which fresh memory already holds).
+pub fn synthetic_gguf() -> Vec<u8> {
+    fn string(out: &mut Vec<u8>, s: &[u8]) {
+        out.extend((s.len() as u64).to_le_bytes());
+        out.extend(s);
+    }
+    let blocks = MODEL_LEN.div_ceil(34) as u64;
+    let mut out = b"GGUF".to_vec();
+    out.extend(3u32.to_le_bytes());
+    out.extend(1u64.to_le_bytes()); // tensors
+    out.extend(1u64.to_le_bytes()); // metadata keys
+    string(&mut out, b"general.architecture");
+    out.extend(8u32.to_le_bytes()); // string
+    string(&mut out, b"pharos-test");
+    string(&mut out, b"data");
+    out.extend(1u32.to_le_bytes()); // dimensions
+    out.extend((blocks * 32).to_le_bytes());
+    out.extend(8u32.to_le_bytes()); // Q8_0
+    out.extend(0u64.to_le_bytes()); // offset
+    out.resize(out.len().div_ceil(32) * 32, 0);
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    out.extend((0..blocks * 34 / 8).flat_map(|_| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x.to_le_bytes()
+    }));
+    out.resize(out.len() + (blocks * 34 % 8) as usize, 0x5a);
+    out
+}
+
+/// Writes a store at `path` holding `models/model.gguf` (`model`, or
+/// [`synthetic_gguf`]) and `models/model.sha256`, its raw hash.
+pub fn model(path: &Path, model: Option<&Path>) -> Result<()> {
+    let data = match model {
+        Some(m) => fs::read(m).map_err(|e| format!("cannot read {}: {e}", m.display()))?,
+        None => synthetic_gguf(),
+    };
+    let hash = pharos_store::sha256(&[&data]);
+    let blocks = (data.len() as u64).div_ceil(BLOCK as u64) + 256;
+    let mut store = Store::format(FileDevice::create(path, blocks)?)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    for (name, bytes) in [
+        (&b"models/model.gguf"[..], &data[..]),
+        (b"models/model.sha256", &hash),
+    ] {
+        store
+            .write(name, bytes)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    let source = model.map_or("generated".to_owned(), |m| m.display().to_string());
+    println!("  model store: {} bytes from {source}", data.len());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

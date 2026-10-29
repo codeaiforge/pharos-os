@@ -8,10 +8,17 @@
 //! - 2: namespace 1, read-only: reads what 1 left, every write refused.
 //! - 3: namespace 2: sees nothing of namespace 1.
 //! - 4: badge 0 (handle 2) and an unknown namespace (handle 3): refused.
+//! - 5: namespace 3, read-only, for the `large_file` test kernel (#78):
+//!   reads `model.gguf` (676 MB) into private memory through a 16 MiB
+//!   window, checks it against `model.sha256`, and parses it as GGUF.
 
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+use pharos_infer::gguf::{Gguf, Value};
 use pharos_programs::store_proto::{Request, Status, encode};
 use pharos_store::sha256;
 use pharos_user::rights::{READ, WRITE};
@@ -288,6 +295,93 @@ fn strangers(f: &mut u64) {
     );
 }
 
+/// Reads the whole model file. The window is shared with the service,
+/// which may write it at any time, so Rust code never borrows it as a
+/// slice: each piece is copied into private memory (a heap `Vec`, its own
+/// mapping), which the GGUF reader then borrows.
+fn large(f: &mut u64) {
+    const WINDOW: u64 = 16 << 20;
+    let c = Client::new(SERVICE);
+    let (s, r) = c.call(Request::Stat {
+        path: b"model.gguf",
+    });
+    let len = u64_at(&r, 2);
+    report(
+        f,
+        "stat the model file: at least 675,710,816 bytes",
+        s == Status::Ok && r[1] == 1 && len >= 675_710_816,
+    );
+    let Some(window) = c.attach(WINDOW) else {
+        report(f, "attach a 16 MiB window", false);
+        return;
+    };
+    let (s, r) = c.call(Request::Read {
+        path: b"model.sha256",
+        offset: 0,
+        len: 32,
+        at: 0,
+    });
+    let mut want = [0u8; 32];
+    window.read_bytes(0, &mut want);
+    report(
+        f,
+        "read the expected SHA-256",
+        s == Status::Ok && u64_at(&r, 1) == 32,
+    );
+    let mut file = Vec::new();
+    if file.try_reserve_exact(len as usize).is_err() {
+        report(f, "allocate the file's size in one process", false);
+        return;
+    }
+    file.resize(len as usize, 0u8);
+    report(f, "allocate the file's size in one process", true);
+    let mut done = 0;
+    while done < len {
+        let n = WINDOW.min(len - done);
+        let (s, r) = c.call(Request::Read {
+            path: b"model.gguf",
+            offset: done,
+            len: n,
+            at: 0,
+        });
+        if s != Status::Ok || u64_at(&r, 1) != n {
+            break;
+        }
+        window.read_bytes(0, &mut file[done as usize..(done + n) as usize]);
+        done += n;
+    }
+    report(f, "read the whole file through the window", done == len);
+    report(f, "its SHA-256 matches", sha256(&[&file]) == want);
+    let parsed = Gguf::parse(&file);
+    if let Ok(g) = &parsed {
+        let arch: &[u8] = match g.get(b"general.architecture") {
+            Some(Value::Str(a)) => &a[..a.len().min(32)],
+            _ => b"none",
+        };
+        let mut line: Vec<u8> = b"gguf: architecture ".to_vec();
+        line.extend_from_slice(arch);
+        line.extend_from_slice(b", tensors ");
+        let mut digits = [0u8; 20];
+        let mut i = digits.len();
+        let mut n = g.tensors.len();
+        loop {
+            i -= 1;
+            digits[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+            if n == 0 {
+                break;
+            }
+        }
+        line.extend_from_slice(&digits[i..]);
+        let _ = debug_write(CONSOLE, &line);
+    }
+    report(
+        f,
+        "pharos-infer's GGUF reader parses it",
+        parsed.is_ok_and(|g| !g.tensors.is_empty()),
+    );
+}
+
 fn main(arg: u64) -> u64 {
     let mut f = 0;
     match arg {
@@ -295,6 +389,7 @@ fn main(arg: u64) -> u64 {
         2 => reader(&mut f),
         3 => other(&mut f),
         4 => strangers(&mut f),
+        5 => large(&mut f),
         _ => f = 0xbad,
     }
     f

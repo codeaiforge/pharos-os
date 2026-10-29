@@ -967,6 +967,8 @@ fn boot_headless(
 fn test_qemu_args(name: &str) -> Vec<OsString> {
     match name {
         "vector_state_avx" => vec!["-cpu".into(), "max".into()],
+        // After `qemu_args`' 256M: QEMU takes the last `-m`.
+        LARGE_FILE_TEST => vec!["-m".into(), "2G".into()],
         _ => Vec::new(),
     }
 }
@@ -1137,6 +1139,13 @@ fn runner_timeout(value: Option<&str>) -> Result<Duration> {
     }
 }
 
+/// The test kernel booted with 2 GiB and a store holding a model file
+/// (user-environment.md); `PHAROS_MODEL` names the file to use.
+const LARGE_FILE_TEST: &str = "large_file";
+const MODEL_ENV: &str = "PHAROS_MODEL";
+/// Its time limit at least: about 45 s on the reference host.
+const LARGE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// The test kernel that `runner` first boots [`CRASH_ROUNDS`] times and
 /// kills while it writes the store (storage.md part 8).
 const CRASH_TEST: &str = "store_crash";
@@ -1230,6 +1239,11 @@ fn crash_rounds(iso: &Path, vars: &Path, logs: &Path, extra: &[OsString]) -> Res
 fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     let timeout = runner_timeout(env::var(TEST_TIMEOUT_ENV).ok().as_deref())?;
     let name = test_name(elf);
+    let timeout = if name == LARGE_FILE_TEST {
+        timeout.max(LARGE_FILE_TIMEOUT)
+    } else {
+        timeout
+    };
     let out = paths.runner_dir(&name);
     fs::create_dir_all(&out).map_err(io_err("cannot create", &out))?;
     let modules = test_modules(&build_user_programs(paths)?);
@@ -1243,6 +1257,10 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     }
     // Stopped when dropped, after the boot ends or times out.
     let _echo = echo::EchoServer::start(echo::ADDR)?;
+    if name == LARGE_FILE_TEST {
+        let model = env::var_os(MODEL_ENV).map(PathBuf::from);
+        store_image::model(&out.join(STORE_IMAGE), model.as_deref())?;
+    }
     if name == CRASH_TEST {
         crash_rounds(&iso, &out.join("ovmf-vars.fd"), &logs, &extra)?;
     }
@@ -1431,6 +1449,7 @@ mod tests {
     #[test]
     fn test_kernels_get_their_machine() {
         assert_eq!(test_qemu_args("vector_state_avx"), ["-cpu", "max"]);
+        assert_eq!(test_qemu_args("large_file"), ["-m", "2G"]);
         assert!(test_qemu_args("vector_state").is_empty());
         assert!(test_qemu_args("network").is_empty());
     }

@@ -116,9 +116,9 @@ Design: [networking.md](../architecture/networking.md). The first four rows are 
 | A forged ARP message redirects traffic | **Limit:** ARP is believed, as in any ARP; on slirp the only other host is the gateway |
 | A guest program reaches beyond the host in tests | **Limit:** slirp's NAT is not restricted (`restrict=on` would also block the echo server); nothing in the guest sends anywhere but `10.0.2.2` |
 
-### User environment and storage (M3.0, planned)
+### User environment and storage (M3.0)
 
-Design: [user-environment.md](../architecture/user-environment.md) and [storage.md part 8](../architecture/storage.md#8-the-writable-store-m30), from D-016 and D-017. Every row is **planned** (#74–#78 and the shared-memory issue) and reviewed at the M3.0 gate.
+Design: [user-environment.md](../architecture/user-environment.md) and [storage.md part 8](../architecture/storage.md#8-the-writable-store-m30), from D-016 and D-017. Rows are marked implemented as their issues land (#74–#78, #80); all are reviewed at the M3.0 gate.
 
 | Threat | Planned mitigation |
 | --- | --- |

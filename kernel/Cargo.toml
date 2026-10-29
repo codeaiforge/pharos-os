@@ -190,3 +190,7 @@ harness = false
 [[test]]
 name = "store_crash"
 harness = false
+
+[[test]]
+name = "large_file"
+harness = false

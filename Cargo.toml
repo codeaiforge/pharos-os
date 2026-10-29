@@ -20,3 +20,12 @@ publish = false
 # relax this per crate (not workspace-wide) and follow the `unsafe` policy
 # in AGENTS.md.
 unsafe_code = "forbid"
+
+# `cargo xtask` builds a 676 MB store for the `large_file` test kernel;
+# unoptimized, its SHA-256 and CRC-32 take about a minute.
+[profile.dev.package.xtask]
+opt-level = 3
+[profile.dev.package.pharos-store]
+opt-level = 3
+[profile.dev.package.pharos-fs]
+opt-level = 3

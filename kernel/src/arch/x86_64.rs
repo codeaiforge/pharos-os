@@ -155,6 +155,16 @@ pub fn wait_for_interrupt() {
     unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
 }
 
+/// Enables interrupts and halts until the next one (`sti; hlt`). `sti`
+/// takes effect after the next instruction, so an interrupt pending since
+/// the caller disabled them wakes the `hlt` instead of being taken before
+/// it: a check made with interrupts disabled cannot miss a wake-up.
+pub fn enable_and_wait_for_interrupt() {
+    // SAFETY: as `enable_interrupts` and `wait_for_interrupt`; touches no
+    // memory.
+    unsafe { asm!("sti", "hlt", options(nomem, nostack)) };
+}
+
 /// Reads the time-stamp counter.
 pub fn rdtsc() -> u64 {
     let (lo, hi): (u32, u32);
