@@ -15,6 +15,10 @@ name = "pharos-fs"
 version = "0.2.0"
 
 [[package]]
+name = "pharos-infer"
+version = "0.2.0"
+
+[[package]]
 name = "pharos-kernel"
 version = "0.2.0"
 dependencies = [

@@ -24,6 +24,7 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 | PCI discovery, device capabilities (MMIO, DMA, MSI-X interrupts), user-space virtio-blk driver | Implemented |
 | Service manager (`init`), user-space network service (UDP, ICMP) with badged network capabilities | Implemented |
 | Writable storage, TCP, more drivers | Planned |
+| Native inference engine spike (`crates/pharos-infer`: llama2.c-format models, `no_std`; host only, for the M3.1 evaluation) | Implemented (spike) |
 | Local AI inference and agent platform | Planned |
 
 ## Vision
