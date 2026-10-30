@@ -10,7 +10,7 @@
   - every new `unsafe` block.
 - **Design under review:** [user-environment.md](../architecture/user-environment.md), [storage.md part 8](../architecture/storage.md#8-the-writable-store-m30), D-016, D-017.
 - **Date:** 2026-10-30, issue #79. Reviewer: AI-assisted (Claude Code), with code reading and a test for each claim. Both findings were fixed in the same issue.
-- **Status:** **awaiting maintainer approval** (M3.0 gate, #79).
+- **Status:** **approved** by the maintainer on 2026-10-30 (M3.0 gate, #79).
 
 ## Method
 

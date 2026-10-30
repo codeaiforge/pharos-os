@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.0 — Platform prerequisites for hosting agents.** Everything in Phases 3–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.2 — Model compatibility and local inference.** Everything in Phases 3–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -41,7 +41,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
 | 2 | Core System | Done (v0.2.0) |
-| 3 | AI Agent Platform | **Current** (M3.0; M3.1 done) |
+| 3 | AI Agent Platform | **Current** (M3.2; M3.1 and M3.0 done) |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
 
@@ -291,7 +291,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ## Phase 3 — AI Agent Platform
 
-**Status: Current** (M3.0; M3.1 done).
+**Status: Current** (M3.2; M3.1 and M3.0 done).
 
 Ordering notes:
 
@@ -312,7 +312,7 @@ Ordering notes:
 
 ### M3.0 — Platform prerequisites for hosting agents
 
-**Status: Current.** M3.1 set its targets (listed under Deliverables).
+**Status: Done** — gate passed 2026-10-30: the CI `qemu` job passed on `main` at `e1d9694` ([run 41016521842](https://github.com/codeaiforge/pharos-os/actions/runs/41016521842), #107) with 42 test kernels, among them `vector_state`, `vector_state_avx`, `user_memory`, `timeouts`, `shared_memory`, `store`, `store_crash` (20 QEMU kills while writing, the store consistent after each), and `large_file` (a 676 MB GGUF read into one process under 2 GiB, in 49 s). Letting `mem_share` re-share a received mapping failed CI on a throwaway branch ([run 41016950143](https://github.com/codeaiforge/pharos-os/actions/runs/41016950143), #108): the QEMU job failed at `shared_memory`, while the host tests and the Rust 1.85 job passed. Every CI run on `main` during M3.0 passed. The security review ([review-m3.0-platform.md](../security/review-m3.0-platform.md)) found and fixed two issues: a receiver could mint a shared-memory capability its sharer's `revoke` could not reach, and one storage client could take the service's whole limit. The maintainer approved it on 2026-10-30. Delivered: D-016 (#71), D-017 (#72), the design (#73), vector state (#74), user memory (#75), timeouts (#76), the writable store and storage service (#77), shared memory (#80), large files (#78), and the gate (#79). Carried: the IPC round trip over D-004's budget (#81), and the limits in the [threat model](../security/threat-model.md#open-limits-carried-out-of-phase-2).
 
 - **Where it runs (D-020):** Pharos; host tests for on-disk formats and pure logic.
 - **Objective and scope:** Give Pharos what an inference runtime and an agent runtime need from the OS, without which no later Phase 3 milestone can run on Pharos.
@@ -360,7 +360,7 @@ Ordering notes:
 
 ### M3.2 — Model compatibility and local inference
 
-**Status: Planned.**
+**Status: Current.** M3.0 gives it SIMD, 1 GiB in one process, the model file from the store, and timeouts.
 
 - **Where it runs (D-020):** Engine crate host-tested, fuzzed, and compared with llama.cpp on the host, in parallel with M3.0; done only when the service runs on Pharos.
 - **Objective and scope:** Run inference locally as an unprivileged service (host prototype first, then on Pharos, per D-020).
@@ -666,4 +666,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted. The current milestone is **M3.0 — Platform prerequisites for hosting agents**, with targets set by M3.1; it starts with D-016 (user execution environment) and D-017 (writable storage). D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, and M3.0 (platform prerequisites) on 2026-10-30. The current milestone is **M3.2 — Model compatibility and local inference**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
