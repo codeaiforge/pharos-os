@@ -147,7 +147,7 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 17 | `irq_notify` (M2.10) | interrupt handle, endpoint, bit (0–31) | 0 (after this, `irq_wait` returns `IN_USE`) | interrupt, `WAIT`; endpoint, `RECEIVE` |
 | 19 | `mem_map` (M3.0) | length in bytes (> 0, rounded up to pages) | start address in the map region | none (the caller's page limit; [user-environment.md](user-environment.md#user-memory)) |
 | 20 | `mem_unmap` (M3.0) | start address, length (one whole earlier mapping) | 0 | none (the caller's own mapping) |
-| 22 | `mem_share` (M3.0) | start address, length (one whole `mem_map` mapping) | a new `Memory` handle (`READ`, `GRANT`, and `WRITE` if the mapping is writable) | none (the caller's own mapping) |
+| 22 | `mem_share` (M3.0) | start address, length (one whole `mem_map` mapping) | a new `Memory` handle (`READ`, `WRITE`, and `GRANT`); a mapping from `mem_map_cap` is refused (`BAD_ADDRESS`) | none (the caller's own mapping) |
 | 23 | `mem_map_cap` (M3.0) | `Memory` handle, writable (0 or 1), length (the object's size) | start address in the map region | memory, `READ`; `WRITE` when writable |
 | 21 | `sleep` (M3.0) | microseconds (0 returns at once, `u64::MAX` sleeps forever) | 0 | none |
 

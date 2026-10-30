@@ -119,8 +119,9 @@ fn run(t: &mut TestRun) {
         Capability::new(Object::Endpoint(endpoint.clone()), RECEIVE),
         Capability::new(Object::Endpoint(report.clone()), SEND),
     ];
-    // 32 MiB: the 17 MiB buffer a client attaches, and the store's heap.
-    let service = process::spawn_elf_limited(&programs, b"bin/store", 0, caps, 8192);
+    // 64 MiB: room for the 17 MiB buffer a client attaches, the store's
+    // heap, and a buffer over the 32 MiB maximum if the service took one.
+    let service = process::spawn_elf_limited(&programs, b"bin/store", 0, caps, 16384);
     t.check("the storage service started", service.is_ok());
     let ready = ipc::poll(&report, Duration::from_secs(10));
     t.check(
@@ -132,7 +133,8 @@ fn run(t: &mut TestRun) {
     }
     let root = Capability::new(Object::Endpoint(endpoint), SEND);
 
-    let writer = client(&programs, &root, 1, 5000, &[1]);
+    // The 64 KiB, 17 MiB, and refused 32 MiB + 4 KiB buffers, and the heap.
+    let writer = client(&programs, &root, 1, 14_000, &[1]);
     passed(
         t,
         &writer,
@@ -150,6 +152,7 @@ fn run(t: &mut TestRun) {
             "a range outside the buffer: NO_BUFFER",
             "a file as a stream: BAD_REQUEST",
             "attach a 17 MiB buffer",
+            "a buffer over 32 MiB is refused; the 17 MiB one stays",
             "a write larger than the store: NO_SPACE, nothing written",
         ],
     );

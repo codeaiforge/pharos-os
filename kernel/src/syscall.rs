@@ -646,8 +646,8 @@ mod kernel {
 
     /// `mem_share`: turns one whole `mem_map` mapping into a `Memory`
     /// object (or returns another capability on it, if already shared) and
-    /// a capability with `READ`, `GRANT`, and `WRITE` if the mapping is
-    /// writable.
+    /// a capability with `READ`, `WRITE`, and `GRANT`. A mapping from
+    /// `mem_map_cap` is refused (`BAD_ADDRESS`): it is not the caller's.
     fn mem_share(process: &process::Process, addr: u64, pages: u64) -> Result<u64, Error> {
         use alloc::vec::Vec;
         if !process.memory.lock().contains(addr, pages) {
@@ -661,9 +661,10 @@ mod kernel {
             .lock()
             .iter()
             .find(|s| s.start == addr)
-            .map(|s| (s.memory.clone(), s.writable));
-        let (memory, writable) = match existing {
-            Some(found) => found,
+            .map(|s| (s.memory.clone(), s.own));
+        let memory = match existing {
+            Some((memory, true)) => memory,
+            Some((_, false)) => return Err(Error::BadAddress),
             None => {
                 let mut frames = Vec::new();
                 frames
@@ -680,12 +681,12 @@ mod kernel {
                 process.shared.lock().push(process::SharedMapping {
                     start: addr,
                     memory: memory.clone(),
-                    writable: true,
+                    own: true,
                 });
-                (memory, true)
+                memory
             }
         };
-        let rights = cap::READ | cap::GRANT | if writable { cap::WRITE } else { 0 };
+        let rights = cap::READ | cap::WRITE | cap::GRANT;
         let cap = cap::Capability::new(Object::Memory(memory), rights);
         Ok(process.caps.lock().insert(cap)?)
     }
@@ -740,7 +741,7 @@ mod kernel {
         process.shared.lock().push(process::SharedMapping {
             start,
             memory,
-            writable,
+            own: false,
         });
         Ok(start)
     }

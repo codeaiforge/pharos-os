@@ -19,7 +19,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use pharos_infer::gguf::{Gguf, Value};
-use pharos_programs::store_proto::{Request, Status, encode};
+use pharos_programs::store_proto::{MAX_BUFFER, Request, Status, encode};
 use pharos_store::sha256;
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
@@ -226,6 +226,13 @@ fn writer(f: &mut u64) {
     // A bigger buffer replaces the first; the write cannot fit.
     let big = c.attach(HUGE);
     report(f, "attach a 17 MiB buffer", big.is_some());
+    let refused = c.attach(MAX_BUFFER + 4096).is_none();
+    let (_, r) = c.call(Request::Buffer);
+    report(
+        f,
+        "a buffer over 32 MiB is refused; the 17 MiB one stays",
+        refused && u64_at(&r, 1) == HUGE,
+    );
     report(
         f,
         "a write larger than the store: NO_SPACE, nothing written",

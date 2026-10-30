@@ -81,11 +81,12 @@ fn passed(t: &mut TestRun, lines: &[Vec<u8>], steps: &[&str]) {
     );
 }
 
-const B_STEPS: [&str; 6] = [
+const B_STEPS: [&str; 7] = [
     "B: map the writable grant",
     "B: sees A's write",
     "B: a read-only grant cannot be mapped writable",
     "B: a wrong length is refused",
+    "B: a received mapping cannot be shared again",
     "B: map the read-only grant",
     "B: the receiver's limit applies",
 ];

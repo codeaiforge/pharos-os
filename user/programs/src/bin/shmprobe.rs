@@ -114,6 +114,11 @@ fn receiver(ends_first: bool) -> u64 {
         "B: a wrong length is refused",
         mem_map_cap(ro, false, 4096).err() == Some(Error::TooLarge),
     );
+    report(
+        &mut f,
+        "B: a received mapping cannot be shared again",
+        mem_share(m1.addr(), LEN).err() == Some(Error::BadAddress),
+    );
     let m2 = mem_map_cap(ro, false, LEN);
     report(
         &mut f,

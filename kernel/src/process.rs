@@ -102,11 +102,15 @@ pub fn shared_free_errors() -> usize {
     SHARED_FREE_ERRORS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// A shared mapping in a process: where, of what, and whether writable.
+/// A shared mapping in a process: where, of what, and whose.
 pub struct SharedMapping {
     pub start: u64,
     pub memory: Arc<SharedMemory>,
-    pub writable: bool,
+    /// True for the sharer's own `mem_map` memory, false for a mapping
+    /// from `mem_map_cap`. Only the sharer's can be shared again: a
+    /// receiver doing so would get a capability outside the sharer's
+    /// derivation tree, which its `revoke` could not reach.
+    pub own: bool,
 }
 
 /// A process's `mem_map` mappings and its page limit (user-environment.md).

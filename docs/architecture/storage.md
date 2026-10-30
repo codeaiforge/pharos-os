@@ -236,7 +236,7 @@ All integers are little-endian. Blocks are 4 KiB (8 virtio-blk sectors).
   | 4 `append` | stream path, record (1–200 bytes, inline; larger records later, when a client needs them) | status, record number (u64), chain head (32 bytes) |
   | 5 `list` | path prefix (may be empty), start index (u32) | status, count (u8), more (u8), then each name as a length byte and bytes |
   | 6 `delete` | path | status |
-  | 7 `attach` (a `send`) | buffer size (u64), with the `Memory` capability (`READ` and `WRITE`) | none |
+  | 7 `attach` (a `send`) | buffer size (u64, at most 32 MiB: `MAX_BUFFER`, so 16 clients fit in the service's limit; larger ones are dropped and the earlier buffer stays; M3.0 review), with the `Memory` capability (`READ` and `WRITE`) | none |
   | 8 `buffer` | — | status, attached buffer size (u64; 0 if none) |
 
   Status codes: 0 OK, 1 BAD_REQUEST, 2 NOT_FOUND, 3 NO_SPACE, 4 READ_ONLY, 5 NO_ACCESS, 6 IO_ERROR, 7 CORRUPT, 8 NO_BUFFER.

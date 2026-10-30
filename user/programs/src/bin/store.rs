@@ -17,7 +17,9 @@
 #![no_std]
 #![no_main]
 
-use pharos_programs::store_proto::{MAX_CLIENT_PATH, Request, Status, full_path, namespace, parse};
+use pharos_programs::store_proto::{
+    MAX_BUFFER, MAX_CLIENT_PATH, Request, Status, full_path, namespace, parse,
+};
 use pharos_programs::virtio::{Blk, SECTOR};
 use pharos_store::{BLOCK, Block, Device, Error, IoError, Kind, Store};
 use pharos_user::{
@@ -121,8 +123,8 @@ impl Service {
     /// one) and drops the capability; the mapping keeps it alive.
     fn attach(&mut self, badge: u32, memory: Handle, len: u64) {
         let mapped = match namespace(badge) {
-            Some(_) => mem_map_cap(memory, true, len).ok(),
-            None => None,
+            Some(_) if len <= MAX_BUFFER => mem_map_cap(memory, true, len).ok(),
+            _ => None,
         };
         let _ = delete(memory);
         let Some(buffer) = mapped else {

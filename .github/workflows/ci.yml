@@ -108,7 +108,8 @@ jobs:
     # Pinned image: OVMF file names and QEMU behaviour come from the distro
     # packages that cargo xtask expects (Ubuntu 24.04, as on the dev host).
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # store_crash (20 boots) and large_file (2 GiB, 676 MB) add minutes.
+    timeout-minutes: 40
     steps:
       # Pinned to a commit SHA (signed v5.1.0 release commit) instead of a
       # movable tag. Update the SHA and the version comment together.

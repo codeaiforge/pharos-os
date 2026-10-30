@@ -84,7 +84,7 @@ const NET: Service = Service {
     limit: 0,
 };
 
-/// 1 GiB: model files are read through shared buffers (#78).
+/// 1 GiB: up to 16 clients' buffers of at most 32 MiB each, and the heap.
 const STORE_LIMIT: u32 = 1 << 18;
 
 const BOOT: &[Service] = &[

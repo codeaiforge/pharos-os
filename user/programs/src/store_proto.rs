@@ -18,7 +18,8 @@ pub mod op {
     pub const LIST: u8 = 5;
     pub const DELETE: u8 = 6;
     /// `send` with a `Memory` capability (`READ | WRITE`) and its size:
-    /// the buffer.
+    /// the buffer, at most [`super::MAX_BUFFER`] bytes (larger ones are
+    /// dropped and the earlier buffer stays).
     pub const ATTACH: u8 = 7;
     /// Reports the attached buffer's size (0: none).
     pub const BUFFER: u8 = 8;
@@ -60,6 +61,9 @@ impl Status {
 pub const MAX_INLINE: usize = 200;
 /// Largest path a client names (its namespace prefix is added).
 pub const MAX_CLIENT_PATH: usize = 80;
+/// Largest buffer a client may attach (bytes): 16 clients fit in the
+/// service's limit, so one client cannot take it all.
+pub const MAX_BUFFER: u64 = 32 << 20;
 /// Badge bit: the client may only read.
 pub const READ_ONLY: u32 = 1 << 16;
 
