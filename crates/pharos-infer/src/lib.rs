@@ -30,12 +30,31 @@ pub mod bpe;
 pub mod gguf;
 pub mod quant;
 pub mod qwen2;
+pub mod session;
 pub mod synth;
 pub mod unicode;
 
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+
+/// This crate's version (major, minor, patch), for result records.
+pub const VERSION: [u8; 3] = [
+    decimal(env!("CARGO_PKG_VERSION_MAJOR")),
+    decimal(env!("CARGO_PKG_VERSION_MINOR")),
+    decimal(env!("CARGO_PKG_VERSION_PATCH")),
+];
+
+const fn decimal(s: &str) -> u8 {
+    let b = s.as_bytes();
+    let mut v = 0u8;
+    let mut i = 0;
+    while i < b.len() {
+        v = v * 10 + (b[i] - b'0');
+        i += 1;
+    }
+    v
+}
 
 /// Floating-point functions the engine needs and `core` lacks.
 pub trait Math {

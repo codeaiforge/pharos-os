@@ -144,7 +144,7 @@ fn run(t: &mut TestRun) {
 
     let got = timed(&programs, 3, vec![]);
     t.check(
-        "sleep for 100 ms lasts within its deadline plus two ticks",
+        "sleep for 100 ms lasts within its deadline plus two ticks; uptime advances by 100 ms",
         got.is_some_and(|(code, d)| code == 0 && within(d, Duration::from_millis(100))),
     );
 

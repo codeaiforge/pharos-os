@@ -37,6 +37,7 @@ pub mod number {
     pub const SLEEP: u64 = 21;
     pub const MEM_SHARE: u64 = 22;
     pub const MEM_MAP_CAP: u64 = 23;
+    pub const UPTIME: u64 = 24;
 }
 
 /// Largest buffer `debug_write` accepts (and the IPC message size).
@@ -207,6 +208,7 @@ pub enum Call {
     Sleep {
         micros: u64,
     },
+    Uptime,
     MemMap {
         pages: u64,
     },
@@ -356,6 +358,7 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             timeout: args[1],
         }),
         number::SLEEP => Ok(Call::Sleep { micros: args[0] }),
+        number::UPTIME => Ok(Call::Uptime),
         number::ENDPOINT_CREATE => Ok(Call::EndpointCreate),
         number::SPAWN => {
             // Capabilities in bits 0-31, the child's page limit in 32-63.
@@ -1038,6 +1041,9 @@ mod kernel {
                 }
                 Ok(0)
             }
+            // Microseconds since boot, for timing work (D-021). Needs no
+            // capability: timeouts already let a program measure time.
+            Call::Uptime => Ok(crate::time::uptime().as_micros() as u64),
             Call::EndpointCreate => {
                 let endpoint = Object::Endpoint(ipc::Endpoint::new());
                 let rights = cap::SEND | cap::RECEIVE | cap::GRANT;
@@ -1144,7 +1150,7 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(24, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(25, [0; 6]), Err(Error::UnknownCall));
         let region = crate::process::MAP_REGION;
         assert_eq!(
             decode(22, [region.start, 8192, 9, 9, 9, 9]),
@@ -1276,6 +1282,7 @@ mod tests {
             decode(21, [0, 9, 9, 9, 9, 9]),
             Ok(Call::Sleep { micros: 0 })
         );
+        assert_eq!(decode(24, [9; 6]), Ok(Call::Uptime));
         let config = |offset, width| decode(9, [1, offset, width, 0, 0, 0]);
         assert_eq!(
             config(0x10, 4),
@@ -1475,7 +1482,7 @@ mod tests {
                     assert!(len <= MAX_MESSAGE && max <= MAX_MESSAGE);
                     assert!(user_range_ok(addr, len as u64) && user_range_ok(addr, max as u64));
                 }
-                Ok(_) => assert!(matches!(number, 0 | 1 | 5 | 6 | 13 | 14 | 16 | 21)),
+                Ok(_) => assert!(matches!(number, 0 | 1 | 5 | 6 | 13 | 14 | 16 | 21 | 24)),
                 Err(error) => assert!(error as u64 >= 1 && error as u64 <= 12),
             }
         }

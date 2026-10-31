@@ -567,7 +567,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 17] = [
+const USER_PROGRAMS: [&str; 19] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -585,6 +585,8 @@ const USER_PROGRAMS: [&str; 17] = [
     "shmprobe",
     "store",
     "storeclient",
+    "infer",
+    "inferclient",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -1170,6 +1172,9 @@ const LARGE_FILE_TEST: &str = "large_file";
 /// The test kernel booted with a store holding a tiny model and the host's
 /// output for it (#87).
 const INFERENCE_TEST: &str = "inference_tiny";
+/// The test kernel booted with a store holding the service's test model
+/// and the host's text for the test prompt (#88).
+const SERVICE_TEST: &str = "inference";
 const MODEL_ENV: &str = "PHAROS_MODEL";
 /// Its time limit at least: about 45 s on the reference host.
 const LARGE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -1291,6 +1296,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     }
     if name == INFERENCE_TEST {
         store_image::tiny(&out.join(STORE_IMAGE))?;
+    }
+    if name == SERVICE_TEST {
+        store_image::service(&out.join(STORE_IMAGE))?;
     }
     if name == CRASH_TEST {
         crash_rounds(&iso, &out.join("ovmf-vars.fd"), &logs, &extra)?;

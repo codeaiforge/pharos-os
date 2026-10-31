@@ -3,6 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-31 (issue #83). It follows [D-010](../project/decision-log.md#d-010-ai-inference-runtime-model-formats-and-licensing), [D-011](../project/decision-log.md#d-011-cpugpu-support-and-memoryvram-constraints), and [D-019](../project/decision-log.md#d-019-service-interfaces-and-versioning), and builds on M3.0 ([user-environment.md](user-environment.md), [storage.md part 8](storage.md#8-the-writable-store-m30)).
+- **Implementation (#88):** **implemented**: the service (`user/programs/src/bin/infer.rs`), the manifest (`pharos_programs::models`), the interface (`pharos_proto::infer`), generation sessions (`pharos_infer::session`), the test model (`pharos_infer::synth::test_model`), `init` starting the service at boot, and the `inference` test kernel. Where it differs from the text below, it says so. The failure tests are #89.
 - **Implementation:** the tokenizer is **implemented** (#84: `crates/pharos-infer/src/bpe.rs` and the generated `unicode.rs`; identical to `llama-tokenize` on 40 of 40 cases, [inference-evaluation.md](../project/inference-evaluation.md)). The interface crate `pharos-proto` exists (#92). **Planned:** the rest of M3.2 (#85–#91).
 
 ## 2. Context
@@ -102,6 +103,14 @@ Every request starts with version 1 and an operation (D-019). Every reply starts
 | `NEXT` | session | Up to 16 new tokens' text (at most 240 bytes), and whether generation ended and why: end-of-text token, token limit, or context limit | 30 s |
 | `CANCEL` | session | — (the session ends) | 1 s |
 | `RESULT` | session (after it ended) | The record: model number and SHA-256, engine version, settings, prompt and generated token counts, stop reason, prompt and generation times | 1 s |
+
+*Implemented with these details:*
+- **Times** come from system call 24 `uptime` (D-021, added for this), in microseconds.
+- **Stop reasons** are end-of-text, token limit, and cancelled. The "context limit" reason never occurs, because a request whose prompt plus tokens exceeds the context is refused with `CONTEXT`.
+- **`RESULT` on a running session** answers `BUSY`; on another client's session, `NO_SESSION`.
+- **Limits:** `GENERATE` over 2,048 tokens or a 64 KiB prompt gets `TOO_LARGE`, and zero tokens or an empty prompt `BAD_REQUEST`. The attached buffer is at most 64 KiB and mapped read-only.
+- **Model loading** reads a 16 MiB window, as #78 does. `MODEL_INVALID` steps are read, size, hash, format, and configuration. A file is checked against the manifest's size before anything is allocated.
+- **The test model** (model 2) has a 64-token context, the 256 byte tokens, three merges, and `<|endoftext|>`, so it takes text prompts. A host test pins its SHA-256.
 
 - **Prompts** arrive through the attached buffer and are copied into private memory before tokenizing, as #78 does for file data. Outputs fit in messages.
 - **Settings:** greedy decoding only, so a result can be replayed exactly (D-010 item 5). Sampling settings would get a new operation, not a new meaning for these bytes.

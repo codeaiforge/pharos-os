@@ -150,6 +150,7 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 22 | `mem_share` (M3.0) | start address, length (one whole `mem_map` mapping) | a new `Memory` handle (`READ`, `WRITE`, and `GRANT`); a mapping from `mem_map_cap` is refused (`BAD_ADDRESS`) | none (the caller's own mapping) |
 | 23 | `mem_map_cap` (M3.0) | `Memory` handle, writable (0 or 1), length (the object's size) | start address in the map region | memory, `READ`; `WRITE` when writable |
 | 21 | `sleep` (M3.0) | microseconds (0 returns at once, `u64::MAX` sleeps forever) | 0 | none |
+| 24 | `uptime` (M3.2, D-021) | — | microseconds since boot | none |
 
 Error codes (`rax`):
 

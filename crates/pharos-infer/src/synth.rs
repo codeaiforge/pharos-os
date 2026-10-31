@@ -152,7 +152,27 @@ pub const TINY: Qwen2Config = Qwen2Config {
 /// A tiny Qwen2 GGUF. `expand_kv` writes each K/V head once per query head
 /// (n_kv_heads = n_heads) with the same values; `tied` omits output.weight.
 pub fn tiny_model(seed: u64, expand_kv: bool, tied: bool) -> Vec<u8> {
-    let c = TINY;
+    let toks: Vec<String> = (0..TINY.vocab_size).map(|i| format!("t{i}")).collect();
+    let toks: Vec<&str> = toks.iter().map(String::as_str).collect();
+    qwen2_file(
+        &TINY,
+        seed,
+        expand_kv,
+        tied,
+        vec![("tokenizer.ggml.tokens", Meta::Strings(toks))],
+    )
+}
+
+/// A Qwen2 GGUF with dimensions `c`, random weights from `seed`, and the
+/// extra metadata `tokenizer` (at least `tokenizer.ggml.tokens`).
+fn qwen2_file(
+    c: &Qwen2Config,
+    seed: u64,
+    expand_kv: bool,
+    tied: bool,
+    tokenizer: Vec<(&str, Meta<'_>)>,
+) -> Vec<u8> {
+    let c = *c;
     let mut r = Rng(seed);
     let (d, h, hs) = (c.dim, c.hidden_dim, c.dim / c.n_heads);
     let kv_heads = if expand_kv { c.n_heads } else { c.n_kv_heads };
@@ -195,29 +215,68 @@ pub fn tiny_model(seed: u64, expand_kv: bool, tied: bool) -> Vec<u8> {
             q8_tensor(&p("ffn_down.weight"), h, &r.vec(d * h)),
         ]);
     }
-    let toks: Vec<String> = (0..c.vocab_size).map(|i| format!("t{i}")).collect();
-    gguf_file(
-        &[
-            ("general.architecture", Meta::Str("qwen2")),
-            ("qwen2.embedding_length", Meta::U32(d as u32)),
-            ("qwen2.feed_forward_length", Meta::U32(h as u32)),
-            ("qwen2.block_count", Meta::U32(c.n_layers as u32)),
-            ("qwen2.attention.head_count", Meta::U32(c.n_heads as u32)),
-            ("qwen2.attention.head_count_kv", Meta::U32(kv_heads as u32)),
-            ("qwen2.context_length", Meta::U32(c.context as u32)),
-            ("qwen2.rope.freq_base", Meta::F32(c.rope_base)),
-            (
-                "qwen2.attention.layer_norm_rms_epsilon",
-                Meta::F32(c.rms_eps),
-            ),
-            (
-                "tokenizer.ggml.tokens",
-                Meta::Strings(toks.iter().map(String::as_str).collect()),
-            ),
-        ],
-        &tensors,
-    )
+    let mut meta = vec![
+        ("general.architecture", Meta::Str("qwen2")),
+        ("qwen2.embedding_length", Meta::U32(d as u32)),
+        ("qwen2.feed_forward_length", Meta::U32(h as u32)),
+        ("qwen2.block_count", Meta::U32(c.n_layers as u32)),
+        ("qwen2.attention.head_count", Meta::U32(c.n_heads as u32)),
+        ("qwen2.attention.head_count_kv", Meta::U32(kv_heads as u32)),
+        ("qwen2.context_length", Meta::U32(c.context as u32)),
+        ("qwen2.rope.freq_base", Meta::F32(c.rope_base)),
+        (
+            "qwen2.attention.layer_norm_rms_epsilon",
+            Meta::F32(c.rms_eps),
+        ),
+    ];
+    meta.extend(tokenizer);
+    gguf_file(&meta, &tensors)
 }
+
+/// The test model's dimensions: [`TINY`]'s, with a byte-level vocabulary
+/// and a 64-token context.
+pub const TEST: Qwen2Config = Qwen2Config {
+    vocab_size: 256 + TEST_TOKENS.len(),
+    context: 64,
+    ..TINY
+};
+
+/// The test model's tokens after the 256 byte tokens; the last is its
+/// end-of-text token.
+const TEST_TOKENS: [&str; 4] = ["he", "ll", "hell", "<|endoftext|>"];
+
+/// The inference service's test model (manifest model 2, #88): [`TEST`]'s
+/// dimensions and a working GPT-2 byte-level tokenizer (the 256 byte
+/// tokens, three merges, and `<|endoftext|>` as a control token and the
+/// end-of-text token), so it takes text prompts.
+pub fn test_model() -> Vec<u8> {
+    let mut tokens: Vec<String> = (0..=255u8)
+        .map(|b| {
+            let mut buf = [0u8; 4];
+            String::from_utf8_lossy(crate::bpe::byte_char(b, &mut buf)).into_owned()
+        })
+        .collect();
+    tokens.extend(TEST_TOKENS.iter().map(|t| String::from(*t)));
+    let mut types = vec![1i32; tokens.len()];
+    let eos = tokens.len() - 1;
+    types[eos] = 3;
+    let meta = vec![
+        (
+            "tokenizer.ggml.tokens",
+            Meta::Strings(tokens.iter().map(String::as_str).collect()),
+        ),
+        ("tokenizer.ggml.token_type", Meta::I32s(types)),
+        (
+            "tokenizer.ggml.merges",
+            Meta::Strings(vec!["h e", "l l", "he ll"]),
+        ),
+        ("tokenizer.ggml.eos_token_id", Meta::U32(eos as u32)),
+    ];
+    qwen2_file(&TEST, TEST_SEED, false, false, meta)
+}
+
+/// The test model's seed.
+pub const TEST_SEED: u64 = 7;
 
 /// The seed of the tiny model `cargo xtask` stores: its greedy output
 /// varies (6 distinct tokens), so a wrong token shows.

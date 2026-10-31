@@ -443,3 +443,74 @@ fn byte_level_decoding() {
     }
     assert!(seen.iter().all(|s| *s));
 }
+
+#[test]
+fn test_model_tokenizes_and_generates_like_the_model_step_by_step() {
+    use crate::session::{Engine, Session, Stop};
+    use crate::synth::{TEST, test_model};
+    let file = test_model();
+    let g = Gguf::parse(&file).unwrap();
+    let e = Engine::load(&g).unwrap();
+    assert_eq!(e.model.config, TEST);
+    let prompt = e.tokenizer.encode("hello hello");
+    // Byte b is token b; "hello" merges to "hell" (258) and "o", and
+    // " hello" keeps its space byte (32) apart, as no merge joins it.
+    assert_eq!(prompt, [258, 111, 32, 258, 111]);
+    let mut s = Session::new(&e, &prompt, 20, &Std).unwrap();
+    let mut text = Vec::new();
+    let mut steps = 0;
+    while s.step(&mut text, &Std) {
+        steps += 1;
+    }
+    std::println!(
+        "{:?} {:?}",
+        s.stop(),
+        std::string::String::from_utf8_lossy(&text)
+    );
+    // The same tokens one by one, without the session.
+    let mut st = Qwen2State::new(&e.model.config, prompt.len() + 20);
+    let mut logits = Vec::new();
+    for (pos, &t) in prompt.iter().enumerate() {
+        logits = e.model.forward(&mut st, t as usize, pos, &Std).to_vec();
+    }
+    let mut want = 0;
+    for pos in prompt.len()..prompt.len() + 20 {
+        let next = crate::argmax(&logits);
+        if next == TEST.vocab_size - 1 {
+            break;
+        }
+        want += 1;
+        logits = e.model.forward(&mut st, next, pos, &Std).to_vec();
+    }
+    assert_eq!(s.generated(), want);
+    assert_eq!(steps + 1, want.max(1));
+    assert_eq!(
+        s.stop(),
+        Some(if want == 20 {
+            Stop::TokenLimit
+        } else {
+            Stop::EndOfText
+        })
+    );
+    assert!(!s.step(&mut text, &Std), "ended stays ended");
+    // Generation stops before an end-of-text token, which adds no text.
+    let mut e = e;
+    e.stop = vec![usize::from(text[0]), usize::from(text[1])];
+    let mut s = Session::new(&e, &prompt, 20, &Std).unwrap();
+    let mut none = Vec::new();
+    assert!(!s.step(&mut none, &Std));
+    assert_eq!(
+        (s.stop(), s.generated(), none.len()),
+        (Some(Stop::EndOfText), 0, 0)
+    );
+    assert!(Session::new(&e, &[], 5, &Std).is_err(), "empty prompt");
+    assert!(Session::new(&e, &prompt, 0, &Std).is_err(), "no tokens");
+    assert!(
+        Session::new(&e, &prompt, TEST.context - prompt.len() + 1, &Std).is_err(),
+        "context"
+    );
+    assert!(
+        Session::new(&e, &[TEST.vocab_size as u32], 5, &Std).is_err(),
+        "vocabulary"
+    );
+}

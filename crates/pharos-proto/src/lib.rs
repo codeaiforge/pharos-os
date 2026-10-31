@@ -1,7 +1,7 @@
 //! Service interfaces (D-019): every request starts with the interface
 //! version and an operation, every reply with a status. Status codes 0–31
 //! and operations 0xF0 and up mean the same in every interface; each
-//! interface module ([`store`], [`net`]) defines the rest, with `parse` and
+//! interface module ([`store`], [`net`], [`infer`]) defines the rest, with `parse` and
 //! `encode` shared by the service and its clients.
 //!
 //! Parsers take untrusted bytes: they check every length, refuse trailing
@@ -13,6 +13,7 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod infer;
 pub mod net;
 pub mod store;
 

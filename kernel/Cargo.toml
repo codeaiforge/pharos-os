@@ -198,3 +198,7 @@ harness = false
 [[test]]
 name = "inference_tiny"
 harness = false
+
+[[test]]
+name = "inference"
+harness = false

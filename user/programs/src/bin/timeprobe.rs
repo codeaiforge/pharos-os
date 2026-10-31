@@ -7,7 +7,8 @@
 //!   timeout 0, then 200 ms: both `TIMED_OUT`. Exits 0 if so.
 //! - 2: handle 1 an endpoint (`SEND`) nobody receives on, handle 2 a reply
 //!   endpoint. `call` with a 100 ms timeout: `TIMED_OUT`. Exits 0 if so.
-//! - 3: `sleep(0)`, then `sleep` for 100 ms. Exits 0.
+//! - 3: `sleep(0)`, then `sleep` for 100 ms. Exits 0 if `uptime` (#88)
+//!   advanced by at least 100 ms across it.
 //! - 4: the client of a race: handles 1 the server's endpoint (`SEND`), 2 a
 //!   reply endpoint. For k = 1..=[`ROUNDS`], calls with request `k` and a
 //!   40 ms timeout, then sleeps 200 ms. Exits with bit k set for each reply.
@@ -20,7 +21,9 @@
 #![no_std]
 #![no_main]
 
-use pharos_user::{Error, Received, call_timeout, delete, receive, receive_timeout, send, sleep};
+use pharos_user::{
+    Error, Received, call_timeout, delete, receive, receive_timeout, send, sleep, uptime,
+};
 
 pharos_user::entry!(main);
 
@@ -73,8 +76,9 @@ fn main(arg: u64) -> u64 {
         2 => call_timeout(1, b"x", 2, &mut buf, 100_000) == Err(Error::TimedOut),
         3 => {
             sleep(0);
+            let start = uptime();
             sleep(100_000);
-            true
+            start > 0 && uptime() - start >= 100_000
         }
         4 => return client(),
         5 => return server(),

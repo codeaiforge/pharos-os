@@ -78,7 +78,7 @@ fn is_other(c: char) -> bool {
 
 /// The GPT-2 byte-level character for byte `b`, UTF-8 encoded into `out`
 /// (inverse of `qwen2::decode_byte_level`).
-fn byte_char(b: u8, out: &mut [u8; 4]) -> &[u8] {
+pub(crate) fn byte_char(b: u8, out: &mut [u8; 4]) -> &[u8] {
     let printable = matches!(b, 0x21..=0x7e | 0xa1..=0xac | 0xae..=0xff);
     let c = if printable {
         u32::from(b)

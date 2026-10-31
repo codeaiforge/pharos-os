@@ -708,6 +708,20 @@ Two system calls per direction plus two task switches and two address-space swit
    - Pulling also gives back-pressure: the server produces only what the client asks for.
 7. **Existing services move to `pharos-proto` in M3.2 (#92):** the network service's codec is extracted, shared with its client, and fuzzed, and `store_proto` moves into the crate. Both adopt the common header and status codes (a new version 1 of each interface). `init`, the test programs, and the docs change with them.
 
+### D-021: A clock for user programs
+
+- **Status:** Accepted
+- **Needed by:** M3.2 (the inference service's result record), M3.4 (audit times)
+- **Date accepted:** 2026-10-31 (issue #88, the maintainer's choice)
+
+**Context.** The inference design (#83) puts prompt and generation times in every `RESULT` record. User programs had no way to read a clock: they could only wait (timeouts and `sleep`, #76).
+
+**Options considered.** A system call returning the time since boot; leaving times out of the record and measuring from outside (the test kernel or `cargo xtask` watching the serial log); or reading the CPU's time-stamp counter in `pharos-user`'s `unsafe` module, which gives ticks of a frequency user space does not know.
+
+**Decision.** System call 24 `uptime`: no arguments, returns microseconds since boot from the kernel's calibrated clock (`time::uptime`). It needs no capability. It adds no authority: timeouts already let any program measure time to the 10 ms tick, and a finer clock does not reach anything a program could not reach before. Wall-clock time (a date) is not part of it; there is no real-time clock driver yet.
+
+**Consequences.** `pharos_user::uptime`. A finer clock makes timing side channels easier to measure; Pharos runs one CPU and does not claim protection from them (threat model). Revisit if it does.
+
 ## Open and proposed decisions
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.

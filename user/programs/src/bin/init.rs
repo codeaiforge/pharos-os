@@ -55,6 +55,11 @@ enum Cap {
     /// A network capability: `SEND` on the service endpoint, badged with
     /// this UDP port (0: an unbadged capability, which the service refuses).
     Network(u16),
+    /// A storage capability: `SEND` on the storage service, badged with a
+    /// namespace and the read-only bit (`pharos_proto::store`).
+    Storage(u32),
+    /// The inference service's endpoint, to receive on (the service).
+    InferService,
 }
 
 struct Service {
@@ -86,6 +91,10 @@ const NET: Service = Service {
 
 /// 1 GiB: up to 16 clients' buffers of at most 32 MiB each, and the heap.
 const STORE_LIMIT: u32 = 1 << 18;
+/// 1 GiB (D-011): one S1 model, its 16 MiB read window, cache, and heap.
+const INFER_LIMIT: u32 = 1 << 18;
+/// Namespace 3, `models`, read-only (`pharos_proto::store`).
+const MODELS_READ_ONLY: u32 = 3 | 1 << 16;
 
 const BOOT: &[Service] = &[
     Service {
@@ -111,6 +120,23 @@ const BOOT: &[Service] = &[
         ],
         after: &[],
         limit: STORE_LIMIT,
+    },
+    // The inference service (#88): only `models`, read-only. It reports
+    // ready without loading a model. Clients get no capability from `init`
+    // in M3.2.
+    Service {
+        name: "infer",
+        path: b"bin/infer",
+        arg: 0,
+        kind: Kind::Daemon,
+        caps: &[
+            Cap::Console,
+            Cap::InferService,
+            Cap::Report,
+            Cap::Storage(MODELS_READ_ONLY),
+        ],
+        after: &[2],
+        limit: INFER_LIMIT,
     },
 ];
 
@@ -296,8 +322,13 @@ fn main(arg: u64) -> u64 {
         2 => NETWORK,
         _ => &[],
     };
-    let endpoints = (endpoint_create(), endpoint_create(), endpoint_create());
-    let (Ok(events), Ok(net_service), Ok(store_service)) = endpoints else {
+    let endpoints = (
+        endpoint_create(),
+        endpoint_create(),
+        endpoint_create(),
+        endpoint_create(),
+    );
+    let (Ok(events), Ok(net_service), Ok(store_service), Ok(infer_service)) = endpoints else {
         let _ = debug_write(CONSOLE, b"init: cannot create an endpoint");
         return 1;
     };
@@ -345,6 +376,16 @@ fn main(arg: u64) -> u64 {
                 },
                 Cap::StoreService => Grant {
                     handle: store_service,
+                    rights: RECEIVE,
+                    badge: 0,
+                },
+                Cap::Storage(badge) => Grant {
+                    handle: store_service,
+                    rights: SEND,
+                    badge: *badge,
+                },
+                Cap::InferService => Grant {
+                    handle: infer_service,
                     rights: RECEIVE,
                     badge: 0,
                 },

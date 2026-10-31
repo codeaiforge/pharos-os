@@ -290,6 +290,45 @@ pub fn tiny(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The inference service test's prompt and token count (`inferclient`).
+pub const SERVICE_PROMPT: &str = "hello hello";
+pub const SERVICE_NEW: usize = 20;
+
+/// The text the service must return for [`SERVICE_PROMPT`] with the test
+/// model: the same `pharos-infer` session code and `libm` math.
+pub fn expected_service(model: &[u8]) -> Result<Vec<u8>> {
+    use pharos_infer::session::{Engine, Session};
+    let g = pharos_infer::gguf::Gguf::parse(model).map_err(|e| format!("test model: {e}"))?;
+    let e = Engine::load(&g).map_err(|e| format!("test model: {e}"))?;
+    let prompt = e.tokenizer.encode(SERVICE_PROMPT);
+    let mut s =
+        Session::new(&e, &prompt, SERVICE_NEW, &Libm).map_err(|e| format!("test model: {e}"))?;
+    let mut text = Vec::new();
+    while s.step(&mut text, &Libm) {}
+    Ok(text)
+}
+
+/// Writes a store at `path` holding the inference service's test model as
+/// `models/test.gguf` and the text it must generate as
+/// `models/test.expected` (`inference` test kernel, #88).
+pub fn service(path: &Path) -> Result<()> {
+    let model = pharos_infer::synth::test_model();
+    let expected = expected_service(&model)?;
+    write_files(
+        path,
+        &[
+            (b"models/test.gguf", &model),
+            (b"models/test.expected", &expected),
+        ],
+    )?;
+    println!(
+        "  service test store: {} bytes, expected text {}",
+        model.len(),
+        hex(&expected)
+    );
+    Ok(())
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

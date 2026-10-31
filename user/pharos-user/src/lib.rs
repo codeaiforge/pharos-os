@@ -36,6 +36,7 @@ pub mod number {
     pub const SLEEP: u64 = 21;
     pub const MEM_SHARE: u64 = 22;
     pub const MEM_MAP_CAP: u64 = 23;
+    pub const UPTIME: u64 = 24;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -262,6 +263,11 @@ pub fn receive_timeout(endpoint: Handle, buf: &mut [u8], micros: u64) -> Result<
 /// plus one); 0 returns at once.
 pub fn sleep(micros: u64) {
     call(number::SLEEP, [micros, 0, 0, 0, 0, 0]).ok();
+}
+
+/// Microseconds since boot.
+pub fn uptime() -> u64 {
+    call(number::UPTIME, [0; 6]).unwrap_or(0)
 }
 
 /// Creates an endpoint; the handle has `SEND`, `RECEIVE`, and `GRANT`.
