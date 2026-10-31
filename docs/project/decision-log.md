@@ -666,6 +666,48 @@ Two system calls per direction plus two task switches and two address-space swit
 6. **Rejected:** llama.cpp on Pharos (C/C++ trusted code and a POSIX-like environment that M3.0 excludes); candle (needs a full standard library); Llama 3.2 (use restrictions in its license); ONNX and safetensors as the primary format (GGUF already carries quantized weights and the tokenizer in one checked file).
 7. **Left to M3.2:** a GGUF tokenizer (Qwen2's byte-level BPE; prompts come as token IDs until then), batched prompt processing (needed for the 10 s first-token target: token by token, the S1 prompt takes about 16 s), and SIMD kernels. Where `exp`, `sin`, `cos`, `powf`, and `sqrt` come from on Pharos is decided with D-016.
 
+## Accepted decisions (M3.2)
+
+### D-019: Service interfaces and versioning
+
+- **Status:** Accepted
+- **Needed by:** M3.2 (inference interface), M3.3 (agent runtime)
+- **Date accepted:** 2026-10-31 (issue #82)
+
+**Context.** Today's IPC carries untyped 256-byte messages, and each service hand-encodes its requests (for example the network service in M2.10). Agents and services that discover and compose each other need typed, versioned contracts.
+
+**Options to evaluate.** A small interface description with generated Rust encoders and decoders, or hand-written codecs with shared host-tested types; a service registry, or capabilities handed out by a manager; how versions are negotiated; how large payloads travel (shared memory capabilities or chunked messages).
+
+**Evaluation criteria.** Every message checked by generated or shared code, fuzzed on the host; finding a service grants no permission; incompatible versions refused with a clear error; structured errors, timeouts, and cancellation in every contract; no new dependency without the AGENTS.md review.
+
+**Evidence (2026-10-31, the two services Pharos has):**
+- **The storage service (#77)** uses one shared module, `store_proto`: `parse` and `encode` for every request, used by the service and its clients, with round-trip tests, truncation and trailing-byte tests, and 100,000 random messages. Its reviews found no codec bug.
+- **The network service (M2.10)** parses requests inline, at fixed offsets in the service's loop. Its client encodes them in separate functions. Neither side is fuzzed, and its status codes differ from the store's (2 is `TOO_LARGE` there, `NOT_FOUND` in the store).
+- Neither service carries a version, so a client built against another layout gets wrong answers instead of a refusal.
+- **Cost of a request:** an IPC round trip is about 1.9 µs under KVM (#81). Generating one token of the S1 model takes about 70 ms on the host (#69), so even one round trip per token costs under 0.01 %.
+- **Large data:** both services already move bulk data outside messages. The store has one shared buffer per client, attached once (#77), and large files are read through a window (#78).
+- **Discovery:** `init` hands every service and client the capabilities its reviewed table lists, badged per client (M2.10). Nothing finds services by name.
+
+**Decision.**
+
+1. **Hand-written codecs in one shared crate, not an interface description.** A new `no_std` crate, `crates/pharos-proto`, with no dependencies and `unsafe` forbidden, holds:
+   - a checked reader and writer;
+   - the common header, status codes, and common operations (below);
+   - one module per service interface, in the style of `store_proto`: a `Request` and a `Reply` type with `parse` and `encode`.
+
+   The service and its clients use the same module. Each module has round-trip tests, truncation and trailing-byte tests, and a fuzz test, and a parser never panics. An interface description language with a generator would add a build tool to review and a second language to read. It pays off only with many interfaces or clients written in other languages, neither of which Pharos has (three interfaces planned by M3.3). Reconsider it then.
+2. **Every message starts with two bytes: interface version, then operation.** One endpoint serves one interface, so the endpoint names it. Pharos IPC has no connections, so each request carries its version. A server refuses a version it does not support with status `VERSION` and the range it supports (lowest and highest). A change that changes the meaning of existing bytes needs a new version; a new operation does not.
+3. **Common status codes, the same in every interface:** 0 `OK`, 1 `BAD_REQUEST`, 2 `VERSION`, 3 `NO_ACCESS`, 4 `BUSY`, 5 `TOO_LARGE`, 6 `NO_BUFFER`, 7 `NOT_FOUND`, 8 `CANCELLED`, 9 `INTERNAL`. Codes 32 and up are the interface's own. Every reply starts with its status.
+4. **Common operations** (codes 0xF0 and up, the same in every interface):
+   - `INFO`: the interface name, its supported versions, and a list of the service's capabilities (for inference: models, context lengths, limits). This is model capability discovery (M3.2). It reveals only what the caller's endpoint capability already reaches.
+   - `ATTACH`: a `send` carrying a `Memory` capability and its size, the client's buffer for bulk data, as in the store (#77). Large data never travels in messages.
+5. **Discovery stays capability-based (D-018).** There is no registry. `init` (later the agent runtime) hands each client the badged endpoint capabilities its table lists, and finding a service grants nothing. A registry, if one comes, returns only capabilities its caller was granted.
+6. **Timeouts and cancellation are part of every contract.**
+   - Each interface documents a timeout for each operation. Clients always use `call` with a timeout (#76), and servers reply with non-blocking `send`s, never waiting on a client.
+   - Long results are pulled. A long operation such as generation returns a session number with its first piece; the client then calls `NEXT` for each further piece, or `CANCEL`. A server drops a session that sees no call within its documented idle time, so a client that dies or stops asking costs nothing for long.
+   - Pulling also gives back-pressure: the server produces only what the client asks for.
+7. **Existing services move to `pharos-proto` in M3.2 (#92):** the network service's codec is extracted, shared with its client, and fuzzed, and `store_proto` moves into the crate. Both adopt the common header and status codes (a new version 1 of each interface). `init`, the test programs, and the docs change with them.
+
 ## Open and proposed decisions
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
@@ -731,14 +773,3 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 6. **Human approval** is required for: granting capabilities beyond an agent's manifest, applying system updates (M4.3), and anything a policy marks sensitive.
 
 **Evaluation criteria.** No ambient authority; revocation independent of the holder; attribution of every consequential action; emergency controls that survive a hung agent runtime; usability of approvals.
-
-### D-019: Service interfaces and versioning
-
-- **Status:** Open
-- **Needed by:** M3.2 (inference interface), M3.3 (agent runtime)
-
-**Context.** Today's IPC carries untyped 256-byte messages, and each service hand-encodes its requests (for example the network service in M2.10). Agents and services that discover and compose each other need typed, versioned contracts.
-
-**Options to evaluate.** A small interface description with generated Rust encoders and decoders, or hand-written codecs with shared host-tested types; a service registry, or capabilities handed out by a manager; how versions are negotiated; how large payloads travel (shared memory capabilities or chunked messages).
-
-**Evaluation criteria.** Every message checked by generated or shared code, fuzzed on the host; finding a service grants no permission; incompatible versions refused with a clear error; structured errors, timeouts, and cancellation in every contract; no new dependency without the AGENTS.md review.
