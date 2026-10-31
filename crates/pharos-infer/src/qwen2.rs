@@ -8,7 +8,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::gguf::{Gguf, TYPE_Q8_0, Tensor};
-use crate::quant::{Q8Vec, QK8_0, dequantize_q8_0, dot_q8_0};
+use crate::quant::{Q8Vec, QK8_0, dequantize_q8_0, dot_q8_0, dot_q8_0_many};
 use crate::{Error, MAX_DIM, MAX_HIDDEN, MAX_LAYERS, MAX_VOCAB, Math};
 
 /// Model dimensions, from the GGUF metadata.
@@ -166,7 +166,11 @@ fn push_decimal(out: &mut Vec<u8>, mut n: usize) {
     out.extend_from_slice(&digits[i..]);
 }
 
-/// Activations and the key/value cache for up to `max_pos` positions.
+/// Most prompt tokens [`Qwen2::forward_batch`] runs in one pass.
+pub const MAX_BATCH: usize = 32;
+
+/// Activations for up to [`MAX_BATCH`] tokens and the key/value cache for up
+/// to `max_pos` positions.
 pub struct Qwen2State {
     max_pos: usize,
     x: Vec<f32>,
@@ -179,7 +183,7 @@ pub struct Qwen2State {
     logits: Vec<f32>,
     key_cache: Vec<f32>,
     value_cache: Vec<f32>,
-    quant: Q8Vec,
+    quant: Vec<Q8Vec>,
 }
 
 impl Qwen2State {
@@ -187,19 +191,20 @@ impl Qwen2State {
     pub fn new(c: &Qwen2Config, max_pos: usize) -> Self {
         let max_pos = max_pos.min(c.context);
         let cache = c.n_layers * max_pos * c.kv_dim();
+        let (d, h) = (MAX_BATCH * c.dim, MAX_BATCH * c.hidden_dim);
         Self {
             max_pos,
-            x: vec![0.0; c.dim],
-            xb: vec![0.0; c.dim],
-            q: vec![0.0; c.dim],
-            att_out: vec![0.0; c.dim],
-            hb: vec![0.0; c.hidden_dim],
-            hb2: vec![0.0; c.hidden_dim],
+            x: vec![0.0; d],
+            xb: vec![0.0; d],
+            q: vec![0.0; d],
+            att_out: vec![0.0; d],
+            hb: vec![0.0; h],
+            hb2: vec![0.0; h],
             att: vec![0.0; max_pos],
             logits: vec![0.0; c.vocab_size],
             key_cache: vec![0.0; cache],
             value_cache: vec![0.0; cache],
-            quant: Q8Vec::new(),
+            quant: (0..MAX_BATCH).map(|_| Q8Vec::new()).collect(),
         }
     }
 
@@ -216,11 +221,34 @@ fn rmsnorm(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32, m: &impl Math) 
     }
 }
 
-/// `out = W x` for Q8_0 `W` (one row per output), with `x` quantized first.
-fn matvec(out: &mut [f32], w: &Tensor<'_>, x: &[f32], quant: &mut Q8Vec) {
-    quant.quantize(x);
-    for (i, o) in out.iter_mut().enumerate() {
-        *o = dot_q8_0(w.row(i), quant);
+/// `out[b] = W x[b]` for the `n` vectors in `x` (one row of `W` per output),
+/// each vector quantized first. Each weight row is read once for all `n`
+/// vectors; each output is the same dot product as for one vector alone.
+fn matmul(out: &mut [f32], w: &Tensor<'_>, x: &[f32], n: usize, quant: &mut [Q8Vec]) {
+    let (rows, cols) = (out.len() / n, x.len() / n);
+    for (q, x) in quant.iter_mut().zip(x.chunks_exact(cols)) {
+        q.quantize(x);
+    }
+    if n == 1 {
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = dot_q8_0(w.row(i), &quant[0]);
+        }
+        return;
+    }
+    let mut sums = [0.0f32; MAX_BATCH];
+    for i in 0..rows {
+        dot_q8_0_many(w.row(i), &quant[..n], &mut sums[..n]);
+        for (b, sum) in sums[..n].iter().enumerate() {
+            out[b * rows + i] = *sum;
+        }
+    }
+}
+
+fn add_bias(v: &mut [f32], bias: &[f32]) {
+    for chunk in v.chunks_exact_mut(bias.len()) {
+        for (v, b) in chunk.iter_mut().zip(bias) {
+            *v += b;
+        }
     }
 }
 
@@ -252,84 +280,110 @@ impl Qwen2<'_> {
         pos: usize,
         m: &impl Math,
     ) -> &'s [f32] {
+        self.forward_batch(s, &[token], pos, m)
+    }
+
+    /// Runs `tokens` (1 to [`MAX_BATCH`], each below `vocab_size`) at
+    /// positions `pos..pos + tokens.len()` (at most the state's `max_pos`),
+    /// filling the key/value cache for all of them, and returns the last
+    /// token's logits. Every value is computed with the same operations in
+    /// the same order as running the tokens one by one with
+    /// [`Qwen2::forward`], so the logits are bit-identical.
+    pub fn forward_batch<'s>(
+        &self,
+        s: &'s mut Qwen2State,
+        tokens: &[usize],
+        pos: usize,
+        m: &impl Math,
+    ) -> &'s [f32] {
+        let n = tokens.len();
+        assert!(
+            (1..=MAX_BATCH).contains(&n) && pos + n <= s.max_pos,
+            "forward_batch: 1 to {MAX_BATCH} tokens within the state's positions"
+        );
         let c = &self.config;
-        let (kv_dim, hs) = (c.kv_dim(), c.head_size());
+        let (d, h, kv_dim, hs) = (c.dim, c.hidden_dim, c.kv_dim(), c.head_size());
+        let (nd, nh) = (n * d, n * h);
         let kv_mul = c.n_heads / c.n_kv_heads;
-        dequantize_q8_0(self.embedding.row(token), &mut s.x);
+        for (x, &t) in s.x.chunks_exact_mut(d).zip(tokens) {
+            dequantize_q8_0(self.embedding.row(t), x);
+        }
         let scale = 1.0 / m.sqrt(hs as f32);
 
         for (l, layer) in self.layers.iter().enumerate() {
-            rmsnorm(&mut s.xb, &s.x, &layer.attn_norm, c.rms_eps, m);
+            for (o, x) in s.xb[..nd].chunks_exact_mut(d).zip(s.x.chunks_exact(d)) {
+                rmsnorm(o, x, &layer.attn_norm, c.rms_eps, m);
+            }
+            // The block's positions are contiguous in the cache.
             let at = (l * s.max_pos + pos) * kv_dim;
-            matvec(&mut s.q, &layer.q, &s.xb, &mut s.quant);
-            matvec(
-                &mut s.key_cache[at..at + kv_dim],
-                &layer.k,
-                &s.xb,
-                &mut s.quant,
-            );
-            matvec(
-                &mut s.value_cache[at..at + kv_dim],
-                &layer.v,
-                &s.xb,
-                &mut s.quant,
-            );
-            for (v, b) in s.q.iter_mut().zip(&layer.q_bias) {
-                *v += b;
+            let kv = at..at + n * kv_dim;
+            matmul(&mut s.q[..nd], &layer.q, &s.xb[..nd], n, &mut s.quant);
+            let keys = &mut s.key_cache[kv.clone()];
+            matmul(keys, &layer.k, &s.xb[..nd], n, &mut s.quant);
+            let values = &mut s.value_cache[kv.clone()];
+            matmul(values, &layer.v, &s.xb[..nd], n, &mut s.quant);
+            add_bias(&mut s.q[..nd], &layer.q_bias);
+            add_bias(&mut s.key_cache[kv.clone()], &layer.k_bias);
+            add_bias(&mut s.value_cache[kv.clone()], &layer.v_bias);
+            for (b, (q, k)) in s.q[..nd]
+                .chunks_exact_mut(d)
+                .zip(s.key_cache[kv].chunks_exact_mut(kv_dim))
+                .enumerate()
+            {
+                rope(q, hs, pos + b, c.rope_base, m);
+                rope(k, hs, pos + b, c.rope_base, m);
             }
-            for (v, b) in s.key_cache[at..at + kv_dim].iter_mut().zip(&layer.k_bias) {
-                *v += b;
-            }
-            for (v, b) in s.value_cache[at..at + kv_dim].iter_mut().zip(&layer.v_bias) {
-                *v += b;
-            }
-            rope(&mut s.q, hs, pos, c.rope_base, m);
-            rope(&mut s.key_cache[at..at + kv_dim], hs, pos, c.rope_base, m);
 
             let base = l * s.max_pos * kv_dim;
-            for h in 0..c.n_heads {
-                let q = &s.q[h * hs..(h + 1) * hs];
-                let kv_off = (h / kv_mul) * hs;
-                let att = &mut s.att[..=pos];
-                for (t, a) in att.iter_mut().enumerate() {
-                    let k = &s.key_cache[base + t * kv_dim + kv_off..][..hs];
-                    *a = q.iter().zip(k).map(|(x, y)| x * y).sum::<f32>() * scale;
-                }
-                let max = att.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                let mut sum = 0.0;
-                for a in att.iter_mut() {
-                    *a = m.exp(*a - max);
-                    sum += *a;
-                }
-                let out = &mut s.att_out[h * hs..(h + 1) * hs];
-                out.fill(0.0);
-                for (t, a) in att.iter().enumerate() {
-                    let v = &s.value_cache[base + t * kv_dim + kv_off..][..hs];
-                    for (o, x) in out.iter_mut().zip(v) {
-                        *o += a / sum * x;
+            for b in 0..n {
+                let p = pos + b;
+                for head in 0..c.n_heads {
+                    let q = &s.q[b * d + head * hs..][..hs];
+                    let kv_off = (head / kv_mul) * hs;
+                    let att = &mut s.att[..=p];
+                    for (t, a) in att.iter_mut().enumerate() {
+                        let k = &s.key_cache[base + t * kv_dim + kv_off..][..hs];
+                        *a = q.iter().zip(k).map(|(x, y)| x * y).sum::<f32>() * scale;
+                    }
+                    let max = att.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let mut sum = 0.0;
+                    for a in att.iter_mut() {
+                        *a = m.exp(*a - max);
+                        sum += *a;
+                    }
+                    let out = &mut s.att_out[b * d + head * hs..][..hs];
+                    out.fill(0.0);
+                    for (t, a) in att.iter().enumerate() {
+                        let v = &s.value_cache[base + t * kv_dim + kv_off..][..hs];
+                        for (o, x) in out.iter_mut().zip(v) {
+                            *o += a / sum * x;
+                        }
                     }
                 }
             }
-            matvec(&mut s.xb, &layer.o, &s.att_out, &mut s.quant);
-            for (x, d) in s.x.iter_mut().zip(&s.xb) {
+            matmul(&mut s.xb[..nd], &layer.o, &s.att_out[..nd], n, &mut s.quant);
+            for (x, d) in s.x[..nd].iter_mut().zip(&s.xb[..nd]) {
                 *x += d;
             }
 
-            rmsnorm(&mut s.xb, &s.x, &layer.ffn_norm, c.rms_eps, m);
-            matvec(&mut s.hb, &layer.gate, &s.xb, &mut s.quant);
-            matvec(&mut s.hb2, &layer.up, &s.xb, &mut s.quant);
-            for (g, u) in s.hb.iter_mut().zip(&s.hb2) {
+            for (o, x) in s.xb[..nd].chunks_exact_mut(d).zip(s.x.chunks_exact(d)) {
+                rmsnorm(o, x, &layer.ffn_norm, c.rms_eps, m);
+            }
+            matmul(&mut s.hb[..nh], &layer.gate, &s.xb[..nd], n, &mut s.quant);
+            matmul(&mut s.hb2[..nh], &layer.up, &s.xb[..nd], n, &mut s.quant);
+            for (g, u) in s.hb[..nh].iter_mut().zip(&s.hb2[..nh]) {
                 *g = *g / (1.0 + m.exp(-*g)) * u;
             }
-            matvec(&mut s.xb, &layer.down, &s.hb, &mut s.quant);
-            for (x, d) in s.x.iter_mut().zip(&s.xb) {
+            matmul(&mut s.xb[..nd], &layer.down, &s.hb[..nh], n, &mut s.quant);
+            for (x, d) in s.x[..nd].iter_mut().zip(&s.xb[..nd]) {
                 *x += d;
             }
         }
 
-        let x = s.x.clone();
-        rmsnorm(&mut s.x, &x, &self.output_norm, c.rms_eps, m);
-        matvec(&mut s.logits, &self.output, &s.x, &mut s.quant);
+        // Only the last token's logits are needed.
+        let last = &s.x[nd - d..nd];
+        rmsnorm(&mut s.xb[..d], last, &self.output_norm, c.rms_eps, m);
+        matmul(&mut s.logits, &self.output, &s.xb[..d], 1, &mut s.quant);
         &s.logits
     }
 }

@@ -7,7 +7,8 @@
 //! - `pharos-infer <model.gguf> <prompt> <n>`: a Qwen2 GGUF model with
 //!   Q8_0 weights, the prompt tokenized with the file's own tokenizer
 //!   ([`pharos_infer::bpe`], #84; special tokens recognized, as
-//!   llama.cpp does). `pharos-infer <model.gguf> --ids <token IDs> <n>`
+//!   llama.cpp does) and run in blocks of up to 32 tokens (#85).
+//!   `pharos-infer <model.gguf> --ids <token IDs> <n>`
 //!   takes token IDs instead. Prints only the generated text, as
 //!   `llama-completion --no-display-prompt` does: control tokens hidden,
 //!   stopping at the end-of-text tokens. The generated token IDs go to
@@ -27,7 +28,7 @@ use std::time::Instant;
 
 use pharos_infer::bpe;
 use pharos_infer::gguf::Gguf;
-use pharos_infer::qwen2::{Qwen2, Qwen2State, decode_byte_level};
+use pharos_infer::qwen2::{MAX_BATCH, Qwen2, Qwen2State, decode_byte_level};
 use pharos_infer::{Math, Model, Tokenizer, argmax, generate};
 
 /// The standard library's functions, as `run.c` uses C's.
@@ -136,8 +137,10 @@ fn run_gguf(args: &[String], bytes: &[u8], start: Instant) -> Result<(), String>
     let mut state = Qwen2State::new(&model.config, positions);
     let t0 = Instant::now();
     let mut logits = Vec::new();
-    for (pos, &t) in prompt.iter().enumerate() {
-        logits = model.forward(&mut state, t, pos, &Std).to_vec();
+    for (i, block) in prompt.chunks(MAX_BATCH).enumerate() {
+        logits = model
+            .forward_batch(&mut state, block, i * MAX_BATCH, &Std)
+            .to_vec();
     }
     let prompt_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let t1 = Instant::now();

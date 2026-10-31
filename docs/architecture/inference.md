@@ -32,7 +32,7 @@ Three additions, all host work first (D-020), each compared with llama.cpp or wi
   - byte-level encoding, BPE merges by rank, and special tokens matched as whole strings (`<|im_start|>`, `<|im_end|>`, `<|endoftext|>`).
 
   Unicode letter and number classes come from `core`'s `char::is_alphabetic` and `is_numeric`, which differ slightly from the pattern's `\p{L}` and `\p{N}`. The test corpus includes text where they differ, and every mismatch with llama.cpp's `llama-tokenize` is a failure until explained. Vocabulary and merges are untrusted input: checked before use and fuzzed.
-- **Batched prompts (#85).** The prompt is processed in blocks of up to 32 tokens: each weight row is read once per block instead of once per token. The S1 prompt then needs 8 passes over the weights instead of 233. Each output value is still computed with the same operations in the same order as on the single-token path, so the generated tokens stay bit-identical; the tests compare both paths.
+- **Batched prompts (#85).** The prompt is processed in blocks of up to 32 tokens: each weight row is read once per block instead of once per token. The S1 prompt then needs 8 passes over the weights instead of 233. Each output value is still computed with the same operations in the same order as on the single-token path, so the generated tokens stay bit-identical; the tests compare both paths. *Implemented:* only the last token's logits are computed, and each weight block is widened to 16 bits once per block; the S1 prompt takes 8.4–9.0 s on the host instead of about 16 s (inference-evaluation.md).
 - **No hand-written SIMD in M3.2 (#86).**
   - **The constraint:** explicit SIMD needs `unsafe` even on the newest Rust. Checked with Rust 1.99 on 2026-10-31: calling a function marked `#[target_feature(enable = "sse2")]` from ordinary code is `unsafe`, even though SSE2 is always present on x86-64, and SIMD loads through pointers are always `unsafe`. `pharos-infer` forbids `unsafe`.
   - **Why it is not needed:** the host measurement (13.7–14.6 tokens/s) was compiled for the same SSE2 baseline as Pharos user programs, with the compiler vectorizing the Q8_0 dot products. Generation already meets S1 almost three times over, and batching addresses the first-token time.
@@ -147,5 +147,5 @@ Each check is mutation-tested as in earlier milestones.
 
 ## 7. Open questions
 
-- The first-token time on Pharos under KVM with batching (#90). On the host, batching should bring the S1 prompt from about 16 s to a few seconds, but that is not yet measured.
+- The first-token time on Pharos under KVM with batching (#90). On the host, batching brings the S1 prompt from about 16 s to 8.4–9.0 s (#85), 1.0–1.6 s inside the target.
 - Chat formatting (the `<|im_start|>` template) belongs to the caller in M3.2. The agent runtime (M3.3) decides whether the service should apply it.

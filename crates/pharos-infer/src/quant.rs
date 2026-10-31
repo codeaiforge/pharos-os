@@ -84,10 +84,11 @@ fn round_even(x: f32) -> f32 {
 }
 
 /// A vector quantized to Q8_0 blocks: one scale (already rounded through
-/// f16, as stored) and 32 values per block.
+/// f16, as stored) and 32 values per block, each in -127..=127 and kept
+/// widened to 16 bits for [`dot_q8_0_many`].
 pub struct Q8Vec {
     pub scales: Vec<f32>,
-    pub values: Vec<i8>,
+    pub values: Vec<i16>,
 }
 
 impl Q8Vec {
@@ -110,7 +111,7 @@ impl Q8Vec {
             let id = if amax != 0.0 { 127.0 / amax } else { 0.0 };
             self.scales.push(f16_to_f32(f32_to_f16(d)));
             self.values
-                .extend(block.iter().map(|v| round_even(v * id) as i8));
+                .extend(block.iter().map(|v| round_even(v * id) as i16));
         }
     }
 }
@@ -134,6 +135,16 @@ pub fn dequantize_q8_0(row: &[u8], out: &mut [f32]) {
     }
 }
 
+/// The integer dot product of one block's 32 weights and 32 quantized
+/// values, both widened to 16 bits (so it compiles to SSE2's 16-bit
+/// multiply-add, `pmaddwd`; products and sums are exact).
+fn block_dot(w: &[i16; QK8_0], x: &[i16]) -> i32 {
+    w.iter()
+        .zip(&x[..QK8_0])
+        .map(|(w, v)| i32::from(*w) * i32::from(*v))
+        .sum()
+}
+
 /// The dot product of one row of Q8_0 blocks with a quantized vector.
 pub fn dot_q8_0(row: &[u8], x: &Q8Vec) -> f32 {
     let mut sum = 0.0f32;
@@ -151,6 +162,26 @@ pub fn dot_q8_0(row: &[u8], x: &Q8Vec) -> f32 {
         sum += d_w * d_x * isum as f32;
     }
     sum
+}
+
+/// [`dot_q8_0`] of one row with each of `xs`, into `out`. Each weight block
+/// is decoded and widened once for all vectors (the saving that batching
+/// gives); each sum is accumulated block by block in the same order, and
+/// integer sums are exact, so the results are bit-identical to
+/// `dot_q8_0`'s.
+pub fn dot_q8_0_many(row: &[u8], xs: &[Q8Vec], out: &mut [f32]) {
+    out.fill(0.0);
+    let mut w = [0i16; QK8_0];
+    for (k, block) in row.chunks_exact(Q8_0_BYTES).enumerate() {
+        let d_w = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+        for (w, b) in w.iter_mut().zip(&block[2..]) {
+            *w = i16::from(*b as i8);
+        }
+        for (sum, x) in out.iter_mut().zip(xs) {
+            let isum = block_dot(&w, &x.values[k * QK8_0..]);
+            *sum += d_w * x.scales[k] * isum as f32;
+        }
+    }
 }
 
 /// Quantizes `x` to Q8_0 blocks in the stored layout (for building test

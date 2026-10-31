@@ -3,7 +3,7 @@
 
 use crate::gguf::{Gguf, TYPE_F32, TYPE_Q8_0, Value};
 use crate::quant::{Q8Vec, dequantize_q8_0, dot_q8_0, f16_to_f32, f32_to_f16, quantize_row_q8_0};
-use crate::qwen2::{Qwen2, Qwen2Config, Qwen2State, decode_byte_level};
+use crate::qwen2::{MAX_BATCH, Qwen2, Qwen2Config, Qwen2State, decode_byte_level};
 use crate::{Error, Math};
 use std::string::String;
 use std::vec;
@@ -501,6 +501,27 @@ fn loads_and_runs_deterministically() {
         "every position up to the context"
     );
     assert_eq!(a, logits(&file, &tokens));
+}
+
+#[test]
+fn batched_prompts_match_token_by_token() {
+    let file = tiny_model(4, false, false);
+    let g = Gguf::parse(&file).unwrap();
+    let m = Qwen2::load(&g, TINY.vocab_size).unwrap();
+    let tokens: Vec<usize> = (0..TINY.context)
+        .map(|i| i * 11 % TINY.vocab_size)
+        .collect();
+    let single = logits(&file, &tokens);
+    assert_eq!(TINY.context, MAX_BATCH, "one block can fill the context");
+    for size in [1, 3, 7, MAX_BATCH] {
+        let mut s = Qwen2State::new(&m.config, tokens.len());
+        for (i, block) in tokens.chunks(size).enumerate() {
+            let pos = i * size;
+            let got = m.forward_batch(&mut s, block, pos, &Std);
+            // Bit-identical, not just close.
+            assert_eq!(got, &single[pos + block.len() - 1][..], "blocks of {size}");
+        }
+    }
 }
 
 #[test]

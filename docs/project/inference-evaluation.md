@@ -99,7 +99,20 @@ About 3.4 GB in total. The GPU (GTX 1060) is measured only if the Vulkan build i
 - **Why generated tables:** with Rust's `char::is_alphabetic` in place of `\p{L}`, 2 of the 40 cases differ (Thai, whose vowel signs are combining marks, and Roman numerals, which are numbers). `char::is_whitespace` matches `\s`, so it is used.
 - **Tests:** exact splits for the pattern's alternatives (contractions followed by letters, whitespace backtracking, punctuation runs keeping their newlines); merge order; special tokens longest first; refused vocabularies (missing byte tokens, merges naming unknown tokens or without a space, duplicate tokens, mismatched types); 20,000 fuzzed texts and 5,000 fuzzed merge lists. Five mutations caught: rank ignored, case-sensitive contractions, no whitespace backtracking, shortest special token first, newlines dropped after punctuation.
 
-**Not yet:** other quantization types (Q4_K), batched prompt processing (#85), and hand-written SIMD kernels (#86).
+**Batched prompts (M3.2, #85; `Qwen2::forward_batch`):**
+- The prompt runs in blocks of up to 32 tokens. Each weight row is used for the whole block, each weight block is widened to 16 bits once for the block (with activations stored as 16-bit values, the 8-bit products compile to SSE2's 16-bit multiply-add), and only the last token's logits are computed: the output matrix (151,936 × 896) is skipped for the other prompt tokens. Single-token `forward` is a block of one with the original dot-product loop.
+- **Bit-identical:** every value is computed with the same operations in the same order as token by token (integer sums are exact). The host test compares the logits of blocks of 1, 3, 7, and 32 tokens with the single-token path for every position up to the context, exactly; two mutations caught (block tokens rotated at the block's first position, attention over the whole block). On Qwen2.5-0.5B the generated text and its SHA-256 are the same as in the M3.1 run (2026-10-29) for both benchmark prompts.
+- **Measured** on 2026-10-31 on the reference host with `scripts/bench-inference.py`, 1 thread, 128 tokens, 3 runs (release build, no target CPU flags):
+
+  | Prompt | Prompt time | Prompt tok/s | Gen tok/s | Peak RSS | Same output, 3 runs |
+  | --- | --- | --- | --- | --- | --- |
+  | short (8 tokens) | 236–245 ms | 33.6 | 15.5 | 660 MiB | yes |
+  | summary (S1, 233 tokens) | **8.4–9.0 s** (was about 16 s) | 26.8 | 14.7 | 664 MiB | yes |
+
+  The S1 prompt now meets the 10 s first-token target on the host, with 1.0–1.6 s to spare. Pharos under KVM is measured in #90; if it misses, #86 decides on SIMD.
+- **What limits it:** the 8-bit multiplies under SSE2, not memory. Reading each row once per block and skipping the output matrix took the S1 prompt from 16.1 s to 9.7 s, and widening once per block to 8.4 s. Decoding each block's scale once for all tokens, with the 8-bit loop kept, was slower (10.4 s).
+
+**Not yet:** other quantization types (Q4_K) and hand-written SIMD kernels (#86).
 
 ## Output comparison
 
@@ -157,7 +170,7 @@ Short-prompt rows for llama.cpp at 10 threads are in the JSON results; they are 
 - **Output is deterministic** for both engines at fixed seed and thread count: every configuration produced identical text in its three runs, at 1 and at 10 threads.
 - **Memory:** peak RSS is 1.7 to 2.5 times the model file for llama.cpp (it maps the file and allocates its context and buffers at its default context length), and 2 times for `pharos-infer`, which copies the f32 weights into memory. The M3.0 targets of 2 GB guest memory and 1.5 GB for the service fit Qwen2.5-0.5B; Qwen2.5-1.5B would need about 3 GB.
 - **The native engine on the same model.** With Q8_0 weights, `pharos-infer` generates 13.7–14.6 tokens/s on one thread, 60–65% of llama.cpp's speed and almost three times the 5 tokens/s target, with no hand-written SIMD (the compiler vectorizes the 8-bit dot products with SSE2, the host target's baseline). An earlier estimate in this report, 2–3 tokens/s scaled from the f32 `stories15M` run, was wrong: it ignored that 8-bit weights quarter the memory traffic.
-- **Prompt processing is the native engine's gap.** It reads the prompt one token at a time, about 14 tokens/s, against llama.cpp's 95 tokens/s with batched matrix products. The 233-token S1 prompt would take about 16 s, **over the 10 s first-token target**; batched prompt processing (one pass over each weight matrix for many tokens) is needed in M3.2.
+- **Prompt processing is the native engine's gap.** It reads the prompt one token at a time, about 14 tokens/s, against llama.cpp's 95 tokens/s with batched matrix products. The 233-token S1 prompt would take about 16 s, **over the 10 s first-token target**; batched prompt processing (one pass over each weight matrix for many tokens) is needed in M3.2. *Done in M3.2 (#85): 8.4–9.0 s, see the native engine section.*
 - **Memory:** the native engine's peak is about the model file (660 MiB for 676 MB), since it reads the file once and computes from it; llama.cpp's is 1.7 times.
 
 Runner (results in `target/bench/`, never committed):
