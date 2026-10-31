@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-31 (issue #83). It follows [D-010](../project/decision-log.md#d-010-ai-inference-runtime-model-formats-and-licensing), [D-011](../project/decision-log.md#d-011-cpugpu-support-and-memoryvram-constraints), and [D-019](../project/decision-log.md#d-019-service-interfaces-and-versioning), and builds on M3.0 ([user-environment.md](user-environment.md), [storage.md part 8](storage.md#8-the-writable-store-m30)).
-- **Implementation:** **planned** (M3.2: #84–#92).
+- **Implementation:** the tokenizer is **implemented** (#84: `crates/pharos-infer/src/bpe.rs` and the generated `unicode.rs`; identical to `llama-tokenize` on 40 of 40 cases, [inference-evaluation.md](../project/inference-evaluation.md)). The interface crate `pharos-proto` exists (#92). **Planned:** the rest of M3.2 (#85–#91).
 
 ## 2. Context
 
@@ -147,6 +147,5 @@ Each check is mutation-tested as in earlier milestones.
 
 ## 7. Open questions
 
-- Whether core's `is_alphabetic`/`is_numeric` match Qwen2's pattern closely enough. #84 measures it; a table of the differing ranges is the fallback.
 - The first-token time on Pharos under KVM with batching (#90). On the host, batching should bring the S1 prompt from about 16 s to a few seconds, but that is not yet measured.
 - Chat formatting (the `<|im_start|>` template) belongs to the caller in M3.2. The agent runtime (M3.3) decides whether the service should apply it.

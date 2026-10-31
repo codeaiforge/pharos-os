@@ -85,9 +85,21 @@ About 3.4 GB in total. The GPU (GTX 1060) is measured only if the Vulkan build i
 - `pharos-infer <model> <tokenizer> <prompt> <n>` prints the text as `run.c` does and the harness's JSON timing line; a prompt longer than the model's context is refused with a message.
 
 - **Qwen2 from GGUF with Q8_0 weights** (tier S): a checked, zero-copy GGUF reader (weights borrow the file), half-precision conversion (all 65,536 values round-trip), Q8_0 matrix-vector products with the input quantized as llama.cpp's AVX2 path does (scale `127/max`, round half to even), and llama.cpp's Qwen2 graph: attention biases, NeoX rotary embeddings, grouped-query attention, SwiGLU. Byte-level (GPT-2) decoding of token strings; control tokens hidden; generation stops at the end-of-text tokens. 13 more tests (24 in all), including hand-computed rotary values and 20,000 fuzzed GGUF files; four more mutations caught.
-- `pharos-infer <model.gguf> <token IDs> <n>` runs it.
+- `pharos-infer <model.gguf> <token IDs> <n>` runs it. Since #84 the prompt is text, tokenized by the engine (`--ids <token IDs>` keeps the old form).
 
-**Not yet:** a tokenizer for GGUF models (prompts come as token IDs from llama.cpp's `llama-tokenize`; Qwen2's byte-level BPE with its pre-tokenizer is M3.2 work), other quantization types (Q4_K), batched prompt processing, and hand-written SIMD kernels.
+**Qwen2's tokenizer (M3.2, #84; `crates/pharos-infer/src/bpe.rs`):**
+- GPT-2 byte-level BPE from the GGUF file's tokens, token types, and merges. Special tokens (types 3 and 4) are matched as whole strings, longest first. A hand-written pre-tokenizer follows Qwen2's pattern, with `\p{L}` and `\p{N}` tables generated from Unicode 16.0 by `scripts/gen-unicode-tables.py`. Merges go lowest rank first, leftmost among equals, using a heap, so a 100,000-letter word costs O(n log n).
+- **Compared with `llama-tokenize` (build b11609)** by `scripts/compare-tokenizer.py`, on 2026-10-31: **identical token IDs in 40 of 40 cases**. The cases are both benchmark prompts (the S1 prompt is 233 tokens) and 38 hard cases:
+  - contractions in any case, apostrophes, digits, whitespace runs, tabs, CRLF, and trailing and only-space text;
+  - punctuation, German, Russian, Greek, Chinese, Japanese, Korean, Arabic, Devanagari, and Thai;
+  - emoji with modifiers and flags, combining marks, ligatures, circled letters, Roman numerals and fractions, invisible spaces, and control characters;
+  - the chat template's special tokens, partial special tokens, and tool-call tags;
+  - code, a 3,000-letter word, 300 spaces, and 60 digits.
+- **Generation from the text prompt** gives the same tokens as generation from `llama-tokenize`'s IDs: checked with the short prompt and 24 tokens.
+- **Why generated tables:** with Rust's `char::is_alphabetic` in place of `\p{L}`, 2 of the 40 cases differ (Thai, whose vowel signs are combining marks, and Roman numerals, which are numbers). `char::is_whitespace` matches `\s`, so it is used.
+- **Tests:** exact splits for the pattern's alternatives (contractions followed by letters, whitespace backtracking, punctuation runs keeping their newlines); merge order; special tokens longest first; refused vocabularies (missing byte tokens, merges naming unknown tokens or without a space, duplicate tokens, mismatched types); 20,000 fuzzed texts and 5,000 fuzzed merge lists. Five mutations caught: rank ignored, case-sensitive contractions, no whitespace backtracking, shortest special token first, newlines dropped after punctuation.
+
+**Not yet:** other quantization types (Q4_K), batched prompt processing (#85), and hand-written SIMD kernels (#86).
 
 ## Output comparison
 
@@ -158,6 +170,7 @@ python3 scripts/bench-inference.py --engine native --model $M/stories15M.bin --l
 python3 scripts/bench-inference.py --engine native --model $M/qwen2.5-0.5b-instruct-q8_0.gguf --label "qwen2.5-0.5b q8_0 t1" \
     --threads 1 --runs 3 -n 128 -- ./native-gguf.sh {model} {prompt} {n}
 #   native-gguf.sh: ids=$(llama-tokenize -m "$1" -p "$2" --ids --log-disable | tail -1); exec pharos-infer "$1" "$ids" "$3"
+#   since #84: -- target/release/pharos-infer {model} {prompt} {n} (the engine tokenizes; IDs need --ids)
 python3 scripts/bench-inference.py --engine llama --model $M/<model>.gguf --label "<model> t<T>" \
     --threads <T> --runs 3 -n 128 --version-cmd "$L/llama-completion --version" \
     -- $L/llama-completion -m {model} -p {prompt} -n {n} -t {threads} -s {seed} --temp 0 -no-cnv --simple-io --no-display-prompt

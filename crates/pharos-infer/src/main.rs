@@ -4,12 +4,17 @@
 //! - `pharos-infer <model.bin> <tokenizer.bin> <prompt> <n>`: a llama2.c
 //!   model. Prints the text as llama2.c's `run.c` prints it (prompt
 //!   included, single unprintable bytes skipped).
-//! - `pharos-infer <model.gguf> <token IDs> <n>`: a Qwen2 GGUF model with
-//!   Q8_0 weights. The prompt is given as token IDs (for example from
-//!   llama.cpp's `llama-tokenize --ids`), so no tokenizer is needed. Prints
-//!   only the generated text, as `llama-completion --no-display-prompt`
-//!   does: control tokens hidden, stopping at the end-of-text tokens. The
-//!   generated token IDs go to stderr.
+//! - `pharos-infer <model.gguf> <prompt> <n>`: a Qwen2 GGUF model with
+//!   Q8_0 weights, the prompt tokenized with the file's own tokenizer
+//!   ([`pharos_infer::bpe`], #84; special tokens recognized, as
+//!   llama.cpp does). `pharos-infer <model.gguf> --ids <token IDs> <n>`
+//!   takes token IDs instead. Prints only the generated text, as
+//!   `llama-completion --no-display-prompt` does: control tokens hidden,
+//!   stopping at the end-of-text tokens. The generated token IDs go to
+//!   stderr.
+//! - `pharos-infer tokenize <model.gguf> <file>`: prints the tokens of the
+//!   file's text in the form of `llama-tokenize --ids` (for comparing the
+//!   tokenizers).
 //!
 //! Both generate `n` tokens after the prompt (as llama.cpp's `-n`;
 //! llama2.c's `run.c -n` counts the prompt too), then print a newline and
@@ -20,6 +25,7 @@ use std::io::Write;
 use std::process::ExitCode;
 use std::time::Instant;
 
+use pharos_infer::bpe;
 use pharos_infer::gguf::Gguf;
 use pharos_infer::qwen2::{Qwen2, Qwen2State, decode_byte_level};
 use pharos_infer::{Math, Model, Tokenizer, argmax, generate};
@@ -73,14 +79,32 @@ fn parse_ids(text: &str) -> Result<Vec<usize>, String> {
 }
 
 fn run_gguf(args: &[String], bytes: &[u8], start: Instant) -> Result<(), String> {
-    let [_, model_path, ids, n] = args else {
-        return Err("usage: pharos-infer <model.gguf> <token IDs> <n>".into());
+    let (model_path, prompt, n) = match args {
+        [_, m, flag, ids, n] if flag == "--ids" => (m, Prompt::Ids(ids), n),
+        [_, m, text, n] => (m, Prompt::Text(text), n),
+        _ => {
+            return Err(
+                "usage: pharos-infer <model.gguf> <prompt> <n>, or <model.gguf> --ids <token IDs> <n>"
+                    .into(),
+            );
+        }
     };
     let n: usize = n
         .parse()
         .map_err(|_| format!("n must be a number, got '{n}'"))?;
-    let prompt = parse_ids(ids)?;
     let g = Gguf::parse(bytes).map_err(|e| format!("{model_path}: {e}"))?;
+    let prompt = match prompt {
+        Prompt::Ids(ids) => parse_ids(ids)?,
+        Prompt::Text(text) => bpe::Tokenizer::from_gguf(&g)
+            .map_err(|e| format!("{model_path}: tokenizer: {e}"))?
+            .encode(text)
+            .into_iter()
+            .map(|t| t as usize)
+            .collect(),
+    };
+    if prompt.is_empty() {
+        return Err("the prompt has no tokens".into());
+    }
     let tokens = g
         .strings(b"tokenizer.ggml.tokens")
         .map_err(|e| format!("{model_path}: tokens: {e}"))?;
@@ -146,7 +170,28 @@ fn run_gguf(args: &[String], bytes: &[u8], start: Instant) -> Result<(), String>
     Ok(())
 }
 
+enum Prompt<'a> {
+    Ids(&'a str),
+    Text(&'a str),
+}
+
+/// `tokenize <model.gguf> <file>`: the file's tokens, as `[1, 2, 3]`.
+fn tokenize(model_path: &str, text_path: &str) -> Result<(), String> {
+    let bytes = std::fs::read(model_path).map_err(|e| format!("cannot read {model_path}: {e}"))?;
+    let text = std::fs::read_to_string(text_path)
+        .map_err(|e| format!("cannot read {text_path} as UTF-8 text: {e}"))?;
+    let g = Gguf::parse(&bytes).map_err(|e| format!("{model_path}: {e}"))?;
+    let t = bpe::Tokenizer::from_gguf(&g).map_err(|e| format!("{model_path}: tokenizer: {e}"))?;
+    println!("{:?}", t.encode(&text));
+    Ok(())
+}
+
 fn run(args: &[String]) -> Result<(), String> {
+    if let [_, cmd, model, file] = args {
+        if cmd == "tokenize" {
+            return tokenize(model, file);
+        }
+    }
     if let Some(path) = args.get(1) {
         let start = Instant::now();
         let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;

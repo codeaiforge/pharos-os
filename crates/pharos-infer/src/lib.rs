@@ -26,9 +26,11 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod bpe;
 pub mod gguf;
 pub mod quant;
 pub mod qwen2;
+pub mod unicode;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -613,5 +615,7 @@ pub fn generate(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_bpe;
 #[cfg(test)]
 mod tests_gguf;
