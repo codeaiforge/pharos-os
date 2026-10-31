@@ -130,7 +130,7 @@ Every request starts with version 1 and an operation (D-019). Every reply starts
 | Host, `pharos-infer` | Tokenizer: IDs identical to `llama-tokenize` on the benchmark prompts and a corpus of hard cases; fuzzed vocabularies and merges. Batched prompts: tokens identical to the single-token path. `libm` math: tokens identical between the host and the Pharos build's arithmetic |
 | Host, `pharos-proto` | The inference interface round-trips; truncated, oversized, and trailing-byte messages refused; wrong version refused; fuzzed |
 | Host, `xtask` | The generated test model has the pinned SHA-256 |
-| QEMU, `inference_tiny` (#87) | `pharos-infer` in a user program generates from the test model; the tokens equal those `cargo xtask` computed on the host |
+| QEMU, `inference_tiny` (#87) | `pharos-infer` in a user program generates from the test model; the tokens equal those `cargo xtask` computed on the host. *Implemented:* the tokens and a hash of every logit's bits, with `libm` on both sides |
 | QEMU, `inference` (#88, #89) | Through the service: `INFO`; `GENERATE`, `NEXT` until the end, `RESULT` with the expected record; `CANCEL`; `BUSY` for a second client; an idle session dropped; `NO_MODEL`; `MODEL_INVALID` for a file with a wrong hash, a truncated file, and a wrong configuration (each placed in the store by `cargo xtask`); `CONTEXT`; a client's timeout when the service is stopped; the service holds only its listed capabilities |
 | KVM, `cargo xtask bench-infer` (#90) | S1 on Pharos: the Qwen2.5-0.5B model from `PHAROS_MODEL`, the S1 prompt; load time, first-token time, tokens per second, peak memory; tokens identical to the host's |
 

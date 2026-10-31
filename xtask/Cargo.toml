@@ -13,4 +13,8 @@ workspace = true
 [dependencies]
 pharos-elf = { path = "../crates/pharos-elf" }
 pharos-fs = { path = "../crates/pharos-fs" }
+pharos-infer = { path = "../crates/pharos-infer" }
 pharos-store = { path = "../crates/pharos-store" }
+# The tiny model's reference output with the same math as user programs
+# (D-016; MIT, no dependencies).
+libm = "0.2.16"

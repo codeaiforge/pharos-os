@@ -1167,6 +1167,9 @@ fn runner_timeout(value: Option<&str>) -> Result<Duration> {
 /// The test kernel booted with 2 GiB and a store holding a model file
 /// (user-environment.md); `PHAROS_MODEL` names the file to use.
 const LARGE_FILE_TEST: &str = "large_file";
+/// The test kernel booted with a store holding a tiny model and the host's
+/// output for it (#87).
+const INFERENCE_TEST: &str = "inference_tiny";
 const MODEL_ENV: &str = "PHAROS_MODEL";
 /// Its time limit at least: about 45 s on the reference host.
 const LARGE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -1285,6 +1288,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     if name == LARGE_FILE_TEST {
         let model = env::var_os(MODEL_ENV).map(PathBuf::from);
         store_image::model(&out.join(STORE_IMAGE), model.as_deref())?;
+    }
+    if name == INFERENCE_TEST {
+        store_image::tiny(&out.join(STORE_IMAGE))?;
     }
     if name == CRASH_TEST {
         crash_rounds(&iso, &out.join("ovmf-vars.fd"), &logs, &extra)?;

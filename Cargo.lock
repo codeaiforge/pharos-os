@@ -66,7 +66,9 @@ version = "0.2.0"
 name = "xtask"
 version = "0.2.0"
 dependencies = [
+ "libm",
  "pharos-elf",
  "pharos-fs",
+ "pharos-infer",
  "pharos-store",
 ]

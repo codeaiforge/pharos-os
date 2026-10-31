@@ -30,6 +30,7 @@ pub mod bpe;
 pub mod gguf;
 pub mod quant;
 pub mod qwen2;
+pub mod synth;
 pub mod unicode;
 
 use alloc::vec;

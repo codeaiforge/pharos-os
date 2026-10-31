@@ -2,7 +2,29 @@
 //! the `libm` functions the inference engine needs, folded into one value.
 //! The host and Pharos must compute the same bits, which checks that user
 //! programs use hardware floating point correctly and that their state
-//! survives preemption (`vector_state` test kernel).
+//! survives preemption (`vector_state` test kernel). Also the engine's
+//! [`Libm`] math functions.
+
+/// `pharos-infer`'s math functions, from `libm` (D-016).
+pub struct Libm;
+
+impl pharos_infer::Math for Libm {
+    fn sqrt(&self, x: f32) -> f32 {
+        libm::sqrtf(x)
+    }
+    fn exp(&self, x: f32) -> f32 {
+        libm::expf(x)
+    }
+    fn sin(&self, x: f32) -> f32 {
+        libm::sinf(x)
+    }
+    fn cos(&self, x: f32) -> f32 {
+        libm::cosf(x)
+    }
+    fn powf(&self, x: f32, y: f32) -> f32 {
+        libm::powf(x, y)
+    }
+}
 
 /// The checksum the host computes (host test below).
 pub const EXPECTED: u64 = 0xf3b5_e485_8afa_5715;

@@ -1,11 +1,14 @@
 //! Tests for the GGUF reader, Q8_0 arithmetic, and the Qwen2 model, on
 //! small files built here.
 
-use crate::gguf::{Gguf, TYPE_F32, TYPE_Q8_0, Value};
+use crate::gguf::{Gguf, TYPE_F32, Value};
 use crate::quant::{Q8Vec, dequantize_q8_0, dot_q8_0, f16_to_f32, f32_to_f16, quantize_row_q8_0};
-use crate::qwen2::{MAX_BATCH, Qwen2, Qwen2Config, Qwen2State, decode_byte_level};
+use crate::qwen2::{MAX_BATCH, Qwen2, Qwen2State, decode_byte_level};
+use crate::synth::{
+    Meta, TINY, TINY_PROMPT, TINY_SEED, TensorSpec, f32_tensor, gguf_file, q8_tensor, run_tiny,
+    tiny_model,
+};
 use crate::{Error, Math};
-use std::string::String;
 use std::vec;
 use std::vec::Vec;
 
@@ -110,110 +113,6 @@ fn q8_0_dot_matches_f32_within_quantization_error() {
         (exact - approx).abs() < 0.05 * exact.abs().max(1.0),
         "{exact} vs {approx}"
     );
-}
-
-// ---- GGUF writer for tests ----
-
-enum Meta<'a> {
-    U32(u32),
-    F32(f32),
-    Str(&'a str),
-    Strings(Vec<&'a str>),
-    I32s(Vec<i32>),
-}
-
-struct TensorSpec {
-    name: String,
-    dims: Vec<u64>,
-    ty: u32,
-    data: Vec<u8>,
-}
-
-fn put_str(out: &mut Vec<u8>, s: &str) {
-    out.extend((s.len() as u64).to_le_bytes());
-    out.extend(s.as_bytes());
-}
-
-fn gguf_file(meta: &[(&str, Meta<'_>)], tensors: &[TensorSpec]) -> Vec<u8> {
-    let mut out = b"GGUF".to_vec();
-    out.extend(3u32.to_le_bytes());
-    out.extend((tensors.len() as u64).to_le_bytes());
-    out.extend((meta.len() as u64).to_le_bytes());
-    for (k, v) in meta {
-        put_str(&mut out, k);
-        match v {
-            Meta::U32(x) => {
-                out.extend(4u32.to_le_bytes());
-                out.extend(x.to_le_bytes());
-            }
-            Meta::F32(x) => {
-                out.extend(6u32.to_le_bytes());
-                out.extend(x.to_le_bytes());
-            }
-            Meta::Str(s) => {
-                out.extend(8u32.to_le_bytes());
-                put_str(&mut out, s);
-            }
-            Meta::Strings(list) => {
-                out.extend(9u32.to_le_bytes());
-                out.extend(8u32.to_le_bytes());
-                out.extend((list.len() as u64).to_le_bytes());
-                for s in list {
-                    put_str(&mut out, s);
-                }
-            }
-            Meta::I32s(list) => {
-                out.extend(9u32.to_le_bytes());
-                out.extend(5u32.to_le_bytes());
-                out.extend((list.len() as u64).to_le_bytes());
-                for v in list {
-                    out.extend(v.to_le_bytes());
-                }
-            }
-        }
-    }
-    let mut offset = 0u64;
-    let mut offsets = Vec::new();
-    for t in tensors {
-        put_str(&mut out, &t.name);
-        out.extend((t.dims.len() as u32).to_le_bytes());
-        for d in &t.dims {
-            out.extend(d.to_le_bytes());
-        }
-        out.extend(t.ty.to_le_bytes());
-        out.extend(offset.to_le_bytes());
-        offsets.push(offset);
-        offset += (t.data.len() as u64).div_ceil(32) * 32;
-    }
-    while out.len() % 32 != 0 {
-        out.push(0);
-    }
-    for t in tensors {
-        out.extend(&t.data);
-        while out.len() % 32 != 0 {
-            out.push(0);
-        }
-    }
-    out
-}
-
-fn f32_tensor(name: &str, values: &[f32]) -> TensorSpec {
-    TensorSpec {
-        name: name.into(),
-        dims: vec![values.len() as u64],
-        ty: TYPE_F32,
-        data: values.iter().flat_map(|v| v.to_le_bytes()).collect(),
-    }
-}
-
-/// A Q8_0 matrix of `rows` rows of `cols` values (ggml dims [cols, rows]).
-fn q8_tensor(name: &str, cols: usize, values: &[f32]) -> TensorSpec {
-    TensorSpec {
-        name: name.into(),
-        dims: vec![cols as u64, (values.len() / cols) as u64],
-        ty: TYPE_Q8_0,
-        data: quantize_row_q8_0(values),
-    }
 }
 
 #[test]
@@ -380,103 +279,6 @@ fn fuzzed_gguf_never_panics() {
 
 // ---- Qwen2 ----
 
-struct Rng(u64);
-
-impl Rng {
-    fn vec(&mut self, n: usize) -> Vec<f32> {
-        (0..n)
-            .map(|_| {
-                self.0 ^= self.0 << 13;
-                self.0 ^= self.0 >> 7;
-                self.0 ^= self.0 << 17;
-                ((self.0 % 2001) as f32 / 1000.0 - 1.0) * 0.4
-            })
-            .collect()
-    }
-}
-
-const TINY: Qwen2Config = Qwen2Config {
-    dim: 64,
-    hidden_dim: 96,
-    n_layers: 2,
-    n_heads: 4,
-    n_kv_heads: 2,
-    vocab_size: 40,
-    context: 32,
-    rope_base: 10000.0,
-    rms_eps: 1e-6,
-};
-
-/// A tiny Qwen2 GGUF. `expand_kv` writes each K/V head once per query head
-/// (n_kv_heads = n_heads) with the same values; `tied` omits output.weight.
-fn tiny_model(seed: u64, expand_kv: bool, tied: bool) -> Vec<u8> {
-    let c = TINY;
-    let mut r = Rng(seed);
-    let (d, h, hs) = (c.dim, c.hidden_dim, c.dim / c.n_heads);
-    let kv_heads = if expand_kv { c.n_heads } else { c.n_kv_heads };
-    let mut tensors = vec![q8_tensor("token_embd.weight", d, &r.vec(c.vocab_size * d))];
-    if !tied {
-        tensors.push(q8_tensor("output.weight", d, &r.vec(c.vocab_size * d)));
-    }
-    tensors.push(f32_tensor("output_norm.weight", &r.vec(d)));
-    let expand = |w: &[f32], per_head: usize| -> Vec<f32> {
-        if !expand_kv {
-            return w.to_vec();
-        }
-        (0..c.n_heads)
-            .flat_map(|head| {
-                let kv = head / (c.n_heads / c.n_kv_heads);
-                w[kv * per_head..(kv + 1) * per_head].to_vec()
-            })
-            .collect()
-    };
-    for l in 0..c.n_layers {
-        let p = |s: &str| std::format!("blk.{l}.{s}");
-        let (k, kb, v, vb) = (
-            r.vec(c.n_kv_heads * hs * d),
-            r.vec(c.n_kv_heads * hs),
-            r.vec(c.n_kv_heads * hs * d),
-            r.vec(c.n_kv_heads * hs),
-        );
-        tensors.extend([
-            f32_tensor(&p("attn_norm.weight"), &r.vec(d)),
-            q8_tensor(&p("attn_q.weight"), d, &r.vec(d * d)),
-            f32_tensor(&p("attn_q.bias"), &r.vec(d)),
-            q8_tensor(&p("attn_k.weight"), d, &expand(&k, hs * d)),
-            f32_tensor(&p("attn_k.bias"), &expand(&kb, hs)),
-            q8_tensor(&p("attn_v.weight"), d, &expand(&v, hs * d)),
-            f32_tensor(&p("attn_v.bias"), &expand(&vb, hs)),
-            q8_tensor(&p("attn_output.weight"), d, &r.vec(d * d)),
-            f32_tensor(&p("ffn_norm.weight"), &r.vec(d)),
-            q8_tensor(&p("ffn_gate.weight"), d, &r.vec(h * d)),
-            q8_tensor(&p("ffn_up.weight"), d, &r.vec(h * d)),
-            q8_tensor(&p("ffn_down.weight"), h, &r.vec(d * h)),
-        ]);
-    }
-    let toks: Vec<String> = (0..c.vocab_size).map(|i| std::format!("t{i}")).collect();
-    gguf_file(
-        &[
-            ("general.architecture", Meta::Str("qwen2")),
-            ("qwen2.embedding_length", Meta::U32(d as u32)),
-            ("qwen2.feed_forward_length", Meta::U32(h as u32)),
-            ("qwen2.block_count", Meta::U32(c.n_layers as u32)),
-            ("qwen2.attention.head_count", Meta::U32(c.n_heads as u32)),
-            ("qwen2.attention.head_count_kv", Meta::U32(kv_heads as u32)),
-            ("qwen2.context_length", Meta::U32(c.context as u32)),
-            ("qwen2.rope.freq_base", Meta::F32(c.rope_base)),
-            (
-                "qwen2.attention.layer_norm_rms_epsilon",
-                Meta::F32(c.rms_eps),
-            ),
-            (
-                "tokenizer.ggml.tokens",
-                Meta::Strings(toks.iter().map(String::as_str).collect()),
-            ),
-        ],
-        &tensors,
-    )
-}
-
 fn logits(file: &[u8], tokens: &[usize]) -> Vec<Vec<f32>> {
     let g = Gguf::parse(file).unwrap();
     let m = Qwen2::load(&g, TINY.vocab_size).unwrap();
@@ -522,6 +324,41 @@ fn batched_prompts_match_token_by_token() {
             assert_eq!(got, &single[pos + block.len() - 1][..], "blocks of {size}");
         }
     }
+}
+
+/// [`Std`] with `sin` and `cos` swapped: a wrong math function.
+struct Swapped;
+
+impl Math for Swapped {
+    fn sqrt(&self, x: f32) -> f32 {
+        x.sqrt()
+    }
+    fn exp(&self, x: f32) -> f32 {
+        x.exp()
+    }
+    fn sin(&self, x: f32) -> f32 {
+        x.cos()
+    }
+    fn cos(&self, x: f32) -> f32 {
+        x.sin()
+    }
+    fn powf(&self, x: f32, y: f32) -> f32 {
+        x.powf(y)
+    }
+}
+
+#[test]
+fn tiny_run_is_deterministic_and_sees_the_math() {
+    let file = tiny_model(TINY_SEED, false, false);
+    let (tokens, hash) = run_tiny(&file, &Std).unwrap();
+    assert_eq!(tokens.len(), TINY.context - TINY_PROMPT.len());
+    let mut distinct = tokens.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert!(distinct.len() >= 5, "varied output: {tokens:?}");
+    assert_eq!(run_tiny(&file, &Std).unwrap(), (tokens.clone(), hash));
+    assert_ne!(run_tiny(&file, &Swapped).unwrap().1, hash);
+    assert!(run_tiny(&file[..100], &Std).is_err());
 }
 
 #[test]

@@ -208,25 +208,106 @@ pub fn model(path: &Path, model: Option<&Path>) -> Result<()> {
         None => synthetic_gguf(),
     };
     let hash = pharos_store::sha256(&[&data]);
-    let blocks = (data.len() as u64).div_ceil(BLOCK as u64) + 256;
-    let mut store = Store::format(FileDevice::create(path, blocks)?)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    for (name, bytes) in [
-        (&b"models/model.gguf"[..], &data[..]),
-        (b"models/model.sha256", &hash),
-    ] {
-        store
-            .write(name, bytes)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-    }
+    write_files(
+        path,
+        &[
+            (b"models/model.gguf", &data),
+            (b"models/model.sha256", &hash),
+        ],
+    )?;
     let source = model.map_or("generated".to_owned(), |m| m.display().to_string());
     println!("  model store: {} bytes from {source}", data.len());
     Ok(())
 }
 
+/// A fresh store at `path`, just big enough, holding `files`.
+fn write_files(path: &Path, files: &[(&[u8], &[u8])]) -> Result<()> {
+    let len: usize = files.iter().map(|(_, d)| d.len()).sum();
+    let blocks = (len as u64).div_ceil(BLOCK as u64) + 256;
+    let mut store = Store::format(FileDevice::create(path, blocks)?)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    for (name, bytes) in files {
+        store
+            .write(name, bytes)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// `pharos-infer`'s math functions from `libm`, as user programs supply
+/// them (`pharos_programs::fp::Libm`), so the host's reference output
+/// comes from the same arithmetic as Pharos's.
+struct Libm;
+
+impl pharos_infer::Math for Libm {
+    fn sqrt(&self, x: f32) -> f32 {
+        libm::sqrtf(x)
+    }
+    fn exp(&self, x: f32) -> f32 {
+        libm::expf(x)
+    }
+    fn sin(&self, x: f32) -> f32 {
+        libm::sinf(x)
+    }
+    fn cos(&self, x: f32) -> f32 {
+        libm::cosf(x)
+    }
+    fn powf(&self, x: f32, y: f32) -> f32 {
+        libm::powf(x, y)
+    }
+}
+
+/// The host's output for the tiny model: the logit hash, then each
+/// generated token as a little-endian `u32`.
+pub fn expected_tiny(model: &[u8]) -> Result<Vec<u8>> {
+    let (tokens, hash) =
+        pharos_infer::synth::run_tiny(model, &Libm).map_err(|e| format!("tiny model: {e}"))?;
+    let mut out = hash.to_le_bytes().to_vec();
+    for t in tokens {
+        out.extend((t as u32).to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// Writes a store at `path` holding the tiny Qwen2 model
+/// (`pharos_infer::synth::tiny_model`) as `models/tiny.gguf` and the host's
+/// output for it as `models/tiny.expected` (`inference_tiny` test kernel, #87).
+pub fn tiny(path: &Path) -> Result<()> {
+    let model = pharos_infer::synth::tiny_model(pharos_infer::synth::TINY_SEED, false, false);
+    let expected = expected_tiny(&model)?;
+    write_files(
+        path,
+        &[
+            (b"models/tiny.gguf", &model),
+            (b"models/tiny.expected", &expected),
+        ],
+    )?;
+    println!(
+        "  tiny model store: {} bytes, host output {}",
+        model.len(),
+        hex(&expected)
+    );
+    Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tiny_model_and_its_output_are_pinned() {
+        let model = pharos_infer::synth::tiny_model(pharos_infer::synth::TINY_SEED, false, false);
+        assert_eq!(
+            hex(&pharos_store::sha256(&[&model])),
+            "f0df1f79c7e184e83430528b1c65e0a0db8456831168cf83b6fbec8c58b60ad3"
+        );
+        let expected = expected_tiny(&model).unwrap();
+        assert_eq!(hex(&expected[..8]), "797e6c31bd5bd65b", "logit hash");
+    }
 
     #[test]
     fn build_then_ls_round_trips_and_detects_damage() {

@@ -11,6 +11,9 @@
 //! - 5: namespace 3, read-only, for the `large_file` test kernel (#78):
 //!   reads `model.gguf` (676 MB) into private memory through a 16 MiB
 //!   window, checks it against `model.sha256`, and parses it as GGUF.
+//! - 6: namespace 3, read-only, for the `inference_tiny` test kernel (#87):
+//!   runs `tiny.gguf` with `pharos-infer` and compares the tokens and logit
+//!   hash with `tiny.expected`, which `cargo xtask` computed on the host.
 
 #![no_std]
 #![no_main]
@@ -19,6 +22,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use pharos_infer::gguf::{Gguf, Value};
+use pharos_infer::synth::run_tiny;
+use pharos_programs::fp::Libm;
 use pharos_proto::store::{MAX_BUFFER, NAME, Request, Status, VERSION, encode};
 use pharos_proto::{Info, versions};
 use pharos_store::sha256;
@@ -329,6 +334,79 @@ fn strangers(f: &mut u64) {
     );
 }
 
+/// Fills `file` from the start of `path` through `window` (`size` bytes),
+/// copying each piece out; true if every piece arrived in full.
+fn read_into(c: &Client, window: &Mapped, size: u64, path: &[u8], file: &mut [u8]) -> bool {
+    let len = file.len() as u64;
+    let mut done = 0;
+    while done < len {
+        let n = size.min(len - done);
+        let (s, r) = c.call(Request::Read {
+            path,
+            offset: done,
+            len: n,
+            at: 0,
+        });
+        if s != Status::Ok || u64_at(&r, 1) != n {
+            return false;
+        }
+        window.read_bytes(0, &mut file[done as usize..(done + n) as usize]);
+        done += n;
+    }
+    true
+}
+
+/// Reads a whole small file into private memory.
+fn read_file(c: &Client, window: &Mapped, size: u64, path: &[u8]) -> Option<Vec<u8>> {
+    let (s, r) = c.call(Request::Stat { path });
+    if s != Status::Ok || r[1] != 1 {
+        return None;
+    }
+    let mut file = alloc::vec![0u8; usize::try_from(u64_at(&r, 2)).ok()?];
+    read_into(c, window, size, path, &mut file).then_some(file)
+}
+
+/// Runs the tiny model and compares with the host's output.
+fn inference(f: &mut u64) {
+    const WINDOW: u64 = 1 << 20;
+    let c = Client::new(SERVICE);
+    let Some(window) = c.attach(WINDOW) else {
+        report(f, "attach a 1 MiB window", false);
+        return;
+    };
+    let model = read_file(&c, &window, WINDOW, b"tiny.gguf");
+    let expected = read_file(&c, &window, WINDOW, b"tiny.expected");
+    report(
+        f,
+        "read the tiny model and the host's output",
+        model.is_some() && expected.is_some(),
+    );
+    let (Some(model), Some(expected)) = (model, expected) else {
+        return;
+    };
+    let Ok((tokens, hash)) = run_tiny(&model, &Libm) else {
+        report(f, "pharos-infer loads and runs the model", false);
+        return;
+    };
+    report(f, "pharos-infer loads and runs the model", true);
+    let mut got = hash.to_le_bytes().to_vec();
+    for t in &tokens {
+        got.extend((*t as u32).to_le_bytes());
+    }
+    let mut line: Vec<u8> = b"output ".to_vec();
+    for b in &got {
+        line.extend_from_slice(&[HEX[usize::from(b >> 4)], HEX[usize::from(b & 15)]]);
+    }
+    let _ = debug_write(CONSOLE, &line);
+    report(
+        f,
+        "tokens and logit hash identical to the host's",
+        got == expected,
+    );
+}
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
 /// Reads the whole model file. The window is shared with the service,
 /// which may write it at any time, so Rust code never borrows it as a
 /// slice: each piece is copied into private memory (a heap `Vec`, its own
@@ -369,22 +447,11 @@ fn large(f: &mut u64) {
     }
     file.resize(len as usize, 0u8);
     report(f, "allocate the file's size in one process", true);
-    let mut done = 0;
-    while done < len {
-        let n = WINDOW.min(len - done);
-        let (s, r) = c.call(Request::Read {
-            path: b"model.gguf",
-            offset: done,
-            len: n,
-            at: 0,
-        });
-        if s != Status::Ok || u64_at(&r, 1) != n {
-            break;
-        }
-        window.read_bytes(0, &mut file[done as usize..(done + n) as usize]);
-        done += n;
-    }
-    report(f, "read the whole file through the window", done == len);
+    report(
+        f,
+        "read the whole file through the window",
+        read_into(&c, &window, WINDOW, b"model.gguf", &mut file),
+    );
     report(f, "its SHA-256 matches", sha256(&[&file]) == want);
     let parsed = Gguf::parse(&file);
     if let Ok(g) = &parsed {
@@ -424,6 +491,7 @@ fn main(arg: u64) -> u64 {
         3 => other(&mut f),
         4 => strangers(&mut f),
         5 => large(&mut f),
+        6 => inference(&mut f),
         _ => f = 0xbad,
     }
     f

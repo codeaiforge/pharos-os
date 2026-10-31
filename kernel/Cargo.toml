@@ -194,3 +194,7 @@ harness = false
 [[test]]
 name = "large_file"
 harness = false
+
+[[test]]
+name = "inference_tiny"
+harness = false
