@@ -368,6 +368,7 @@ That is under 1 µs, half the budget.
 - **Steady state:** 1.97–2.00 µs per round trip under KVM, release build, i9-10900K (three runs of 100,000 round trips). This meets the 2 µs budget, with no margin.
 - **Global kernel pages (added for this):** without them, the 1,000-round-trip test took 2.9 µs per trip; with them, 2.65 µs (both figures include starting the process).
 - **If later work pushes it over:** see `syscalls-ipc.md` (open questions).
+- **Measured again (#81, 2026-10-31):** it had risen to 2.29–2.32 µs by M3.0. One locked instruction fewer per lock and unlock brought it to medians of 1.87–1.92 µs, every run at or under 2.00 µs; `cargo xtask bench-ipc` now measures it with one command. The budget stands.
 
 ### D-014: IPC model and system-call mechanism
 

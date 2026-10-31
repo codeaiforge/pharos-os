@@ -20,6 +20,20 @@ use super::heap::{HEAP_BITMAP_WORDS, Heap};
 /// switch tasks while any is held (D-013).
 static HELD: AtomicUsize = AtomicUsize::new(0);
 
+/// Adds `delta` (1 or -1) to [`HELD`]. In the kernel, only with interrupts
+/// disabled on one CPU, so a plain load and store suffice and skip a locked
+/// instruction on every lock and unlock (#81). Host tests lock from
+/// several threads, so there it stays an atomic add.
+fn count_held(delta: isize) {
+    #[cfg(target_os = "none")]
+    HELD.store(
+        HELD.load(Ordering::Relaxed).wrapping_add_signed(delta),
+        Ordering::Relaxed,
+    );
+    #[cfg(not(target_os = "none"))]
+    HELD.fetch_add(delta as usize, Ordering::Relaxed);
+}
+
 /// Number of [`IrqMutex`] guards currently held.
 pub fn irq_locks_held() -> usize {
     HELD.load(Ordering::Relaxed)
@@ -57,7 +71,7 @@ impl<T> IrqMutex<T> {
         #[cfg(target_os = "none")]
         disable_interrupts();
         let guard = self.lock.lock();
-        HELD.fetch_add(1, Ordering::Relaxed);
+        count_held(1);
         IrqMutexGuard {
             mutex: self,
             guard: Some(guard),
@@ -93,8 +107,9 @@ impl<T> Drop for IrqMutexGuard<'_, T> {
     fn drop(&mut self) {
         // Release the spin lock first, then restore interrupts, so no
         // interrupt can arrive while this CPU still holds the lock.
+        // Interrupts are still disabled here: they are restored below.
         drop(self.guard.take());
-        HELD.fetch_sub(1, Ordering::Relaxed);
+        count_held(-1);
         if self.interrupts_were_enabled {
             #[cfg(target_os = "none")]
             enable_interrupts();

@@ -219,7 +219,7 @@ Planned test kernels (QEMU under TCG, run in CI):
   - two processes exchange messages in a checked order;
   - a capability is passed and then revoked;
   - a process without `SEND` cannot send;
-  - the round trip is measured under KVM against the D-004 budget (a manual local run; CI only checks correctness).
+  - the round trip is measured under KVM against the D-004 budget with `cargo xtask bench-ipc` (a manual local run; CI only checks correctness).
 
 ## 6. Alternatives
 
@@ -234,13 +234,10 @@ Planned test kernels (QEMU under TCG, run in CI):
 - Multiple threads per process, and a spawn system call (with a process capability).
 - Memory capabilities for shared memory (the inference data path; D-004's 100 µs grant budget).
 - Interrupt capabilities for user-space drivers (M2.9, D-008).
-- **The IPC round trip meets the D-004 budget at the limit:** 1.97–2.00 µs against at most 2 µs (KVM, release build, i9-10900K, 100,000 round trips). Candidates if later work makes it slower:
-  - a combined `call`/reply (one system call and one block per side instead of two);
-  - PCID, so CR3 switches keep user TLB entries;
-  - fewer lock acquisitions on the IPC path.
-
-  Global kernel pages (#41) already cut it from about 2.9 µs to 2.65 µs in the 1,000-round-trip test (which includes starting the process).
-
-  **Over budget since M2.10** (found in #74, 2026-10-29): the same measurement now gives 2.10–2.19 µs without saving vector state, and 2.12–2.34 µs with it (the vector-state switch adds no measurable time). The increase came between M2.7 and M3.0, most likely from M2.10's IPC changes (badges, notifications, `call`); it was not noticed because the measurement is a manual local run. Recorded for a follow-up issue with the candidates above.
+- **The IPC round trip is within the D-004 budget, with a small margin (#81, 2026-10-31):** medians of 1.87–1.92 µs in three sets of 15 runs, every run at or under 2.00 µs (KVM, release build, i9-10900K, 100,000 round trips; `cargo xtask bench-ipc`, [testing.md](../development/testing.md#ipc-round-trip-kvm)).
+  - **History:** 1.97–2.00 µs at M2.7 (#41), when the measurement was a manual source edit. By M3.0 it had risen to 2.29–2.32 µs (medians of 15). Measured again at each milestone gate on 2026-10-31, under the same conditions: M2.7 2.03, M2.8 1.95, M2.9 2.08, M2.10 2.16, M3.0 2.30 µs. So there was no single regression: each milestone added work to the path. The largest piece is M3.0's eager vector-state switch, about 175 ns per round trip (two switches). The rest is M2.9 and M2.10 code on the path, such as more lookups and locks per system call.
+  - **The fix:** every `IrqMutex` lock and unlock also counted held locks with an atomic read-modify-write, a locked instruction on x86. Each `send` takes about nine locks, so a round trip paid about 70 locked instructions just for the count. The count changes only with interrupts disabled on one CPU, so the kernel now uses a plain load and store; host tests, which lock from several threads, keep the atomic. That alone took the median from 2.30 to 1.87 µs. It weakens no check: the scheduler still refuses to switch while a lock is held.
+  - **Measured, not adopted:** PCIDs (process-context identifiers, so a switch keeps user TLB entries) saved about 80–115 ns, and `XSAVEOPT` about 45 ns (noise level). Both are headroom if later work pushes the round trip over again. PCID needs every unmap of a space that is not running to flush that space's PCID before its next run, which no path does today. Still candidates: a combined reply and receive, and fewer locks per system call (`send` takes the scheduler lock three times and the process table twice).
+  - **Where the time goes** (`rdtsc` counters, 2026-10-31, before the fix): a `send` that wakes a waiting receiver took about 1,800 cycles (480 ns), with no single large part: the capability lookup about 100 cycles, zeroing the 256-byte message 150, the page-table walk to read 8 user bytes 310, finding the current thread and the receiver's process 80–250 each, and the endpoint hand-over 100–260.
 - SMP: per-CPU scratch slots (`swapgs`), and locking for mappings during copies.
 - KPTI or other mitigations for speculative-execution attacks on real hardware.

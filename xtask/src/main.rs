@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode};
 use std::time::{Duration, Instant, SystemTime};
 
+mod bench;
 mod echo;
 mod fs_image;
 mod store_image;
@@ -94,6 +95,11 @@ COMMANDS:
                             regular files under DIR (storage.md part 8).
     store ls <IMAGE>        Mount a store with the storage service's code, check
                             every object, and list them.
+    bench-ipc [--runs <N>]  Measure the IPC round trip against D-004's 2 us budget:
+                            build the release `ipc` test kernel with 100,000
+                            round trips and boot it N times (default 5) under
+                            KVM (needs read-write /dev/kvm). Prints each run
+                            and the median.
     runner <ELF>            Boot one test kernel headless (used by Cargo as the
                             runner for x86_64-unknown-none; see .cargo/config.toml).
     help                    Show this help message
@@ -136,6 +142,9 @@ enum Task {
     },
     StoreLs {
         image: PathBuf,
+    },
+    BenchIpc {
+        runs: u32,
     },
 }
 
@@ -256,6 +265,22 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                 );
             }
         },
+        Some("bench-ipc") => {
+            let mut runs = 5;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--runs" => {
+                        let value = args.next().ok_or("--runs needs a number")?;
+                        runs =
+                            value.parse().ok().filter(|&n| n > 0).ok_or(format!(
+                                "--runs must be a positive number, got '{value}'"
+                            ))?;
+                    }
+                    other => return Err(format!("unexpected argument '{other}'")),
+                }
+            }
+            return Ok(Task::BenchIpc { runs });
+        }
         Some(other) => return Err(format!("unknown command '{other}'")),
     };
     match args.next() {
@@ -1308,6 +1333,7 @@ fn main() -> ExitCode {
             Task::FsLs { image } => fs_image::ls(&image),
             Task::StoreBuild { dir, image, blocks } => store_image::build(&dir, &image, blocks),
             Task::StoreLs { image } => store_image::ls(&image),
+            Task::BenchIpc { runs } => bench::ipc(&paths, runs),
         }
     });
     match result {
@@ -1411,6 +1437,13 @@ mod tests {
         assert!(parse(args(&["store", "build", "d", "s.img", "--blocks", "3"])).is_err());
         assert!(parse(args(&["store", "build", "d", "s.img", "--blocks", "x"])).is_err());
         assert!(parse(args(&["store"])).is_err());
+        assert_eq!(parse(args(&["bench-ipc"])), Ok(Task::BenchIpc { runs: 5 }));
+        assert_eq!(
+            parse(args(&["bench-ipc", "--runs", "9"])),
+            Ok(Task::BenchIpc { runs: 9 })
+        );
+        assert!(parse(args(&["bench-ipc", "--runs", "0"])).is_err());
+        assert!(parse(args(&["bench-ipc", "--runs"])).is_err());
         assert!(parse(args(&["fs"])).is_err());
         assert!(parse(args(&["fs", "build", "dir"])).is_err());
         assert!(parse(args(&["fs", "ls"])).is_err());

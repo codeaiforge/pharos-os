@@ -24,7 +24,30 @@ use pharos_kernel::{kprintln, mm, sched, time};
 
 pharos_kernel::test_kernel!(run);
 
-const ROUND_TRIPS: u64 = 1000;
+/// Ping-pong round trips: 1000, or `PHAROS_IPC_ROUND_TRIPS` at build time
+/// (`cargo xtask bench-ipc` builds with 100,000).
+const ROUND_TRIPS: u64 = match option_env!("PHAROS_IPC_ROUND_TRIPS") {
+    Some(n) => decimal(n),
+    None => 1000,
+};
+
+/// A positive decimal number, at compile time.
+const fn decimal(s: &str) -> u64 {
+    let b = s.as_bytes();
+    assert!(!b.is_empty(), "PHAROS_IPC_ROUND_TRIPS is empty");
+    let mut i = 0;
+    let mut v = 0u64;
+    while i < b.len() {
+        assert!(
+            b[i].is_ascii_digit(),
+            "PHAROS_IPC_ROUND_TRIPS must be a number"
+        );
+        v = v * 10 + (b[i] - b'0') as u64;
+        i += 1;
+    }
+    assert!(v > 0, "PHAROS_IPC_ROUND_TRIPS must be positive");
+    v
+}
 /// Each table process: entries from the start, strings at +0x800, receive
 /// buffers at +0xc00 (all in its own page at this address).
 const TABLE: u64 = 0x6000_0000;
@@ -200,7 +223,7 @@ fn run(t: &mut TestRun) {
     );
     settle(|| to_pong.waiting() == (0, 1));
     t.check(
-        "1000 round trips, every reply the request plus one, in order",
+        "every round trip's reply is the request plus one, in order",
         exit_code(ping) == Some(0),
     );
     t.check(
