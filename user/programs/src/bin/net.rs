@@ -12,14 +12,15 @@
 #![no_std]
 #![no_main]
 
-use pharos_programs::net::client::{
-    BAD_REQUEST, BUSY, MAX_PAYLOAD, NO_PORT, NO_ROOM, OK, OP_PING, OP_RECV, OP_SEND, OP_STATS,
-    TOO_LARGE,
-};
 use pharos_programs::net::{
     ArpCache, OUR_IP, Packet, STATS, arp_frame, classify, echo_frame, next_hop, stat, udp_frame,
 };
 use pharos_programs::virtio_net::Net;
+use pharos_proto::net::{
+    BUSY, MAX_PAYLOAD, NAME, NO_PORT, NO_ROOM, OK, Request, VERSION, encode_datagram, encode_pong,
+    encode_stats, parse,
+};
+use pharos_proto::{Info, refusal};
 use pharos_user::{
     Handle, Received, debug_write, delete, irq_create, irq_notify, receive, send, try_send,
 };
@@ -137,10 +138,9 @@ fn answer(stats: &mut [u32; STATS], reply: Handle, bytes: &[u8]) {
 
 fn datagram_reply(stats: &mut [u32; STATS], reply: Handle, d: &Datagram) {
     let mut out = [0u8; 256];
-    out[2..4].copy_from_slice(&d.port.to_le_bytes());
-    out[4..8].copy_from_slice(&d.ip);
-    out[8..8 + d.len].copy_from_slice(&d.data[..d.len]);
-    answer(stats, reply, &out[..8 + d.len]);
+    // Datagrams are at most MAX_PAYLOAD bytes (checked on arrival).
+    let n = encode_datagram(d.ip, d.port, &d.data[..d.len], &mut out).unwrap_or(0);
+    answer(stats, reply, &out[..n]);
 }
 
 impl Service {
@@ -304,9 +304,7 @@ impl Service {
                 });
                 if let Some(c) = found {
                     if let Some(p) = c.ping.take() {
-                        let mut out = [OK, 0, 0, 0];
-                        out[2..4].copy_from_slice(&seq.to_le_bytes());
-                        answer(&mut self.stats, p.reply, &out);
+                        answer(&mut self.stats, p.reply, &encode_pong(seq));
                     }
                 }
             }
@@ -339,18 +337,20 @@ impl Service {
         let Some(i) = self.client(port) else {
             return answer(&mut self.stats, reply, &[NO_ROOM]);
         };
-        match req.first().copied() {
-            Some(OP_SEND) if req.len() >= 8 => {
-                let payload = &req[8..];
-                if payload.len() > MAX_PAYLOAD {
-                    return answer(&mut self.stats, reply, &[TOO_LARGE]);
-                }
-                let ip = [req[4], req[5], req[6], req[7]];
-                let dst_port = u16::from_le_bytes([req[2], req[3]]);
-                let status = self.send_udp(i, Datagram::new(ip, dst_port, payload));
+        let req = match parse(req) {
+            Ok(req) => req,
+            Err(refused) => {
+                let mut out = [0u8; 4];
+                let n = refusal(refused, VERSION, &mut out);
+                return answer(&mut self.stats, reply, &out[..n]);
+            }
+        };
+        match req {
+            Request::Send { ip, port, payload } => {
+                let status = self.send_udp(i, Datagram::new(ip, port, payload));
                 answer(&mut self.stats, reply, &[status]);
             }
-            Some(OP_RECV) => {
+            Request::Recv => {
                 if self.clients[i].recv.is_some() {
                     return answer(&mut self.stats, reply, &[BUSY]);
                 }
@@ -359,26 +359,34 @@ impl Service {
                     None => self.clients[i].recv = Some(reply),
                 }
             }
-            Some(OP_PING) if req.len() >= 8 => {
+            Request::Ping { ip, seq } => {
                 if self.clients[i].ping.is_some() {
                     return answer(&mut self.stats, reply, &[BUSY]);
                 }
                 self.clients[i].ping = Some(Ping {
                     reply,
-                    seq: u16::from_le_bytes([req[2], req[3]]),
-                    ip: [req[4], req[5], req[6], req[7]],
+                    seq,
+                    ip,
                     sent: false,
                 });
                 self.send_ping(i);
             }
-            Some(OP_STATS) => {
+            Request::Stats => {
                 let mut out = [0u8; 4 + 4 * STATS];
-                for (k, v) in self.stats.iter().enumerate() {
-                    out[4 + 4 * k..8 + 4 * k].copy_from_slice(&v.to_le_bytes());
-                }
+                encode_stats(&self.stats, &mut out);
                 answer(&mut self.stats, reply, &out);
             }
-            _ => answer(&mut self.stats, reply, &[BAD_REQUEST]),
+            Request::Info => {
+                let mut out = [0u8; 16];
+                let info = Info {
+                    name: NAME,
+                    low: VERSION,
+                    high: VERSION,
+                    details: &[],
+                };
+                let n = info.encode(&mut out).unwrap_or(0);
+                answer(&mut self.stats, reply, &out[..n]);
+            }
         }
     }
 }

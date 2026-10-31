@@ -26,7 +26,7 @@ use pharos_kernel::{fs, kprintln, mm, pci, process, sched, storage, time};
 
 pharos_kernel::test_kernel!(run);
 
-/// Namespace 3 (`models`), read-only (`store_proto`).
+/// Namespace 3 (`models`), read-only (`pharos_proto::store`).
 const MODELS_READ_ONLY: u32 = 3 | 1 << 16;
 /// 800 MiB: the file, the 16 MiB window, and the heap.
 const CLIENT_PAGES: u64 = 204_800;

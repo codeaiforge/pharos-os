@@ -17,8 +17,10 @@
 #![no_std]
 #![no_main]
 
-use pharos_programs::net::client::{NO_PORT, OK, ping, recv, send_to, stats};
+use pharos_programs::net::client::{NO_PORT, OK, ping, raw, recv, send_to, stats};
 use pharos_programs::net::{GATEWAY, OUR_IP, stat};
+use pharos_proto::net::{NAME, Request, VERSION, encode};
+use pharos_proto::{Info, versions};
 use pharos_user::{Error, debug_write, endpoint_create, receive, send, try_send};
 
 pharos_user::entry!(main);
@@ -108,6 +110,24 @@ fn main(arg: u64) -> u64 {
                 "sender: counters show frames both ways and the lost datagram",
                 counters.is_ok_and(|(s, c)| {
                     s == OK && c[stat::RECEIVED] > 0 && c[stat::SENT] > 0 && c[stat::NO_PORT] >= 1
+                }),
+            );
+            let mut v2 = [0u8; 8];
+            let n = encode(&Request::Stats, &mut v2).unwrap_or(0);
+            v2[0] = VERSION + 1;
+            report(
+                &mut f,
+                "sender: version 2: VERSION, supported 1 to 1",
+                raw(NET, reply, &v2[..n])
+                    .is_ok_and(|(r, len)| versions(&r[..len]) == Some((VERSION, VERSION))),
+            );
+            let n = encode(&Request::Info, &mut v2).unwrap_or(0);
+            report(
+                &mut f,
+                "sender: INFO names the interface and its versions",
+                raw(NET, reply, &v2[..n]).is_ok_and(|(r, len)| {
+                    Info::parse(&r[..len])
+                        .is_some_and(|i| i.name == NAME && (i.low, i.high) == (1, 1))
                 }),
             );
             f

@@ -5,7 +5,7 @@
 //! - Argument 0, the service. Handles: 1 the console, 2 the device (`MAP |
 //!   CONFIG | IRQ`), 3 its endpoint (`RECEIVE`), 4 the report endpoint
 //!   (`SEND`). Mounts the store, sends `ready`, and serves requests
-//!   ([`pharos_programs::store_proto`]). Exits 1 if the store does not
+//!   ([`pharos_proto::store`], version 1). Exits 1 if the store does not
 //!   mount, 2 if the device cannot be set up.
 //! - Argument 1, the crash writer (handles 1 and 2): checks the `crash/`
 //!   objects an earlier, killed run left (a counter file and a log stream
@@ -17,10 +17,11 @@
 #![no_std]
 #![no_main]
 
-use pharos_programs::store_proto::{
-    MAX_BUFFER, MAX_CLIENT_PATH, Request, Status, full_path, namespace, parse,
-};
 use pharos_programs::virtio::{Blk, SECTOR};
+use pharos_proto::store::{
+    MAX_BUFFER, MAX_CLIENT_PATH, NAME, Request, Status, VERSION, full_path, namespace, parse,
+};
+use pharos_proto::{Info, Refused, refusal};
 use pharos_store::{BLOCK, Block, Device, Error, IoError, Kind, Store};
 use pharos_user::{
     Handle, Mapped, Received, debug_write, delete, irq_create, mem_map_cap, mem_unmap, receive,
@@ -151,7 +152,16 @@ impl Service {
 
     /// Handles one request; writes the reply (status first) into `out` and
     /// returns its length.
-    fn handle(&mut self, req: Option<Request<'_>>, badge: u32, out: &mut [u8; 256]) -> usize {
+    fn handle(
+        &mut self,
+        req: Result<Request<'_>, Refused>,
+        badge: u32,
+        out: &mut [u8; 256],
+    ) -> usize {
+        let req = match req {
+            Ok(req) => req,
+            Err(refused) => return refusal(refused, VERSION, out),
+        };
         match self.answer(req, badge, out) {
             Ok(n) => {
                 out[0] = Status::Ok as u8;
@@ -166,11 +176,20 @@ impl Service {
 
     fn answer(
         &mut self,
-        req: Option<Request<'_>>,
+        req: Request<'_>,
         badge: u32,
         out: &mut [u8; 256],
     ) -> Result<usize, Status> {
-        let req = req.ok_or(Status::BadRequest)?;
+        if req == Request::Info {
+            // Names only the interface; nothing about any namespace.
+            let info = Info {
+                name: NAME,
+                low: VERSION,
+                high: VERSION,
+                details: &[],
+            };
+            return info.encode(out).ok_or(Status::BadRequest);
+        }
         let (prefix, read_only) = namespace(badge).ok_or(Status::NoAccess)?;
         let mut path = [0u8; 104];
         let full =
@@ -273,7 +292,7 @@ impl Service {
                 out[1..9].copy_from_slice(&size.to_le_bytes());
                 return Ok(9);
             }
-            Request::Attach { .. } => return Err(Status::BadRequest),
+            Request::Attach { .. } | Request::Info => return Err(Status::BadRequest),
         };
         match result {
             Ok(()) => Ok(1),
@@ -301,7 +320,7 @@ fn serve(store: Store<Disk>) -> u64 {
             continue;
         };
         let req = parse(&msg[..len.min(msg.len())]);
-        if let Some(Request::Attach { len }) = req {
+        if let Ok(Request::Attach { len }) = req {
             if cap != 0 {
                 s.attach(badge, cap, len);
             }

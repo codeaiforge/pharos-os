@@ -39,8 +39,16 @@ dependencies = [
  "libm",
  "pharos-fs",
  "pharos-infer",
+ "pharos-proto",
  "pharos-store",
  "pharos-user",
+]
+
+[[package]]
+name = "pharos-proto"
+version = "0.2.0"
+dependencies = [
+ "pharos-fs",
 ]
 
 [[package]]

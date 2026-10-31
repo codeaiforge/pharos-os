@@ -71,16 +71,17 @@ All parsing is in `pharos_programs::net`: safe Rust, no allocation per packet, e
 ### Network capability and client interface
 
 - **A client's network capability is a `SEND` capability on the service's endpoint,** badged by `init` with the one UDP port the client may use (1–65535). Badge 0, which `init`'s own unbadged capability has, is refused. Revoking the capability ends the client's access. The service binds a port to a client on first use and never lets another badge use it.
-- **Requests use `call`** (below). Each request and reply is one message, with little-endian fields:
+- **Requests use `call`** (below). Each request and reply is one message, with little-endian fields. Since #92 this is interface `net`, version 1 (D-019): the codec is `pharos_proto::net`, shared by the service and its clients and fuzzed on the host. Every request starts with the version (1) and the operation; the byte that was padding before #92 now holds the version.
 
   | Op | Request | Reply |
   | --- | --- | --- |
-  | 1 `send` | `[1, 0, dst_port:u16, dst_ip:[u8;4], payload…]` | `[status]` |
-  | 2 `recv` | `[2]` | `[status, 0, src_port:u16, src_ip:[u8;4], payload…]`, deferred until a datagram arrives |
-  | 3 `ping` | `[3, 0, seq:u16, dst_ip:[u8;4]]` | `[status, 0, seq:u16]`, deferred until the echo reply |
-  | 4 `stats` | `[4]` | `[status, counters…]`: frames received and sent, drops by reason |
+  | 1 `send` | `[1, 1, dst_port:u16, dst_ip:[u8;4], payload…]` (payload at most 248 bytes) | `[status]` |
+  | 2 `recv` | `[1, 2]` | `[status, 0, src_port:u16, src_ip:[u8;4], payload…]`, deferred until a datagram arrives |
+  | 3 `ping` | `[1, 3, seq:u16, dst_ip:[u8;4]]` | `[status, 0, seq:u16]`, deferred until the echo reply |
+  | 4 `stats` | `[1, 4]` | `[status, 0, 0, 0, counters (u32 each)…]`: frames received and sent, drops by reason |
+  | 0xF0 `INFO` (common) | `[1, 0xF0]` | `[status, 1, 1, 3, "net"]`: versions 1 to 1, no details |
 
-  Status codes: 0 OK, 1 bad request, 2 too large, 3 busy (a receive or ping is already outstanding, or a datagram already waits for ARP), 4 no port (badge 0 or above 65535), 5 no room (8 clients already known).
+  Status codes: the common ones (D-019): 0 OK, 1 bad request (including a malformed request), 2 `VERSION` (another version: the reply is `[2, 1, 1]`, the supported range), 4 busy (a receive or ping is already outstanding, or a datagram already waits for ARP); and the interface's own: 32 no port (badge 0 or above 65535), 33 no room (8 clients already known). Before #92, codes 2–5 were too large, busy, no port, and no room; a payload over 248 bytes cannot arrive in a 256-byte message, so "too large" is gone.
 - **Counters** (`stats`): frames received and sent, frames dropped by the parser (malformed or not for us), datagrams for a port no client holds, replies dropped because the client was not waiting, and datagrams dropped from a full queue.
 - **Clients are known by port from their first request** and stay known; with 8 ports seen, new ones get `NO_ROOM`. A client registers by making any request (the echoer in the tests asks for `stats` first), so datagrams that arrive before its first `recv` are queued.
 - **No destination policy in M2.10:** a client may send to any address and port. Per-destination grants come with D-012 (M3.4).

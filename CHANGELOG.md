@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- The shared protocol crate (#92, D-019): new `crates/pharos-proto` (`no_std`, `unsafe` forbidden, no third-party code) with the common header (interface version, then operation), common status codes, `INFO` and `ATTACH`, and a checked reader and writer. The storage interface moves into it from `pharos_programs::store_proto`, and the network service's request parsing, which was inline in its loop, becomes `pharos_proto::net`, shared with its client functions. Both are version 1. Both services answer `INFO` and refuse other versions with `VERSION` and their range. Each parser is fuzzed with 100,000 messages. The `store` and `network` test kernels check a version-2 request and `INFO`. Status codes are renumbered: storage `NOT_FOUND` 2 → 7, `NO_SPACE`/`READ_ONLY`/`IO_ERROR`/`CORRUPT` → 32–35, `NO_ACCESS` 5 → 3, `NO_BUFFER` 8 → 6, `ATTACH` 7 → 0xF1; network busy 3 → 4, no port 4 → 32, no room 5 → 33.
 - M3.2 design (#83), approved by the maintainer: `docs/architecture/inference.md`. It covers:
   - in `pharos-infer`: Qwen2's tokenizer, batched prompts with bit-identical output, and no hand-written SIMD (it would need `unsafe`, and the SSE2 baseline already meets S1's generation target);
   - an unprivileged inference service with read-only access to the `models` namespace, a 1 GiB limit, and a compiled-in manifest of models with SHA-256 and expected configuration, loaded on first use;

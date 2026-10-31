@@ -350,33 +350,24 @@ impl ArpCache {
     }
 }
 
-/// Client requests (networking.md): encoding shared by the service and
-/// its clients.
+/// Client calls (networking.md), over the shared codec in
+/// [`pharos_proto::net`] (interface version 1, D-019).
 pub mod client {
+    use pharos_proto::net::{Request, encode, parse_datagram, parse_stats};
     use pharos_user::{Error, Handle, Received, call_reply};
 
-    pub const OP_SEND: u8 = 1;
-    pub const OP_RECV: u8 = 2;
-    pub const OP_PING: u8 = 3;
-    pub const OP_STATS: u8 = 4;
+    pub use pharos_proto::net::{BAD_REQUEST, BUSY, MAX_PAYLOAD, NO_PORT, NO_ROOM, OK};
 
-    pub const OK: u8 = 0;
-    pub const BAD_REQUEST: u8 = 1;
-    pub const TOO_LARGE: u8 = 2;
-    pub const BUSY: u8 = 3;
-    pub const NO_PORT: u8 = 4;
-    pub const NO_ROOM: u8 = 5;
-
-    /// Largest payload in one request or reply.
-    pub const MAX_PAYLOAD: usize = 248;
-
-    fn reply(
+    /// Sends `req` by `call`; returns the reply's length in `buf`.
+    fn call(
         net: Handle,
         reply: Handle,
-        request: &[u8],
+        req: &Request<'_>,
         buf: &mut [u8; 256],
     ) -> Result<usize, Error> {
-        match call_reply(net, request, reply, buf)? {
+        let mut msg = [0u8; 256];
+        let n = encode(req, &mut msg).ok_or(Error::TooLarge)?;
+        match call_reply(net, &msg[..n], reply, buf)? {
             Received::Message { len, .. } if len >= 1 => Ok(len.min(buf.len())),
             _ => Err(Error::Other(0)),
         }
@@ -390,16 +381,13 @@ pub mod client {
         port: u16,
         payload: &[u8],
     ) -> Result<u8, Error> {
-        let mut req = [0u8; 256];
-        if payload.len() > MAX_PAYLOAD {
-            return Err(Error::TooLarge);
-        }
-        req[0] = OP_SEND;
-        req[2..4].copy_from_slice(&port.to_le_bytes());
-        req[4..8].copy_from_slice(&ip);
-        req[8..8 + payload.len()].copy_from_slice(payload);
         let mut buf = [0u8; 256];
-        reply(net, reply_ep, &req[..8 + payload.len()], &mut buf)?;
+        call(
+            net,
+            reply_ep,
+            &Request::Send { ip, port, payload },
+            &mut buf,
+        )?;
         Ok(buf[0])
     }
 
@@ -411,43 +399,44 @@ pub mod client {
         out: &mut [u8],
     ) -> Result<(u8, [u8; 4], u16, usize), Error> {
         let mut buf = [0u8; 256];
-        let n = reply(net, reply_ep, &[OP_RECV], &mut buf)?;
-        if buf[0] != OK || n < 8 {
-            return Ok((buf[0], [0; 4], 0, 0));
+        let n = call(net, reply_ep, &Request::Recv, &mut buf)?;
+        match parse_datagram(&buf[..n]) {
+            Some((ip, port, payload)) => {
+                let len = payload.len().min(out.len());
+                out[..len].copy_from_slice(&payload[..len]);
+                Ok((OK, ip, port, len))
+            }
+            None => Ok((buf[0], [0; 4], 0, 0)),
         }
-        let len = (n - 8).min(out.len());
-        out[..len].copy_from_slice(&buf[8..8 + len]);
-        let ip = [buf[4], buf[5], buf[6], buf[7]];
-        Ok((OK, ip, u16::from_le_bytes([buf[2], buf[3]]), len))
     }
 
     /// Pings `ip` and waits for the reply; returns the status.
     pub fn ping(net: Handle, reply_ep: Handle, ip: [u8; 4], seq: u16) -> Result<u8, Error> {
-        let mut req = [OP_PING, 0, 0, 0, 0, 0, 0, 0];
-        req[2..4].copy_from_slice(&seq.to_le_bytes());
-        req[4..8].copy_from_slice(&ip);
         let mut buf = [0u8; 256];
-        reply(net, reply_ep, &req, &mut buf)?;
+        call(net, reply_ep, &Request::Ping { ip, seq }, &mut buf)?;
         Ok(buf[0])
     }
 
-    /// The service's counters, in [`super::Stats`] order.
+    /// The service's counters, in [`super::stat`] order.
     pub fn stats(net: Handle, reply_ep: Handle) -> Result<(u8, [u32; super::STATS]), Error> {
         let mut buf = [0u8; 256];
-        let n = reply(net, reply_ep, &[OP_STATS], &mut buf)?;
-        let mut out = [0u32; super::STATS];
-        for (i, v) in out.iter_mut().enumerate() {
-            let at = 4 + 4 * i;
-            if at + 4 <= n {
-                *v = u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]);
-            }
+        let n = call(net, reply_ep, &Request::Stats, &mut buf)?;
+        Ok((buf[0], parse_stats(&buf[..n]).unwrap_or_default()))
+    }
+
+    /// Sends raw bytes by `call` (for tests of refusals); returns the reply
+    /// and its length.
+    pub fn raw(net: Handle, reply_ep: Handle, msg: &[u8]) -> Result<([u8; 256], usize), Error> {
+        let mut buf = [0u8; 256];
+        match call_reply(net, msg, reply_ep, &mut buf)? {
+            Received::Message { len, .. } => Ok((buf, len.min(buf.len()))),
+            _ => Err(Error::Other(0)),
         }
-        Ok((buf[0], out))
     }
 }
 
 /// Counters the service reports with `stats`.
-pub const STATS: usize = 6;
+pub use pharos_proto::net::STATS;
 
 /// Indexes into the `stats` counters.
 pub mod stat {

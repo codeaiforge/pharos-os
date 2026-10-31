@@ -1,0 +1,16 @@
+[package]
+name = "pharos-proto"
+description = "Pharos OS service interfaces (D-019): the common message header, status codes, and operations, and one checked, fuzzed codec per interface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Store path rules for the storage interface (in this workspace; no
+# third-party code).
+pharos-fs = { path = "../pharos-fs" }
+
+[lints]
+workspace = true

@@ -21,7 +21,7 @@ use pharos_kernel::{fs, ipc, kprintln, mm, pci, process, sched, storage, time};
 pharos_kernel::test_kernel!(run);
 
 /// Client steps that must pass.
-const STEPS: [&str; 12] = [
+const STEPS: [&str; 14] = [
     "echoer: registered",
     "sender: non-blocking send with nobody waiting: WOULD_BLOCK",
     "sender: ping 10.0.2.2 answered",
@@ -33,6 +33,8 @@ const STEPS: [&str; 12] = [
     "sender: pong from 10.0.2.15:40001",
     "sender: datagram to a port nobody holds accepted",
     "sender: counters show frames both ways and the lost datagram",
+    "sender: version 2: VERSION, supported 1 to 1",
+    "sender: INFO names the interface and its versions",
     "unbadged: refused with NO_PORT",
 ];
 

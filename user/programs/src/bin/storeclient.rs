@@ -19,7 +19,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use pharos_infer::gguf::{Gguf, Value};
-use pharos_programs::store_proto::{MAX_BUFFER, Request, Status, encode};
+use pharos_proto::store::{MAX_BUFFER, NAME, Request, Status, VERSION, encode};
+use pharos_proto::{Info, versions};
 use pharos_store::sha256;
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
@@ -70,6 +71,15 @@ impl Client {
         match call_reply(self.service, &msg[..n], self.reply, &mut buf) {
             Ok(Received::Message { len, .. }) if len >= 1 => (Status::from_code(buf[0]), buf),
             _ => (Status::IoError, buf),
+        }
+    }
+
+    /// Sends raw bytes by `call`; returns the reply and its length.
+    fn raw(&self, msg: &[u8]) -> ([u8; 256], usize) {
+        let mut buf = [0u8; 256];
+        match call_reply(self.service, msg, self.reply, &mut buf) {
+            Ok(Received::Message { len, .. }) => (buf, len.min(buf.len())),
+            _ => (buf, 0),
         }
     }
 
@@ -222,6 +232,23 @@ fn writer(f: &mut u64) {
             path: b"keep.txt",
             record: b"x",
         }) == Status::BadRequest,
+    );
+    let mut v2 = [0u8; 16];
+    let n = encode(&Request::Stat { path: b"keep.txt" }, &mut v2).unwrap_or(0);
+    v2[0] = VERSION + 1;
+    let (r, len) = c.raw(&v2[..n]);
+    report(
+        f,
+        "version 2: VERSION, supported 1 to 1",
+        versions(&r[..len]) == Some((VERSION, VERSION)),
+    );
+    let mut info = [0u8; 4];
+    let n = encode(&Request::Info, &mut info).unwrap_or(0);
+    let (r, len) = c.raw(&info[..n]);
+    report(
+        f,
+        "INFO names the interface and its versions",
+        Info::parse(&r[..len]).is_some_and(|i| i.name == NAME && (i.low, i.high) == (1, 1)),
     );
     // A bigger buffer replaces the first; the write cannot fit.
     let big = c.attach(HUGE);

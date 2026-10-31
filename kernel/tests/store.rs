@@ -25,7 +25,7 @@ use pharos_kernel::{fs, kprintln, mm, pci, process, sched, storage, time};
 
 pharos_kernel::test_kernel!(run);
 
-/// Namespace badges (`store_proto`): 1 `test`, 2 `spare`; bit 16 read-only.
+/// Namespace badges (`pharos_proto::store`): 1 `test`, 2 `spare`; bit 16 read-only.
 const READ_ONLY: u32 = 1 << 16;
 
 fn lines(id: TaskId) -> Vec<Vec<u8>> {
@@ -151,6 +151,8 @@ fn run(t: &mut TestRun) {
             "a path escaping the namespace: BAD_REQUEST",
             "a range outside the buffer: NO_BUFFER",
             "a file as a stream: BAD_REQUEST",
+            "version 2: VERSION, supported 1 to 1",
+            "INFO names the interface and its versions",
             "attach a 17 MiB buffer",
             "a buffer over 32 MiB is refused; the 17 MiB one stays",
             "a write larger than the store: NO_SPACE, nothing written",
