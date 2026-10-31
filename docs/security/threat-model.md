@@ -132,6 +132,19 @@ Design: [user-environment.md](../architecture/user-environment.md) and [storage.
 | A client reads or writes another's files | **Implemented (#77):** namespaces from badges, read-only bit, paths joined to the prefix and checked against escape; file data only in the client's own attached buffer (`store` test: read-only, foreign, unbadged, and unknown clients; mutation-checked) |
 | A client exhausts the storage service | **Implemented (M3.0 review, F2):** attached buffers are capped at 32 MiB, at most 16 clients hold one, within the service's 1 GiB limit (`store` test, mutation-checked). **Limit:** a client's buffer stays mapped after it ends, until its badge attaches another |
 
+### Local inference (M3.2, planned)
+
+Design: [inference.md](../architecture/inference.md), from D-010, D-011, and D-019. Every row is **planned** (#84–#92) and reviewed at the M3.2 gate (#91).
+
+| Threat | Planned mitigation |
+| --- | --- |
+| A malformed or substituted model file exploits the parser or changes the model's behaviour | Only models in the compiled-in manifest load; size and SHA-256 checked before parsing; configuration checked against the manifest; the GGUF and tokenizer parsers are checked and fuzzed |
+| A client exhausts the service's memory or holds it forever | Prompt, token, and context limits checked before anything is allocated; one session at a time; idle sessions dropped after 10 s. **Limit:** per-agent token and time budgets are M3.5 |
+| A client changes its prompt while it is being processed | The prompt is copied out of the shared buffer before tokenizing |
+| A hung or crashed service hangs its callers | Every operation has a documented timeout and clients always use `call` with it (#76); the service replies with non-blocking sends. **Limit:** restarting the service is M3.3 |
+| A compromised inference service reaches further | It holds only read-only access to the `models` namespace and its own endpoints: no devices, network, or other storage |
+| Model output is acted on | Output is returned as text to the caller only; nothing in the service executes it or passes it to a privileged interface (AGENTS.md section 7) |
+
 ### Known limitations
 
 - No automated secret scanning or dependency auditing is configured yet (nothing to audit today).

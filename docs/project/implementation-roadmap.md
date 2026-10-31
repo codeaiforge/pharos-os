@@ -360,7 +360,7 @@ Ordering notes:
 
 ### M3.2 — Model compatibility and local inference
 
-**Status: Current.** M3.0 gives it SIMD, 1 GiB in one process, the model file from the store, and timeouts.
+**Status: Current.** M3.0 gives it SIMD, 1 GiB in one process, the model file from the store, and timeouts. D-019 accepted (#82); design: [inference.md](../architecture/inference.md) (#83).
 
 - **Where it runs (D-020):** Engine crate host-tested, fuzzed, and compared with llama.cpp on the host, in parallel with M3.0; done only when the service runs on Pharos.
 - **Objective and scope:** Run inference locally as an unprivileged service (host prototype first, then on Pharos, per D-020).

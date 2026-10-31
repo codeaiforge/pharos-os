@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- M3.2 design (#83), approved by the maintainer: `docs/architecture/inference.md`. It covers:
+  - in `pharos-infer`: Qwen2's tokenizer, batched prompts with bit-identical output, and no hand-written SIMD (it would need `unsafe`, and the SSE2 baseline already meets S1's generation target);
+  - an unprivileged inference service with read-only access to the `models` namespace, a 1 GiB limit, and a compiled-in manifest of models with SHA-256 and expected configuration, loaded on first use;
+  - interface `inference` version 1 on `pharos-proto`: `GENERATE`, pulled `NEXT`, `CANCEL`, `RESULT` with the record for M3.4's audit trail, greedy decoding only, one session at a time;
+  - the planned tests.
+
+  The threat model gains planned inference rows.
 - D-019 accepted (#82): service interfaces use hand-written codecs in a new shared `no_std` crate, `pharos-proto`, instead of an interface language. Every message starts with its interface version and operation; an unsupported version is refused with `VERSION` and the supported range. Status codes are common to all interfaces, with common operations `INFO` (discovery, including model capabilities) and `ATTACH` (bulk data through shared memory). Discovery stays capability-based, with no registry. Every operation has a documented timeout, and long results are pulled (`NEXT`, `CANCEL`). The network and storage services move to it in M3.2 (#92).
 - M3.0 (platform prerequisites for hosting agents) is done (#79): CI green on `main` at `e1d9694` with 42 test kernels, a broken branch caught by the QEMU job, and the security review approved. M3.2 (local inference) is current. `pharos info` shows the new stage.
 - The M3.0 security review (#79, `docs/security/review-m3.0-platform.md`): two findings, both fixed. A receiver could call `mem_share` on its `mem_map_cap` mapping and get a capability outside the sharer's derivation tree, which `revoke` could not reach; `mem_share` now takes only the caller's own `mem_map` memory (`BAD_ADDRESS` otherwise). One storage client could attach a buffer as large as the service's whole limit; buffers over 32 MiB (`store_proto::MAX_BUFFER`) are now refused. The threat model gains the M3.0 limits. The CI QEMU job's time limit rises from 20 to 40 minutes for `store_crash` and `large_file`.
