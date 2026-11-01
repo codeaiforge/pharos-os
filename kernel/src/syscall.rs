@@ -38,7 +38,11 @@ pub mod number {
     pub const MEM_SHARE: u64 = 22;
     pub const MEM_MAP_CAP: u64 = 23;
     pub const UPTIME: u64 = 24;
+    pub const PROCESS_STOP: u64 = 25;
 }
+
+/// `process_status`'s value for a stopped process, beside the killed bit.
+pub const STOPPED: u64 = 256;
 
 /// Largest buffer `debug_write` accepts (and the IPC message size).
 pub const MAX_MESSAGE: usize = 256;
@@ -189,6 +193,9 @@ pub enum Call {
         limit: u64,
     },
     ProcessStatus {
+        handle: Handle,
+    },
+    ProcessStop {
         handle: Handle,
     },
     IrqNotify {
@@ -387,6 +394,7 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             })
         }
         number::PROCESS_STATUS => Ok(Call::ProcessStatus { handle: args[0] }),
+        number::PROCESS_STOP => Ok(Call::ProcessStop { handle: args[0] }),
         number::CALL => Ok(Call::Call {
             handle: args[0],
             addr: args[1],
@@ -438,6 +446,7 @@ pub fn needed_rights(call: &Call) -> cap::Rights {
         Call::MmioMap { .. } | Call::DmaAlloc { .. } => cap::MAP,
         Call::IrqCreate { .. } => cap::IRQ,
         Call::IrqWait { .. } | Call::ProcessStatus { .. } | Call::IrqNotify { .. } => cap::WAIT,
+        Call::ProcessStop { .. } => cap::STOP,
         Call::Spawn { .. } => cap::READ,
         _ => 0,
     }
@@ -808,7 +817,8 @@ mod kernel {
         if let Some(endpoint) = notify {
             record.notify_on_end(endpoint, 1 << bit);
         }
-        let child = cap::Capability::new(Object::Process(record), cap::WAIT | cap::GRANT);
+        let child =
+            cap::Capability::new(Object::Process(record), cap::WAIT | cap::GRANT | cap::STOP);
         Ok(process.caps.lock().insert(child)?)
     }
 
@@ -822,6 +832,11 @@ mod kernel {
         };
         frame.rax = status;
         frame.rdx = value;
+        // Told to end (by another process, itself, or its parent ending):
+        // it ends here instead of returning to user mode.
+        if sched::stopping() {
+            process::end_stopped();
+        }
     }
 
     fn execute(call: Call) -> Result<u64, Error> {
@@ -1117,7 +1132,21 @@ mod kernel {
                     None => 0,
                     Some(process::End::Exited(code)) => 1 << 63 | code & VALUE,
                     Some(process::End::Killed(vector)) => 1 << 63 | 1 << 62 | vector & VALUE,
+                    // Exception vectors are below 32, so 256 is free.
+                    Some(process::End::Stopped) => 1 << 63 | 1 << 62 | STOPPED,
                 })
+            }
+            // Ends the process and the processes it started (agents.md).
+            // Returns at once; `process_status` shows when it has ended.
+            Call::ProcessStop { handle } => {
+                let cap = process.caps.lock().get(handle, cap::STOP)?;
+                let Object::Process(record) = cap.object() else {
+                    return Err(Error::MissingRight);
+                };
+                let id = record.id;
+                drop((cap, process));
+                process::stop(id);
+                Ok(0)
             }
         }
     }
@@ -1150,7 +1179,7 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(25, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(26, [0; 6]), Err(Error::UnknownCall));
         let region = crate::process::MAP_REGION;
         assert_eq!(
             decode(22, [region.start, 8192, 9, 9, 9, 9]),
@@ -1283,6 +1312,10 @@ mod tests {
             Ok(Call::Sleep { micros: 0 })
         );
         assert_eq!(decode(24, [9; 6]), Ok(Call::Uptime));
+        assert_eq!(
+            decode(25, [4, 9, 9, 9, 9, 9]),
+            Ok(Call::ProcessStop { handle: 4 })
+        );
         let config = |offset, width| decode(9, [1, offset, width, 0, 0, 0]);
         assert_eq!(
             config(0x10, 4),
@@ -1482,7 +1515,10 @@ mod tests {
                     assert!(len <= MAX_MESSAGE && max <= MAX_MESSAGE);
                     assert!(user_range_ok(addr, len as u64) && user_range_ok(addr, max as u64));
                 }
-                Ok(_) => assert!(matches!(number, 0 | 1 | 5 | 6 | 13 | 14 | 16 | 21 | 24)),
+                Ok(_) => assert!(matches!(
+                    number,
+                    0 | 1 | 5 | 6 | 13 | 14 | 16 | 21 | 24 | 25
+                )),
                 Err(error) => assert!(error as u64 >= 1 && error as u64 <= 12),
             }
         }

@@ -38,6 +38,8 @@ pub const IRQ: Rights = 1 << 6;
 pub const CONFIG: Rights = 1 << 7;
 /// Wait for an interrupt.
 pub const WAIT: Rights = 1 << 8;
+/// Stop a process (and the processes it started; agents.md).
+pub const STOP: Rights = 1 << 9;
 
 /// Badges are 24 bits (services.md).
 pub const BADGE_MASK: u32 = 0xff_ffff;

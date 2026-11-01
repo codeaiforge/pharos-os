@@ -93,10 +93,10 @@ That is, for a notification, bits 32–63 hold the 32 notification bits.
   - `arg`: passed in `rdi`.
   - `caps`: a user array of `count` (at most 8) entries `{ handle: u64, rights: u32, badge: u32 }` (16 bytes each). Entry *i* becomes the child's handle *i* + 1: a capability derived from the caller's, with `GRANT` required on it, rights narrowed to `rights`, and the badge set as described above. So revoking the caller's capability revokes the child's.
   - `endpoint`, `bit`: 0, or an endpoint the caller holds with `RECEIVE`, and a bit (0–31) to signal when the child ends.
-  - Returns a **process capability** with `WAIT | GRANT`.
+  - Returns a **process capability** with `WAIT | GRANT | STOP` (`STOP` since M3.3).
 - **`process_status(process)`** (needs `WAIT`) returns:
   - 0 while the child runs;
-  - once it has ended: bit 63 set, with bit 62 set if it was killed (low bits: the exception vector), otherwise the exit code in the low 62 bits.
+  - once it has ended: bit 63 set, with bit 62 set if it was killed (low bits: the exception vector), otherwise the exit code in the low 62 bits. Since M3.3, bits 63 and 62 with 256 in the low bits mean it was stopped (exception vectors are below 32).
 
   The status stays readable as long as the capability exists.
 - **Checks, before anything is allocated:**
@@ -105,11 +105,10 @@ That is, for a notification, bits 32–63 hold the 32 notification bits.
   - the live-process limit (`MAX_PROCESSES` = 32, kernel-wide).
 
   Then the ELF checks (`BAD_PROGRAM` on failure). On any failure nothing is created and no frames are lost.
-- **Not in M2.10:**
-  - killing another process;
-  - restarting;
-  - passing memory;
-  - a process outliving its last capability is fine. The process capability only observes; dropping it does not end the child.
+- **Stopping (M3.3, #95, [agents.md](agents.md)):** `process_stop(process)` (call 25, needs `STOP`) tells the process to end. It is woken if it waits: its wait ends as timed out, so it leaves every endpoint queue (a blocked `send` takes its message back), and it never waits again. It ends at its next return to user mode, from a system call or a timer tick, as **stopped**. The call returns at once; `process_status` and the end notification show when the process has ended. **When any process ends** (exit, fault, or stop), every process it started is stopped too, so no work outlives the process that started it. A client in `call` to a stopped server gets its own timeout (`TIMED_OUT`); its reply capability is not signalled.
+- **Not yet:**
+  - restarting (M3.3, #100);
+  - a process outliving its last capability is fine. The process capability only observes; dropping it does not end the child (its parent ending does).
 
 ### `init`
 

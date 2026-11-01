@@ -366,6 +366,9 @@ pub struct Process {
     /// Which of those mappings are shared memory (dropping one may free
     /// the frames, so it is dropped after the frame allocator's lock).
     pub shared: IrqMutex<Vec<SharedMapping>>,
+    /// The process that started it (`None`: the kernel did). When a
+    /// process ends, the processes it started are stopped (agents.md).
+    pub parent: Option<TaskId>,
 }
 
 /// Live processes by task ID (one thread each).
@@ -401,6 +404,8 @@ pub fn start_limited(
             .insert(cap)
             .map_err(|_| ProcessError::TooManyCapabilities)?;
     }
+    // Started from a process's `spawn`: that process is the parent.
+    let parent = current().map(|p| p.record.id);
     // Register the process before its thread can run (no preemption here).
     without_interrupts(|| {
         let id = sched::spawn_in(space, move || {
@@ -414,6 +419,7 @@ pub fn start_limited(
             mmio_pages: IrqMutex::new(0),
             memory: IrqMutex::new(UserMemory::new(limit)),
             shared: IrqMutex::new(Vec::new()),
+            parent,
             record: Arc::new(ProcessRecord {
                 id,
                 end: IrqMutex::new(None),
@@ -465,6 +471,9 @@ pub enum End {
     Exited(u64),
     /// Killed by this CPU exception vector.
     Killed(u64),
+    /// Stopped by `process_stop`, or because the process that started it
+    /// ended.
+    Stopped,
 }
 
 /// What outlives a process for those observing it (a `Process`
@@ -531,13 +540,39 @@ fn end_current(end: End) -> ! {
     if let Some(id) = sched::current_id() {
         // Dropped after the table's lock is released: dropping a process may
         // drop device handles, which stop their devices and free memory.
-        let process = PROCESSES.lock().remove(&id);
+        let (process, children) = {
+            let mut table = PROCESSES.lock();
+            let process = table.remove(&id);
+            let children: Vec<TaskId> = table
+                .values()
+                .filter(|p| p.parent == Some(id))
+                .map(|p| p.record.id)
+                .collect();
+            (process, children)
+        };
+        // No work outlives the process that started it. Each child, as it
+        // ends, stops its own children in turn.
+        for child in children {
+            sched::stop(child);
+        }
         if let Some(process) = &process {
             process.record.finish(end);
         }
         drop(process);
     }
     sched::exit()
+}
+
+/// Tells process `id` to end ([`End::Stopped`]); it does at its next
+/// return to user mode, and its children after it. Returns false if no
+/// such process runs.
+pub fn stop(id: TaskId) -> bool {
+    by_id(id).is_some() && sched::stop(id)
+}
+
+/// Ends the running process, which was told to stop.
+pub(crate) fn end_stopped() -> ! {
+    end_current(End::Stopped)
 }
 
 /// A process that ended with the `exit` system call.

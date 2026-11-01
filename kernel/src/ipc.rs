@@ -194,8 +194,15 @@ mod kernel {
                 }
                 sched::wake(receiver);
             }
-            // The receiver that takes the message wakes us.
-            None => sched::block_current(),
+            // The receiver that takes the message wakes us. A thread being
+            // stopped returns at once and takes its message back, so no
+            // queue keeps a sender that has ended.
+            None => {
+                sched::block_current();
+                if sched::stopping() {
+                    endpoint.remove_sender(me);
+                }
+            }
         }
     }
 

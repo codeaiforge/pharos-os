@@ -16,7 +16,7 @@
 //! is (D-004 constraint 5) and host-tested.
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
@@ -144,6 +144,12 @@ impl<T> SleepQueue<T> {
         }
     }
 
+    /// Removes and returns the first entry `matches` accepts.
+    pub fn take(&mut self, matches: impl Fn(&T) -> bool) -> Option<T> {
+        let at = self.sleepers.iter().position(|(_, t)| matches(t))?;
+        Some(self.sleepers.remove(at).1)
+    }
+
     /// Removes every entry for `thread`.
     pub fn remove(&mut self, thread: &T)
     where
@@ -233,6 +239,9 @@ struct Scheduler {
     timeouts: SleepQueue<TaskId>,
     /// The last exited task, freed by the next scheduling call.
     exited: Option<Arc<Task>>,
+    /// Tasks told to end ([`stop`]): they never block again, and end at
+    /// their next return to user mode.
+    stopping: BTreeSet<TaskId>,
     next_id: TaskId,
     live: usize,
     /// Timer ticks seen by the scheduler.
@@ -262,6 +271,7 @@ pub fn init() -> Result<(), SchedError> {
         blocked: BTreeMap::new(),
         timeouts: SleepQueue::new(),
         exited: None,
+        stopping: BTreeSet::new(),
         next_id: 1,
         live: 1,
         ticks: 0,
@@ -454,17 +464,7 @@ pub fn yield_now() {
 /// disabled since then (system calls run that way), so the wake cannot be
 /// missed. Needs [`enable_preemption`] (the idle task runs meanwhile).
 pub fn block_current() {
-    without_interrupts(|| {
-        check_no_locks();
-        let switch = pick_next(Leave::Block, |s| {
-            assert!(s.queue.has_idle(), "blocking needs enable_preemption");
-            let current = s.queue.current().clone();
-            s.blocked.insert(current.id, current);
-        });
-        if let Some(switch) = switch {
-            run_switch(switch);
-        }
-    });
+    block_until(None);
 }
 
 /// [`block_current`] that also ends at tick `deadline` (`None`: never;
@@ -473,19 +473,19 @@ pub fn block_current() {
 /// After a timeout the caller must still look for what it waited for: a
 /// waker may have delivered it between the deadline and this thread
 /// running again.
+///
+/// A task being stopped never blocks: it returns false at once, as if its
+/// wait had timed out, so the caller takes its time-out path and cleans
+/// up (leaves endpoint queues) before the task ends.
 pub fn block_until(deadline: Option<u64>) -> bool {
-    let Some(deadline) = deadline else {
-        block_current();
-        return true;
-    };
     without_interrupts(|| {
         check_no_locks();
         let mut current = None;
         let switch = {
-            let passed = SCHEDULER
-                .lock()
-                .as_ref()
-                .is_none_or(|s| deadline <= s.ticks);
+            let passed = SCHEDULER.lock().as_ref().is_none_or(|s| {
+                s.stopping.contains(&s.queue.current().id)
+                    || deadline.is_some_and(|deadline| deadline <= s.ticks)
+            });
             if passed {
                 return false;
             }
@@ -493,7 +493,9 @@ pub fn block_until(deadline: Option<u64>) -> bool {
                 assert!(s.queue.has_idle(), "blocking needs enable_preemption");
                 let task = s.queue.current().clone();
                 task.timed_out.store(false, Ordering::Relaxed);
-                s.timeouts.insert(deadline, task.id);
+                if let Some(deadline) = deadline {
+                    s.timeouts.insert(deadline, task.id);
+                }
                 s.blocked.insert(task.id, task.clone());
                 current = Some(task);
             })
@@ -522,6 +524,34 @@ pub fn wake(id: TaskId) -> bool {
     }
 }
 
+/// Tells task `id` to end: it is marked, and if it waits it is made ready
+/// at once, a blocked wait ending as timed out. It ends itself at its next
+/// return to user mode (`process::end_stopped`). Returns false if the
+/// scheduler is not running.
+pub fn stop(id: TaskId) -> bool {
+    let mut scheduler = SCHEDULER.lock();
+    let Some(s) = scheduler.as_mut() else {
+        return false;
+    };
+    s.stopping.insert(id);
+    if let Some(task) = s.blocked.remove(&id) {
+        s.timeouts.remove(&id);
+        task.timed_out.store(true, Ordering::Relaxed);
+        s.queue.push(task);
+    } else if let Some(task) = s.sleepers.take(|t| t.id == id) {
+        s.queue.push(task);
+    }
+    true
+}
+
+/// True if the running task was told to end ([`stop`]).
+pub fn stopping() -> bool {
+    SCHEDULER
+        .lock()
+        .as_ref()
+        .is_some_and(|s| s.stopping.contains(&s.queue.current().id))
+}
+
 /// Sleeps for at least `duration`, rounded up to whole ticks (10 ms).
 /// Before [`enable_preemption`] there is no tick to wake the task, so it
 /// busy-waits instead.
@@ -530,10 +560,16 @@ pub fn sleep(duration: Duration) {
     let ticks = u64::try_from(duration.as_nanos().div_ceil(period.as_nanos())).unwrap_or(u64::MAX);
     without_interrupts(|| {
         check_no_locks();
-        let preemptive = SCHEDULER
-            .lock()
-            .as_ref()
-            .is_some_and(|s| s.queue.has_idle());
+        let (preemptive, stopping) = SCHEDULER.lock().as_ref().map_or((false, false), |s| {
+            (
+                s.queue.has_idle(),
+                s.stopping.contains(&s.queue.current().id),
+            )
+        });
+        // A task being stopped returns at once, to end.
+        if stopping {
+            return;
+        }
         if !preemptive {
             time::delay(duration);
             return;
@@ -559,7 +595,9 @@ pub fn exit() -> ! {
     check_no_locks();
     let Some(switch) = pick_next(Leave::Block, |s| {
         s.live -= 1;
-        s.exited = Some(s.queue.current().clone());
+        let current = s.queue.current().clone();
+        s.stopping.remove(&current.id);
+        s.exited = Some(current);
     }) else {
         panic!("the last ready task exited");
     };
@@ -588,6 +626,11 @@ fn on_tick() {
     });
     if let Some(switch) = switch {
         run_switch(switch);
+    }
+    // A process thread runs again here, interrupted in user mode: if it
+    // was told to end, it ends now. Kernel tasks are never stopped.
+    if stopping() {
+        crate::process::end_stopped();
     }
 }
 

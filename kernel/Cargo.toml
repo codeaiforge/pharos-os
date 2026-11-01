@@ -152,6 +152,10 @@ name = "spawn"
 harness = false
 
 [[test]]
+name = "process_stop"
+harness = false
+
+[[test]]
 name = "services"
 harness = false
 

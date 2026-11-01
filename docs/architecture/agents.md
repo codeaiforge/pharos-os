@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-01 (#94).** Nothing here is implemented yet. Each part is built by its issue: the kernel stop call (#95), the trusted path (#96), manifests (#97), the agent runtime (#98), durable tasks (#99), and service supervision in `init` (#100).
+**Planned. Design approved by the maintainer on 2026-11-01 (#94).** **Implemented:** the kernel stop call (#95). The rest is planned. Each part is built by its issue: the kernel stop call (#95), the trusted path (#96), manifests (#97), the agent runtime (#98), durable tasks (#99), and service supervision in `init` (#100).
 
 ## 2. Context
 
@@ -36,8 +36,8 @@ What M3.3 builds on:
 - **New right `STOP`** on process capabilities. `spawn`'s process handle gets `WAIT | GRANT | STOP`; rights only narrow when the handle is granted.
 - **New call 25, `process_stop(handle)`**, needs `STOP`. It ends the process as an exit would: threads leave every queue they wait in, memory and mappings are freed, capabilities are deleted. Its end is recorded as **stopped**, a new outcome that `process_status` returns.
 - **Children go with their parent.** The kernel records each process's parent at `spawn`. Stopping a process stops every process it spawned, depth first. **A process's children are also stopped when it ends in any other way** (exit, fault), so no work outlives the process that supervised it. When the runtime crashes, its agents stop, and its next start recovers their tasks from the store.
-- **Waiters get errors, not hangs.** A client in `call` to a stopped server gets `REVOKED` (its one-shot reply capability is gone) or its timeout. A `call` the stopped process made is withdrawn.
-- **One CPU:** the whole stop runs with interrupts disabled, so no process in the tree can spawn during it.
+- **Waiters get errors, not hangs.** A client in `call` to a stopped server gets its own timeout (`TIMED_OUT`); every Pharos client calls with one (D-019). The stopped process's own waits end as timed out, so it leaves every endpoint queue, and a blocked `send` takes its message back. *Implemented (#95).*
+- **How it ends (#95):** the stop marks the process and wakes it if it waits. A marked process never waits again, and ends itself at its next return to user mode (after a system call or a timer tick). A process can therefore not run user code after `process_stop` returns and it is next scheduled. Each process that ends stops the processes it started, so a whole tree ends, one level per scheduling round.
 
 ### The trusted path (#96)
 

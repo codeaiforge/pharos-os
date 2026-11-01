@@ -37,6 +37,7 @@ pub mod number {
     pub const MEM_SHARE: u64 = 22;
     pub const MEM_MAP_CAP: u64 = 23;
     pub const UPTIME: u64 = 24;
+    pub const PROCESS_STOP: u64 = 25;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -50,6 +51,7 @@ pub mod rights {
     pub const IRQ: u32 = 1 << 6;
     pub const CONFIG: u32 = 1 << 7;
     pub const WAIT: u32 = 1 << 8;
+    pub const STOP: u32 = 1 << 9;
 }
 
 /// A capability handle in this process's table.
@@ -299,7 +301,8 @@ pub const MAX_SPAWN_CAPS: usize = 8;
 /// Starts the program in `file` (needs `READ`) with `arg`; `caps[i]`
 /// becomes the child's handle `i + 1`. With `notify = Some((endpoint,
 /// bit))` the kernel sets that bit on the endpoint (needs `RECEIVE`) when
-/// the child ends. Returns a process handle for [`process_status`].
+/// the child ends. Returns a process handle (`WAIT`, `GRANT`, `STOP`)
+/// for [`process_status`] and [`process_stop`].
 pub fn spawn(
     file: Handle,
     arg: u64,
@@ -348,6 +351,8 @@ pub enum Status {
     Exited(u64),
     /// Killed by this CPU exception vector.
     Killed(u64),
+    /// Stopped by [`process_stop`], or because its parent ended.
+    Stopped,
 }
 
 /// The status of the process behind `process` (needs `WAIT`).
@@ -357,8 +362,18 @@ pub fn process_status(process: Handle) -> Result<Status, Error> {
     Ok(match (v >> 63, v >> 62 & 1) {
         (0, _) => Status::Running,
         (_, 0) => Status::Exited(v & VALUE),
+        _ if v & VALUE == STOPPED => Status::Stopped,
         _ => Status::Killed(v & VALUE),
     })
+}
+
+/// The kernel's value for a stopped process (exception vectors are below 32).
+const STOPPED: u64 = 256;
+
+/// Ends the process behind `process` (needs `STOP`) and every process it
+/// started. Returns at once; [`process_status`] shows when it has ended.
+pub fn process_stop(process: Handle) -> Result<u64, Error> {
+    call(number::PROCESS_STOP, [process, 0, 0, 0, 0, 0])
 }
 
 /// Removes `handle` from this process's table.
