@@ -1,0 +1,165 @@
+# Agents: runtime, manifests, durable tasks, and the emergency stop
+
+## 1. Status
+
+**Planned. Design approved by the maintainer on 2026-11-01 (#94).** Nothing here is implemented yet. Each part is built by its issue: the kernel stop call (#95), the trusted path (#96), manifests (#97), the agent runtime (#98), durable tasks (#99), and service supervision in `init` (#100).
+
+## 2. Context
+
+M3.2 gave Pharos an inference service that clients reach through a badged capability. M3.3 runs **agents**: untrusted programs that do work for the user, can be started, stopped, supervised, and restarted, and whose work survives restarts.
+
+What M3.3 builds on:
+- **Authority comes only from capabilities (D-018).** Badges tell a server which client is calling, as granted by whoever handed out the capability. No process can stop another yet (#95).
+- **D-018's choices:** the trusted path under QEMU is a virtio-console device owned by a small trusted service. A `STOP` right also stops every process its target spawned. The trusted service holds `STOP` on the agent runtime, and on each agent before that agent is granted anything. M3.3 grants only what a reviewed, compiled-in table allows.
+- **Services and interfaces (D-019):** hand-written codecs in `pharos-proto`, a version and operation on every message, `ATTACH` for bulk data, timeouts on every operation, long results pulled with `NEXT`.
+- **The writable store (D-017):** a write replaces a whole file in one crash-consistent commit, and clients see only their namespace.
+- **IPC** carries 256 bytes and at most one capability per message. `spawn` gives a child up to 8 capabilities and returns a process handle with `WAIT` and `GRANT`. A process's end can set a bit on an endpoint.
+
+## 3. Design
+
+### Processes and what each holds
+
+`init` starts two new daemons after the storage and inference services: first `trust`, then `agents`. Both are unprivileged user processes.
+
+| Process | Holds | Does not hold |
+| --- | --- | --- |
+| `trust` (trusted service) | the virtio-console device (PCI `1af4:1043`); its own endpoint; `init`'s report endpoint; `STOP` on `agents` (sent by `init`); `STOP` on each running agent (sent by `agents`) | storage, inference, network, the serial console |
+| `agents` (the agent runtime) | the serial console; its own endpoint; `init`'s report endpoint; the read-only filesystem (agent programs and manifests); storage namespace `agents`, read-write; `SEND` on inference; `SEND` on `trust` (badged); `STOP`, `WAIT`, and `GRANT` on each agent it starts | any device; `trust`'s console |
+| an agent | **one capability for its whole life:** `SEND` on `agents`' endpoint, badged with its slot | everything else |
+
+- **An agent's only capability is its runtime endpoint.** Every service an agent uses (its task, checkpoints, inference, log lines) goes through the runtime. So the runtime can check, time out, and cancel every request, and stopping an agent cannot leave work running elsewhere. Agents cannot reach each other, the store, or the inference service.
+- **Order of grants (D-018):** `agents` spawns the agent with only that capability, sends `STOP` on it to `trust`, and answers the agent's requests only after `trust` acknowledged. An agent the runtime never registered can do nothing, and stopping `agents` ends it too.
+- **`init`** sends `trust` a `STOP`-only copy of `agents`' process handle right after starting it. `trust` never depends on `agents` to stop it.
+
+### The kernel: stopping a process (#95)
+
+- **New right `STOP`** on process capabilities. `spawn`'s process handle gets `WAIT | GRANT | STOP`; rights only narrow when the handle is granted.
+- **New call 25, `process_stop(handle)`**, needs `STOP`. It ends the process as an exit would: threads leave every queue they wait in, memory and mappings are freed, capabilities are deleted. Its end is recorded as **stopped**, a new outcome that `process_status` returns.
+- **Children go with their parent.** The kernel records each process's parent at `spawn`. Stopping a process stops every process it spawned, depth first. **A process's children are also stopped when it ends in any other way** (exit, fault), so no work outlives the process that supervised it. When the runtime crashes, its agents stop, and its next start recovers their tasks from the store.
+- **Waiters get errors, not hangs.** A client in `call` to a stopped server gets `REVOKED` (its one-shot reply capability is gone) or its timeout. A `call` the stopped process made is withdrawn.
+- **One CPU:** the whole stop runs with interrupts disabled, so no process in the tree can spawn during it.
+
+### The trusted path (#96)
+
+- `trust` drives the virtio-console device with the shared user-space virtio transport (`pharos_programs::virtio`), as the network service drives its device (D-015). No other process holds the device, so nothing else can read the user's commands or write what looks like `trust`'s answers.
+- **Commands**, one per line, each answered on the same console:
+  - `list`: the registered agents and whether each is running;
+  - `stop <agent>`: `process_stop` on that agent;
+  - `stop all`: `process_stop` on `agents`, which ends every agent. This is the emergency stop and safe mode: `init` does not restart a service that was stopped (#100), so everything stays stopped until reboot.
+- **"Revoke" in M3.3 is a stop.** An agent's one capability is deleted with its process, and kernel revocation does not unmap memory (carried limit), so ending the process is the full revocation. Revoking one capability while the agent keeps running comes with M3.4.
+- **`trust`'s interface** (`trust`, version 1, `pharos-proto`) has one operation, `REGISTER` (agent slot and name), with a `STOP` capability on the message. It accepts it only from `agents`' badge, and keeps at most 16 agents, replacing an agent's entry when its slot is reused. A registered agent that ended is shown as ended. `REGISTER` cannot make `trust` do anything else.
+
+### Agent manifests (#97)
+
+A manifest describes what an agent needs. It is a small text file in the read-only filesystem image (`agents/<name>.manifest`), at most 4 KiB, one `key = value` per line, `#` comments:
+
+```text
+manifest = 1
+name = summarize
+program = agents/summarize
+pages = 2048
+models = 1
+attempts = 3
+progress_ms = 30000
+task_ms = 600000
+```
+
+- `pages`: the agent's page limit. `models`: inference models it may use. `attempts`: tries per task, at most 10. `progress_ms`: how long it may go without a request while it has a task. `task_ms`: how long a task may run.
+- **Manifests are untrusted input:** a `no_std` parser in `pharos-proto` with checked bounds. Unknown keys, repeated keys, missing keys, and values out of range are refused. Host tests and 100,000 fuzzed inputs.
+- **The policy table** in the runtime is reviewed code, like `init`'s service table: for each agent name, the program and the most it may get (pages, models, attempts, timeouts). **A manifest asking for more than its entry is refused, not narrowed**, so the agent never runs with settings nobody wrote down. An agent with no entry does not start.
+
+### Lifecycle (#98)
+
+```text
+            spawn + trust REGISTER
+ starting ───────────────────────────▶ running ──── COMPLETE / FAIL / exit 0 ──▶ stopped
+    │                                     │
+    │ spawn or REGISTER fails             ├── crash, or no request for progress_ms ──▶ restarting ──▶ starting
+    ▼                                     │                                               │
+  failed ◀──────────── attempts used up ──┴───────────────────────────────────────────────┘
+                                          └── CANCEL, or trust's stop ──▶ stopped
+```
+
+- **One process per task attempt.** The runtime starts an agent when one of its tasks can run. The agent asks for its task, works, reports the result, and exits. A restart is a new process for the same task, with the attempt count increased and the last checkpoint handed back.
+- **At most 4 agents run at once**, at most 16 slots in all (the notification bits on the runtime's endpoint tell it which agent ended).
+- **Crash:** the end notification and `process_status` (exit code or fault vector). **Hang:** no request from the agent for `progress_ms` while it has a task, or the task over `task_ms`. The runtime then stops the agent (`process_stop`) and counts the attempt.
+- **Events** are console lines from the runtime: `agents: <name> task <id> started`, `completed`, `crashed <vector>`, `hung`, `restarting <n>/<max>`, `failed`, `cancelled`, `stopped`. Agents' own `LOG` lines are written as `agents: <name>: <text>`.
+
+### The runtime's interface (`agents`, version 1)
+
+Clients are told apart by badge: agent slots, and control clients that `init`'s table lists (tests in M3.3; a user shell later).
+
+| Operation | From | Does | Timeout |
+| --- | --- | --- | --- |
+| `TASK` | agent | its task: ID, attempt, input and last checkpoint (copied into its attached buffer) | 1 s |
+| `CHECKPOINT` | agent | stores up to 64 KiB from its buffer as the task's checkpoint; `OK` only after the store committed | 10 s |
+| `BEGIN` | agent | starts a consequential operation with a 16-byte idempotency key: `GO`, `DONE` with the recorded result, or `UNKNOWN` | 10 s |
+| `END` | agent | records the operation's result (up to 64 bytes) | 10 s |
+| `COMPLETE`, `FAIL` | agent | ends the task with a result (up to 4 KiB) or a reason | 10 s |
+| `INFER`, `NEXT`, `CANCEL_INFER` | agent | inference through the runtime: the prompt is copied from the agent's buffer into the runtime's own buffer at the inference service; models only from the agent's manifest | as `inference` |
+| `LOG` | agent | one console line, at most 200 bytes, printable characters only | 1 s |
+| `SUBMIT` | control | a new task: agent name, up to 4 task IDs it depends on, input from the client's buffer; returns the task ID | 10 s |
+| `STATUS` | control | a task's state, attempts, and result | 1 s |
+| `CANCEL` | control | stops the task's agent, cancels its inference session, marks it cancelled | 10 s |
+| `FORGET` | control | deletes an ended task's record | 10 s |
+| `INFO`, `ATTACH` | both | as D-019 | 1 s |
+
+- An agent sees only its own task: the badge gives the slot, the slot the task. A request about another task answers `NO_SESSION`.
+- Everything an agent sends is checked and copied out of its buffer before use, as in the inference service. Inference output reaches the agent as data, never interpreted by the runtime.
+
+### Durable tasks (#99)
+
+- **Storage:** namespace `agents` (new, read-write, held only by the runtime). One file per task, `tasks/<id>`, rewritten whole on every change, so each change is one crash-consistent commit. It holds the agent name, state, dependencies, attempts, input, checkpoint, idempotency entries, and result. `next-id` is written before a new task's file, so a task ID is never reused, even after a crash. At most 256 task files; `SUBMIT` beyond that answers `TOO_LARGE`.
+- **States:** pending, running, done, failed, cancelled. A task runs only when all its dependencies are done. If one fails or is cancelled, the task fails ("dependency failed"). A task can depend only on tasks that already exist, so there are no cycles.
+- **Recovery:** when the runtime starts, it reads every task file. A running task becomes pending with one more attempt, or failed if its attempts are used up ("retries exhausted").
+- **Idempotency keys** (no exactly-once promise):
+  - `BEGIN` writes the key as *begun* and commits before it answers `GO`.
+  - `END` writes the result as *done*.
+  - After a restart, `BEGIN` with a done key answers `DONE` and the recorded result, so the operation is not repeated. With a key that was begun but never ended it answers `UNKNOWN`: the operation may or may not have happened, and the agent must check or give up. It is never silently repeated.
+  - At most 32 keys per task.
+- **The task logic** (state changes, recovery, keys, dependencies) is a host-tested `no_std` module, separate from IPC and storage. Fault injection cuts the store's writes at every point on the host. In QEMU, the runtime is stopped during checkpoints, and QEMU is killed during them.
+
+### Timeouts and cancellation
+
+- Every operation above has its timeout, and the runtime uses `call` with a timeout toward the store and the inference service.
+- Cancelling a task stops its agent's process and cancels its inference session. Stopping the runtime stops all agents (children go with their parent). The inference service drops the runtime's session after 10 s idle anyway (M3.2).
+
+### Service supervision in `init` (#100)
+
+- `init` waits for each daemon's `ready` with a timeout and reports one that never answers.
+- A daemon that crashes is restarted at most 3 times. One that was **stopped** is never restarted (safe mode).
+- The storage and inference services release a client's buffer when the client ends (carried from the M3.0 and M3.2 reviews). The inference service tries a model whose read failed again after a restart.
+
+## 4. Security
+
+- **What must be right for the emergency stop:** the kernel's stop call and `trust` with its virtio-console driver. Neither the runtime nor any agent can delay or prevent a stop: `trust` holds `STOP` on the runtime from `init`, and a stop needs nothing from the process it stops.
+- **What the runtime is trusted for:** task integrity, idempotency records, attribution in its events, and granting only what the policy table allows. It is not trusted for the stop.
+- **Agents are untrusted:** one capability, every request checked, limits from the manifest within the table, nothing reachable but the runtime. A compromised agent can waste its own budget, but cannot reach another agent's task, the store, or the inference service directly.
+- **Attribution:** console lines are prefixed by the kernel with the writing process. `trust`'s console is its own device. Records name the agent, task, and attempt.
+
+## 5. Testing
+
+| Where | What |
+| --- | --- |
+| Host | Manifest parser: every field, every refusal, 100,000 fuzzed inputs (#97). Task logic: every state change, recovery from every state, retries bounded, keys answering `GO`/`DONE`/`UNKNOWN`, dependencies, and every store write cut (#99). Codecs for `agents` and `trust`: round trips, truncation, fuzzing |
+| QEMU, `process_stop` (#95) | Stopping a looping, a blocked, and a memory-holding process; its children stopped with it; children of a process that exits or faults stopped; no frames, handles, or queued messages left; a client of a stopped server gets an error; the `spawn` kernel's process-limit check rechecked, since its parent now takes its children with it |
+| QEMU, `trust` (#96) | A `stop` typed on the trusted path ends an agent while a stand-in runtime spins in a loop (no test hooks in the real runtime); `stop all`; an agent holds nothing that reaches `trust` |
+| QEMU, `agents` (#98, #99) | Start and stop; crash, hang, and restart; attempts used up; an agent holds exactly one capability; a task's inference through the runtime; recovery after the runtime is stopped mid-task; a repeated key answers `DONE`; checkpoints survive a QEMU kill |
+| QEMU, `init` (#100) | A daemon that never reports `ready`; a killed inference service restarted and serving; a stopped one not restarted; a client's buffer released after it ends |
+
+Each check is mutation-tested, as in earlier milestones.
+
+## 6. Alternatives
+
+- **Agents holding inference and storage capabilities directly:** one copy fewer, but the runtime could not cancel, time out, or (in M3.5) budget their requests, and stopping an agent could leave a session running.
+- **A spawn that starts the child suspended:** grants the stop capability before the child runs at all, but adds a kernel call. With a single capability that the runtime does not serve until `trust` acknowledged, the agent can do nothing before then anyway.
+- **Serial input for the trusted path:** rejected in D-018 (shared with every process's output, needs kernel input code).
+- **A journal instead of one file per task:** fewer bytes written, but replay, compaction, and a format of its own. The store already makes a whole-file write atomic.
+- **Manifests in the store:** editable at run time, but data an unsigned store cannot vouch for (as for models, M3.2). Reconsidered with signed updates (M4.3).
+- **Narrowing a manifest to the table instead of refusing it:** the agent would run with settings different from the ones written.
+
+## 7. Open questions
+
+- The trusted path on real hardware (M5): a local console or keyboard that only `trust` reads.
+- Who submits tasks after M3.3 (a user shell, M3.6), and whether one agent process should run several tasks.
+- Whether 64 KiB checkpoints are enough for the agents M3.6 brings.

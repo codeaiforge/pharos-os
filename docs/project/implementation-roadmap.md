@@ -375,7 +375,7 @@ Ordering notes:
 
 ### M3.3 — Agent lifecycle and orchestration
 
-**Status: Current.** M3.2 gives it local inference as a service. D-018 accepted (#93): the trusted path is a virtio-console device owned by a trusted service, and stopping a process also stops the processes it spawned.
+**Status: Current.** M3.2 gives it local inference as a service. D-018 accepted (#93): the trusted path is a virtio-console device owned by a trusted service, and stopping a process also stops the processes it spawned. Design: [agents.md](../architecture/agents.md) (#94).
 
 - **Where it runs (D-020):** Pharos; task-state and manifest logic host-tested.
 - **Objective and scope:** Start, stop, supervise, and restart agents, and keep their work durable across restarts.
