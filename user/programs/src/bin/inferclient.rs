@@ -283,6 +283,31 @@ fn failures(f: &mut u64) {
             && state(r, 4) == Some(ModelState::Failed(Step::Size)),
     );
 
+    // A record survives another client's session (M3.2 review, F1).
+    let (r, n) = call(reply, generate(2, 1), GENERATE_US);
+    let mine = Started::parse(&r[..n]).map(|s| s.session);
+    let ended = mine.is_some_and(|session| {
+        let r = call(reply, Request::Next { session }, NEXT_US);
+        Tokens::parse(&r.0[..r.1]).is_some_and(|t| t.stop == Some(Stop::TokenLimit))
+    });
+    let n = encode(&Request::Attach { len: 4096 }, &mut msg).unwrap_or(0);
+    let theirs = attach(OTHER, &msg[..n], 4096).and_then(|b| {
+        b.write_bytes(0, PROMPT);
+        let (r, n) = call_to(OTHER, reply, generate(2, 20), GENERATE_US);
+        let session = Started::parse(&r[..n])?.session;
+        let cancel = call_to(OTHER, reply, Request::Cancel { session }, SHORT_US);
+        (status(&cancel) == Status::Ok).then_some(session)
+    });
+    report(
+        f,
+        "a record survives another client's session",
+        ended
+            && theirs.is_some()
+            && mine
+                .and_then(|s| record(reply, s))
+                .is_some_and(|r| (r.stop, r.generated) == (Stop::TokenLimit, 1)),
+    );
+
     let mut msg = [0u8; 32];
     let n = encode(&Request::Info, &mut msg).unwrap_or(0);
     let mut buf = [0u8; 256];

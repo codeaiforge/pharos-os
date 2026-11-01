@@ -132,15 +132,16 @@ Design: [user-environment.md](../architecture/user-environment.md) and [storage.
 | A client reads or writes another's files | **Implemented (#77):** namespaces from badges, read-only bit, paths joined to the prefix and checked against escape; file data only in the client's own attached buffer (`store` test: read-only, foreign, unbadged, and unknown clients; mutation-checked) |
 | A client exhausts the storage service | **Implemented (M3.0 review, F2):** attached buffers are capped at 32 MiB, at most 16 clients hold one, within the service's 1 GiB limit (`store` test, mutation-checked). **Limit:** a client's buffer stays mapped after it ends, until its badge attaches another |
 
-### Local inference (M3.2, planned)
+### Local inference (M3.2)
 
-Design: [inference.md](../architecture/inference.md), from D-010, D-011, and D-019. Rows marked **implemented** or **tested** are in place; the rest is **planned** (#84–#92). All are reviewed at the M3.2 gate (#91).
+Design: [inference.md](../architecture/inference.md), from D-010, D-011, and D-019. Every row is **implemented** (#84–#92) and was reviewed at the M3.2 gate: [review-m3.2-inference.md](review-m3.2-inference.md) (finding F1 fixed). Rows marked **Limit** are accepted.
 
 | Threat | Planned mitigation |
 | --- | --- |
 | A malformed or substituted model file exploits the parser or changes the model's behaviour | Only models in the compiled-in manifest load; size and SHA-256 checked before parsing; configuration checked against the manifest; the GGUF and tokenizer parsers are checked and fuzzed. **Implemented and tested (#88, #89):** a changed and a truncated file in QEMU; malformed files and a wrong configuration on the host |
-| A client exhausts the service's memory or holds it forever | Prompt, token, and context limits checked before anything is allocated; one session at a time; idle sessions dropped after 10 s. **Implemented and tested (#89):** `CONTEXT`, `BUSY`, and the idle drop in QEMU. **Limit:** per-agent token and time budgets are M3.5 |
+| A client exhausts the service's memory or holds it forever | Prompt, token, and context limits checked before anything is allocated; one session at a time; idle sessions dropped after 10 s. **Implemented and tested (#89):** `CONTEXT`, `BUSY`, and the idle drop in QEMU. **Limit:** per-agent token and time budgets are M3.5; a prompt near the context limit holds the service for about a minute, and other callers time out meanwhile; at most 8 clients hold a buffer slot, never released |
 | A client changes its prompt while it is being processed | The prompt is copied out of the shared buffer before tokenizing |
+| A client hides another's inference from the audit record | **Implemented (M3.2 review, F1):** each client's `RESULT` record is kept with its own slot until its next session ends, so another client's session cannot replace it (`inference` test, mutation-checked). **Limit:** the record is stored by the audit trail only from M3.4 |
 | A hung or crashed service hangs its callers | Every operation has a documented timeout and clients always use `call` with it (#76); the service replies with non-blocking sends. **Tested (#89):** a client calling a service that never receives gets `TIMED_OUT`. **Limit:** restarting the service is M3.3 |
 | A compromised inference service reaches further | It holds only read-only access to the `models` namespace and its own endpoints: no devices, network, or other storage. **Tested (#89):** the `inference` kernel checks every handle the service holds after its clients ran |
 | Model output is acted on | Output is returned as text to the caller only; nothing in the service executes it or passes it to a privileged interface (AGENTS.md section 7) |
@@ -153,7 +154,7 @@ Design: [inference.md](../architecture/inference.md), from D-010, D-011, and D-0
 
 ### Open limits carried out of Phase 2
 
-Phase 2 and M3.0 ([review](review-m3.0-platform.md)) close with these limits accepted. Each is carried to the milestone that addresses it; none blocks Phase 3, which runs only in QEMU.
+Phase 2, M3.0 ([review](review-m3.0-platform.md)), and M3.2 ([review](review-m3.2-inference.md)) close with these limits accepted. Each is carried to the milestone that addresses it; none blocks Phase 3, which runs only in QEMU.
 
 | Limit | Since | Carried to |
 | --- | --- | --- |
@@ -169,6 +170,7 @@ Phase 2 and M3.0 ([review](review-m3.0-platform.md)) close with these limits acc
 | Page limits not carved from the creator's; a large `mem_map` zeroes pages with interrupts disabled | M3.0 | M3.5 |
 | Revocation does not unmap shared memory already mapped | M3.0 | M3.4 |
 | Audit chains not anchored | M3.0 | M3.4 |
+| The inference service: a long prompt holds it (callers time out); a failed model load stays failed until restart; client slots are never released | M3.2 | M3.5 (budgets), M3.3 (restarts and clients) |
 
 ## Part 2 — Planned system (Phases 2–5)
 

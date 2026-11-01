@@ -70,10 +70,13 @@ struct Active {
     last_seen: u64,
 }
 
-/// One client's attached prompt buffer.
+/// One client's attached prompt buffer, and its last ended session.
 struct Client {
     badge: u32,
     buffer: Mapped,
+    /// The session number and record, kept per client so another client's
+    /// session cannot replace it before it is read (M3.2 review, F1).
+    ended: Option<(u32, Record)>,
 }
 
 struct Service {
@@ -81,8 +84,6 @@ struct Service {
     models: [Option<Result<Loaded, Step>>; MANIFEST.len()],
     clients: [Option<Client>; MAX_CLIENTS],
     active: Option<Active>,
-    /// The last ended session's client, number, and record.
-    ended: Option<(u32, u32, Record)>,
     next_number: u32,
     /// The window into the storage service, once attached.
     window: Option<Mapped>,
@@ -227,9 +228,16 @@ impl Service {
             let _ = mem_unmap(buffer.addr(), buffer.len() as u64);
             return;
         };
-        if let Some(old) = self.clients[slot].replace(Client { badge, buffer }) {
+        // The slot is this client's or empty: a new buffer keeps the record.
+        let ended = self.clients[slot].take().and_then(|old| {
             let _ = mem_unmap(old.buffer.addr(), old.buffer.len() as u64);
-        }
+            old.ended
+        });
+        self.clients[slot] = Some(Client {
+            badge,
+            buffer,
+            ended,
+        });
     }
 
     /// Ends the active session with `stop`, keeping its record.
@@ -246,7 +254,15 @@ impl Service {
                 prompt_us: a.prompt_us,
                 generate_us: a.generate_us,
             };
-            self.ended = Some((a.badge, a.number, record));
+            // Every session's client has a slot: GENERATE needs its buffer.
+            if let Some(c) = self
+                .clients
+                .iter_mut()
+                .flatten()
+                .find(|c| c.badge == a.badge)
+            {
+                c.ended = Some((a.number, record));
+            }
         }
     }
 
@@ -300,7 +316,6 @@ impl Service {
             .map_err(|_| Status::Internal)?;
         let number = self.next_number;
         self.next_number = self.next_number.wrapping_add(1).max(1);
-        self.ended = None;
         let now = uptime();
         self.active = Some(Active {
             badge,
@@ -411,13 +426,16 @@ impl Service {
                 }
                 _ => Err(Status::NoSession),
             },
-            Request::Result { session } => match (&self.active, &self.ended) {
-                (Some(a), _) if a.badge == badge && a.number == session => Err(Status::Busy),
-                (_, Some((b, n, record))) if *b == badge && *n == session => {
-                    record.encode(out).ok_or(Status::Internal)
+            Request::Result { session } => {
+                let ended = self.clients.iter().flatten().find(|c| c.badge == badge);
+                match (&self.active, ended.and_then(|c| c.ended.as_ref())) {
+                    (Some(a), _) if a.badge == badge && a.number == session => Err(Status::Busy),
+                    (_, Some((n, record))) if *n == session => {
+                        record.encode(out).ok_or(Status::Internal)
+                    }
+                    _ => Err(Status::NoSession),
                 }
-                _ => Err(Status::NoSession),
-            },
+            }
             // A `call` with ATTACH carries no buffer.
             Request::Attach { .. } => Err(Status::BadRequest),
         };
@@ -449,7 +467,6 @@ fn main(_: u64) -> u64 {
         models: [None; MANIFEST.len()],
         clients: Default::default(),
         active: None,
-        ended: None,
         next_number: 1,
         window: None,
         store_reply,

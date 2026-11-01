@@ -242,6 +242,7 @@ fn run(t: &mut TestRun) {
             "model 4, 32 bytes short: MODEL_INVALID, size",
             "model 3 again: MODEL_INVALID, hash",
             "INFO: model 2 loaded, 3 failed at hash, 4 at size",
+            "a record survives another client's session",
             "a stopped service: TIMED_OUT after 200 ms, within 3 ticks",
         ],
     );

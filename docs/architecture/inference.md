@@ -115,7 +115,7 @@ Every request starts with version 1 and an operation (D-019). Every reply starts
 
 - **Prompts** arrive through the attached buffer and are copied into private memory before tokenizing, as #78 does for file data. Outputs fit in messages.
 - **Settings:** greedy decoding only, so a result can be replayed exactly (D-010 item 5). Sampling settings would get a new operation, not a new meaning for these bytes.
-- **Sessions:** a session that sees no `NEXT` for 10 s is cancelled, and its `RESULT` stays available until the next `GENERATE`. A client that dies therefore holds the service for at most 10 s plus one step.
+- **Sessions:** a session that sees no `NEXT` for 10 s is cancelled, and its `RESULT` stays available until that client's next session ends (kept per client, so another client cannot replace it: M3.2 review, F1). A client that dies therefore holds the service for at most 10 s plus one step.
 - **The record** in `RESULT` is what M3.4's audit trail will store. The service keeps no log of its own.
 
 ### Failures
