@@ -38,6 +38,7 @@ Three additions, all host work first (D-020), each compared with llama.cpp or wi
   - **The constraint:** explicit SIMD needs `unsafe` even on the newest Rust. Checked with Rust 1.99 on 2026-10-31: calling a function marked `#[target_feature(enable = "sse2")]` from ordinary code is `unsafe`, even though SSE2 is always present on x86-64, and SIMD loads through pointers are always `unsafe`. `pharos-infer` forbids `unsafe`.
   - **Why it is not needed:** the host measurement (13.7–14.6 tokens/s) was compiled for the same SSE2 baseline as Pharos user programs, with the compiler vectorizing the Q8_0 dot products. Generation already meets S1 almost three times over, and batching addresses the first-token time.
   - **What #86 becomes:** it measures the engine on Pharos (#90) and adds SIMD only if a target is missed. The options then are a second build of the service for `x86-64-v3` (AVX2 and FMA), chosen when it starts, in safe Rust; or a small reviewed `unsafe` module. Either is a design change for the maintainer.
+  - **Decided (#86, 2026-11-01): no SIMD in M3.2.** #90 measured S1 on Pharos under KVM with the SSE2 build: first token 6.35 s after the request (target 10 s), 14.2 tokens/s (target 5), 686 MiB, text identical to the host's. Both targets are met, so neither option is taken. The maintainer counts the first-token target from a loaded model: the first request after boot also loads it (6.7 s), which is boot cost, not per-request cost. Faster loading (the SHA-256 and the copies through the store window) can come later; it is not profiled.
   - **Determinism:** one build runs on every CPU, so the same request gives the same tokens everywhere. This is D-010 item 5.
 - **Math functions.** On Pharos, `pharos-programs` implements the engine's `Math` trait with `libm` (D-016). Host comparisons use the same `libm` implementation, not the standard library's, so Pharos and the host compute identical values.
 
@@ -153,7 +154,7 @@ Each check is mutation-tested as in earlier milestones.
 
 ## 6. Alternatives
 
-- **Hand-written SIMD now:** faster generation, but `unsafe` in a crate that forbids it, for a target already met. Revisited with #90's numbers.
+- **Hand-written SIMD now:** faster generation, but `unsafe` in a crate that forbids it, for a target already met. Revisited with #90's numbers and not taken (#86): both targets are met without it.
 - **Runtime CPU dispatch inside one binary:** needs `unsafe` calls into `target_feature` functions, and gives different floating-point results on different CPUs, against D-010's determinism.
 - **A manifest file in the store:** easier to add models, but data an unsigned store cannot vouch for. Reconsidered with signed updates (M4.3).
 - **Loading the model at start:** the first request is faster, but every boot would read 676 MB and the 1 GiB would be taken before anyone asks.
@@ -162,5 +163,5 @@ Each check is mutation-tested as in earlier milestones.
 
 ## 7. Open questions
 
-- ~~The first-token time on Pharos under KVM with batching (#90).~~ Measured: 6.35 s from the request, 14.2 tokens/s, text identical to the host's ([inference-evaluation.md](../project/inference-evaluation.md)). The first request after boot also loads the model (6.7 s), 13.0 s in all: whether the 10 s target applies to it is for the maintainer.
+- ~~The first-token time on Pharos under KVM with batching (#90).~~ Measured: 6.35 s from the request, 14.2 tokens/s, text identical to the host's ([inference-evaluation.md](../project/inference-evaluation.md)). The first request after boot also loads the model (6.7 s), 13.0 s in all; the maintainer counts the target from a loaded model (#86).
 - Chat formatting (the `<|im_start|>` template) belongs to the caller in M3.2. The agent runtime (M3.3) decides whether the service should apply it.

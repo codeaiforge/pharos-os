@@ -128,9 +128,10 @@ About 3.4 GB in total. The GPU (GTX 1060) is measured only if the Vulkan build i
   | Text | identical to the host's on every run | |
 
   The text is the same from the host CLI (standard-library math), the host reference with `libm`, and Pharos, byte for byte (623 bytes).
-- **Open for the maintainer: the first request after boot.** The model loads on the first `GENERATE` (design), so that request's first token comes after 6.7 + 6.4 = 13.0 s, over the 10 s target; every later request meets it. Options: count the target from a loaded model (as now measured); load model 1 when the service starts (boot is 6.7 s longer, and the 676 MB are held even if no agent asks); or make loading faster (the hash and the copies through the window are most of it; not yet profiled).
+- **The first request after boot.** The model loads on the first `GENERATE` (design), so that request's first token comes after 6.7 + 6.4 = 13.0 s; every later request meets the 10 s target. Options were: count the target from a loaded model; load model 1 when the service starts (boot is 6.7 s longer, and the 676 MB are held even if no agent asks); or make loading faster (the hash and the copies through the window are most of it; not yet profiled). **Decided by the maintainer (#86, 2026-11-01): the target counts from a loaded model.** Faster loading is left for later.
+- **SIMD (#86): not added.** Both targets are met with the SSE2 build the compiler vectorizes, so M3.2 adds no hand-written SIMD and no `unsafe` (inference.md).
 
-**Not yet:** other quantization types (Q4_K) and hand-written SIMD kernels (#86).
+**Not yet:** other quantization types (Q4_K). Hand-written SIMD was not needed (#86).
 
 ## Output comparison
 
