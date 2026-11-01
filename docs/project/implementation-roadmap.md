@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.2 — Model compatibility and local inference.** Everything in Phases 3–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.3 — Agent lifecycle and orchestration.** Everything in Phases 3–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -41,7 +41,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
 | 2 | Core System | Done (v0.2.0) |
-| 3 | AI Agent Platform | **Current** (M3.2; M3.1 and M3.0 done) |
+| 3 | AI Agent Platform | **Current** (M3.3; M3.1, M3.0, and M3.2 done) |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
 
@@ -291,7 +291,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ## Phase 3 — AI Agent Platform
 
-**Status: Current** (M3.2; M3.1 and M3.0 done).
+**Status: Current** (M3.3; M3.1, M3.0, and M3.2 done).
 
 Ordering notes:
 
@@ -360,7 +360,7 @@ Ordering notes:
 
 ### M3.2 — Model compatibility and local inference
 
-**Status: Current.** M3.0 gives it SIMD, 1 GiB in one process, the model file from the store, and timeouts. D-019 accepted (#82); design: [inference.md](../architecture/inference.md) (#83).
+**Status: Done** — gate passed 2026-11-01: the CI jobs passed on `main` at `403c5c7` ([run 41316810311](https://github.com/codeaiforge/pharos-os/actions/runs/41316810311)) with 44 test kernels, among them `inference_tiny` (a tiny Qwen2 model on Pharos, identical to the host) and `inference` (the service as `init` starts it: generation identical to the host, `CONTEXT`, `BUSY`, cancel, the idle drop, a changed and a truncated model refused, a stopped service's `TIMED_OUT`, and exactly its granted handles). Removing the model's SHA-256 check failed CI on a throwaway branch ([run 41316879215](https://github.com/codeaiforge/pharos-os/actions/runs/41316879215)): the host tests and the Rust 1.85 job failed at `each_load_check_refuses_its_file`, and the QEMU job at `inference`, where the changed model was accepted. Every CI run on `main` during M3.2 passed. Scenario S1 on Pharos under KVM (`cargo xtask bench-infer`, #90): first token 6.35 s after the request (target 10 s, counted from a loaded model, #86), 14.2 tokens/s (target 5), 686 MiB peak, text identical to the host's. The IPC round trip was re-measured at a 1938 ns median, within D-004's budget. The security review ([review-m3.2-inference.md](../security/review-m3.2-inference.md)) found and fixed one issue: one client could erase another's `RESULT` record. The maintainer approved it, and D-011's implementation part, on 2026-11-01. Delivered: D-019 (#82), the design (#83), `pharos-proto` (#92), the tokenizer (#84), batched prompts (#85), no hand-written SIMD (#86), first inference on Pharos (#87), the inference service (#88), failure tests (#89), S1 under KVM (#90), and the gate (#91). Carried: the limits in the [threat model](../security/threat-model.md#open-limits-carried-out-of-phase-2), and faster model loading (6.7 s on the first request after boot; not profiled).
 
 - **Where it runs (D-020):** Engine crate host-tested, fuzzed, and compared with llama.cpp on the host, in parallel with M3.0; done only when the service runs on Pharos.
 - **Objective and scope:** Run inference locally as an unprivileged service (host prototype first, then on Pharos, per D-020).
@@ -375,7 +375,7 @@ Ordering notes:
 
 ### M3.3 — Agent lifecycle and orchestration
 
-**Status: Planned.**
+**Status: Current.** M3.2 gives it local inference as a service. First step: accept D-018 (a prerequisite below).
 
 - **Where it runs (D-020):** Pharos; task-state and manifest logic host-tested.
 - **Objective and scope:** Start, stop, supervise, and restart agents, and keep their work durable across restarts.
@@ -639,7 +639,7 @@ Ordering notes:
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-012 has a recorded direction; D-018 is proposed; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part on 2026-11-01; D-012 has a recorded direction; D-018 is proposed; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -653,7 +653,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-008 | Driver strategy | M2.9 | **Accepted:** user-space drivers with device, interrupt, MMIO, and DMA capabilities; virtio-blk only in M2.9; PCI through config ports, MSI-X; no IOMMU yet (tracked limit) |
 | D-009 | QEMU automation and debugging | M2.3 | **Accepted:** status 33 + serial marker, 60 s timeout, test kernels via Cargo runner and `cargo xtask test` |
 | D-010 | Inference runtime, model formats, licensing | M3.1 | **Accepted:** our own `no_std` engine on Pharos; GGUF with Q8_0; Qwen2.5-0.5B-Instruct q8_0 for S1; llama.cpp host-only reference; deterministic output required |
-| D-011 | CPU/GPU support, memory/VRAM | M3.1, M3.2 | **Requirements accepted:** CPU only; SSE2 required, AVX2 used when present; 1 GiB for the inference service, 2 GiB guest; no threads. **Implementation part proposed (#91):** SSE2 only, no AVX2 or FMA (both S1 targets met); 686 MiB peak within 1 GiB |
+| D-011 | CPU/GPU support, memory/VRAM | M3.1, M3.2 | **Requirements accepted:** CPU only; SSE2 required, AVX2 used when present; 1 GiB for the inference service, 2 GiB guest; no threads. **Implementation part accepted (#91):** SSE2 only, no AVX2 or FMA (both S1 targets met); 686 MiB peak within 1 GiB |
 | D-015 | Network stack and service model | M2.10 | **Accepted:** own minimal stack (Ethernet, ARP, IPv4, ICMP echo, UDP; no TCP) inside the virtio-net driver's process; badged capabilities as network capabilities (amended, #59); static slirp addresses; the kernel starts `init`, which starts services |
 | D-014 | IPC model and system-call mechanism | M2.7 | **Accepted:** `syscall`/`sysret`; synchronous endpoints, 256-byte messages plus one capability, bounded per-thread buffers |
 | D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | **Direction:** kernel-enforced capabilities (per-process handle tables, rights, grant over IPC, revocation), policy in user space; final at M3.4 |
@@ -666,4 +666,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, and M3.0 (platform prerequisites) on 2026-10-30. The current milestone is **M3.2 — Model compatibility and local inference**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, and M3.2 (local inference) on 2026-11-01. The current milestone is **M3.3 — Agent lifecycle and orchestration**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

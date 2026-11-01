@@ -9,7 +9,7 @@
   - every new `unsafe` block.
 - **Design under review:** [inference.md](../architecture/inference.md), D-019, D-021, D-010, D-011.
 - **Date:** 2026-11-01, issue #91. Reviewer: AI-assisted (Claude Code), with code reading and a test for each claim. The finding was fixed in the same issue.
-- **Status:** **awaiting the maintainer's approval** (M3.2 gate, #91).
+- **Status:** **approved** by the maintainer on 2026-11-01 (M3.2 gate, #91).
 
 ## Method
 

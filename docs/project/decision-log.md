@@ -728,7 +728,7 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-011: CPU/GPU support and memory/VRAM constraints
 
-- **Status:** Requirements part accepted 2026-10-29 (issue #70); implementation part proposed 2026-11-01 (M3.2 gate, #91)
+- **Status:** Requirements part accepted 2026-10-29 (issue #70); implementation part accepted 2026-11-01 (M3.2 gate, #91)
 - **Needed by:** M3.1 (requirements), M3.2 (implementation)
 
 **Context.** GPU acceleration on a custom OS requires drivers that may not exist; CPU-only inference limits model size. The reference host's GPU (NVIDIA GTX 1060, 6 GB) has no realistic driver path on Pharos (NVIDIA's drivers are proprietary), so the expected outcome is CPU-only on Pharos for the foreseeable future, with the GPU used for host measurements only.
@@ -742,7 +742,7 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 3. **Memory for tier S:** the model file in memory (676 MB; weights borrowed from it), a key/value cache of 24 KiB per token (24 layers × 2 × 128 values × 4 bytes; 48 MiB for 2,048 tokens), and small activations. Measured peak on the host: 662 MiB for a 233-token prompt and 128 generated tokens. **Limit for the inference service: 1 GiB; guest memory for inference runs: 2 GiB.**
 4. **Threads:** none needed (one CPU); the engine stays single-threaded, which also keeps its output deterministic.
 
-**Decision (implementation part, proposed 2026-11-01, M3.2 gate #91).** What M3.2 measured on Pharos under KVM (#90, [inference-evaluation.md](inference-evaluation.md)):
+**Decision (implementation part, accepted 2026-11-01, M3.2 gate #91).** What M3.2 measured on Pharos under KVM (#90, [inference-evaluation.md](inference-evaluation.md)):
 
 1. **CPU only, confirmed.** S1 runs on one CPU: first token 6.35 s after the request (target 10 s), 14.2 tokens/s (target 5), text identical to the host's.
 2. **SSE2 only; AVX2 and FMA are not used** (amends item 2 of the requirements part). The compiler-vectorized SSE2 build meets both targets, so M3.2 has no hand-written SIMD and no second build (#86). One build on every CPU keeps output identical everywhere (D-010 item 5). A second build for `x86-64-v3` stays the option if a later model misses a target.
