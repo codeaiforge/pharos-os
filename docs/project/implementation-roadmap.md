@@ -375,7 +375,7 @@ Ordering notes:
 
 ### M3.3 — Agent lifecycle and orchestration
 
-**Status: Current.** M3.2 gives it local inference as a service. First step: accept D-018 (a prerequisite below).
+**Status: Current.** M3.2 gives it local inference as a service. D-018 accepted (#93): the trusted path is a virtio-console device owned by a trusted service, and stopping a process also stops the processes it spawned.
 
 - **Where it runs (D-020):** Pharos; task-state and manifest logic host-tested.
 - **Objective and scope:** Start, stop, supervise, and restart agents, and keep their work durable across restarts.
@@ -639,7 +639,7 @@ Ordering notes:
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part on 2026-11-01; D-012 has a recorded direction; D-018 is proposed; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part and D-018 on 2026-11-01; D-012 has a recorded direction; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -659,7 +659,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | **Direction:** kernel-enforced capabilities (per-process handle tables, rights, grant over IPC, revocation), policy in user space; final at M3.4 |
 | D-016 | User execution environment: SIMD state, user memory, timeouts | M3.0 | **Accepted:** user programs built for `x86_64-unknown-linux-gnu` as `no_std` static programs; eager XSAVE/FXSAVE per thread; `mem_map`/`mem_unmap` with a per-process limit; timeout argument and `TIMED_OUT`; `libm` in user space |
 | D-017 | Writable persistent storage and audit integrity | M3.0, M3.4 | **Accepted:** new `pharos-store` crate; copy-on-write with two superblock roots; whole-file objects and append-only streams; SHA-256-chained audit records; storage service in the virtio-blk driver's process; shared-memory capabilities for bulk data |
-| D-018 | Authority model: capabilities, identity, human control | M3.3 | **Proposed:** authority only from capabilities; identity for attribution and audit; delegation narrows; a trusted path for emergency stop and revocation that needs no agent or model |
+| D-018 | Authority model: capabilities, identity, human control | M3.3 | **Accepted** (final with D-012 at M3.4): authority only from capabilities; identity for attribution and audit; delegation narrows; a trusted path for emergency stop and revocation that needs no agent or model, on a virtio-console device owned by a trusted service; a `STOP` right that also stops a process's children, held by the agent runtime and by the trusted service; M3.3 grants only from a reviewed table |
 | D-019 | Service interfaces and versioning | M3.2, M3.3 | **Accepted:** hand-written codecs in a shared `no_std` crate `pharos-proto` (no interface language); every message starts with interface version and operation, `VERSION` refused with the supported range; common status codes and the common operations `INFO` (discovery) and `ATTACH` (bulk data through shared memory); capabilities handed out by `init`, no registry; per-operation timeouts, long results pulled with `NEXT`/`CANCEL`; network and storage move to it in M3.2 (#92) |
 | D-020 | Where Phase 3 runs first | M3.1 | **Accepted:** one codebase of `no_std` crates tested on the host and run on Pharos; measurements on the host; enforcement shown only on Pharos; M3.0 on the critical path from M3.2 |
 | D-013 | Scheduling model | M2.6 | **Accepted:** preemptive round-robin on one CPU, 10 ms slice, kernel threads on guarded stacks, no lock held across a switch |

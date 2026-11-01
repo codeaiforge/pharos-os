@@ -779,12 +779,13 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-018: Authority model: capabilities, identity, and human control
 
-- **Status:** Proposed
+- **Status:** Accepted (final with D-012 at M3.4)
 - **Needed by:** M3.3 (final with D-012 at M3.4)
+- **Date accepted:** 2026-11-01 (issue #93)
 
 **Context.** Agent platforms often authorize by identity ("this agent may do X"). In a capability system that brings back ambient authority and confused-deputy bugs. Agents, models, tools, and users also need identities for attribution. And the user needs controls that work when every agent is wrong or compromised; Pharos is headless today, so no trusted path to a human exists.
 
-**Recommendation.**
+**Decision.**
 
 1. **Authority comes only from capabilities.** A request is allowed because the caller holds a capability with the right, never because of who it claims to be. Badges (M2.10) identify a client to a server, as granted by whoever handed out the capability.
 2. **Identity is for attribution.** Agent, model, tool, and user identities are recorded in audit records and task state, and are kept separate from each other; they never grant access by themselves.
@@ -794,3 +795,19 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 6. **Human approval** is required for: granting capabilities beyond an agent's manifest, applying system updates (M4.3), and anything a policy marks sensitive.
 
 **Evaluation criteria.** No ambient authority; revocation independent of the holder; attribution of every consequential action; emergency controls that survive a hung agent runtime; usability of approvals.
+
+**Evidence (2026-11-01, issue #93, for M3.3):**
+- **Authority already comes only from capabilities.** Every service decides by the badge on a capability `init` granted: the network service by port (M2.10), the storage service by namespace and read-only bit (M3.0), the inference service by client (M3.2). No service looks up who a caller claims to be.
+- **No process can stop another.** The kernel has `spawn` and `process_status` (wait for an end), but no call that ends a process, and it does not record which process spawned which. A stop needs a kernel addition (#95).
+- **Console output is attributable, input does not exist.** The kernel prefixes every `debug_write` line with `process <id>:` and replaces control characters, so no process can forge another's line or the kernel's. Fifteen of `init`'s entries hold a console capability. The kernel reads no input: there is no UART receive path and no I/O APIC, so serial input would need new interrupt routing or polling in the kernel. Test kernels write serial output to a log file, which carries no input.
+- **A second device costs little.** The user-space virtio transport (`pharos_programs::virtio`, 563 lines) already drives virtio-blk and virtio-net through capabilities (MMIO, DMA, MSI-X; M2.9). A virtio-console driver reuses it; the network service's device code is 255 lines on top of it. QEMU attaches a virtio-console port to any character device, so a test can feed commands through a file or socket of its own, apart from the serial log.
+
+**Decision on the open options (the maintainer chose each recommendation, 2026-11-01):**
+
+7. **Trusted path under QEMU: a virtio-console device, owned by the trusted service** (as the network service owns its device, D-015). It is a channel no other process can read or write: commands in, acknowledgements out. The serial console stays the shared, attributed log. No kernel input path or I/O APIC is needed. On real hardware (M5), the trusted path becomes whatever local input the platform has; this decision covers QEMU.
+8. **Stopping: both the agent runtime and the trusted service can, and the trusted service never depends on the runtime.**
+   - The kernel's stop call (#95) takes a process capability with a `STOP` right, and stopping a process also stops every process it spawned.
+   - `init` starts the trusted service before the agent runtime and gives it `STOP` on the runtime. Stopping the runtime therefore stops every agent, even when the runtime is hung.
+   - The runtime starts each agent with no capabilities, hands a `STOP` capability on it to the trusted service, and only then grants the agent anything. An agent the runtime never reported holds nothing, and stopping the runtime ends it too.
+9. **Delegation with expiry: left to M3.4, with D-012.** M3.3 grants an agent only what a reviewed table allows (below), so it needs no time-limited grants yet.
+10. **Human approval in M3.3: none needed, because nothing beyond the reviewed table is granted.** The runtime grants an agent only capabilities listed for it in a compiled-in table, like `init`'s; a manifest asking for more is refused. Approvals for anything beyond it come with M3.4's permission model.
