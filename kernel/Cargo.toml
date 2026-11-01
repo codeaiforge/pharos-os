@@ -156,6 +156,10 @@ name = "process_stop"
 harness = false
 
 [[test]]
+name = "trust"
+harness = false
+
+[[test]]
 name = "services"
 harness = false
 

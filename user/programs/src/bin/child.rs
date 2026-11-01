@@ -23,10 +23,18 @@
 //! - 13: handle 1 `bin/child`: starts a looping child (5), then exits 0.
 //! - 14: handle 1 a process handle with only `WAIT`: exits 0 if stopping
 //!   it is `MISSING_RIGHT` and its status still reads.
+//!
+//! For the `trust` test kernel (#96): 15, a stand-in agent runtime that
+//! hangs. Handles 1 `bin/child`, 2 the trusted service's endpoint (`SEND`,
+//! badged as the runtime). Starts a looping agent (5) with no
+//! capabilities, registers it with the trusted service as `worker`, and
+//! loops forever.
 
 #![no_std]
 #![no_main]
 
+use pharos_proto::trust::{self, Request};
+use pharos_user::rights::{STOP, WAIT};
 use pharos_user::{
     Error, Received, Status, call_timeout, debug_write, endpoint_create, mem_map_buffer,
     process_status, process_stop, receive, send, sleep, spawn, try_send, yield_now,
@@ -124,6 +132,23 @@ fn main(arg: u64) -> u64 {
             let refused = process_stop(1) == Err(Error::MissingRight);
             let reads = process_status(1) == Ok(Status::Running);
             if refused && reads { 0 } else { 1 }
+        }
+        15 => {
+            let Ok(agent) = spawn(1, 5, &[], None) else {
+                return 1;
+            };
+            let mut msg = [0u8; 64];
+            let register = Request::Register {
+                slot: 0,
+                name: b"worker",
+            };
+            let Some(n) = trust::encode(&register, &mut msg) else {
+                return 2;
+            };
+            if send(2, &msg[..n], agent, STOP | WAIT, 0).is_err() {
+                return 3;
+            }
+            spin()
         }
         _ => 99,
     }

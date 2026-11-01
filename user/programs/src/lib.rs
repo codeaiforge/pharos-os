@@ -6,4 +6,5 @@ pub mod fp;
 pub mod models;
 pub mod net;
 pub mod virtio;
+pub mod virtio_console;
 pub mod virtio_net;

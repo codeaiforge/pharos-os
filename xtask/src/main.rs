@@ -17,6 +17,7 @@ use std::process::{Child, Command, ExitCode};
 use std::time::{Duration, Instant, SystemTime};
 
 mod bench;
+mod console;
 mod echo;
 mod fs_image;
 mod store_image;
@@ -581,7 +582,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 20] = [
+const USER_PROGRAMS: [&str; 21] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -602,6 +603,7 @@ const USER_PROGRAMS: [&str; 20] = [
     "infer",
     "inferclient",
     "stopper",
+    "trust",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -849,6 +851,18 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
         "-device".into(),
         "virtio-blk-pci,drive=disk1,disable-legacy=on".into(),
     ]);
+    // The trusted path (D-018, agents.md): a virtio-console on the FIFOs
+    // `trust.in` and `trust.out` next to the ISO ([`console::fifos`]).
+    let mut pipe = OsString::from("pipe,id=trust,path=");
+    pipe.push(iso.with_file_name(console::PIPE));
+    args.extend([
+        "-chardev".into(),
+        pipe,
+        "-device".into(),
+        "virtio-serial-pci,disable-legacy=on".into(),
+        "-device".into(),
+        "virtconsole,chardev=trust".into(),
+    ]);
     args.push("-serial".into());
     args.push(serial.into());
     if !bios {
@@ -928,6 +942,7 @@ fn run_qemu(paths: &Paths, bios: bool, gdb: bool, kernel: Option<PathBuf>) -> Re
     let out = paths.image_dir();
     let vars = out.join("ovmf-vars.fd");
     prepare_firmware(&vars, bios)?;
+    let trust = console::fifos(&out)?;
     if gdb {
         println!("QEMU is waiting for GDB. In another terminal run:");
         println!(
@@ -939,6 +954,12 @@ fn run_qemu(paths: &Paths, bios: bool, gdb: bool, kernel: Option<PathBuf>) -> Re
         "Booting {} with {} (serial output follows; stop with Ctrl+C)",
         iso.display(),
         if bios { "SeaBIOS" } else { "OVMF (UEFI)" }
+    );
+    println!(
+        "Trusted console (D-018): in another terminal, `cat {}` shows it, and \
+         `echo list > {}` types a command (list, stop <agent>, stop all)",
+        trust.with_extension("out").display(),
+        trust.with_extension("in").display()
     );
     let status = qemu_command(qemu_args(&iso, &vars, OsStr::new("stdio"), bios, gdb))
         .status()
@@ -983,6 +1004,7 @@ fn boot_headless(
     extra: &[OsString],
 ) -> Result<BootRun> {
     prepare_firmware(vars, bios)?;
+    console::fifos(iso.parent().unwrap_or(Path::new(".")))?;
     let _ = fs::remove_file(log);
     let mut serial = OsString::from("file:");
     serial.push(log);
@@ -1190,6 +1212,22 @@ const INFERENCE_TEST: &str = "inference_tiny";
 /// The test kernel booted with a store holding the service's test model
 /// and the host's text for the test prompt (#88).
 const SERVICE_TEST: &str = "inference";
+/// The test kernel whose trusted console the runner types into (#96).
+const TRUST_TEST: &str = "trust";
+/// What the runner waits for on the trusted console, and types then.
+const TRUST_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("registered runtime", ""),
+    ("registered worker", "list\n"),
+    ("worker running", "stop worker\n"),
+    ("stopped worker", "status please\n"),
+    ("commands: list", "list\n"),
+    // The runtime still runs (hung) after its agent was stopped.
+    ("runtime running\r\nworker stopped", "stop all\n"),
+    ("stopped all", ""),
+];
+/// The impostor the kernel registers under `init`'s badge must be dropped.
+const TRUST_REFUSED: &[&str] = &["impostor"];
 const MODEL_ENV: &str = "PHAROS_MODEL";
 /// Its time limit at least: about 45 s on the reference host.
 const LARGE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -1225,6 +1263,7 @@ fn crash_rounds(iso: &Path, vars: &Path, logs: &Path, extra: &[OsString]) -> Res
         seed ^= seed << 17;
         let delay = Duration::from_millis(seed % CRASH_WINDOW_MS);
         prepare_firmware(vars, false)?;
+        console::fifos(iso.parent().unwrap_or(Path::new(".")))?;
         let log = logs.join(format!("test-{CRASH_TEST}-round-{round}.log"));
         let _ = fs::remove_file(&log);
         let mut serial = OsString::from("file:");
@@ -1318,6 +1357,12 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     if name == CRASH_TEST {
         crash_rounds(&iso, &out.join("ovmf-vars.fd"), &logs, &extra)?;
     }
+    let script = if name == TRUST_TEST {
+        let base = console::fifos(&out)?;
+        Some(console::Script::start(&base, TRUST_SCRIPT)?)
+    } else {
+        None
+    };
     let run = boot_headless(
         &iso,
         &out.join("ovmf-vars.fd"),
@@ -1327,7 +1372,15 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         &extra,
     )?;
     let label = format!("test kernel {name} (uefi)");
-    match evaluate_boot(&run, TESTS_MARKER, timeout) {
+    let typed = script.map_or(Ok(()), |s| {
+        s.finish(TRUST_REFUSED).map(|output| {
+            println!("  trusted console:");
+            for line in output.lines() {
+                println!("    {line}");
+            }
+        })
+    });
+    match evaluate_boot(&run, TESTS_MARKER, timeout).and(typed) {
         Ok(()) => {
             for line in clean_log(&run.log)
                 .lines()
@@ -1567,6 +1620,8 @@ mod tests {
         assert!(uefi.contains(OVMF_CODE) && uefi.contains("file=vars.fd"));
         assert!(!uefi.contains(" -S"));
         assert!(uefi.contains("-serial stdio"));
+        assert!(uefi.contains("-chardev pipe,id=trust,path=trust"));
+        assert!(uefi.contains("virtconsole,chardev=trust"));
         let bios = joined(qemu_args(
             iso,
             vars,

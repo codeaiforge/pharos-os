@@ -432,7 +432,7 @@ pub fn start_limited(
 }
 
 /// PCI vendor and device IDs of the devices `init` is given.
-pub const INIT_DEVICES: [(u16, u16); 2] = [(0x1af4, 0x1042), (0x1af4, 0x1041)];
+pub const INIT_DEVICES: [(u16, u16); 3] = [(0x1af4, 0x1042), (0x1af4, 0x1041), (0x1af4, 0x1043)];
 
 /// The capabilities the kernel starts `init` with (services.md): 1 the
 /// debug console, 2 `fs`, 3 `report` (`SEND`), then each device in

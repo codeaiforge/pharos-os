@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-01 (#94).** **Implemented:** the kernel stop call (#95). The rest is planned. Each part is built by its issue: the kernel stop call (#95), the trusted path (#96), manifests (#97), the agent runtime (#98), durable tasks (#99), and service supervision in `init` (#100).
+**Planned. Design approved by the maintainer on 2026-11-01 (#94).** **Implemented:** the kernel stop call (#95) and the trusted path (#96). The rest is planned. Each part is built by its issue: the kernel stop call (#95), the trusted path (#96), manifests (#97), the agent runtime (#98), durable tasks (#99), and service supervision in `init` (#100).
 
 ## 2. Context
 
@@ -47,7 +47,10 @@ What M3.3 builds on:
   - `stop <agent>`: `process_stop` on that agent;
   - `stop all`: `process_stop` on `agents`, which ends every agent. This is the emergency stop and safe mode: `init` does not restart a service that was stopped (#100), so everything stays stopped until reboot.
 - **"Revoke" in M3.3 is a stop.** An agent's one capability is deleted with its process, and kernel revocation does not unmap memory (carried limit), so ending the process is the full revocation. Revoking one capability while the agent keeps running comes with M3.4.
-- **`trust`'s interface** (`trust`, version 1, `pharos-proto`) has one operation, `REGISTER` (agent slot and name), with a `STOP` capability on the message. It accepts it only from `agents`' badge, and keeps at most 16 agents, replacing an agent's entry when its slot is reused. A registered agent that ended is shown as ended. `REGISTER` cannot make `trust` do anything else.
+- **`trust`'s interface** (`pharos_proto::trust`, version 1) has two operations, each carrying a process capability with `STOP` and `WAIT` (`WAIT` so `list` can show whether it runs): `RUNTIME`, accepted only under `init`'s badge, and `REGISTER` (agent slot and name), accepted only under the runtime's badge. Anything else is dropped and its capability deleted. It keeps at most 16 agents, replacing an agent's entry when its slot is reused. There is no reply: the sender's blocking `send` returns once `trust` has the message, and `trust` never refuses a valid one. Neither operation can make `trust` do anything but remember a process.
+- *Implemented (#96):* `bin/trust` and `pharos_programs::virtio_console` (`VERSION_1` only, port 0, 16 receive buffers of 64 bytes and 16 transmit buffers of 256; every used element checked; output never waits, so a full console drops a line). Lines are at most 64 bytes; control bytes are dropped. Each stop waits up to 1 s and answers `stopped <name>` or `stopping <name>: still running`. `stop all` stops the runtime, then every registered agent. `trust` holds no serial console: on a setup failure it exits with a code, which `init` reports. `init` starts it after the inference service (the runtime's registration comes with #98).
+- **The host side (QEMU):** `cargo xtask` gives every boot a `virtio-serial-pci` with one `virtconsole` on a pair of FIFOs next to the boot image, `trust.in` (typed) and `trust.out` (answers). `cargo xtask run` prints both paths: `cat` the one and `echo list >` the other.
+- **Limit:** under OVMF, the firmware prints its boot messages to the virtio-console too, before Pharos starts; it could also read keys typed there then. The firmware is trusted anyway (boot chain, M4.3).
 
 ### Agent manifests (#97)
 

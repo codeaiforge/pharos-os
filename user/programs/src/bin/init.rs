@@ -28,6 +28,7 @@ const FIRST_DEVICE: Handle = 4;
 
 const VIRTIO_BLK: u32 = 0x1042_1af4;
 const VIRTIO_NET: u32 = 0x1041_1af4;
+const VIRTIO_CONSOLE: u32 = 0x1043_1af4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -60,6 +61,8 @@ enum Cap {
     Storage(u32),
     /// The inference service's endpoint, to receive on (the service).
     InferService,
+    /// The trusted service's endpoint, to receive on (the service).
+    TrustService,
 }
 
 struct Service {
@@ -137,6 +140,18 @@ const BOOT: &[Service] = &[
         ],
         after: &[2],
         limit: INFER_LIMIT,
+    },
+    // The trusted service (#96, D-018): the trusted path's device and its
+    // endpoint, nothing else. The agent runtime (#98) starts after it and
+    // `init` sends it the runtime's `STOP` capability.
+    Service {
+        name: "trust",
+        path: b"bin/trust",
+        arg: 0,
+        kind: Kind::Daemon,
+        caps: &[Cap::Device(VIRTIO_CONSOLE), Cap::TrustService, Cap::Report],
+        after: &[],
+        limit: 0,
     },
 ];
 
@@ -327,8 +342,11 @@ fn main(arg: u64) -> u64 {
         endpoint_create(),
         endpoint_create(),
         endpoint_create(),
+        endpoint_create(),
     );
-    let (Ok(events), Ok(net_service), Ok(store_service), Ok(infer_service)) = endpoints else {
+    let (Ok(events), Ok(net_service), Ok(store_service), Ok(infer_service), Ok(trust_service)) =
+        endpoints
+    else {
         let _ = debug_write(CONSOLE, b"init: cannot create an endpoint");
         return 1;
     };
@@ -386,6 +404,11 @@ fn main(arg: u64) -> u64 {
                 },
                 Cap::InferService => Grant {
                     handle: infer_service,
+                    rights: RECEIVE,
+                    badge: 0,
+                },
+                Cap::TrustService => Grant {
+                    handle: trust_service,
                     rights: RECEIVE,
                     badge: 0,
                 },
