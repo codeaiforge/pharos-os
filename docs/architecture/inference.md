@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-31 (issue #83). It follows [D-010](../project/decision-log.md#d-010-ai-inference-runtime-model-formats-and-licensing), [D-011](../project/decision-log.md#d-011-cpugpu-support-and-memoryvram-constraints), and [D-019](../project/decision-log.md#d-019-service-interfaces-and-versioning), and builds on M3.0 ([user-environment.md](user-environment.md), [storage.md part 8](storage.md#8-the-writable-store-m30)).
-- **Implementation (#88):** **implemented**: the service (`user/programs/src/bin/infer.rs`), the manifest (`pharos_programs::models`), the interface (`pharos_proto::infer`), generation sessions (`pharos_infer::session`), the test model (`pharos_infer::synth::test_model`), `init` starting the service at boot, and the `inference` test kernel. Where it differs from the text below, it says so. The failure tests are #89.
+- **Implementation (#88):** **implemented**: the service (`user/programs/src/bin/infer.rs`), the manifest (`pharos_programs::models`), the interface (`pharos_proto::infer`), generation sessions (`pharos_infer::session`), the test model (`pharos_infer::synth::test_model`), `init` starting the service at boot, and the `inference` test kernel. Where it differs from the text below, it says so. The failure tests are **implemented** (#89, section 5).
 - **Implementation:** the tokenizer is **implemented** (#84: `crates/pharos-infer/src/bpe.rs` and the generated `unicode.rs`; identical to `llama-tokenize` on 40 of 40 cases, [inference-evaluation.md](../project/inference-evaluation.md)). The interface crate `pharos-proto` exists (#92). **Planned:** the rest of M3.2 (#85–#91).
 
 ## 2. Context
@@ -123,6 +123,12 @@ Every request starts with version 1 and an operation (D-019). Every reply starts
 - **A request over the limits** (prompt, tokens, context) is refused before anything is allocated. The service never asks for more memory than its manifest entry implies, so it cannot fail half-way for lack of memory.
 - **A malformed model** fails its hash check first. A model with the right hash cannot be malformed unless the manifest entry is wrong, and the GGUF parser rejects bad input anyway (fuzzed since #69).
 
+*Implemented with these details (#89):*
+- **Test models 3 and 4** in the manifest copy model 2's entry; `cargo xtask` stores them with one byte changed (`corrupt.gguf`, a hash failure) and 32 bytes short (`short.gguf`, a size failure). They are listed by `INFO` like any model.
+- **The format and configuration steps** cannot be reached in QEMU without a wrong manifest entry, so the checks after reading are shared functions, `pharos_programs::models::verify` (size, hash) and `open` (format, configuration), and host tests give them malformed files with a matching entry.
+- **A stopped service** is tested as an endpoint nobody receives on: the kernel has no call to stop a process from outside yet (M3.3).
+- **The service's own handles:** it deletes the capability for the window it shares with the store once sent, so it holds only its four handles and its reply endpoint.
+
 ## 4. Security
 
 - **The model file is untrusted until its SHA-256 matches the manifest,** and parsed by checked, fuzzed code even after that.
@@ -140,7 +146,7 @@ Every request starts with version 1 and an operation (D-019). Every reply starts
 | Host, `pharos-proto` | The inference interface round-trips; truncated, oversized, and trailing-byte messages refused; wrong version refused; fuzzed |
 | Host, `xtask` | The generated test model has the pinned SHA-256 |
 | QEMU, `inference_tiny` (#87) | `pharos-infer` in a user program generates from the test model; the tokens equal those `cargo xtask` computed on the host. *Implemented:* the tokens and a hash of every logit's bits, with `libm` on both sides |
-| QEMU, `inference` (#88, #89) | Through the service: `INFO`; `GENERATE`, `NEXT` until the end, `RESULT` with the expected record; `CANCEL`; `BUSY` for a second client; an idle session dropped; `NO_MODEL`; `MODEL_INVALID` for a file with a wrong hash, a truncated file, and a wrong configuration (each placed in the store by `cargo xtask`); `CONTEXT`; a client's timeout when the service is stopped; the service holds only its listed capabilities |
+| QEMU, `inference` (#88, #89) | Through the service: `INFO`; `GENERATE`, `NEXT` until the end, `RESULT` with the expected record; `CANCEL`; `BUSY` for a second client; an idle session dropped; `NO_MODEL`; `MODEL_INVALID` for a file with a wrong hash, a truncated file, and a wrong configuration (each placed in the store by `cargo xtask`); `CONTEXT`; a client's timeout when the service is stopped; the service holds only its listed capabilities. *Implemented:* all of these, except the wrong configuration and malformed files, which are host tests of `pharos_programs::models` (section 3, Failures) |
 | KVM, `cargo xtask bench-infer` (#90) | S1 on Pharos: the Qwen2.5-0.5B model from `PHAROS_MODEL`, the S1 prompt; load time, first-token time, tokens per second, peak memory; tokens identical to the host's |
 
 Each check is mutation-tested as in earlier milestones.

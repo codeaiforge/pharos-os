@@ -20,10 +20,9 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use pharos_infer::gguf::Gguf;
 use pharos_infer::session::{self, Engine, Session};
 use pharos_programs::fp::Libm;
-use pharos_programs::models::{MANIFEST, Model as Entry, find};
+use pharos_programs::models::{self, MANIFEST, Model as Entry, find};
 use pharos_proto::infer::{
     MAX_BUFFER, MAX_NEW, MAX_PROMPT, MAX_TEXT, Model, ModelState, NAME, NEXT_TOKENS, Record,
     Request, Started, Status, Step, Stop, Tokens, VERSION, parse,
@@ -134,7 +133,10 @@ impl Service {
             let memory = mem_share(buf.addr(), WINDOW).ok()?;
             let mut msg = [0u8; 16];
             let n = store::encode(&StoreRequest::Attach { len: WINDOW }, &mut msg)?;
-            send(STORE, &msg[..n], memory, READ | WRITE, 0).ok()?;
+            let sent = send(STORE, &msg[..n], memory, READ | WRITE, 0);
+            // The store has its own copy; the service keeps only the mapping.
+            let _ = delete(memory);
+            sent.ok()?;
             let (s, r) = self.store(StoreRequest::Buffer);
             if s != StoreStatus::Ok || u64_at(&r, 1) != WINDOW {
                 return None;
@@ -176,18 +178,12 @@ impl Service {
             window.read_bytes(0, &mut file[done as usize..(done + n) as usize]);
             done += n;
         }
-        if pharos_store::sha256(&[&file]) != m.sha256 {
-            return Err(Step::Hash);
-        }
+        models::verify(m, &file)?;
         // ponytail: leaked once the hash matches; a file that then fails
         // below stays in memory until the service restarts (only possible
         // if the manifest entry itself is wrong).
         let bytes: &'static [u8] = file.leak();
-        let g = Gguf::parse(bytes).map_err(|_| Step::Format)?;
-        let engine = Engine::load(&g).map_err(|_| Step::Format)?;
-        if engine.model.config != m.config {
-            return Err(Step::Config);
-        }
+        let engine = models::open(m, bytes)?;
         Ok(Box::leak(Box::new(engine)))
     }
 

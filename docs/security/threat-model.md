@@ -134,15 +134,15 @@ Design: [user-environment.md](../architecture/user-environment.md) and [storage.
 
 ### Local inference (M3.2, planned)
 
-Design: [inference.md](../architecture/inference.md), from D-010, D-011, and D-019. Every row is **planned** (#84–#92) and reviewed at the M3.2 gate (#91).
+Design: [inference.md](../architecture/inference.md), from D-010, D-011, and D-019. Rows marked **implemented** or **tested** are in place; the rest is **planned** (#84–#92). All are reviewed at the M3.2 gate (#91).
 
 | Threat | Planned mitigation |
 | --- | --- |
-| A malformed or substituted model file exploits the parser or changes the model's behaviour | Only models in the compiled-in manifest load; size and SHA-256 checked before parsing; configuration checked against the manifest; the GGUF and tokenizer parsers are checked and fuzzed |
-| A client exhausts the service's memory or holds it forever | Prompt, token, and context limits checked before anything is allocated; one session at a time; idle sessions dropped after 10 s. **Limit:** per-agent token and time budgets are M3.5 |
+| A malformed or substituted model file exploits the parser or changes the model's behaviour | Only models in the compiled-in manifest load; size and SHA-256 checked before parsing; configuration checked against the manifest; the GGUF and tokenizer parsers are checked and fuzzed. **Implemented and tested (#88, #89):** a changed and a truncated file in QEMU; malformed files and a wrong configuration on the host |
+| A client exhausts the service's memory or holds it forever | Prompt, token, and context limits checked before anything is allocated; one session at a time; idle sessions dropped after 10 s. **Implemented and tested (#89):** `CONTEXT`, `BUSY`, and the idle drop in QEMU. **Limit:** per-agent token and time budgets are M3.5 |
 | A client changes its prompt while it is being processed | The prompt is copied out of the shared buffer before tokenizing |
-| A hung or crashed service hangs its callers | Every operation has a documented timeout and clients always use `call` with it (#76); the service replies with non-blocking sends. **Limit:** restarting the service is M3.3 |
-| A compromised inference service reaches further | It holds only read-only access to the `models` namespace and its own endpoints: no devices, network, or other storage |
+| A hung or crashed service hangs its callers | Every operation has a documented timeout and clients always use `call` with it (#76); the service replies with non-blocking sends. **Tested (#89):** a client calling a service that never receives gets `TIMED_OUT`. **Limit:** restarting the service is M3.3 |
+| A compromised inference service reaches further | It holds only read-only access to the `models` namespace and its own endpoints: no devices, network, or other storage. **Tested (#89):** the `inference` kernel checks every handle the service holds after its clients ran |
 | Model output is acted on | Output is returned as text to the caller only; nothing in the service executes it or passes it to a privileged interface (AGENTS.md section 7) |
 
 ### Known limitations

@@ -309,16 +309,22 @@ pub fn expected_service(model: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Writes a store at `path` holding the inference service's test model as
-/// `models/test.gguf` and the text it must generate as
-/// `models/test.expected` (`inference` test kernel, #88).
+/// `models/test.gguf`, the text it must generate as `models/test.expected`
+/// (`inference` test kernel, #88), and two broken copies for manifest
+/// models 3 and 4 (#89): `corrupt.gguf`, one byte changed, and
+/// `short.gguf`, 32 bytes short.
 pub fn service(path: &Path) -> Result<()> {
     let model = pharos_infer::synth::test_model();
     let expected = expected_service(&model)?;
+    let mut corrupt = model.clone();
+    corrupt[model.len() / 2] ^= 1;
     write_files(
         path,
         &[
             (b"models/test.gguf", &model),
             (b"models/test.expected", &expected),
+            (b"models/corrupt.gguf", &corrupt),
+            (b"models/short.gguf", &model[..model.len() - 32]),
         ],
     )?;
     println!(
