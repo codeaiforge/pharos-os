@@ -29,3 +29,9 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.pharos-fs]
 opt-level = 3
+# `cargo xtask bench-infer` computes S1's reference text on the host (#90):
+# about 20 s optimized, many minutes without.
+[profile.dev.package.pharos-infer]
+opt-level = 3
+[profile.dev.package.libm]
+opt-level = 3

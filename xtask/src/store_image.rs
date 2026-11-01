@@ -335,6 +335,60 @@ pub fn service(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Scenario S1's prompt and token count, as `scripts/bench-inference.py`'s
+/// `summary` prompt (a host test checks they match).
+pub const S1_REPORT: &str = include_str!("s1-report.txt");
+pub const S1_NEW: usize = 128;
+
+pub fn s1_prompt() -> String {
+    format!("Summarize the following report in three sentences.\n\n{S1_REPORT}")
+}
+
+/// Writes a store at `path` holding the S1 model from `model` under its
+/// manifest path, `models/s1.prompt`, and `models/s1.expected`: the text
+/// `pharos-infer` generates on the host with `libm`, as on Pharos (#90).
+/// Prints the host's own times for comparison.
+pub fn s1(path: &Path, model: &Path) -> Result<()> {
+    use pharos_infer::session::{Engine, Session};
+    use std::time::Instant;
+    let data = fs::read(model).map_err(|e| format!("cannot read {}: {e}", model.display()))?;
+    println!(
+        "  S1 model: {} bytes, SHA-256 {}",
+        data.len(),
+        hex(&pharos_store::sha256(&[&data]))
+    );
+    let start = Instant::now();
+    let g = pharos_infer::gguf::Gguf::parse(&data).map_err(|e| format!("S1 model: {e}"))?;
+    let e = Engine::load(&g).map_err(|e| format!("S1 model: {e}"))?;
+    let load = start.elapsed();
+    let prompt = s1_prompt();
+    let tokens = e.tokenizer.encode(&prompt);
+    let start = Instant::now();
+    let mut s = Session::new(&e, &tokens, S1_NEW, &Libm).map_err(|e| format!("S1 model: {e}"))?;
+    let prompt_time = start.elapsed();
+    let start = Instant::now();
+    let mut text = Vec::new();
+    while s.step(&mut text, &Libm) {}
+    let gen_time = start.elapsed();
+    println!(
+        "  host reference (1 thread, libm): load {:.2} s, prompt {} tokens in {:.2} s, {} tokens at {:.1} tokens/s",
+        load.as_secs_f64(),
+        tokens.len(),
+        prompt_time.as_secs_f64(),
+        s.generated(),
+        s.generated() as f64 / gen_time.as_secs_f64()
+    );
+    println!("  host text: {:?}", String::from_utf8_lossy(&text));
+    write_files(
+        path,
+        &[
+            (b"models/qwen2.5-0.5b-instruct-q8_0.gguf", &data),
+            (b"models/s1.prompt", prompt.as_bytes()),
+            (b"models/s1.expected", &text),
+        ],
+    )
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -342,6 +396,17 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn s1_prompt_is_the_benchmarks() {
+        let script = include_str!("../../scripts/bench-inference.py");
+        let report = script.split("REPORT = \"\"\"\\\n").nth(1).unwrap();
+        assert_eq!(report.split("\"\"\"").next().unwrap(), S1_REPORT);
+        assert!(script.contains(
+            "(\"summary\", \"Summarize the following report in three sentences.\\n\\n\" + REPORT)"
+        ));
+        assert!(s1_prompt().len() < 4096, "fits the client's buffer");
+    }
 
     #[test]
     fn tiny_model_and_its_output_are_pinned() {

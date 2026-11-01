@@ -100,6 +100,13 @@ COMMANDS:
                             round trips and boot it N times (default 5) under
                             KVM (needs read-write /dev/kvm). Prints each run
                             and the median.
+    bench-infer [--runs <N>]
+                            Measure scenario S1 on Pharos: boot the release
+                            `inference` kernel N times (default 3) under KVM
+                            with 2 GiB and the model in PHAROS_MODEL; print
+                            load, first-token time, tokens/s, and the service's
+                            peak memory against S1's targets. The text must
+                            equal pharos-infer's on the host.
     runner <ELF>            Boot one test kernel headless (used by Cargo as the
                             runner for x86_64-unknown-none; see .cargo/config.toml).
     help                    Show this help message
@@ -144,6 +151,9 @@ enum Task {
         image: PathBuf,
     },
     BenchIpc {
+        runs: u32,
+    },
+    BenchInfer {
         runs: u32,
     },
 }
@@ -265,8 +275,8 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                 );
             }
         },
-        Some("bench-ipc") => {
-            let mut runs = 5;
+        Some(cmd @ ("bench-ipc" | "bench-infer")) => {
+            let mut runs = if cmd == "bench-ipc" { 5 } else { 3 };
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--runs" => {
@@ -279,7 +289,11 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                     other => return Err(format!("unexpected argument '{other}'")),
                 }
             }
-            return Ok(Task::BenchIpc { runs });
+            return Ok(if cmd == "bench-ipc" {
+                Task::BenchIpc { runs }
+            } else {
+                Task::BenchInfer { runs }
+            });
         }
         Some(other) => return Err(format!("unknown command '{other}'")),
     };
@@ -1348,6 +1362,7 @@ fn main() -> ExitCode {
             Task::StoreBuild { dir, image, blocks } => store_image::build(&dir, &image, blocks),
             Task::StoreLs { image } => store_image::ls(&image),
             Task::BenchIpc { runs } => bench::ipc(&paths, runs),
+            Task::BenchInfer { runs } => bench::infer(&paths, runs),
         }
     });
     match result {
@@ -1458,6 +1473,15 @@ mod tests {
         );
         assert!(parse(args(&["bench-ipc", "--runs", "0"])).is_err());
         assert!(parse(args(&["bench-ipc", "--runs"])).is_err());
+        assert_eq!(
+            parse(args(&["bench-infer"])),
+            Ok(Task::BenchInfer { runs: 3 })
+        );
+        assert_eq!(
+            parse(args(&["bench-infer", "--runs", "1"])),
+            Ok(Task::BenchInfer { runs: 1 })
+        );
+        assert!(parse(args(&["bench-infer", "--runs", "0"])).is_err());
         assert!(parse(args(&["fs"])).is_err());
         assert!(parse(args(&["fs", "build", "dir"])).is_err());
         assert!(parse(args(&["fs", "ls"])).is_err());

@@ -9,6 +9,10 @@
 //! the test model (manifest models 3 and 4). Last, the service's handles
 //! must be exactly the four it was given and its own reply endpoint. Runs
 //! under UEFI (D-009).
+//!
+//! Built with `PHAROS_INFER_S1` set (`cargo xtask bench-infer`, #90), it
+//! instead runs scenario S1 with the real model: `inferclient` mode 3 times
+//! it, and the kernel samples the service's mapped memory.
 
 #![no_std]
 #![no_main]
@@ -39,19 +43,29 @@ const CLIENT_PAGES: u64 = 256;
 const CLIENT: u32 = 1;
 const OTHER: u32 = 2;
 
-/// Runs `inferclient` in mode `arg`; its exit code and lines.
+/// Set by `cargo xtask bench-infer`: run S1 instead of the checks.
+const S1: bool = option_env!("PHAROS_INFER_S1").is_some();
+
+/// Runs `inferclient` in mode `arg`, sampling `service`'s mapped pages
+/// every 100 ms; its exit code, lines, and the most pages seen.
 fn client(
     programs: &fs::Fs,
     arg: u64,
     caps: Vec<alloc::sync::Arc<Capability>>,
-) -> (Option<u64>, Vec<Vec<u8>>) {
+    service: Option<TaskId>,
+) -> (Option<u64>, Vec<Vec<u8>>, u64) {
     let start = time::uptime();
     let Ok(id) = process::spawn_elf_limited(programs, b"bin/inferclient", arg, caps, CLIENT_PAGES)
     else {
-        return (None, Vec::new());
+        return (None, Vec::new(), 0);
     };
     let mut code = None;
-    for _ in 0..600 {
+    let mut peak = 0;
+    // 300 s: S1 loads a 676 MB model.
+    for _ in 0..3000 {
+        if let Some(p) = service.and_then(process::by_id) {
+            peak = peak.max(p.memory.lock().used);
+        }
         if let Some(e) = process::exits().into_iter().find(|e| e.task == id) {
             code = Some(e.code);
             break;
@@ -62,7 +76,7 @@ fn client(
         "  client {arg} finished in {} ms",
         (time::uptime() - start).as_millis()
     );
-    (code, lines(id))
+    (code, lines(id), peak)
 }
 
 fn steps(t: &mut TestRun, out: &[Vec<u8>], steps: &[&str]) {
@@ -154,13 +168,32 @@ fn run(t: &mut TestRun) {
         ready.is_some_and(|m| m.bytes() == b"ready"),
     );
     let root = Capability::new(Object::Endpoint(infer.clone()), SEND);
+    if S1 {
+        let caps = vec![
+            Capability::new(Object::DebugConsole, WRITE),
+            root.derive_badged(SEND, CLIENT),
+            store.derive_badged(SEND, MODELS_READ_ONLY | 1 << 17),
+        ];
+        let (code, out, peak) = client(&programs, 3, caps, service.as_ref().ok().copied());
+        steps(
+            t,
+            &out,
+            &[
+                "read the S1 prompt and the host's text",
+                "S1: the text is the host's",
+            ],
+        );
+        kprintln!("S1 peak: {peak} pages mapped by the service");
+        t.check("the S1 client exited with no failures", code == Some(0));
+        return;
+    }
     let caps = vec![
         Capability::new(Object::DebugConsole, WRITE),
         root.derive_badged(SEND, CLIENT),
         // Bit 17 tells the client's store buffer from the service's.
         store.derive_badged(SEND, MODELS_READ_ONLY | 1 << 17),
     ];
-    let (code, out) = client(&programs, 1, caps);
+    let (code, out, _) = client(&programs, 1, caps, None);
     steps(
         t,
         &out,
@@ -189,7 +222,7 @@ fn run(t: &mut TestRun) {
         root.derive_badged(SEND, OTHER),
         dead,
     ];
-    let (code, out) = client(&programs, 2, caps);
+    let (code, out, _) = client(&programs, 2, caps, None);
     steps(
         t,
         &out,

@@ -109,8 +109,26 @@ About 3.4 GB in total. The GPU (GTX 1060) is measured only if the Vulkan build i
   | short (8 tokens) | 236–245 ms | 33.6 | 15.5 | 660 MiB | yes |
   | summary (S1, 233 tokens) | **8.4–9.0 s** (was about 16 s) | 26.8 | 14.7 | 664 MiB | yes |
 
-  The S1 prompt now meets the 10 s first-token target on the host, with 1.0–1.6 s to spare. Pharos under KVM is measured in #90; if it misses, #86 decides on SIMD.
+  The S1 prompt now meets the 10 s first-token target on the host, with 1.0–1.6 s to spare. Pharos under KVM is measured in #90 (below); #90 also made the batched path faster on both.
 - **What limits it:** the 8-bit multiplies under SSE2, not memory. Reading each row once per block and skipping the output matrix took the S1 prompt from 16.1 s to 9.7 s, and widening once per block to 8.4 s. Decoding each block's scale once for all tokens, with the 8-bit loop kept, was slower (10.4 s).
+
+**S1 on Pharos (M3.2, #90; `cargo xtask bench-infer`):**
+- **How:** the release `inference` test kernel, built with `PHAROS_INFER_S1`, boots under KVM (`-cpu host`, 2 GiB) with a store holding the real model, the S1 prompt, and the text `pharos-infer` generated on the host with `libm`. `init`'s capabilities and limits for the service (1 GiB), the S1 prompt (233 tokens), greedy decoding, 128 new tokens. The client loads the model with a one-token request first, so load and first token are timed separately. Times come from `uptime` and the `RESULT` record. Peak memory is the service's `mem_map` pages, sampled by the kernel every 100 ms (the program's static heap arena is not included).
+- **First measurement: first token missed.** The first token took 12.8–13.4 s, and a second request in the same boot was as slow, so it was not warm-up. Generation matched the host (14.2 tokens/s). Only the batched prompt path was slow: in `dot_q8_0_many` each of the 32 tokens' quantized inputs was its own vector, and Pharos's allocator gives every block of 4 KiB or more a 4 KiB-aligned address (`pharos-user`'s size classes). The same block of all 32 vectors then fell in the same L1 cache set (8 ways). glibc places them unaligned, so the host suffered less.
+- **Fix:** the batch's inputs are kept back to back in one vector (`Qwen2State::quant`). Same arithmetic, so the output is bit-identical: the host tests pass unchanged, and the S1 and short texts have the same SHA-256 as in M3.1 (`74a022fc…` and `60542471…`).
+- **Measured** on 2026-11-01 on the reference host (i9-10900K), 3 boots, medians:
+
+  | | Pharos (KVM) | Host, `pharos-infer` CLI |
+  | --- | --- | --- |
+  | Model load | 6.51–6.69 s (store reads through a 16 MiB window, SHA-256, parse) | 0.37 s (memory-mapped file, no hash) |
+  | S1 prompt, 233 tokens | 6.26–6.40 s (was 12.8–13.4 s) | 6.06–6.10 s (was 8.4–9.0 s) |
+  | First token after the request | **6.35 s** (target 10 s: met) | — |
+  | Generation, 128 tokens | **14.2 tokens/s** (target 5: met) | 14.6 tokens/s |
+  | Peak memory | 686 MiB mapped by the service | 664 MiB RSS |
+  | Text | identical to the host's on every run | |
+
+  The text is the same from the host CLI (standard-library math), the host reference with `libm`, and Pharos, byte for byte (623 bytes).
+- **Open for the maintainer: the first request after boot.** The model loads on the first `GENERATE` (design), so that request's first token comes after 6.7 + 6.4 = 13.0 s, over the 10 s target; every later request meets it. Options: count the target from a loaded model (as now measured); load model 1 when the service starts (boot is 6.7 s longer, and the 676 MB are held even if no agent asks); or make loading faster (the hash and the copies through the window are most of it; not yet profiled).
 
 **Not yet:** other quantization types (Q4_K) and hand-written SIMD kernels (#86).
 

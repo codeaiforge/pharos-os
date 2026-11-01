@@ -164,22 +164,29 @@ pub fn dot_q8_0(row: &[u8], x: &Q8Vec) -> f32 {
     sum
 }
 
-/// [`dot_q8_0`] of one row with each of `xs`, into `out`. Each weight block
+/// [`dot_q8_0`] of one row with each of the `out.len()` vectors that `xs`
+/// holds back to back (each the row's length), into `out`. Each weight block
 /// is decoded and widened once for all vectors (the saving that batching
 /// gives); each sum is accumulated block by block in the same order, and
 /// integer sums are exact, so the results are bit-identical to
 /// `dot_q8_0`'s.
-pub fn dot_q8_0_many(row: &[u8], xs: &[Q8Vec], out: &mut [f32]) {
+///
+/// One buffer, not one per vector: separate vectors start on 4 KiB
+/// boundaries in Pharos's allocator, so the same block of each fell in the
+/// same L1 cache set, and the S1 prompt took 13.3 s instead of about 9 (#90).
+pub fn dot_q8_0_many(row: &[u8], xs: &Q8Vec, out: &mut [f32]) {
     out.fill(0.0);
+    let blocks = row.len() / Q8_0_BYTES;
     let mut w = [0i16; QK8_0];
     for (k, block) in row.chunks_exact(Q8_0_BYTES).enumerate() {
         let d_w = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
         for (w, b) in w.iter_mut().zip(&block[2..]) {
             *w = i16::from(*b as i8);
         }
-        for (sum, x) in out.iter_mut().zip(xs) {
-            let isum = block_dot(&w, &x.values[k * QK8_0..]);
-            *sum += d_w * x.scales[k] * isum as f32;
+        for (b, sum) in out.iter_mut().enumerate() {
+            let at = b * blocks + k;
+            let isum = block_dot(&w, &xs.values[at * QK8_0..]);
+            *sum += d_w * xs.scales[at] * isum as f32;
         }
     }
 }

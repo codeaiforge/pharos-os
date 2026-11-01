@@ -12,6 +12,9 @@
 //!   a second client, 5 `SEND` on an endpoint nobody receives on (a stopped
 //!   service). `CONTEXT`, `BUSY`, `CANCEL`, an idle session dropped,
 //!   `MODEL_INVALID` for models 3 and 4, and a timeout.
+//! - 3 (#90): scenario S1 with model 1. Loads it with a one-token request,
+//!   then generates [`S1_NEW`] tokens from `models/s1.prompt`, prints the
+//!   times, and compares the text with `models/s1.expected`.
 
 #![no_std]
 #![no_main]
@@ -94,10 +97,14 @@ fn attach(to: Handle, msg: &[u8], len: u64) -> Option<Mapped> {
 
 /// Reads `models/test.expected` (small) from the store.
 fn expected(reply: Handle) -> Option<Vec<u8>> {
+    read(reply, b"test.expected")
+}
+
+/// Reads a file of at most 4 KiB from the store's `models` namespace.
+fn read(reply: Handle, path: &[u8]) -> Option<Vec<u8>> {
     let mut msg = [0u8; 64];
     let n = store::encode(&StoreRequest::Attach { len: 4096 }, &mut msg)?;
     let window = attach(STORE, &msg[..n], 4096)?;
-    let path = b"test.expected";
     let n = store::encode(&StoreRequest::Stat { path }, &mut msg)?;
     let (r, len) = raw(STORE, reply, &msg[..n], SHORT_US);
     if len < 10 || StoreStatus::from_code(r[0]) != StoreStatus::Ok {
@@ -411,11 +418,109 @@ fn generate(f: &mut u64) {
     );
 }
 
+/// S1's generated tokens, as in the M3.1 benchmark (`scripts/bench-inference.py`).
+const S1_NEW: u16 = 128;
+
+/// Appends `n` in decimal (`format!` would bring in unwinding).
+fn decimal(out: &mut Vec<u8>, n: u64) {
+    let mut digits = [0u8; 20];
+    let mut i = digits.len();
+    let mut n = n;
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&digits[i..]);
+}
+
+fn s1(f: &mut u64) {
+    let Ok(reply) = endpoint_create() else {
+        report(f, "create a reply endpoint", false);
+        return;
+    };
+    let (prompt, want) = (read(reply, b"s1.prompt"), read(reply, b"s1.expected"));
+    report(
+        f,
+        "read the S1 prompt and the host's text",
+        prompt.is_some() && want.is_some(),
+    );
+    let (Some(prompt), Some(want)) = (prompt, want) else {
+        return;
+    };
+    let mut msg = [0u8; 32];
+    let n = encode(&Request::Attach { len: 4096 }, &mut msg).unwrap_or(0);
+    let Some(buffer) = attach(SERVICE, &msg[..n], 4096) else {
+        report(f, "attach a prompt buffer", false);
+        return;
+    };
+    let generate = |max_new, prompt_len| Request::Generate {
+        model: 1,
+        max_new,
+        prompt_len,
+    };
+    // Load the model with a one-token request; its prompt time is not load.
+    buffer.write_bytes(0, b"Hi");
+    let start = uptime();
+    let (r, n) = call(reply, generate(1, 2), GENERATE_US);
+    let load_us = uptime() - start;
+    let Some(Started { session, .. }) = Started::parse(&r[..n]) else {
+        report(f, "S1: load model 1", false);
+        return;
+    };
+    let _ = call(reply, Request::Cancel { session }, SHORT_US);
+    let load_us = load_us - record(reply, session).map_or(0, |r| r.prompt_us);
+
+    buffer.write_bytes(0, &prompt);
+    let start = uptime();
+    let (r, n) = call(reply, generate(S1_NEW, prompt.len() as u32), GENERATE_US);
+    let generate_call_us = uptime() - start;
+    let Some(Started { session, .. }) = Started::parse(&r[..n]) else {
+        report(f, "S1: GENERATE", false);
+        return;
+    };
+    let mut text = Vec::new();
+    loop {
+        let (r, n) = call(reply, Request::Next { session }, NEXT_US);
+        let Some(t) = Tokens::parse(&r[..n]) else {
+            break;
+        };
+        text.extend_from_slice(t.text);
+        if t.stop.is_some() {
+            break;
+        }
+    }
+    let Some(rec) = record(reply, session) else {
+        report(f, "S1: RESULT", false);
+        return;
+    };
+    let per_token = rec.generate_us / u64::from(rec.generated.max(1));
+    let mut line = Vec::new();
+    for (text, n) in [
+        (&b"S1: load "[..], load_us),
+        (b" us, prompt ", u64::from(rec.prompt_tokens)),
+        (b" tokens in ", rec.prompt_us),
+        (b" us, first token ", generate_call_us + per_token),
+        (b" us, ", u64::from(rec.generated)),
+        (b" tokens in ", rec.generate_us),
+    ] {
+        line.extend_from_slice(text);
+        decimal(&mut line, n);
+    }
+    line.extend_from_slice(b" us");
+    let _ = debug_write(CONSOLE, &line);
+    report(f, "S1: the text is the host's", text == want);
+}
+
 fn main(arg: u64) -> u64 {
     let mut f = 0;
     match arg {
         1 => generate(&mut f),
         2 => failures(&mut f),
+        3 => s1(&mut f),
         _ => f = 0xbad,
     }
     f

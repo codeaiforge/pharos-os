@@ -183,7 +183,8 @@ pub struct Qwen2State {
     logits: Vec<f32>,
     key_cache: Vec<f32>,
     value_cache: Vec<f32>,
-    quant: Vec<Q8Vec>,
+    /// The batch's quantized inputs, back to back.
+    quant: Q8Vec,
 }
 
 impl Qwen2State {
@@ -204,7 +205,7 @@ impl Qwen2State {
             logits: vec![0.0; c.vocab_size],
             key_cache: vec![0.0; cache],
             value_cache: vec![0.0; cache],
-            quant: (0..MAX_BATCH).map(|_| Q8Vec::new()).collect(),
+            quant: Q8Vec::new(),
         }
     }
 
@@ -224,20 +225,19 @@ fn rmsnorm(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32, m: &impl Math) 
 /// `out[b] = W x[b]` for the `n` vectors in `x` (one row of `W` per output),
 /// each vector quantized first. Each weight row is read once for all `n`
 /// vectors; each output is the same dot product as for one vector alone.
-fn matmul(out: &mut [f32], w: &Tensor<'_>, x: &[f32], n: usize, quant: &mut [Q8Vec]) {
-    let (rows, cols) = (out.len() / n, x.len() / n);
-    for (q, x) in quant.iter_mut().zip(x.chunks_exact(cols)) {
-        q.quantize(x);
-    }
+fn matmul(out: &mut [f32], w: &Tensor<'_>, x: &[f32], n: usize, quant: &mut Q8Vec) {
+    let rows = out.len() / n;
+    // One vector, so a single `quantize` covers the whole batch.
+    quant.quantize(x);
     if n == 1 {
         for (i, o) in out.iter_mut().enumerate() {
-            *o = dot_q8_0(w.row(i), &quant[0]);
+            *o = dot_q8_0(w.row(i), quant);
         }
         return;
     }
     let mut sums = [0.0f32; MAX_BATCH];
     for i in 0..rows {
-        dot_q8_0_many(w.row(i), &quant[..n], &mut sums[..n]);
+        dot_q8_0_many(w.row(i), quant, &mut sums[..n]);
         for (b, sum) in sums[..n].iter().enumerate() {
             out[b * rows + i] = *sum;
         }

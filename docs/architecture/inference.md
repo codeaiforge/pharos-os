@@ -147,7 +147,7 @@ Every request starts with version 1 and an operation (D-019). Every reply starts
 | Host, `xtask` | The generated test model has the pinned SHA-256 |
 | QEMU, `inference_tiny` (#87) | `pharos-infer` in a user program generates from the test model; the tokens equal those `cargo xtask` computed on the host. *Implemented:* the tokens and a hash of every logit's bits, with `libm` on both sides |
 | QEMU, `inference` (#88, #89) | Through the service: `INFO`; `GENERATE`, `NEXT` until the end, `RESULT` with the expected record; `CANCEL`; `BUSY` for a second client; an idle session dropped; `NO_MODEL`; `MODEL_INVALID` for a file with a wrong hash, a truncated file, and a wrong configuration (each placed in the store by `cargo xtask`); `CONTEXT`; a client's timeout when the service is stopped; the service holds only its listed capabilities. *Implemented:* all of these, except the wrong configuration and malformed files, which are host tests of `pharos_programs::models` (section 3, Failures) |
-| KVM, `cargo xtask bench-infer` (#90) | S1 on Pharos: the Qwen2.5-0.5B model from `PHAROS_MODEL`, the S1 prompt; load time, first-token time, tokens per second, peak memory; tokens identical to the host's |
+| KVM, `cargo xtask bench-infer` (#90) | S1 on Pharos: the Qwen2.5-0.5B model from `PHAROS_MODEL`, the S1 prompt; load time, first-token time, tokens per second, peak memory; tokens identical to the host's. *Implemented:* the text is compared byte for byte; peak memory is the service's mapped pages |
 
 Each check is mutation-tested as in earlier milestones.
 
@@ -162,5 +162,5 @@ Each check is mutation-tested as in earlier milestones.
 
 ## 7. Open questions
 
-- The first-token time on Pharos under KVM with batching (#90). On the host, batching brings the S1 prompt from about 16 s to 8.4–9.0 s (#85), 1.0–1.6 s inside the target.
+- ~~The first-token time on Pharos under KVM with batching (#90).~~ Measured: 6.35 s from the request, 14.2 tokens/s, text identical to the host's ([inference-evaluation.md](../project/inference-evaluation.md)). The first request after boot also loads the model (6.7 s), 13.0 s in all: whether the 10 s target applies to it is for the maintainer.
 - Chat formatting (the `<|im_start|>` template) belongs to the caller in M3.2. The agent runtime (M3.3) decides whether the service should apply it.
