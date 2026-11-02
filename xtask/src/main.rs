@@ -1238,21 +1238,51 @@ const MODEL_ENV: &str = "PHAROS_MODEL";
 /// Its time limit at least: about 45 s on the reference host.
 const LARGE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// The test kernel that `runner` first boots [`CRASH_ROUNDS`] times and
-/// kills while it writes the store (storage.md part 8).
-const CRASH_TEST: &str = "store_crash";
-const CRASH_ROUNDS: u32 = 20;
-/// Kills land up to this long after the writer starts.
-const CRASH_WINDOW_MS: u64 = 1500;
+/// A test kernel that `runner` first boots `rounds` times on one store
+/// disk and kills at random moments.
+struct Crash {
+    test: &'static str,
+    rounds: u32,
+    /// Kills land up to this long after `started` appears.
+    window_ms: u64,
+    started: &'static str,
+    /// The boot's check line, and how it reads when the check passed.
+    check: &'static str,
+    ok: &'static str,
+    /// The work finished before the kill.
+    finished: &'static str,
+}
 
-/// Crash injection: boots the `store_crash` kernel [`CRASH_ROUNDS`] times
-/// on the same store disk, killing QEMU at a random moment after the
-/// writer reports `store: writing`. Each boot must first find the store
-/// consistent (`store check: ok`), so every round checks the previous
-/// kill. The seed is printed so a failure can be repeated. (Killing QEMU
-/// keeps what it already handed to the host; losing unflushed writes is
-/// covered by `pharos-store`'s host tests.)
-fn crash_rounds(iso: &Path, vars: &Path, logs: &Path, extra: &[OsString]) -> Result<()> {
+/// The store's writer (storage.md part 8).
+const STORE_CRASH: Crash = Crash {
+    test: "store_crash",
+    rounds: 20,
+    window_ms: 1500,
+    started: "store: writing",
+    check: "store check:",
+    ok: "store check: ok",
+    finished: "store crash: done",
+};
+
+/// Durable agent tasks (#99): the `counter` task, killed while it counts.
+/// Each kill uses up one of its 10 attempts, so at most 6 rounds.
+const AGENTS_CRASH: Crash = Crash {
+    test: "agents_crash",
+    rounds: 6,
+    window_ms: 2500,
+    started: "agents check:",
+    check: "agents check:",
+    ok: "agents check: ok",
+    finished: "agents check: done",
+};
+
+/// Crash injection: boots the kernel `c.rounds` times on the same store
+/// disk, killing QEMU at a random moment after it prints `c.started`.
+/// Each boot must first find its state consistent (`c.ok`), so every round
+/// checks the previous kill. The seed is printed so a failure can be
+/// repeated. (Killing QEMU keeps what it already handed to the host;
+/// losing unflushed writes is covered by `pharos-store`'s host tests.)
+fn crash_rounds(c: &Crash, iso: &Path, vars: &Path, logs: &Path, extra: &[OsString]) -> Result<()> {
     let mut seed = env::var("PHAROS_CRASH_SEED")
         .ok()
         .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
@@ -1262,15 +1292,18 @@ fn crash_rounds(iso: &Path, vars: &Path, logs: &Path, extra: &[OsString]) -> Res
                 .map_or(1, |d| d.as_nanos() as u64)
         })
         | 1;
-    println!("  store crash injection: {CRASH_ROUNDS} rounds, PHAROS_CRASH_SEED={seed:#x}");
-    for round in 1..=CRASH_ROUNDS {
+    println!(
+        "  crash injection: {} rounds, PHAROS_CRASH_SEED={seed:#x}",
+        c.rounds
+    );
+    for round in 1..=c.rounds {
         seed ^= seed << 13;
         seed ^= seed >> 7;
         seed ^= seed << 17;
-        let delay = Duration::from_millis(seed % CRASH_WINDOW_MS);
+        let delay = Duration::from_millis(seed % c.window_ms);
         prepare_firmware(vars, false)?;
         console::fifos(iso.parent().unwrap_or(Path::new(".")))?;
-        let log = logs.join(format!("test-{CRASH_TEST}-round-{round}.log"));
+        let log = logs.join(format!("test-{}-round-{round}.log", c.test));
         let _ = fs::remove_file(&log);
         let mut serial = OsString::from("file:");
         serial.push(&log);
@@ -1284,7 +1317,7 @@ fn crash_rounds(iso: &Path, vars: &Path, logs: &Path, extra: &[OsString]) -> Res
         let read = || String::from_utf8_lossy(&fs::read(&log).unwrap_or_default()).into_owned();
         let start = Instant::now();
         let started = loop {
-            if read().contains("store: writing") {
+            if read().contains(c.started) {
                 break true;
             }
             if child.try_wait().map_err(qemu_error)?.is_some()
@@ -1302,22 +1335,23 @@ fn crash_rounds(iso: &Path, vars: &Path, logs: &Path, extra: &[OsString]) -> Res
         let text = read();
         let check = text
             .lines()
-            .find(|l| l.contains("store check:"))
+            .find(|l| l.contains(c.check))
             .unwrap_or("no check line");
-        if !started || !check.contains("store check: ok") {
+        if !started || !check.contains(c.ok) {
             return Err(format!(
-                "store crash round {round}: {} (log: {})",
+                "{} round {round}: {} (log: {})",
+                c.test,
                 check.trim(),
                 log.display()
             ));
         }
-        let finished = if text.contains("store crash: done") {
-            ", writer finished first"
+        let finished = if text.contains(c.finished) {
+            ", work finished first"
         } else {
             ""
         };
         println!(
-            "  round {round}: {}; killed {} ms into writing{finished}",
+            "  round {round}: {}; killed {} ms in{finished}",
             check
                 .trim()
                 .trim_start_matches(|c: char| !c.is_ascii_alphabetic()),
@@ -1360,8 +1394,10 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     if name == SERVICE_TEST || name == AGENTS_TEST {
         store_image::service(&out.join(STORE_IMAGE))?;
     }
-    if name == CRASH_TEST {
-        crash_rounds(&iso, &out.join("ovmf-vars.fd"), &logs, &extra)?;
+    for c in [&STORE_CRASH, &AGENTS_CRASH] {
+        if name == c.test {
+            crash_rounds(c, &iso, &out.join("ovmf-vars.fd"), &logs, &extra)?;
+        }
     }
     let script = if name == TRUST_TEST {
         let base = console::fifos(&out)?;

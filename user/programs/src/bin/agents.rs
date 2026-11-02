@@ -5,16 +5,19 @@
 //! Handles: 1 the console, 2 its endpoint (`RECEIVE`, `SEND`, `GRANT`, to
 //! hand agents a badged `SEND`), 3 `init`'s report endpoint, 4 the
 //! read-only filesystem (agent programs and manifests), 5 the inference
-//! service (`SEND`, badged), 6 `trust` (`SEND`, badged as the runtime).
-//! The argument selects the policy table (0: boot, empty; 1: the `agents`
-//! test kernel).
+//! service (`SEND`, badged), 6 `trust` (`SEND`, badged as the runtime), 7
+//! the storage service, badged for namespace `agents` (read-write). The
+//! argument selects the policy table (0: boot, empty; 1: the `agents` and
+//! `agents_crash` test kernels).
 //!
 //! Each policy entry's manifest, `agents/<name>.manifest`, is read and
 //! checked at start; an agent whose manifest is missing or refused never
 //! runs. Every task attempt is one process holding one capability: `SEND`
 //! on the runtime's endpoint, badged with its slot. The process is
 //! registered with `trust` before the runtime answers it. Tasks are kept
-//! in memory until #99 makes them durable.
+//! in the store ([`pharos_programs::tasks`], #99): every change is stored
+//! before it is answered or acted on, and at start the runtime recovers
+//! them, a task that was running becoming pending again.
 
 #![no_std]
 #![no_main]
@@ -23,14 +26,17 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use pharos_programs::tasks::{self, Begin, Files, StoreFailed, Tasks};
 use pharos_proto::agents::{
-    self, Assigned, CONTROL, MAX_BUFFER, MAX_INPUT, MAX_RESULT, MAX_RUNNING, MAX_TASKS, NAME,
-    NO_SESSION, Request, SLOTS, State, TaskStatus, VERSION, agent_slot, parse,
+    self, Assigned, Begun, CHECKPOINT_AT, CONTROL, MAX_BUFFER, MAX_CHECKPOINT, MAX_INPUT,
+    MAX_RESULT, MAX_RUNNING, NAME, NO_SESSION, Request, SLOTS, State, TaskStatus, VERSION,
+    agent_slot, parse,
 };
 use pharos_proto::infer::{self, Request as InferRequest, Started, Tokens};
 use pharos_proto::manifest::{self, Entry, Why};
+use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::{Info, refusal, status, trust};
-use pharos_user::rights::{READ, SEND, STOP, WAIT};
+use pharos_user::rights::{READ, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
     Grant, Handle, Mapped, Received, Status, call_timeout, debug_write, delete, endpoint_create,
     mem_map_buffer, mem_map_cap, mem_share, mem_unmap, open, process_status, process_stop, read,
@@ -45,6 +51,10 @@ const REPORT: Handle = 3;
 const ROOT: Handle = 4;
 const INFER: Handle = 5;
 const TRUST: Handle = 6;
+const STORE: Handle = 7;
+/// The runtime's buffer at the storage service: the largest task file.
+const STORE_BUFFER: u64 = 128 << 10;
+const STORE_US: u64 = 10_000_000;
 
 /// How long a call to the inference service may take; `GENERATE` may load
 /// a model first.
@@ -55,9 +65,9 @@ const MAX_CONTROLS: usize = 4;
 
 const BOOT: &[Entry] = &[];
 
-/// The `agents` test kernel's agents, all `bin/testagent`. `greedy`'s
-/// manifest asks for more pages than its entry allows; `absent` has no
-/// manifest.
+/// The test kernels' agents, all `bin/testagent`. `greedy`'s manifest
+/// asks for more pages than its entry allows; `absent` has no manifest;
+/// `counter` is the `agents_crash` kernel's.
 const TEST: &[Entry] = &[
     Entry {
         name: b"worker",
@@ -86,6 +96,15 @@ const TEST: &[Entry] = &[
         progress_ms: 2_000,
         task_ms: 20_000,
     },
+    Entry {
+        name: b"counter",
+        program: b"bin/testagent",
+        pages: 64,
+        models: 0,
+        attempts: 10,
+        progress_ms: 5_000,
+        task_ms: 120_000,
+    },
 ];
 
 /// What an accepted manifest asked for (at most its entry).
@@ -99,15 +118,99 @@ struct Limits {
     task_us: u64,
 }
 
-struct Task {
-    id: u32,
-    agent: usize,
-    state: State,
-    /// Attempts started.
-    attempts: u8,
-    input: Vec<u8>,
-    /// The result, or why it failed.
-    result: Vec<u8>,
+/// The storage service as [`Files`], through the runtime's buffer there.
+struct Store {
+    buffer: Mapped,
+    reply: Handle,
+}
+
+impl Store {
+    fn call(
+        &self,
+        req: &StoreRequest<'_>,
+        out: &mut [u8; 256],
+    ) -> Result<StoreStatus, StoreFailed> {
+        let mut msg = [0u8; 256];
+        let n = store::encode(req, &mut msg).ok_or(StoreFailed)?;
+        match call_timeout(STORE, &msg[..n], self.reply, out, STORE_US) {
+            Ok(Received::Message { len, .. }) if len >= 1 => Ok(StoreStatus::from_code(out[0])),
+            _ => Err(StoreFailed),
+        }
+    }
+}
+
+fn u64_at(b: &[u8], at: usize) -> u64 {
+    let mut v = [0u8; 8];
+    v.copy_from_slice(&b[at..at + 8]);
+    u64::from_le_bytes(v)
+}
+
+impl Files for Store {
+    fn write(&mut self, path: &[u8], bytes: &[u8]) -> Result<(), StoreFailed> {
+        if bytes.len() > self.buffer.len() {
+            return Err(StoreFailed);
+        }
+        self.buffer.write_bytes(0, bytes);
+        let len = bytes.len() as u64;
+        let req = StoreRequest::Write { path, len, at: 0 };
+        match self.call(&req, &mut [0; 256])? {
+            StoreStatus::Ok => Ok(()),
+            _ => Err(StoreFailed),
+        }
+    }
+
+    fn read(&mut self, path: &[u8]) -> Result<Option<Vec<u8>>, StoreFailed> {
+        let mut out = [0u8; 256];
+        match self.call(&StoreRequest::Stat { path }, &mut out)? {
+            StoreStatus::NotFound => return Ok(None),
+            StoreStatus::Ok => {}
+            _ => return Err(StoreFailed),
+        }
+        let len = u64_at(&out, 2);
+        if len > self.buffer.len() as u64 {
+            return Err(StoreFailed);
+        }
+        let req = StoreRequest::Read {
+            path,
+            offset: 0,
+            len,
+            at: 0,
+        };
+        if self.call(&req, &mut out)? != StoreStatus::Ok || u64_at(&out, 1) != len {
+            return Err(StoreFailed);
+        }
+        let mut bytes = alloc::vec![0u8; len as usize];
+        self.buffer.read_bytes(0, &mut bytes);
+        Ok(Some(bytes))
+    }
+
+    fn delete(&mut self, path: &[u8]) -> Result<(), StoreFailed> {
+        match self.call(&StoreRequest::Delete { path }, &mut [0; 256])? {
+            StoreStatus::Ok | StoreStatus::NotFound => Ok(()),
+            _ => Err(StoreFailed),
+        }
+    }
+
+    fn list(&mut self, prefix: &[u8]) -> Result<Vec<Vec<u8>>, StoreFailed> {
+        let mut names = Vec::new();
+        loop {
+            let mut out = [0u8; 256];
+            let start = names.len() as u32;
+            if self.call(&StoreRequest::List { prefix, start }, &mut out)? != StoreStatus::Ok {
+                return Err(StoreFailed);
+            }
+            let (count, more) = (out[1], out[2]);
+            let mut at = 3;
+            for _ in 0..count {
+                let n = usize::from(*out.get(at).ok_or(StoreFailed)?);
+                names.push(out.get(at + 1..at + 1 + n).ok_or(StoreFailed)?.to_vec());
+                at += 1 + n;
+            }
+            if more == 0 || count == 0 {
+                return Ok(names);
+            }
+        }
+    }
 }
 
 /// Why the runtime itself ended an agent.
@@ -121,7 +224,8 @@ enum Ending {
 
 /// A running agent process.
 struct Slot {
-    task: usize,
+    /// The task's ID.
+    task: u32,
     process: Handle,
     buffer: Option<Mapped>,
     started: u64,
@@ -132,10 +236,10 @@ struct Slot {
 
 struct Runtime {
     agents: Vec<Limits>,
-    tasks: Vec<Task>,
+    tasks: Tasks,
+    store: Store,
     slots: [Option<Slot>; SLOTS],
     controls: [Option<(u32, Mapped)>; MAX_CONTROLS],
-    next_id: u32,
     infer_buffer: Mapped,
     reply: Handle,
 }
@@ -161,6 +265,16 @@ fn say(parts: &[&[u8]]) {
         n += take;
     }
     let _ = debug_write(CONSOLE, &line[..n]);
+}
+
+/// The status for a refused task change.
+fn store_error(e: tasks::Error) -> u8 {
+    match e {
+        tasks::Error::NotFound => status::NOT_FOUND,
+        tasks::Error::TooLarge => status::TOO_LARGE,
+        tasks::Error::Busy => status::BUSY,
+        tasks::Error::Store => status::INTERNAL,
+    }
 }
 
 /// A reply of just `OK`.
@@ -232,17 +346,24 @@ fn load(e: &'static Entry, table: &'static [Entry]) -> Result<Limits, &'static [
 }
 
 impl Runtime {
-    fn event(&self, task: usize, what: &[u8], number: Option<u64>) {
-        let t = &self.tasks[task];
+    fn limits(&self, agent: &[u8]) -> Option<Limits> {
+        self.agents.iter().find(|l| l.entry.name == agent).copied()
+    }
+
+    fn event(&self, id: u32, what: &[u8], number: Option<u64>) {
+        let name = self
+            .tasks
+            .find(id)
+            .map_or(&b"?"[..], |i| &self.tasks.list[i].agent);
         let mut a = [0u8; 20];
         let mut b = [0u8; 20];
         let number = number.map_or(&b""[..], |v| decimal(v, &mut b));
         let space: &[u8] = if number.is_empty() { b"" } else { b" " };
         say(&[
             b"agents: ",
-            self.agents[t.agent].entry.name,
+            name,
             b" task ",
-            decimal(u64::from(t.id), &mut a),
+            decimal(u64::from(id), &mut a),
             b" ",
             what,
             space,
@@ -279,23 +400,46 @@ impl Runtime {
         self.slots.iter().flatten().count()
     }
 
-    /// Starts pending tasks, oldest first, while slots are free.
+    /// Ends task `id` with `state`, stored; says so if the store refused.
+    fn finish(&mut self, id: u32, state: State, result: &[u8]) -> bool {
+        let stored = self
+            .tasks
+            .find(id)
+            .is_some_and(|i| self.tasks.finish(&mut self.store, i, state, result).is_ok());
+        if !stored {
+            self.event(id, b"not stored", None);
+        }
+        stored
+    }
+
+    /// Starts runnable tasks, oldest first, while slots are free.
     fn start_pending(&mut self) {
         while self.running() < MAX_RUNNING {
-            let Some(task) = self.tasks.iter().position(|t| t.state == State::Pending) else {
-                return;
-            };
             let Some(slot) = self.slots.iter().position(Option::is_none) else {
                 return;
             };
-            self.start(task, slot);
+            let agents = &self.agents;
+            let runnable = |t: &tasks::Task| agents.iter().any(|l| l.entry.name == t.agent);
+            let Some(i) = self.tasks.next(&mut self.store, runnable) else {
+                return;
+            };
+            // The attempt is counted and stored before the agent runs; if
+            // the store refuses, try again on the next event.
+            if self.tasks.start(&mut self.store, i).is_err() {
+                return;
+            }
+            self.start(self.tasks.list[i].id, slot);
         }
     }
 
-    fn start(&mut self, task: usize, slot: usize) {
-        let limits = self.agents[self.tasks[task].agent];
-        let t = &mut self.tasks[task];
-        t.attempts += 1;
+    fn start(&mut self, id: u32, slot: usize) {
+        let Some(limits) = self
+            .tasks
+            .find(id)
+            .and_then(|i| self.limits(&self.tasks.list[i].agent))
+        else {
+            return;
+        };
         let process = open(ROOT, limits.entry.program).and_then(|file| {
             let grant = Grant {
                 handle: SERVICE,
@@ -308,9 +452,8 @@ impl Runtime {
             p
         });
         let Ok(process) = process else {
-            t.state = State::Failed;
-            t.result = b"spawn failed".to_vec();
-            self.event(task, b"failed", None);
+            self.finish(id, State::Failed, b"spawn failed");
+            self.event(id, b"failed", None);
             return;
         };
         // `trust` holds the agent's STOP before the runtime answers it.
@@ -323,7 +466,7 @@ impl Runtime {
             .is_some_and(|n| send(TRUST, &msg[..n], process, STOP | WAIT, 0).is_ok());
         let now = uptime();
         self.slots[slot] = Some(Slot {
-            task,
+            task: id,
             process,
             buffer: None,
             started: now,
@@ -332,15 +475,12 @@ impl Runtime {
             ending: None,
         });
         if !registered {
-            let t = &mut self.tasks[task];
-            t.state = State::Failed;
-            t.result = b"trust registration failed".to_vec();
+            self.finish(id, State::Failed, b"trust registration failed");
             self.end(slot, Ending::Finished);
-            self.event(task, b"failed", None);
+            self.event(id, b"failed", None);
             return;
         }
-        self.tasks[task].state = State::Running;
-        self.event(task, b"started", None);
+        self.event(id, b"started", None);
     }
 
     /// Stops agents with no request for `progress_ms`, or over `task_ms`.
@@ -353,12 +493,18 @@ impl Runtime {
             if s.ending.is_some() {
                 continue;
             }
-            let l = self.agents[self.tasks[s.task].agent];
-            let deadline = (s.last + l.progress_us).min(s.started + l.task_us);
+            let (id, last, started) = (s.task, s.last, s.started);
+            let Some(l) = self
+                .tasks
+                .find(id)
+                .and_then(|t| self.limits(&self.tasks.list[t].agent))
+            else {
+                continue;
+            };
+            let deadline = (last + l.progress_us).min(started + l.task_us);
             if now >= deadline {
-                let task = s.task;
                 self.end(i, Ending::Hung);
-                self.event(task, b"hung", None);
+                self.event(id, b"hung", None);
             } else {
                 wait = wait.min(deadline - now);
             }
@@ -383,49 +529,51 @@ impl Runtime {
         if let Some(b) = s.buffer {
             unmap(b);
         }
-        let task = s.task;
+        let id = s.task;
         match (s.ending, status) {
             (Some(Ending::Finished | Ending::Cancelled), _) => {}
-            (Some(Ending::Hung), _) => self.retry(task),
+            (Some(Ending::Hung), _) => self.retry(id),
             // Stopped, but not by the runtime: the user, on the trusted path.
             (None, Ok(Status::Stopped)) => {
-                self.tasks[task].state = State::Cancelled;
-                self.event(task, b"stopped", None);
+                self.finish(id, State::Cancelled, b"stopped");
+                self.event(id, b"stopped", None);
             }
             (None, Ok(Status::Killed(vector))) => {
-                self.event(task, b"crashed", Some(vector));
-                self.retry(task);
+                self.event(id, b"crashed", Some(vector));
+                self.retry(id);
             }
             // Ending without COMPLETE or FAIL is a failed attempt.
             (None, Ok(Status::Exited(code))) => {
-                self.event(task, b"exited", Some(code));
-                self.retry(task);
+                self.event(id, b"exited", Some(code));
+                self.retry(id);
             }
-            (None, _) => self.retry(task),
+            (None, _) => self.retry(id),
         }
     }
 
     /// A failed attempt: run again, or fail the task.
-    fn retry(&mut self, task: usize) {
-        let max = self.agents[self.tasks[task].agent].attempts;
-        let t = &mut self.tasks[task];
-        if t.attempts >= max {
-            t.state = State::Failed;
-            t.result = b"retries exhausted".to_vec();
-            self.event(task, b"failed", None);
-        } else {
-            t.state = State::Pending;
-            let mut d = [0u8; 20];
-            let mut e = [0u8; 20];
-            let next = decimal(u64::from(t.attempts) + 1, &mut d);
-            let max = decimal(u64::from(max), &mut e);
-            let mut what = [0u8; 64];
-            let mut n = 0;
-            for p in [&b"restarting "[..], next, b"/", max] {
-                what[n..n + p.len()].copy_from_slice(p);
-                n += p.len();
+    fn retry(&mut self, id: u32) {
+        let Some(i) = self.tasks.find(id) else { return };
+        let max = self
+            .limits(&self.tasks.list[i].agent)
+            .map_or(0, |l| l.attempts);
+        match self.tasks.retry(&mut self.store, i, max) {
+            Ok(false) => self.event(id, b"failed", None),
+            Ok(true) => {
+                let mut d = [0u8; 20];
+                let mut e = [0u8; 20];
+                let next = decimal(u64::from(self.tasks.list[i].attempts) + 1, &mut d);
+                let max = decimal(u64::from(max), &mut e);
+                let mut what = [0u8; 64];
+                let mut n = 0;
+                for p in [&b"restarting "[..], next, b"/", max] {
+                    what[n..n + p.len()].copy_from_slice(p);
+                    n += p.len();
+                }
+                self.event(id, &what[..n], None);
             }
-            self.event(task, &what[..n], None);
+            // Still marked running: recovered as pending at the next start.
+            Err(_) => self.event(id, b"not stored", None),
         }
     }
 
@@ -479,26 +627,65 @@ impl Runtime {
             return Err(NO_SESSION);
         };
         s.last = now;
-        let (task, session) = (s.task, s.session);
-        let limits = self.agents[self.tasks[task].agent];
+        let (id, session) = (s.task, s.session);
+        let t = self.tasks.find(id).ok_or(NO_SESSION)?;
+        let limits = self
+            .limits(&self.tasks.list[t].agent)
+            .ok_or(status::INTERNAL)?;
         let buffer = self.slots[i].as_ref().and_then(|s| s.buffer.as_ref());
         let buffer_len = buffer.map_or(0, Mapped::len);
+        let stored = |r: Result<(), tasks::Error>| r.map_err(store_error);
         match req {
             Request::Task => {
-                let t = &self.tasks[task];
-                if t.input.len() > buffer_len {
+                let task = &self.tasks.list[t];
+                let cp = task.checkpoint.len();
+                if task.input.len() > buffer_len
+                    || (cp > 0 && CHECKPOINT_AT as usize + cp > buffer_len)
+                {
                     return Err(status::NO_BUFFER);
                 }
                 if let Some(b) = buffer {
-                    b.write_bytes(0, &t.input);
+                    b.write_bytes(0, &task.input);
+                    b.write_bytes(CHECKPOINT_AT as usize, &task.checkpoint);
                 }
                 Assigned {
-                    task: t.id,
-                    attempt: t.attempts,
-                    input_len: t.input.len() as u32,
+                    task: task.id,
+                    attempt: task.attempts,
+                    input_len: task.input.len() as u32,
+                    checkpoint_len: cp as u32,
                 }
                 .encode(out)
                 .ok_or(status::INTERNAL)
+            }
+            Request::Checkpoint { len } => {
+                if len > MAX_CHECKPOINT {
+                    return Err(status::TOO_LARGE);
+                }
+                if CHECKPOINT_AT as usize + len as usize > buffer_len {
+                    return Err(status::NO_BUFFER);
+                }
+                let mut bytes = alloc::vec![0u8; len as usize];
+                if let Some(b) = buffer {
+                    b.read_bytes(CHECKPOINT_AT as usize, &mut bytes);
+                }
+                stored(self.tasks.checkpoint(&mut self.store, t, &bytes))?;
+                Ok(done(out))
+            }
+            Request::Begin { key } => {
+                let begun = self
+                    .tasks
+                    .begin(&mut self.store, t, key)
+                    .map_err(store_error)?;
+                match begun {
+                    Begin::Go => Begun::Go.encode(out),
+                    Begin::Done(r) => Begun::Done(&r).encode(out),
+                    Begin::Unknown => Begun::Unknown.encode(out),
+                }
+                .ok_or(status::INTERNAL)
+            }
+            Request::End { key, result } => {
+                stored(self.tasks.end(&mut self.store, t, key, result))?;
+                Ok(done(out))
             }
             Request::Complete { len } => {
                 if len > MAX_RESULT {
@@ -511,19 +698,15 @@ impl Runtime {
                 if let Some(b) = buffer {
                     b.read_bytes(0, &mut result);
                 }
-                let t = &mut self.tasks[task];
-                t.state = State::Done;
-                t.result = result;
+                stored(self.tasks.finish(&mut self.store, t, State::Done, &result))?;
                 self.end(i, Ending::Finished);
-                self.event(task, b"completed", None);
+                self.event(id, b"completed", None);
                 Ok(done(out))
             }
             Request::Fail { reason } => {
-                let t = &mut self.tasks[task];
-                t.state = State::Failed;
-                t.result = reason.to_vec();
+                stored(self.tasks.finish(&mut self.store, t, State::Failed, reason))?;
                 self.end(i, Ending::Finished);
-                self.event(task, b"failed", None);
+                self.event(id, b"failed", None);
                 Ok(done(out))
             }
             Request::Log { text } => {
@@ -586,9 +769,10 @@ impl Runtime {
                 Ok(done(out))
             }
             Request::Info => self.info(out).ok_or(status::INTERNAL),
-            Request::Submit { .. } | Request::Status { .. } | Request::Cancel { .. } => {
-                Err(status::NO_ACCESS)
-            }
+            Request::Submit { .. }
+            | Request::Status { .. }
+            | Request::Cancel { .. }
+            | Request::Forget { .. } => Err(status::NO_ACCESS),
             Request::Attach { .. } => Err(status::BAD_REQUEST),
         }
     }
@@ -605,13 +789,15 @@ impl Runtime {
     fn control(&mut self, badge: u32, req: Request<'_>, out: &mut [u8; 256]) -> Result<usize, u8> {
         let buffer_len = self.control_buffer(badge).map_or(0, Mapped::len);
         match req {
-            Request::Submit { name, input_len } => {
-                let agent = self
-                    .agents
-                    .iter()
-                    .position(|l| l.entry.name == name)
-                    .ok_or(status::NOT_FOUND)?;
-                if input_len > MAX_INPUT || self.tasks.len() >= MAX_TASKS {
+            Request::Submit {
+                name,
+                input_len,
+                deps,
+            } => {
+                if self.limits(name).is_none() {
+                    return Err(status::NOT_FOUND);
+                }
+                if input_len > MAX_INPUT {
                     return Err(status::TOO_LARGE);
                 }
                 if input_len as usize > buffer_len {
@@ -621,24 +807,14 @@ impl Runtime {
                 if let Some(b) = self.control_buffer(badge) {
                     b.read_bytes(0, &mut input);
                 }
-                let id = self.next_id;
-                self.next_id += 1;
-                self.tasks.push(Task {
-                    id,
-                    agent,
-                    state: State::Pending,
-                    attempts: 0,
-                    input,
-                    result: Vec::new(),
-                });
+                let id = self
+                    .tasks
+                    .submit(&mut self.store, name, deps.as_slice(), &input)
+                    .map_err(store_error)?;
                 agents::submitted(id, out).ok_or(status::INTERNAL)
             }
             Request::Status { task } => {
-                let t = self
-                    .tasks
-                    .iter()
-                    .find(|t| t.id == task)
-                    .ok_or(status::NOT_FOUND)?;
+                let t = &self.tasks.list[self.tasks.find(task).ok_or(status::NOT_FOUND)?];
                 if t.result.len() > buffer_len {
                     return Err(status::NO_BUFFER);
                 }
@@ -654,26 +830,27 @@ impl Runtime {
                 .ok_or(status::INTERNAL)
             }
             Request::Cancel { task } => {
-                let at = self
-                    .tasks
-                    .iter()
-                    .position(|t| t.id == task)
-                    .ok_or(status::NOT_FOUND)?;
-                match self.tasks[at].state {
-                    State::Pending => {}
-                    State::Running => {
-                        if let Some(slot) = self
-                            .slots
-                            .iter()
-                            .position(|s| s.as_ref().is_some_and(|s| s.task == at))
-                        {
-                            self.end(slot, Ending::Cancelled);
-                        }
-                    }
-                    _ => return Ok(done(out)),
+                let at = self.tasks.find(task).ok_or(status::NOT_FOUND)?;
+                if self.tasks.list[at].ended() {
+                    return Ok(done(out));
                 }
-                self.tasks[at].state = State::Cancelled;
-                self.event(at, b"cancelled", None);
+                self.tasks
+                    .finish(&mut self.store, at, State::Cancelled, b"cancelled")
+                    .map_err(store_error)?;
+                if let Some(slot) = self
+                    .slots
+                    .iter()
+                    .position(|s| s.as_ref().is_some_and(|s| s.task == task))
+                {
+                    self.end(slot, Ending::Cancelled);
+                }
+                self.event(task, b"cancelled", None);
+                Ok(done(out))
+            }
+            Request::Forget { task } => {
+                self.tasks
+                    .forget(&mut self.store, task)
+                    .map_err(store_error)?;
                 Ok(done(out))
             }
             Request::Info => self.info(out).ok_or(status::INTERNAL),
@@ -741,12 +918,51 @@ fn main(arg: u64) -> u64 {
             Err(w) => say(&[b"agents: ", e.name, b" manifest refused: ", w]),
         }
     }
+    // The runtime's buffer at the storage service, for task files.
+    let Ok(buffer) = mem_map_buffer(STORE_BUFFER) else {
+        return 5;
+    };
+    let attached = mem_share(buffer.addr(), STORE_BUFFER).is_ok_and(|memory| {
+        let mut msg = [0u8; 16];
+        let req = StoreRequest::Attach { len: STORE_BUFFER };
+        let sent = store::encode(&req, &mut msg)
+            .is_some_and(|n| send(STORE, &msg[..n], memory, READ | WRITE, 0).is_ok());
+        let _ = delete(memory);
+        sent
+    });
+    let mut store = Store { buffer, reply };
+    let mut out = [0u8; 256];
+    let size = store.call(&StoreRequest::Buffer, &mut out);
+    if !attached || size != Ok(StoreStatus::Ok) || u64_at(&out, 1) != STORE_BUFFER {
+        return 6;
+    }
+    let attempts = |name: &[u8]| {
+        agents
+            .iter()
+            .find(|l| l.entry.name == name)
+            .map(|l| l.attempts)
+    };
+    let Ok((tasks, found)) = Tasks::load(&mut store, attempts) else {
+        say(&[b"agents: cannot read the task store"]);
+        return 7;
+    };
+    let mut d = [[0u8; 20]; 3];
+    let [a, b, c] = &mut d;
+    say(&[
+        b"agents: ",
+        decimal(found.tasks as u64, a),
+        b" tasks recovered, ",
+        decimal(found.recovered as u64, b),
+        b" were running, ",
+        decimal(found.unreadable as u64, c),
+        b" unreadable",
+    ]);
     let mut r = Runtime {
         agents,
-        tasks: Vec::new(),
+        tasks,
+        store,
         slots: Default::default(),
         controls: Default::default(),
-        next_id: 1,
         infer_buffer,
         reply,
     };

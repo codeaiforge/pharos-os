@@ -72,8 +72,14 @@ pub const READ_ONLY: u32 = 1 << 16;
 
 /// Namespaces by number (badge bits 0–15): the path prefix each sees.
 /// Reviewed code, like `init`'s service table.
-pub const NAMESPACES: &[(u16, &[u8])] =
-    &[(1, b"test"), (2, b"spare"), (3, b"models"), (4, b"crash")];
+pub const NAMESPACES: &[(u16, &[u8])] = &[
+    (1, b"test"),
+    (2, b"spare"),
+    (3, b"models"),
+    (4, b"crash"),
+    // The agent runtime's tasks (#99), held only by the runtime.
+    (5, b"agents"),
+];
 
 /// The namespace prefix for `badge` and whether it is read-only; `None`
 /// for badge 0 or an unknown namespace.

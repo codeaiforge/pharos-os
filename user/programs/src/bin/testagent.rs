@@ -10,7 +10,17 @@
 //! - `infer`: model 1 (not in its manifest) must be refused, then generates
 //!   from model 2 and completes with the text;
 //! - `probe`: completes with `probe ok` if control requests are refused;
-//! - `wait`: keeps asking `INFO` every 200 ms until stopped.
+//! - `wait`: keeps asking `INFO` every 200 ms until stopped;
+//! - `keys`: checks `BEGIN` answers `GO`, `UNKNOWN`, and `DONE` (#99);
+//! - `resume`: stores checkpoint `half` and crashes; on attempt 2 completes
+//!   with `resumed half` if the checkpoint came back;
+//! - `durable`: stores checkpoint `step1`, does keyed operation `sent`,
+//!   logs `ready to stop`, and waits; on a later attempt (after the runtime
+//!   was replaced) completes with `recovered sent` if the checkpoint came
+//!   back and the operation answers `DONE`;
+//! - `count` (the `agents_crash` kernel): counts to [`COUNT`], one keyed
+//!   operation and one checkpoint per step, checking on every attempt that
+//!   each step before its checkpoint is recorded as done.
 
 #![no_std]
 #![no_main]
@@ -19,7 +29,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use pharos_proto::agents::{Assigned, NO_SESSION, Request, encode};
+use pharos_proto::agents::{
+    Assigned, Begun, CHECKPOINT_AT, Deps, KEY, MAX_BUFFER, NO_SESSION, Request, encode,
+};
 use pharos_proto::infer::{Started, Tokens};
 use pharos_proto::status;
 use pharos_user::rights::{READ, WRITE};
@@ -31,8 +43,19 @@ use pharos_user::{
 pharos_user::entry!(main);
 
 const RUNTIME: Handle = 1;
-const BUFFER: u64 = 4096;
+const BUFFER: u64 = MAX_BUFFER;
+/// The `count` task's steps.
+/// At most `MAX_KEYS` (32): one key per step.
+const COUNT: u32 = 30;
 const TIMEOUT_US: u64 = 60_000_000;
+
+/// A `BEGIN` answer, owned.
+#[derive(PartialEq, Eq)]
+enum Got {
+    Go,
+    Done(Vec<u8>),
+    Unknown,
+}
 
 struct Agent {
     reply: Handle,
@@ -111,9 +134,11 @@ impl Agent {
             Request::Submit {
                 name: b"worker",
                 input_len: 0,
+                deps: Deps::NONE,
             },
             Request::Status { task: 1 },
             Request::Cancel { task: 1 },
+            Request::Forget { task: 1 },
         ];
         for req in &control {
             if self.call(req, &mut out).0 != status::NO_ACCESS {
@@ -121,6 +146,125 @@ impl Agent {
             }
         }
         self.complete(b"probe ok")
+    }
+
+    fn begin(&self, key: [u8; KEY], out: &mut [u8; 256]) -> Option<Got> {
+        let (_, n) = self.call(&Request::Begin { key }, out);
+        Some(match Begun::parse(&out[..n])? {
+            Begun::Go => Got::Go,
+            Begun::Unknown => Got::Unknown,
+            Begun::Done(r) => Got::Done(Vec::from(r)),
+        })
+    }
+
+    fn end(&self, key: [u8; KEY], result: &[u8]) -> u8 {
+        self.call(&Request::End { key, result }, &mut [0; 256]).0
+    }
+
+    fn checkpoint(&self, bytes: &[u8]) -> bool {
+        self.buffer.write_bytes(CHECKPOINT_AT as usize, bytes);
+        let len = bytes.len() as u32;
+        self.call(&Request::Checkpoint { len }, &mut [0; 256]).0 == status::OK
+    }
+
+    fn stored_checkpoint(&self, task: &Assigned) -> Vec<u8> {
+        let mut cp = alloc::vec![0u8; task.checkpoint_len as usize];
+        self.buffer.read_bytes(CHECKPOINT_AT as usize, &mut cp);
+        cp
+    }
+
+    fn keys(&self) -> u64 {
+        let mut out = [0u8; 256];
+        let k = [1; KEY];
+        if self.begin(k, &mut out) != Some(Got::Go) {
+            return self.fail(b"a new key was not GO");
+        }
+        if self.begin(k, &mut out) != Some(Got::Unknown) {
+            return self.fail(b"a begun key was not UNKNOWN");
+        }
+        if self.end([2; KEY], b"x") != status::NOT_FOUND {
+            return self.fail(b"END of a key never begun was not refused");
+        }
+        if self.end(k, b"r1") != status::OK {
+            return self.fail(b"END failed");
+        }
+        if self.begin(k, &mut out) != Some(Got::Done(b"r1".to_vec())) {
+            return self.fail(b"an ended key was not DONE with its result");
+        }
+        if self.end(k, b"other") != status::BUSY {
+            return self.fail(b"a second, different result was not refused");
+        }
+        self.complete(b"keys ok")
+    }
+
+    fn durable(&self, task: &Assigned) -> u64 {
+        let mut out = [0u8; 256];
+        let k = [b'd'; KEY];
+        if task.attempt == 1 {
+            if !self.checkpoint(b"step1") || self.begin(k, &mut out) != Some(Got::Go) {
+                return self.fail(b"checkpoint or BEGIN failed");
+            }
+            if self.end(k, b"sent") != status::OK {
+                return self.fail(b"END failed");
+            }
+            self.call(
+                &Request::Log {
+                    text: b"ready to stop",
+                },
+                &mut out,
+            );
+            loop {
+                self.call(&Request::Info, &mut out);
+                sleep(200_000);
+            }
+        }
+        if self.stored_checkpoint(task) != b"step1" {
+            return self.fail(b"the checkpoint was lost");
+        }
+        match self.begin(k, &mut out) {
+            Some(Got::Done(r)) if r == b"sent" => self.complete(b"recovered sent"),
+            _ => self.fail(b"the operation was not recorded as done"),
+        }
+    }
+
+    fn count(&self, task: &Assigned) -> u64 {
+        let mut out = [0u8; 256];
+        let cp = self.stored_checkpoint(task);
+        let from = match cp.as_slice() {
+            [] => 0,
+            [a, b, c, d] => u32::from_le_bytes([*a, *b, *c, *d]),
+            _ => return self.fail(b"bad checkpoint"),
+        };
+        let key = |n: u32| {
+            let mut k = [b'c'; KEY];
+            k[..4].copy_from_slice(&n.to_le_bytes());
+            k
+        };
+        // Every step before the checkpoint must be recorded as done.
+        for n in 0..from {
+            if self.begin(key(n), &mut out) != Some(Got::Done(n.to_le_bytes().to_vec())) {
+                return self.fail(b"a step before the checkpoint is not done");
+            }
+        }
+        self.call(&Request::Log { text: b"counting" }, &mut out);
+        for n in from..COUNT {
+            match self.begin(key(n), &mut out) {
+                // Begun, maybe not done: the step is safe to do again here.
+                Some(Got::Go | Got::Unknown) => {
+                    if self.end(key(n), &n.to_le_bytes()) != status::OK {
+                        return self.fail(b"END failed");
+                    }
+                }
+                Some(Got::Done(r)) if r == n.to_le_bytes() => {}
+                _ => return self.fail(b"a step's record is wrong"),
+            }
+            if !self.checkpoint(&(n + 1).to_le_bytes()) {
+                return self.fail(b"CHECKPOINT failed");
+            }
+            // Spread over seconds, so kills land mid-count.
+            sleep(150_000);
+        }
+        self.complete(b"count 30")
     }
 }
 
@@ -179,6 +323,18 @@ fn main(_: u64) -> u64 {
         b"fail" => a.fail(b"asked to fail"),
         b"infer" => a.infer(),
         b"probe" => a.probe(),
+        b"keys" => a.keys(),
+        b"resume" if task.attempt == 1 => {
+            if a.checkpoint(b"half") {
+                overflow(0)
+            } else {
+                a.fail(b"CHECKPOINT failed")
+            }
+        }
+        b"resume" if a.stored_checkpoint(&task) == b"half" => a.complete(b"resumed half"),
+        b"resume" => a.fail(b"the checkpoint was lost"),
+        b"durable" => a.durable(&task),
+        b"count" => a.count(&task),
         b"wait" => loop {
             a.call(&Request::Info, &mut out);
             sleep(200_000);

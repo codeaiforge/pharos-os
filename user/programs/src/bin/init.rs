@@ -114,6 +114,8 @@ const RUNTIME_PATH: &[u8] = b"bin/agents";
 /// handle (badge 0, `trust::INIT`).
 const TRUST_RUNTIME: [u8; 2] = [1, 1];
 const TRUST_RUNTIME_BADGE: u32 = 2;
+/// Namespace 5, `agents`, read-write: the runtime's tasks (#99).
+const AGENTS_TASKS: u32 = 5;
 /// Namespace 3, `models`, read-only (`pharos_proto::store`).
 const MODELS_READ_ONLY: u32 = 3 | 1 << 16;
 
@@ -185,8 +187,9 @@ const BOOT: &[Service] = &[
             Cap::Root,
             Cap::Inference(1),
             Cap::TrustRuntime,
+            Cap::Storage(AGENTS_TASKS),
         ],
-        after: &[3, 4],
+        after: &[2, 3, 4],
         limit: AGENTS_LIMIT,
     },
 ];

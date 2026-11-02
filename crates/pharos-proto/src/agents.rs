@@ -7,17 +7,21 @@
 //! ([`agent_slot`]), a control client's is [`CONTROL`] or above. `INFER`
 //! and `NEXT` answer with the inference service's own reply
 //! ([`crate::infer::Started`], [`crate::infer::Tokens`]) and status codes.
-//! Durable tasks, checkpoints, and idempotency keys come with #99.
+//!
+//! An agent's buffer holds its task's input at 0 and its last checkpoint
+//! at [`CHECKPOINT_AT`]; `CHECKPOINT` takes the new one from there too.
 
 use crate::{Reader, Refused, Writer, op as common, split, status};
 
 pub const NAME: &[u8] = b"agents";
 pub const VERSION: u8 = 1;
 
-/// Operation codes. Gaps are kept for #99's (`CHECKPOINT`, `BEGIN`,
-/// `END`, `FORGET`).
+/// Operation codes.
 pub mod op {
     pub const TASK: u8 = 1;
+    pub const CHECKPOINT: u8 = 2;
+    pub const BEGIN: u8 = 3;
+    pub const END: u8 = 4;
     pub const COMPLETE: u8 = 5;
     pub const FAIL: u8 = 6;
     pub const INFER: u8 = 7;
@@ -27,6 +31,7 @@ pub mod op {
     pub const SUBMIT: u8 = 16;
     pub const STATUS: u8 = 17;
     pub const CANCEL: u8 = 18;
+    pub const FORGET: u8 = 19;
 }
 
 /// The interface's own status code: the caller has no task, inference
@@ -46,8 +51,47 @@ pub const MAX_TEXT: usize = 200;
 /// Largest task input and result.
 pub const MAX_INPUT: u32 = 4096;
 pub const MAX_RESULT: u32 = 4096;
-/// Largest buffer a client may attach.
-pub const MAX_BUFFER: u64 = 64 << 10;
+/// Largest checkpoint.
+pub const MAX_CHECKPOINT: u32 = 64 << 10;
+/// Where a checkpoint sits in an agent's buffer.
+pub const CHECKPOINT_AT: u32 = MAX_INPUT;
+/// Largest buffer a client may attach: input and checkpoint.
+pub const MAX_BUFFER: u64 = CHECKPOINT_AT as u64 + MAX_CHECKPOINT as u64;
+/// Most tasks one task may depend on.
+pub const MAX_DEPS: usize = 4;
+/// An idempotency key's length.
+pub const KEY: usize = 16;
+/// Most keys per task.
+pub const MAX_KEYS: usize = 32;
+/// Largest recorded result of a keyed operation.
+pub const MAX_KEY_RESULT: usize = 64;
+
+/// The tasks a submitted task depends on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Deps {
+    ids: [u32; MAX_DEPS],
+    len: u8,
+}
+
+impl Deps {
+    pub const NONE: Self = Self {
+        ids: [0; MAX_DEPS],
+        len: 0,
+    };
+
+    /// `None` if there are more than [`MAX_DEPS`].
+    pub fn new(ids: &[u32]) -> Option<Self> {
+        let mut d = Self {
+            ids: [0; MAX_DEPS],
+            len: u8::try_from(ids.len()).ok()?,
+        };
+        d.ids.get_mut(..ids.len())?.copy_from_slice(ids);
+        Some(d)
+    }
+    pub fn as_slice(&self) -> &[u32] {
+        &self.ids[..usize::from(self.len)]
+    }
+}
 
 /// The agent slot a badge names, if it is an agent's.
 pub fn agent_slot(badge: u32) -> Option<usize> {
@@ -63,8 +107,23 @@ pub fn valid_text(text: &[u8]) -> bool {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request<'a> {
-    /// Agent: its task, input copied into its buffer.
+    /// Agent: its task, input and last checkpoint copied into its buffer.
     Task,
+    /// Agent: the first `len` bytes at [`CHECKPOINT_AT`] become its task's
+    /// checkpoint; `OK` once stored.
+    Checkpoint {
+        len: u32,
+    },
+    /// Agent: starts the operation named `key`: `GO`, `DONE` with its
+    /// recorded result, or `UNKNOWN` ([`Begun`]).
+    Begin {
+        key: [u8; KEY],
+    },
+    /// Agent: records the result of the operation `key` begun.
+    End {
+        key: [u8; KEY],
+        result: &'a [u8],
+    },
     /// Agent: ends its task with the first `len` bytes of its buffer.
     Complete {
         len: u32,
@@ -87,10 +146,12 @@ pub enum Request<'a> {
     Log {
         text: &'a [u8],
     },
-    /// Control: a new task for agent `name`, input from the buffer.
+    /// Control: a new task for agent `name`, input from the buffer, run
+    /// once every task in `deps` is done.
     Submit {
         name: &'a [u8],
         input_len: u32,
+        deps: Deps,
     },
     /// Control: a task's state; its result is copied into the buffer.
     Status {
@@ -98,6 +159,10 @@ pub enum Request<'a> {
     },
     /// Control: cancels a task, stopping its agent.
     Cancel {
+        task: u32,
+    },
+    /// Control: deletes an ended task's record.
+    Forget {
         task: u32,
     },
     Attach {
@@ -112,6 +177,18 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
     let req = (|| {
         Some(match code {
             op::TASK => Request::Task,
+            op::CHECKPOINT => Request::Checkpoint { len: r.u32()? },
+            op::BEGIN => Request::Begin {
+                key: r.take(KEY)?.try_into().ok()?,
+            },
+            op::END => {
+                let key = r.take(KEY)?.try_into().ok()?;
+                let n = usize::from(r.u8()?);
+                Request::End {
+                    key,
+                    result: r.take(n).filter(|_| n <= MAX_KEY_RESULT)?,
+                }
+            }
             op::COMPLETE => Request::Complete { len: r.u32()? },
             op::FAIL => Request::Fail {
                 reason: Some(r.rest()).filter(|t| valid_text(t))?,
@@ -128,13 +205,22 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             },
             op::SUBMIT => {
                 let n = usize::from(r.u8()?);
+                let name = r.take(n).filter(|n| crate::trust::valid_name(n))?;
+                let input_len = r.u32()?;
+                let mut ids = [0u32; MAX_DEPS];
+                let count = usize::from(r.u8()?);
+                for id in ids.get_mut(..count)? {
+                    *id = r.u32()?;
+                }
                 Request::Submit {
-                    name: r.take(n).filter(|n| crate::trust::valid_name(n))?,
-                    input_len: r.u32()?,
+                    name,
+                    input_len,
+                    deps: Deps::new(&ids[..count])?,
                 }
             }
             op::STATUS => Request::Status { task: r.u32()? },
             op::CANCEL => Request::Cancel { task: r.u32()? },
+            op::FORGET => Request::Forget { task: r.u32()? },
             common::ATTACH => Request::Attach { len: r.u64()? },
             common::INFO => Request::Info,
             _ => return None,
@@ -151,6 +237,23 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
     let head = |w: &mut Writer<'_>, code| w.bytes(&[VERSION, code]);
     match *req {
         Request::Task => head(&mut w, op::TASK)?,
+        Request::Checkpoint { len } => {
+            head(&mut w, op::CHECKPOINT)?;
+            w.u32(len)?;
+        }
+        Request::Begin { key } => {
+            head(&mut w, op::BEGIN)?;
+            w.bytes(&key)?;
+        }
+        Request::End { key, result } => {
+            if result.len() > MAX_KEY_RESULT {
+                return None;
+            }
+            head(&mut w, op::END)?;
+            w.bytes(&key)?;
+            w.bytes(&[result.len() as u8])?;
+            w.bytes(result)?;
+        }
         Request::Complete { len } => {
             head(&mut w, op::COMPLETE)?;
             w.u32(len)?;
@@ -179,7 +282,11 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
         }
         Request::Next => head(&mut w, op::NEXT)?,
         Request::CancelInfer => head(&mut w, op::CANCEL_INFER)?,
-        Request::Submit { name, input_len } => {
+        Request::Submit {
+            name,
+            input_len,
+            deps,
+        } => {
             if !crate::trust::valid_name(name) {
                 return None;
             }
@@ -187,13 +294,22 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.bytes(&[name.len() as u8])?;
             w.bytes(name)?;
             w.u32(input_len)?;
+            w.bytes(&[deps.len])?;
+            for id in deps.as_slice() {
+                w.u32(*id)?;
+            }
         }
         Request::Status { task } => {
             head(&mut w, op::STATUS)?;
             w.u32(task)?;
         }
-        Request::Cancel { task } => {
-            head(&mut w, op::CANCEL)?;
+        Request::Cancel { task } | Request::Forget { task } => {
+            let code = if matches!(req, Request::Cancel { .. }) {
+                op::CANCEL
+            } else {
+                op::FORGET
+            };
+            head(&mut w, code)?;
             w.u32(task)?;
         }
         Request::Attach { len } => {
@@ -230,12 +346,14 @@ impl State {
     }
 }
 
-/// The `TASK` reply: `[OK, task u32, attempt u8, input length u32]`.
+/// The `TASK` reply: `[OK, task u32, attempt u8, input length u32,
+/// checkpoint length u32]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Assigned {
     pub task: u32,
     pub attempt: u8,
     pub input_len: u32,
+    pub checkpoint_len: u32,
 }
 
 impl Assigned {
@@ -245,6 +363,7 @@ impl Assigned {
         w.u32(self.task)?;
         w.bytes(&[self.attempt])?;
         w.u32(self.input_len)?;
+        w.u32(self.checkpoint_len)?;
         Some(w.len())
     }
     pub fn parse(reply: &[u8]) -> Option<Self> {
@@ -254,8 +373,56 @@ impl Assigned {
             task: r.u32()?,
             attempt: r.u8()?,
             input_len: r.u32()?,
+            checkpoint_len: r.u32()?,
         };
-        (ok && r.is_empty() && a.input_len <= MAX_INPUT).then_some(a)
+        let fits = a.input_len <= MAX_INPUT && a.checkpoint_len <= MAX_CHECKPOINT;
+        (ok && r.is_empty() && fits).then_some(a)
+    }
+}
+
+/// The `BEGIN` reply: `[OK, outcome]`, then for `DONE` the result's
+/// length and the result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Begun<'a> {
+    /// Not begun before: go ahead (the key is now recorded as begun).
+    Go,
+    /// Done before, with this result: do not repeat it.
+    Done(&'a [u8]),
+    /// Begun before but never ended: it may or may not have happened.
+    Unknown,
+}
+
+impl<'a> Begun<'a> {
+    pub fn encode(&self, out: &mut [u8]) -> Option<usize> {
+        let mut w = Writer::new(out);
+        match *self {
+            Self::Go => w.bytes(&[status::OK, 1])?,
+            Self::Done(result) => {
+                if result.len() > MAX_KEY_RESULT {
+                    return None;
+                }
+                w.bytes(&[status::OK, 2, result.len() as u8])?;
+                w.bytes(result)?;
+            }
+            Self::Unknown => w.bytes(&[status::OK, 3])?,
+        }
+        Some(w.len())
+    }
+    pub fn parse(reply: &'a [u8]) -> Option<Self> {
+        let mut r = Reader::new(reply);
+        if r.u8()? != status::OK {
+            return None;
+        }
+        let b = match r.u8()? {
+            1 => Self::Go,
+            2 => {
+                let n = usize::from(r.u8()?);
+                Self::Done(r.take(n).filter(|_| n <= MAX_KEY_RESULT)?)
+            }
+            3 => Self::Unknown,
+            _ => return None,
+        };
+        r.is_empty().then_some(b)
     }
 }
 
@@ -325,9 +492,28 @@ mod tests {
             Request::Submit {
                 name: b"worker",
                 input_len: 4096,
+                deps: Deps::new(&[]).unwrap(),
+            },
+            Request::Submit {
+                name: b"w",
+                input_len: 0,
+                deps: Deps::new(&[1, 2, 3, u32::MAX]).unwrap(),
             },
             Request::Status { task: 9 },
             Request::Cancel { task: u32::MAX },
+            Request::Forget { task: 4 },
+            Request::Checkpoint {
+                len: MAX_CHECKPOINT,
+            },
+            Request::Begin { key: [7; KEY] },
+            Request::End {
+                key: [1; KEY],
+                result: b"",
+            },
+            Request::End {
+                key: [2; KEY],
+                result: &[b'r'; MAX_KEY_RESULT],
+            },
             Request::Attach { len: 1 << 16 },
             Request::Info,
         ] {
@@ -386,8 +572,28 @@ mod tests {
         let bad = Request::Submit {
             name: b"x y",
             input_len: 0,
+            deps: Deps::new(&[]).unwrap(),
         };
         assert_eq!(encode(&bad, &mut [0; 64]), None);
+        assert_eq!(Deps::new(&[1; MAX_DEPS + 1]), None, "five dependencies");
+        let mut submit = std::vec![VERSION, op::SUBMIT, 1, b'a', 0, 0, 0, 0, 5];
+        submit.extend_from_slice(&[0; 20]);
+        assert_eq!(parse(&submit), Err(Refused::Bad), "five dependencies");
+        let mut end = std::vec![VERSION, op::END];
+        end.extend_from_slice(&[0; KEY]);
+        end.push(65);
+        end.extend_from_slice(&[b'r'; 65]);
+        assert_eq!(parse(&end), Err(Refused::Bad), "a 65-byte result");
+        let long = Request::End {
+            key: [0; KEY],
+            result: &[0; 65],
+        };
+        assert_eq!(encode(&long, &mut [0; 256]), None);
+        assert_eq!(
+            parse(&[VERSION, op::BEGIN, 1, 2]),
+            Err(Refused::Bad),
+            "short key"
+        );
         crate::fuzz(100_000, 255, |m| {
             match parse(m) {
                 Ok(Request::Fail { reason: t } | Request::Log { text: t }) => {
@@ -402,6 +608,9 @@ mod tests {
             let _ = Assigned::parse(m);
             let _ = TaskStatus::parse(m);
             let _ = parse_submitted(m);
+            if let Some(Begun::Done(r)) = Begun::parse(m) {
+                assert!(r.len() <= MAX_KEY_RESULT);
+            }
         });
     }
 
@@ -412,6 +621,7 @@ mod tests {
             task: 3,
             attempt: 2,
             input_len: MAX_INPUT,
+            checkpoint_len: MAX_CHECKPOINT,
         };
         let n = a.encode(&mut out).unwrap();
         assert_eq!(Assigned::parse(&out[..n]), Some(a));
@@ -422,6 +632,30 @@ mod tests {
         };
         let n = big.encode(&mut out).unwrap();
         assert_eq!(Assigned::parse(&out[..n]), None, "input over the limit");
+        let big = Assigned {
+            checkpoint_len: MAX_CHECKPOINT + 1,
+            ..a
+        };
+        let n = big.encode(&mut out).unwrap();
+        assert_eq!(
+            Assigned::parse(&out[..n]),
+            None,
+            "checkpoint over the limit"
+        );
+        let mut wide = [0u8; 128];
+        for b in [
+            Begun::Go,
+            Begun::Unknown,
+            Begun::Done(b""),
+            Begun::Done(&[b'x'; 64]),
+        ] {
+            let n = b.encode(&mut wide).unwrap();
+            assert_eq!(Begun::parse(&wide[..n]), Some(b));
+            assert_eq!(Begun::parse(&wide[..n + 1]), None, "trailing");
+        }
+        assert_eq!(Begun::Done(&[0; 65]).encode(&mut wide), None);
+        assert_eq!(Begun::parse(&[status::OK, 4]), None, "unknown outcome");
+        assert_eq!(Begun::parse(&[status::BUSY]), None);
 
         let n = submitted(77, &mut out).unwrap();
         assert_eq!(parse_submitted(&out[..n]), Some(77));

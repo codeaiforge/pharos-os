@@ -20,70 +20,19 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 
+#[path = "common/agents.rs"]
+mod common;
+
+use common::{Services, caps_of, endpoint};
 use pharos_kernel::arch::x86_64::{apic, gdt, idt};
-use pharos_kernel::cap::{
-    CONFIG, Capability, GRANT, IRQ, MAP, MAX_HANDLES, Object, READ, RECEIVE, SEND, STOP, WAIT,
-    WRITE,
-};
-use pharos_kernel::device::DeviceHandle;
-use pharos_kernel::ipc::{self, Endpoint, Message};
+use pharos_kernel::cap::{Object, SEND};
+use pharos_kernel::ipc::{self, Endpoint};
 use pharos_kernel::process;
 use pharos_kernel::sched::TaskId;
-use pharos_kernel::syscall::MAX_MESSAGE;
 use pharos_kernel::testing::{self, TestRun};
-use pharos_kernel::{fs, kprintln, mm, pci, sched, storage, time};
+use pharos_kernel::{kprintln, mm, sched, storage, time};
 
 pharos_kernel::test_kernel!(run);
-
-/// Namespace 3 (`models`), read-only (`pharos_proto::store`).
-const MODELS_READ_ONLY: u32 = 3 | 1 << 16;
-/// `pharos_proto::trust`: `RUNTIME` and the badges.
-const TRUST_RUNTIME: [u8; 2] = [1, 1];
-const INIT_BADGE: u32 = 0;
-const RUNTIME_BADGE: u32 = 2;
-/// The runtime's badge at the inference service, as `init` gives it.
-const INFER_CLIENT: u32 = 1;
-/// `pharos_proto::agents::CONTROL`.
-const CONTROL: u32 = 0x100;
-/// As `init` gives the runtime.
-const RUNTIME_PAGES: u64 = 1 << 14;
-
-/// The capabilities of `id`.
-fn caps_of(id: TaskId) -> Vec<Arc<Capability>> {
-    process::by_id(id).map_or(Vec::new(), |p| {
-        let mut caps = p.caps.lock();
-        (1..=MAX_HANDLES as u64)
-            .filter_map(|h| caps.get(h, 0).ok())
-            .collect()
-    })
-}
-
-fn endpoint(c: &Capability) -> Option<&Arc<Endpoint>> {
-    match c.object() {
-        Object::Endpoint(e) => Some(e),
-        _ => None,
-    }
-}
-
-/// Starts `path` and waits for its `ready` on a new report endpoint.
-fn start(
-    t: &mut TestRun,
-    programs: &fs::Fs,
-    path: &[u8],
-    arg: u64,
-    caps: Vec<Arc<Capability>>,
-    report: &Arc<Endpoint>,
-    pages: u64,
-) -> Option<TaskId> {
-    let id = process::spawn_elf_limited(programs, path, arg, caps, pages).ok();
-    let ready = ipc::poll(report, Duration::from_secs(10)).is_some_and(|m| m.bytes() == b"ready");
-    let name = core::str::from_utf8(path).unwrap_or("?");
-    t.check(
-        &alloc::format!("{name} started and reported ready"),
-        id.is_some() && ready,
-    );
-    id.filter(|_| ready)
-}
 
 fn run(t: &mut TestRun) {
     gdt::init();
@@ -110,112 +59,47 @@ fn run(t: &mut TestRun) {
     }
     process::init();
     t.check("preemption enabled", sched::enable_preemption().is_ok());
-    pci::enumerate();
-    let devices = pci::devices();
-    let disk = devices
-        .iter()
-        .filter(|d| (d.vendor, d.device) == (0x1af4, 0x1042))
-        .nth(1)
-        .cloned();
-    let console = devices
-        .iter()
-        .find(|d| (d.vendor, d.device) == (0x1af4, 0x1043))
-        .cloned();
-    let (Some(disk), Some(console), Ok(programs)) = (disk, console, fs::mount("programs")) else {
-        t.check(
-            "the store disk, the console, and the programs are found",
-            false,
-        );
+    let Some(services) = common::setup(t) else {
         return;
     };
-    let (Some(disk), Some(console)) = (DeviceHandle::grant(disk), DeviceHandle::grant(console))
-    else {
-        t.check("the devices are granted", false);
+    let Services {
+        runtime_ep,
+        report,
+        infer,
+        trust_ep,
+        store,
+        trust,
+        ..
+    } = &services;
+    let trust = *trust;
+    let Some(mut runtime) = common::start_runtime(t, &services) else {
         return;
     };
-
-    let (store, report) = (Endpoint::new(), Endpoint::new());
-    let caps = vec![
-        Capability::new(Object::DebugConsole, WRITE),
-        Capability::new(Object::Device(disk), MAP | CONFIG | IRQ),
-        Capability::new(Object::Endpoint(store.clone()), RECEIVE),
-        Capability::new(Object::Endpoint(report.clone()), SEND),
-    ];
-    let Some(_) = start(t, &programs, b"bin/store", 0, caps, &report, 10_240) else {
-        return;
-    };
-    let store_send = Capability::new(Object::Endpoint(store.clone()), SEND);
-    let infer = Endpoint::new();
-    let caps = vec![
-        Capability::new(Object::DebugConsole, WRITE),
-        Capability::new(Object::Endpoint(infer.clone()), RECEIVE),
-        Capability::new(Object::Endpoint(report.clone()), SEND),
-        store_send.derive_badged(SEND, MODELS_READ_ONLY),
-    ];
-    let Some(_) = start(t, &programs, b"bin/infer", 0, caps, &report, 1 << 18) else {
-        return;
-    };
-    let trust_ep = Endpoint::new();
-    let caps = vec![
-        Capability::new(Object::Device(console), MAP | CONFIG | IRQ),
-        Capability::new(Object::Endpoint(trust_ep.clone()), RECEIVE),
-        Capability::new(Object::Endpoint(report.clone()), SEND),
-    ];
-    let Some(trust) = start(t, &programs, b"bin/trust", 0, caps, &report, 0) else {
-        return;
-    };
-
-    // The runtime, with what `init` gives it.
-    let runtime_ep = Endpoint::new();
-    let infer_send = Capability::new(Object::Endpoint(infer.clone()), SEND);
-    let trust_send = Capability::new(Object::Endpoint(trust_ep.clone()), SEND);
-    let caps = vec![
-        Capability::new(Object::DebugConsole, WRITE),
-        Capability::new(Object::Endpoint(runtime_ep.clone()), RECEIVE | SEND | GRANT),
-        Capability::new(Object::Endpoint(report.clone()), SEND),
-        Capability::new(Object::Filesystem(programs.clone()), READ),
-        infer_send.derive_badged(SEND, INFER_CLIENT),
-        trust_send.derive_badged(SEND, RUNTIME_BADGE),
-    ];
-    let Some(runtime) = start(t, &programs, b"bin/agents", 1, caps, &report, RUNTIME_PAGES) else {
-        return;
-    };
-    let Some(record) = process::by_id(runtime).map(|p| p.record.clone()) else {
-        return;
-    };
-    let mut data = [0u8; MAX_MESSAGE];
-    data[..2].copy_from_slice(&TRUST_RUNTIME);
-    ipc::send(
-        &trust_ep,
-        Message {
-            data,
-            len: 2,
-            cap: Some(Capability::new(Object::Process(record), STOP | WAIT)),
-            badge: INIT_BADGE,
-        },
-    );
-
-    // The control client; its steps arrive on `steps`.
-    let steps = Endpoint::new();
-    let runtime_send = Capability::new(Object::Endpoint(runtime_ep.clone()), SEND);
-    let caps = vec![
-        Capability::new(Object::DebugConsole, WRITE),
-        runtime_send.derive_badged(SEND, CONTROL),
-        Capability::new(Object::Endpoint(steps.clone()), SEND),
-    ];
-    let client = process::spawn_elf_limited(&programs, b"bin/agentclient", 0, caps, 64);
-    t.check("the control client started", client.is_ok());
-    let client = client.unwrap_or(u64::MAX);
+    let mut runtimes = vec![runtime];
+    let (client, steps) = common::client(t, &services, 0);
 
     let mut passed: Vec<Vec<u8>> = Vec::new();
     let mut events: Vec<Vec<u8>> = Vec::new();
     let mut checked = None;
+    let mut replaced = None;
     let start = time::uptime();
-    // Up to 180 s; about 30 s on the reference host.
-    while time::uptime() - start < Duration::from_secs(180) {
+    // Up to 240 s; about 40 s on the reference host.
+    while time::uptime() - start < Duration::from_secs(240) {
         for (id, line) in process::debug_output() {
-            if id == runtime && !events.contains(&line) {
+            if runtimes.contains(&id) && !events.contains(&line) {
                 events.push(line);
+            }
+        }
+        // The `durable` agent stored its checkpoint and key: replace the
+        // runtime while the task runs (#99).
+        let ready = events
+            .iter()
+            .any(|l| l.ends_with(b"agents: worker: ready to stop"));
+        if ready && replaced.is_none() {
+            replaced = Some(common::replace_runtime(t, &services, runtime));
+            if let Some(Some(new)) = replaced {
+                runtime = new;
+                runtimes.push(new);
             }
         }
         let Some(m) = ipc::poll(&steps, Duration::from_millis(50)) else {
@@ -224,8 +108,8 @@ fn run(t: &mut TestRun) {
         match m.bytes() {
             b"done" => break,
             b"check" => {
-                let services = [&store, &infer, &trust_ep, &report, &steps];
-                checked = Some(check_agents(runtime, &runtime_ep, &services));
+                let known = [store, infer, trust_ep, report, &steps];
+                checked = Some(check_agents(runtime, runtime_ep, &known));
             }
             step => {
                 kprintln!("  {}", core::str::from_utf8(step).unwrap_or("?"));
@@ -234,12 +118,16 @@ fn run(t: &mut TestRun) {
         }
     }
     for (id, line) in process::debug_output() {
-        if id == runtime && !events.contains(&line) {
+        if runtimes.contains(&id) && !events.contains(&line) {
             events.push(line);
         }
     }
+    t.check(
+        "the runtime was stopped mid-task and a new one started on the same store",
+        matches!(replaced, Some(Some(_))),
+    );
     for step in [
-        "INFO: interface agents, one agent accepted, none running",
+        "INFO: interface agents, two agents accepted, none running",
         "agents with a refused, missing, or unlisted manifest are not found",
         "agent requests from a control client are refused",
         "an unknown task is not found",
@@ -253,6 +141,15 @@ fn run(t: &mut TestRun) {
         "an agent's control requests are refused",
         "at most four agents run at once",
         "cancelling running and pending tasks stops their agents",
+        "idempotency keys answer GO, UNKNOWN, and DONE",
+        "a checkpoint comes back to the next attempt",
+        "an unknown dependency is refused",
+        "a task runs once its dependency is done",
+        "a task waits for its dependency",
+        "FORGET refuses a task that has not ended",
+        "a task whose dependency was cancelled fails",
+        "FORGET deletes an ended task's record",
+        "a task outlives the runtime: its checkpoint comes back and its operation is DONE",
     ] {
         let want = alloc::format!("ok {step}");
         t.check(step, passed.iter().any(|l| l == want.as_bytes()));
@@ -299,6 +196,10 @@ fn run(t: &mut TestRun) {
         ("a failure", " failed"),
         ("a cancellation", " cancelled"),
         ("an agent's log line", "agents: worker: working"),
+        (
+            "a recovered running task",
+            " tasks recovered, 1 were running, 0 unreadable",
+        ),
     ] {
         t.check(&alloc::format!("the runtime reported {what}"), has(text));
     }

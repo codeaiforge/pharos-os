@@ -207,10 +207,10 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// The filesystem image of programs the tests use (`programs`): every
 /// program in `programs` (`bin/<name>`), and every [`bad_programs`] copy of
 /// `bin/hello`.
-/// The `agents` test kernel's manifests (#98): `worker` within its policy
-/// entry, `greedy` asking for more pages than its entry allows, and
-/// `noentry`, which has no entry.
-pub const TEST_MANIFESTS: [(&str, &str); 3] = [
+/// The `agents` test kernels' manifests (#98, #99): `worker` and `counter`
+/// within their policy entries, `greedy` asking for more pages than its
+/// entry allows, and `noentry`, which has no entry.
+pub const TEST_MANIFESTS: [(&str, &str); 4] = [
     (
         "agents/worker.manifest",
         "# The agents test kernel's worker.\nmanifest = 1\nname = worker\nprogram = bin/testagent\n\
@@ -220,6 +220,11 @@ pub const TEST_MANIFESTS: [(&str, &str); 3] = [
         "agents/greedy.manifest",
         "manifest = 1\nname = greedy\nprogram = bin/testagent\npages = 128\nmodels =\n\
          attempts = 1\nprogress_ms = 2000\ntask_ms = 20000\n",
+    ),
+    (
+        "agents/counter.manifest",
+        "manifest = 1\nname = counter\nprogram = bin/testagent\npages = 64\nmodels =\n\
+         attempts = 10\nprogress_ms = 5000\ntask_ms = 120000\n",
     ),
     (
         "agents/noentry.manifest",
