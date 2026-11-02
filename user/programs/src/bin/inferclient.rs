@@ -15,6 +15,15 @@
 //! - 3 (#90): scenario S1 with model 1. Loads it with a one-token request,
 //!   then generates [`S1_NEW`] tokens from `models/s1.prompt`, prints the
 //!   times, and compares the text with `models/s1.expected`.
+//! - 4 (#100): under `init` in the `supervision` test kernel, as client 2,
+//!   with handle 3 `models` read-write. The model file is missing at
+//!   first: `GENERATE` fails at the read step, and the failure is not
+//!   kept. It copies `models/staged.gguf` to `models/test.gguf`, prints
+//!   `client: kill the store` (the kernel kills the storage service and
+//!   `init` restarts it), then generates through the reloaded model. Then
+//!   `client: kill the inference service`: once the restarted one
+//!   answers, it has no buffer from before, and after attaching again it
+//!   generates the same text. Last `client: done`.
 
 #![no_std]
 #![no_main]
@@ -540,12 +549,165 @@ fn s1(f: &mut u64) {
     report(f, "S1: the text is the host's", text == want);
 }
 
+/// Generates [`PROMPT`] with the test model and pulls every token: the
+/// text, or `None` if any step failed.
+fn pull(reply: Handle) -> Option<Vec<u8>> {
+    let generate = Request::Generate {
+        model: 2,
+        max_new: NEW,
+        prompt_len: PROMPT.len() as u32,
+    };
+    let (r, n) = call(reply, generate, GENERATE_US);
+    let session = Started::parse(&r[..n])?.session;
+    let mut text = Vec::new();
+    loop {
+        let (r, n) = call(reply, Request::Next { session }, NEXT_US);
+        let t = Tokens::parse(&r[..n])?;
+        text.extend_from_slice(t.text);
+        if t.stop.is_some() {
+            return Some(text);
+        }
+    }
+}
+
+/// Copies `from` to `to` in the store's `models` namespace (at most
+/// 128 KiB).
+fn copy(reply: Handle, from: &[u8], to: &[u8]) -> bool {
+    let mut msg = [0u8; 64];
+    let len = 128 << 10;
+    let Some(n) = store::encode(&StoreRequest::Attach { len }, &mut msg) else {
+        return false;
+    };
+    let Some(_buffer) = attach(STORE, &msg[..n], len) else {
+        return false;
+    };
+    let ask = |req: StoreRequest<'_>| {
+        let mut msg = [0u8; 128];
+        let n = store::encode(&req, &mut msg).unwrap_or(0);
+        raw(STORE, reply, &msg[..n], SHORT_US)
+    };
+    let (r, got) = ask(StoreRequest::Stat { path: from });
+    if got < 10 || StoreStatus::from_code(r[0]) != StoreStatus::Ok {
+        return false;
+    }
+    let size = u64::from_le_bytes([r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]]);
+    if size > len {
+        return false;
+    }
+    let read = StoreRequest::Read {
+        path: from,
+        offset: 0,
+        len: size,
+        at: 0,
+    };
+    let (r, _) = ask(read);
+    if StoreStatus::from_code(r[0]) != StoreStatus::Ok {
+        return false;
+    }
+    let (r, _) = ask(StoreRequest::Write {
+        path: to,
+        len: size,
+        at: 0,
+    });
+    StoreStatus::from_code(r[0]) == StoreStatus::Ok
+}
+
+fn supervised(f: &mut u64) {
+    let Ok(reply) = endpoint_create() else {
+        report(f, "create a reply endpoint", false);
+        return;
+    };
+    let attach_prompt = || {
+        let mut msg = [0u8; 32];
+        let n = encode(&Request::Attach { len: 4096 }, &mut msg).unwrap_or(0);
+        let buffer = attach(SERVICE, &msg[..n], 4096)?;
+        buffer.write_bytes(0, PROMPT);
+        Some(buffer)
+    };
+    let Some(_first) = attach_prompt() else {
+        report(f, "attach a prompt buffer", false);
+        return;
+    };
+    let generate = Request::Generate {
+        model: 2,
+        max_new: NEW,
+        prompt_len: PROMPT.len() as u32,
+    };
+    report(
+        f,
+        "a missing model file is a read failure",
+        invalid(&call(reply, generate, GENERATE_US)) == Some(Step::Read as u8),
+    );
+    let (r, n) = call(reply, Request::Info, SHORT_US);
+    report(
+        f,
+        "a read failure is not kept: the model is not loaded",
+        state(&r[..n], 2) == Some(ModelState::NotLoaded),
+    );
+    report(
+        f,
+        "the model file is put in place",
+        copy(reply, b"staged.gguf", b"test.gguf"),
+    );
+    // Only `init`, with no badge, may release a client's slot.
+    let release = StoreRequest::Release {
+        client: 3 | store::READ_ONLY,
+    };
+    let mut msg = [0u8; 16];
+    let n = store::encode(&release, &mut msg).unwrap_or(0);
+    let (r, got) = raw(STORE, reply, &msg[..n], SHORT_US);
+    let store_refused = got == 1 && StoreStatus::from_code(r[0]) == StoreStatus::NoAccess;
+    let infer_refused =
+        status(&call(reply, Request::Release { client: 1 }, SHORT_US)) == Status::NoAccess;
+    report(
+        f,
+        "RELEASE from a client is refused by both services",
+        store_refused && infer_refused,
+    );
+    let _ = debug_write(CONSOLE, b"client: kill the store");
+    sleep(3_000_000);
+    let want = expected(reply);
+    report(
+        f,
+        "after the store restarted, the model loads and generates the host's text",
+        want.is_some() && pull(reply) == want,
+    );
+    let _ = debug_write(CONSOLE, b"client: kill the inference service");
+    sleep(3_000_000);
+    let answered = (0..20).any(|_| {
+        let ok = status(&call(reply, Request::Info, SHORT_US)) == Status::Ok;
+        if !ok {
+            sleep(500_000);
+        }
+        ok
+    });
+    report(f, "the restarted inference service answers", answered);
+    report(
+        f,
+        "it has no buffer from the old one",
+        status(&call(reply, generate, GENERATE_US)) == Status::NoBuffer,
+    );
+    let Some(_second) = attach_prompt() else {
+        report(f, "attach a prompt buffer again", false);
+        return;
+    };
+    report(
+        f,
+        "attached again, it loads the model and generates the host's text again",
+        want.is_some() && pull(reply) == want,
+    );
+    let _ = debug_write(CONSOLE, b"client: done");
+    // The kernel measures the services' memory before this client ends.
+    sleep(1_000_000);
+}
+
 fn main(arg: u64) -> u64 {
     let mut f = 0;
     match arg {
         1 => generate(&mut f),
         2 => failures(&mut f),
         3 => s1(&mut f),
+        4 => supervised(&mut f),
         _ => f = 0xbad,
     }
     f

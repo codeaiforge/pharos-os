@@ -190,6 +190,23 @@ impl Service {
             };
             return info.encode(out).ok_or(Status::BadRequest);
         }
+        // Only `init` holds an unbadged capability: it tells the service a
+        // client ended, so its buffer slot is freed (#100).
+        if let Request::Release { client } = req {
+            if badge != 0 {
+                return Err(Status::NoAccess);
+            }
+            if let Some(i) = self
+                .clients
+                .iter()
+                .position(|c| c.as_ref().is_some_and(|c| c.badge == client))
+            {
+                if let Some(old) = self.clients[i].take() {
+                    let _ = mem_unmap(old.buffer.addr(), old.buffer.len() as u64);
+                }
+            }
+            return Ok(1);
+        }
         let (prefix, read_only) = namespace(badge).ok_or(Status::NoAccess)?;
         let mut path = [0u8; 104];
         let full =
@@ -292,7 +309,9 @@ impl Service {
                 out[1..9].copy_from_slice(&size.to_le_bytes());
                 return Ok(9);
             }
-            Request::Attach { .. } | Request::Info => return Err(Status::BadRequest),
+            Request::Attach { .. } | Request::Info | Request::Release { .. } => {
+                return Err(Status::BadRequest);
+            }
         };
         match result {
             Ok(()) => Ok(1),

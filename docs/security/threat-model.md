@@ -130,7 +130,7 @@ Design: [user-environment.md](../architecture/user-environment.md) and [storage.
 | A corrupted or edited disk crashes or misleads the storage service | **Implemented (#77):** every superblock, index, extent, and record checked (CRC-32) before use; shared parser fuzzed; crash consistency tested by cutting every write sequence on the host (with lost and reordered unflushed writes) and by killing QEMU 20 times while it writes; mutation-checked |
 | Audit records are altered on disk | SHA-256 chain over stream records. **Limit:** the chain head is not anchored until M3.4, so someone holding the disk can rewrite the whole chain |
 | A client reads or writes another's files | **Implemented (#77):** namespaces from badges, read-only bit, paths joined to the prefix and checked against escape; file data only in the client's own attached buffer (`store` test: read-only, foreign, unbadged, and unknown clients; mutation-checked) |
-| A client exhausts the storage service | **Implemented (M3.0 review, F2):** attached buffers are capped at 32 MiB, at most 16 clients hold one, within the service's 1 GiB limit (`store` test, mutation-checked). **Limit:** a client's buffer stays mapped after it ends, until its badge attaches another |
+| A client exhausts the storage service | **Implemented (M3.0 review, F2):** attached buffers are capped at 32 MiB, at most 16 clients hold one, within the service's 1 GiB limit (`store` test, mutation-checked). A client's buffer is freed when it ends: `init` sends the service `RELEASE` for the badge it gave it, accepted only without a badge (**implemented, #100**: the `supervision` test kernel checks a 4 MiB buffer is freed and a client's `RELEASE` refused; mutation-checked). **Limit:** a client that `init` did not start (a test kernel's) keeps its slot until its badge attaches another |
 
 ### Local inference (M3.2)
 
@@ -139,7 +139,7 @@ Design: [inference.md](../architecture/inference.md), from D-010, D-011, and D-0
 | Threat | Planned mitigation |
 | --- | --- |
 | A malformed or substituted model file exploits the parser or changes the model's behaviour | Only models in the compiled-in manifest load; size and SHA-256 checked before parsing; configuration checked against the manifest; the GGUF and tokenizer parsers are checked and fuzzed. **Implemented and tested (#88, #89):** a changed and a truncated file in QEMU; malformed files and a wrong configuration on the host |
-| A client exhausts the service's memory or holds it forever | Prompt, token, and context limits checked before anything is allocated; one session at a time; idle sessions dropped after 10 s. **Implemented and tested (#89):** `CONTEXT`, `BUSY`, and the idle drop in QEMU. **Limit:** per-agent token and time budgets are M3.5; a prompt near the context limit holds the service for about a minute, and other callers time out meanwhile; at most 8 clients hold a buffer slot, never released |
+| A client exhausts the service's memory or holds it forever | Prompt, token, and context limits checked before anything is allocated; one session at a time; idle sessions dropped after 10 s. **Implemented and tested (#89):** `CONTEXT`, `BUSY`, and the idle drop in QEMU. **Limit:** per-agent token and time budgets are M3.5; a prompt near the context limit holds the service for about a minute, and other callers time out meanwhile; at most 8 clients hold a buffer slot, freed by `init`'s `RELEASE` when the client ends (#100) |
 | A client changes its prompt while it is being processed | The prompt is copied out of the shared buffer before tokenizing |
 | A client hides another's inference from the audit record | **Implemented (M3.2 review, F1):** each client's `RESULT` record is kept with its own slot until its next session ends, so another client's session cannot replace it (`inference` test, mutation-checked). **Limit:** the record is stored by the audit trail only from M3.4 |
 | A hung or crashed service hangs its callers | Every operation has a documented timeout and clients always use `call` with it (#76); the service replies with non-blocking sends. **Tested (#89):** a client calling a service that never receives gets `TIMED_OUT`. **Limit:** restarting the service is M3.3 |
@@ -162,7 +162,7 @@ Phase 2, M3.0 ([review](review-m3.0-platform.md)), and M3.2 ([review](review-m3.
 | No KPTI: the kernel half is mapped in every address space (Meltdown class) | M2.7 | M4.2 (security model); required before real-hardware use (M5.2) |
 | One CPU: locking, TLB flushes, and MSI-X routing assume it | from the start | Phase 4; SMP needs a decision record and a re-review of those paths |
 | Revocation does not unmap device registers or DMA buffers; ending the process is the full revocation | M2.9 | M3.4 (revocable agent permissions) |
-| No timeouts on pings or service start (`receive`, `call`, `irq_wait`, and `sleep` have them since #76; services do not use them yet) | M2.7 | M3.3 (supervision) |
+| No timeouts on pings or service start (`receive`, `call`, `irq_wait`, and `sleep` have them since #76). **Resolved (#100):** `init` stops a daemon that sends no `ready` within 10 s, restarts a crashed daemon at most 3 times, and never restarts a stopped one | M2.7 | M3.3 (supervision) |
 | No per-process quotas on processes, handles, or network use | M2.10 | M3.5 (resource accounting and limits) |
 | No network destination policy | M2.10 | M3.4 (D-012) |
 | `rdtsc` in user mode (timing side channels) | M2.7 | M4.2 |
@@ -170,7 +170,7 @@ Phase 2, M3.0 ([review](review-m3.0-platform.md)), and M3.2 ([review](review-m3.
 | Page limits not carved from the creator's; a large `mem_map` zeroes pages with interrupts disabled | M3.0 | M3.5 |
 | Revocation does not unmap shared memory already mapped | M3.0 | M3.4 |
 | Audit chains not anchored | M3.0 | M3.4 |
-| The inference service: a long prompt holds it (callers time out); a failed model load stays failed until restart; client slots are never released | M3.2 | M3.5 (budgets), M3.3 (restarts and clients) |
+| The inference service: a long prompt holds it (callers time out). **Resolved (#100):** a failed model read is not kept (the next `GENERATE` tries again with a new window), and client slots are freed when `init` reports the client ended | M3.2 | M3.5 (budgets) |
 
 ## Part 2 — Planned system (Phases 2–5)
 

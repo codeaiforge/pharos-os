@@ -81,7 +81,7 @@ The table has two entries:
 4. Check every configuration value against the manifest.
 5. Build the tokenizer.
 
-A failure at any step marks the model as failed until the service restarts, and every request for it gets `MODEL_INVALID` with the step that failed. A model not in the table, or a store file that is not one, cannot be loaded at all.
+A failure at any step marks the model as failed until the service restarts, and every request for it gets `MODEL_INVALID` with the step that failed. *Changed in #100:* except a failed read, which is not kept: the storage service may have restarted, so the service drops its read window, and the next `GENERATE` attaches a new one and tries again. A model not in the table, or a store file that is not one, cannot be loaded at all.
 
 **Why compiled in:** a manifest read from the store would be data that anyone able to write the `models` namespace could change. The maintainer, through `cargo xtask store build`, is the only writer today, but nothing signs the store (D-017). Changing the table is a code change, and adding a model is an explicit, reviewed act. Signed manifests are M4.3 (updates).
 
@@ -103,6 +103,7 @@ Every request starts with version 1 and an operation (D-019). Every reply starts
 | `GENERATE` | model, maximum new tokens (at most 2,048), the prompt's length in the attached buffer (UTF-8, at most 64 KiB) | Session number, prompt token count | 120 s (includes loading the model on first use) |
 | `NEXT` | session | Up to 16 new tokens' text (at most 240 bytes), and whether generation ended and why: end-of-text token, token limit, or context limit | 30 s |
 | `CANCEL` | session | — (the session ends) | 1 s |
+| `RELEASE` (5, #100) | client badge; only from `init`, with no badge | — (the client's slot, buffer, record, and any session are freed; `NO_ACCESS` from anyone else) | 1 s |
 | `RESULT` | session (after it ended) | The record: model number and SHA-256, engine version, settings, prompt and generated token counts, stop reason, prompt and generation times | 1 s |
 
 *Implemented with these details:*

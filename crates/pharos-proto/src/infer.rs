@@ -15,6 +15,9 @@ pub mod op {
     pub const NEXT: u8 = 2;
     pub const CANCEL: u8 = 3;
     pub const RESULT: u8 = 4;
+    /// From `init` only (no badge): forget client `badge`, as its process
+    /// ended: its buffer, record, and any session (#100).
+    pub const RELEASE: u8 = 5;
 }
 
 /// Most new tokens one `GENERATE` asks for.
@@ -142,6 +145,9 @@ pub enum Request {
     Result {
         session: u32,
     },
+    Release {
+        client: u32,
+    },
     /// The attached capability's size in bytes.
     Attach {
         len: u64,
@@ -164,6 +170,7 @@ pub fn parse(msg: &[u8]) -> Result<Request, Refused> {
             op::NEXT => Request::Next { session: r.u32()? },
             op::CANCEL => Request::Cancel { session: r.u32()? },
             op::RESULT => Request::Result { session: r.u32()? },
+            op::RELEASE => Request::Release { client: r.u32()? },
             common::ATTACH => Request::Attach { len: r.u64()? },
             common::INFO => Request::Info,
             _ => return None,
@@ -199,6 +206,10 @@ pub fn encode(req: &Request, out: &mut [u8]) -> Option<usize> {
         Request::Result { session } => {
             w.bytes(&[VERSION, op::RESULT])?;
             w.u32(session)?;
+        }
+        Request::Release { client } => {
+            w.bytes(&[VERSION, op::RELEASE])?;
+            w.u32(client)?;
         }
         Request::Attach { len } => {
             w.bytes(&[VERSION, common::ATTACH])?;
@@ -409,6 +420,7 @@ mod tests {
             Request::Next { session: 7 },
             Request::Cancel { session: u32::MAX },
             Request::Result { session: 1 },
+            Request::Release { client: 7 },
             Request::Attach { len: 4096 },
             Request::Info,
         ];

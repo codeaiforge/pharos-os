@@ -570,9 +570,26 @@ pub fn stop(id: TaskId) -> bool {
     by_id(id).is_some() && sched::stop(id)
 }
 
+/// Processes [`kill`] ends, with the vector their end reports.
+static INJECTED: IrqMutex<BTreeMap<TaskId, u64>> = IrqMutex::new(BTreeMap::new());
+
+/// Fault injection for test kernels (#100): ends process `id` as
+/// [`stop`] does, but its end reads [`End::Killed`] with `vector`, as a
+/// crash would, so supervision can be tested on unmodified services.
+/// Nothing in user space can reach it. Returns false if no such process
+/// runs.
+pub fn kill(id: TaskId, vector: u64) -> bool {
+    if by_id(id).is_none() {
+        return false;
+    }
+    INJECTED.lock().insert(id, vector);
+    sched::stop(id)
+}
+
 /// Ends the running process, which was told to stop.
 pub(crate) fn end_stopped() -> ! {
-    end_current(End::Stopped)
+    let injected = sched::current_id().and_then(|id| INJECTED.lock().remove(&id));
+    end_current(injected.map_or(End::Stopped, End::Killed))
 }
 
 /// A process that ended with the `exit` system call.

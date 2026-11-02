@@ -107,10 +107,11 @@ That is, for a notification, bits 32–63 hold the 32 notification bits.
   Then the ELF checks (`BAD_PROGRAM` on failure). On any failure nothing is created and no frames are lost.
 - **Stopping (M3.3, #95, [agents.md](agents.md)):** `process_stop(process)` (call 25, needs `STOP`) tells the process to end. It is woken if it waits: its wait ends as timed out, so it leaves every endpoint queue (a blocked `send` takes its message back), and it never waits again. It ends at its next return to user mode, from a system call or a timer tick, as **stopped**. The call returns at once; `process_status` and the end notification show when the process has ended. **When any process ends** (exit, fault, or stop), every process it started is stopped too, so no work outlives the process that started it. A client in `call` to a stopped server gets its own timeout (`TIMED_OUT`); its reply capability is not signalled.
 - **Not yet:**
-  - restarting (M3.3, #100);
   - a process outliving its last capability is fine. The process capability only observes; dropping it does not end the child (its parent ending does).
 
 ### `init`
+
+- **Supervision (#100, [agents.md](agents.md#service-supervision-in-init-100)):** **implemented.** A daemon must send `ready` within 10 s, else `init` stops it (`no ready within 10 s; stopped`). After its first start, a daemon that exits or is killed is started again with the same capabilities on the same endpoints, so its clients' calls time out and then reach the new one, which they must attach their buffers to again (`NO_BUFFER` tells them). At most 3 restarts (`restarting <n>`, then `not restarted: restarts used up`); one that was stopped, by the trusted path or anyone, is never restarted (`stopped; not restarted`). When any service ends, `init` sends the storage and inference services `RELEASE` for each badge it gave it (operation 9 and 5, accepted only from `init`'s unbadged capability, answered within 1 s), so they free its buffer slot, and the inference service its session and record. Restarting the agent runtime sends `trust` its `RUNTIME` registration again. The `supervision` test table (argument 3) exercises all of it.
 
 - **The main kernel**, after its boot report, enables preemption, mounts `root`, and starts `bin/init` with these capabilities:
 

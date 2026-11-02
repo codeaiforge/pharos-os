@@ -188,15 +188,23 @@ impl Service {
         Ok(Box::leak(Box::new(engine)))
     }
 
-    /// The loaded model for entry `i`, loading it on first use.
+    /// The loaded model for entry `i`, loading it on first use. A failed
+    /// read is not kept (#100): the storage service may have restarted,
+    /// so the window is dropped and the next `GENERATE` attaches a new one
+    /// and tries again.
     fn model(&mut self, i: usize) -> Result<Loaded, Step> {
         if let Some(done) = self.models[i] {
             return done;
         }
-        if self.window().is_none() {
-            return Err(Step::Read);
+        let result = match self.window() {
+            Some(_) => self.load(&MANIFEST[i]),
+            None => Err(Step::Read),
+        };
+        if matches!(result, Err(Step::Read)) {
+            if let Some(w) = self.window.take() {
+                let _ = mem_unmap(w.addr(), w.len() as u64);
+            }
         }
-        let result = self.load(&MANIFEST[i]);
         let step: &[u8] = match result {
             Ok(_) => b"loaded",
             Err(Step::Read) => b"failed: read",
@@ -206,7 +214,9 @@ impl Service {
             Err(Step::Config) => b"failed: configuration",
         };
         say(&[b"infer: model ", MANIFEST[i].name, b" ", step]);
-        self.models[i] = Some(result);
+        if !matches!(result, Err(Step::Read)) {
+            self.models[i] = Some(result);
+        }
         result
     }
 
@@ -407,6 +417,26 @@ impl Service {
             Ok(req) => req,
             Err(refused) => return refusal(refused, VERSION, out),
         };
+        // Only `init` holds an unbadged capability: it tells the service a
+        // client ended, so its slot and any session are freed (#100).
+        if let Request::Release { client } = req {
+            if badge != 0 {
+                out[0] = Status::NoAccess as u8;
+                return 1;
+            }
+            if self.active.as_ref().is_some_and(|a| a.badge == client) {
+                self.end(Stop::Cancelled);
+            }
+            for slot in self.clients.iter_mut() {
+                if slot.as_ref().is_some_and(|c| c.badge == client) {
+                    if let Some(c) = slot.take() {
+                        let _ = mem_unmap(c.buffer.addr(), c.buffer.len() as u64);
+                    }
+                }
+            }
+            out[0] = Status::Ok as u8;
+            return 1;
+        }
         if badge == 0 {
             out[0] = Status::NoAccess as u8;
             return 1;
@@ -437,7 +467,7 @@ impl Service {
                 }
             }
             // A `call` with ATTACH carries no buffer.
-            Request::Attach { .. } => Err(Status::BadRequest),
+            Request::Attach { .. } | Request::Release { .. } => Err(Status::BadRequest),
         };
         match result {
             Ok(n) => {

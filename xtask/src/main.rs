@@ -1218,6 +1218,8 @@ const SERVICE_TEST: &str = "inference";
 /// The agent runtime's test kernel: the same store, for inference through
 /// the runtime (#98).
 const AGENTS_TEST: &str = "agents";
+/// `init` supervising services (#100): the test model staged elsewhere.
+const SUPERVISION_TEST: &str = "supervision";
 /// The test kernel whose trusted console the runner types into (#96).
 const TRUST_TEST: &str = "trust";
 /// What the runner waits for on the trusted console, and types then.
@@ -1393,6 +1395,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     }
     if name == SERVICE_TEST || name == AGENTS_TEST {
         store_image::service(&out.join(STORE_IMAGE))?;
+    }
+    if name == SUPERVISION_TEST {
+        store_image::supervision(&out.join(STORE_IMAGE))?;
     }
     for c in [&STORE_CRASH, &AGENTS_CRASH] {
         if name == c.test {

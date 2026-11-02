@@ -22,6 +22,9 @@ pub mod op {
     pub const DELETE: u8 = 6;
     /// Reports the attached buffer's size (0: none).
     pub const BUFFER: u8 = 8;
+    /// From `init` only (no badge): forget client `badge`'s buffer, as its
+    /// process ended (#100).
+    pub const RELEASE: u8 = 9;
 }
 
 /// Reply status codes: the common ones this interface uses, then its own.
@@ -126,6 +129,10 @@ pub enum Request<'a> {
         len: u64,
     },
     Buffer,
+    /// The client badge whose buffer to drop.
+    Release {
+        client: u32,
+    },
     Info,
 }
 
@@ -176,6 +183,7 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                 path: path(&mut r)?,
             },
             op::BUFFER => Request::Buffer,
+            op::RELEASE => Request::Release { client: r.u32()? },
             common::ATTACH => Request::Attach { len: r.u64()? },
             common::INFO => Request::Info,
             _ => return None,
@@ -245,6 +253,10 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.u64(len)?;
         }
         Request::Buffer => head(&mut w, op::BUFFER)?,
+        Request::Release { client } => {
+            head(&mut w, op::RELEASE)?;
+            w.u32(client)?;
+        }
         Request::Info => head(&mut w, common::INFO)?,
     }
     Some(w.len())
@@ -293,6 +305,9 @@ mod tests {
             Request::Delete { path: b"old" },
             Request::Attach { len: 65536 },
             Request::Buffer,
+            Request::Release {
+                client: 3 | READ_ONLY,
+            },
             Request::Info,
         ];
         for req in reqs {

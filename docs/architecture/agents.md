@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-01 (#94).** **Implemented:** the kernel stop call (#95), the trusted path (#96), the manifest parser (#97), the agent runtime (#98), and durable tasks (#99). Supervision in `init` (#100) is planned. Each part is built by its issue: the kernel stop call (#95), the trusted path (#96), manifests (#97), the agent runtime (#98), durable tasks (#99), and service supervision in `init` (#100).
+**Planned. Design approved by the maintainer on 2026-11-01 (#94).** **Implemented:** the kernel stop call (#95), the trusted path (#96), the manifest parser (#97), the agent runtime (#98), durable tasks (#99), and supervision in `init` (#100). The M3.3 gate (#101) is next. Each part is built by its issue: the kernel stop call (#95), the trusted path (#96), manifests (#97), the agent runtime (#98), durable tasks (#99), and service supervision in `init` (#100).
 
 ## 2. Context
 
@@ -136,6 +136,7 @@ Clients are told apart by badge: agent slots, and control clients that `init`'s 
 - `init` waits for each daemon's `ready` with a timeout and reports one that never answers.
 - A daemon that crashes is restarted at most 3 times. One that was **stopped** is never restarted (safe mode).
 - The storage and inference services release a client's buffer when the client ends (carried from the M3.0 and M3.2 reviews). The inference service tries a model whose read failed again after a restart.
+- *Implemented (#100):* the kernel tells no server that a client ended, but `init` knows, because it starts the clients and gives them their badges. When a service ends, `init` sends `RELEASE` with each badge it gave it to the storage and inference services, through its own unbadged capability; they accept it from no one else (as `trust` accepts `RUNTIME` only from `init`). A failed model read is never kept: the inference service drops its read window, and the next `GENERATE` attaches a new one and tries again. The agent runtime and the inference service attach their buffers again when a restarted service answers `NO_BUFFER`. Details in [services.md](services.md#init). For tests, the kernel can end a process as if it crashed (`process::kill`, not reachable from user space).
 
 ## 4. Security
 
@@ -152,7 +153,7 @@ Clients are told apart by badge: agent slots, and control clients that `init`'s 
 | QEMU, `process_stop` (#95) | Stopping a looping, a blocked, and a memory-holding process; its children stopped with it; children of a process that exits or faults stopped; no frames, handles, or queued messages left; a client of a stopped server gets an error; the `spawn` kernel's process-limit check rechecked, since its parent now takes its children with it |
 | QEMU, `trust` (#96) | A `stop` typed on the trusted path ends an agent while a stand-in runtime spins in a loop (no test hooks in the real runtime); `stop all`; an agent holds nothing that reaches `trust` |
 | QEMU, `agents` (#98, #99) | Start and stop; crash, hang, and restart; attempts used up; an agent holds exactly one capability it was given (*implemented, #98*: start, a crash then success, crashes, exits, and hangs until attempts are used up, an agent's `FAIL`, inference through the runtime with a model outside the manifest refused, an agent's control requests refused, four of five agents running, cancel, refused and missing manifests); a task's inference through the runtime; recovery after the runtime is stopped mid-task; a repeated key answers `DONE`; checkpoints survive a QEMU kill (*implemented, #99*: keys answering `GO`, `UNKNOWN`, and `DONE`, a checkpoint handed to the next attempt, dependencies waited for, an unknown one refused, a cancelled one failing its dependent, `FORGET`, and the runtime stopped while an agent holds a checkpoint and a done key, then a new runtime on the same store finishing the task on attempt 2 without repeating the operation; the `agents_crash` kernel killed 6 times while a task counts to 30, checking every step's record on every attempt) |
-| QEMU, `init` (#100) | A daemon that never reports `ready`; a killed inference service restarted and serving; a stopped one not restarted; a client's buffer released after it ends |
+| QEMU, `init` (#100) | A daemon that never reports `ready`; a killed inference service restarted and serving; a stopped one not restarted; a client's buffer released after it ends (*implemented, #100*: the `supervision` test kernel, also the storage service killed and the model reloaded through the new one, a crashing daemon restarted 3 times and then left, a read failure not kept, and `RELEASE` refused from a client) |
 
 Each check is mutation-tested, as in earlier milestones.
 

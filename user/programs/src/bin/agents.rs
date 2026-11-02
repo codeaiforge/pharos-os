@@ -125,6 +125,36 @@ struct Store {
 }
 
 impl Store {
+    /// Attaches the buffer at the storage service: at start, and again
+    /// after the service restarted and lost it (#100).
+    fn attach(&self) -> bool {
+        let len = self.buffer.len() as u64;
+        let attached = mem_share(self.buffer.addr(), len).is_ok_and(|memory| {
+            let mut msg = [0u8; 16];
+            let sent = store::encode(&StoreRequest::Attach { len }, &mut msg)
+                .is_some_and(|n| send(STORE, &msg[..n], memory, READ | WRITE, 0).is_ok());
+            let _ = delete(memory);
+            sent
+        });
+        let mut out = [0u8; 256];
+        attached
+            && self.call(&StoreRequest::Buffer, &mut out) == Ok(StoreStatus::Ok)
+            && u64_at(&out, 1) == len
+    }
+
+    /// A request that uses the buffer, attaching it again once if the
+    /// service has none from us.
+    fn call_buffered(
+        &self,
+        req: &StoreRequest<'_>,
+        out: &mut [u8; 256],
+    ) -> Result<StoreStatus, StoreFailed> {
+        match self.call(req, out)? {
+            StoreStatus::NoBuffer if self.attach() => self.call(req, out),
+            s => Ok(s),
+        }
+    }
+
     fn call(
         &self,
         req: &StoreRequest<'_>,
@@ -153,7 +183,7 @@ impl Files for Store {
         self.buffer.write_bytes(0, bytes);
         let len = bytes.len() as u64;
         let req = StoreRequest::Write { path, len, at: 0 };
-        match self.call(&req, &mut [0; 256])? {
+        match self.call_buffered(&req, &mut [0; 256])? {
             StoreStatus::Ok => Ok(()),
             _ => Err(StoreFailed),
         }
@@ -176,7 +206,7 @@ impl Files for Store {
             len,
             at: 0,
         };
-        if self.call(&req, &mut out)? != StoreStatus::Ok || u64_at(&out, 1) != len {
+        if self.call_buffered(&req, &mut out)? != StoreStatus::Ok || u64_at(&out, 1) != len {
             return Err(StoreFailed);
         }
         let mut bytes = alloc::vec![0u8; len as usize];
@@ -778,7 +808,10 @@ impl Runtime {
                     max_new,
                     prompt_len,
                 };
-                let n = self.infer(&req, GENERATE_US, out).ok_or(status::INTERNAL)?;
+                let mut n = self.infer(&req, GENERATE_US, out).ok_or(status::INTERNAL)?;
+                if out[0] == status::NO_BUFFER && attach_prompt(&self.infer_buffer) {
+                    n = self.infer(&req, GENERATE_US, out).ok_or(status::INTERNAL)?;
+                }
                 if let (Some(started), Some(s)) = (Started::parse(&out[..n]), &mut self.slots[i]) {
                     s.session = Some(started.session);
                 }
@@ -917,6 +950,19 @@ impl Runtime {
     }
 }
 
+/// Attaches the prompt buffer at the inference service: at start, and
+/// again after the service restarted and lost it (#100).
+fn attach_prompt(buffer: &Mapped) -> bool {
+    mem_share(buffer.addr(), infer::MAX_BUFFER).is_ok_and(|memory| {
+        let mut msg = [0u8; 16];
+        let len = infer::MAX_BUFFER;
+        let sent = infer::encode(&InferRequest::Attach { len }, &mut msg)
+            .is_some_and(|n| send(INFER, &msg[..n], memory, READ, 0).is_ok());
+        let _ = delete(memory);
+        sent
+    })
+}
+
 fn main(arg: u64) -> u64 {
     let table: &'static [Entry] = match arg {
         0 => BOOT,
@@ -930,19 +976,7 @@ fn main(arg: u64) -> u64 {
     let Ok(infer_buffer) = mem_map_buffer(infer::MAX_BUFFER) else {
         return 2;
     };
-    let attached = mem_share(infer_buffer.addr(), infer::MAX_BUFFER).is_ok_and(|memory| {
-        let mut msg = [0u8; 16];
-        let sent = infer::encode(
-            &InferRequest::Attach {
-                len: infer::MAX_BUFFER,
-            },
-            &mut msg,
-        )
-        .is_some_and(|n| send(INFER, &msg[..n], memory, READ, 0).is_ok());
-        let _ = delete(memory);
-        sent
-    });
-    if !attached {
+    if !attach_prompt(&infer_buffer) {
         return 3;
     }
     let mut agents = Vec::new();
@@ -959,18 +993,8 @@ fn main(arg: u64) -> u64 {
     let Ok(buffer) = mem_map_buffer(STORE_BUFFER) else {
         return 5;
     };
-    let attached = mem_share(buffer.addr(), STORE_BUFFER).is_ok_and(|memory| {
-        let mut msg = [0u8; 16];
-        let req = StoreRequest::Attach { len: STORE_BUFFER };
-        let sent = store::encode(&req, &mut msg)
-            .is_some_and(|n| send(STORE, &msg[..n], memory, READ | WRITE, 0).is_ok());
-        let _ = delete(memory);
-        sent
-    });
     let mut store = Store { buffer, reply };
-    let mut out = [0u8; 256];
-    let size = store.call(&StoreRequest::Buffer, &mut out);
-    if !attached || size != Ok(StoreStatus::Ok) || u64_at(&out, 1) != STORE_BUFFER {
+    if !store.attach() {
         return 6;
     }
     let attempts = |name: &[u8]| {

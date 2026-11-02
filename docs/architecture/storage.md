@@ -238,6 +238,7 @@ All integers are little-endian. Blocks are 4 KiB (8 virtio-blk sectors).
   | 6 `delete` | path | status |
   | 0xF1 `ATTACH` (common, a `send`; 7 before #92) | buffer size (u64, at most 32 MiB: `MAX_BUFFER`, so 16 clients fit in the service's limit; larger ones are dropped and the earlier buffer stays; M3.0 review), with the `Memory` capability (`READ` and `WRITE`) | none |
   | 8 `buffer` | — | status, attached buffer size (u64; 0 if none) |
+  | 9 `release` (#100) | client badge (u32); only from `init`, with no badge | status (`NO_ACCESS` from anyone else); the client's buffer is unmapped |
   | 0xF0 `INFO` (common) | — | status, versions 1 to 1, the name `store`, no details; answered for any badge, since it names only the interface |
 
   Status codes: the common ones (D-019): 0 OK, 1 BAD_REQUEST, 2 VERSION (another version; the reply carries the supported range, 1 to 1), 3 NO_ACCESS, 6 NO_BUFFER, 7 NOT_FOUND; and the interface's own: 32 NO_SPACE, 33 READ_ONLY, 34 IO_ERROR, 35 CORRUPT. (Before #92: 2 NOT_FOUND, 3 NO_SPACE, 4 READ_ONLY, 5 NO_ACCESS, 6 IO_ERROR, 7 CORRUPT, 8 NO_BUFFER.)

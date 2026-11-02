@@ -172,6 +172,10 @@ name = "services"
 harness = false
 
 [[test]]
+name = "supervision"
+harness = false
+
+[[test]]
 name = "virtio_net"
 harness = false
 

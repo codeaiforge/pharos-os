@@ -335,6 +335,22 @@ pub fn service(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Writes the `supervision` test kernel's store (#100): the service's test
+/// model as `models/staged.gguf`, not under its manifest path, so the
+/// first load fails at the read step until the client copies it, and
+/// `models/test.expected`.
+pub fn supervision(path: &Path) -> Result<()> {
+    let model = pharos_infer::synth::test_model();
+    let expected = expected_service(&model)?;
+    write_files(
+        path,
+        &[
+            (b"models/staged.gguf", &model),
+            (b"models/test.expected", &expected),
+        ],
+    )
+}
+
 /// Scenario S1's prompt and token count, as `scripts/bench-inference.py`'s
 /// `summary` prompt (a host test checks they match).
 pub const S1_REPORT: &str = include_str!("s1-report.txt");
