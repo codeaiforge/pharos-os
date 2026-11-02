@@ -168,6 +168,10 @@ name = "agents_crash"
 harness = false
 
 [[test]]
+name = "agents_store"
+harness = false
+
+[[test]]
 name = "services"
 harness = false
 

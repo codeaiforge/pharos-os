@@ -1,4 +1,4 @@
-//! What the `agents` and `agents_crash` test kernels share (#98, #99):
+//! What the `agents`, `agents_crash`, and `agents_store` test kernels share (#98, #99):
 //! starting `store`, `infer`, `trust`, and the agent runtime with the
 //! capabilities `init` gives them, replacing the runtime, and starting
 //! the control client.
@@ -36,6 +36,8 @@ const RUNTIME_BADGE: u32 = 2;
 const INFER_CLIENT: u32 = 1;
 /// `pharos_proto::agents::CONTROL`.
 const CONTROL: u32 = 0x100;
+/// As `init` gives the storage service.
+const STORE_PAGES: u64 = 10_240;
 /// As `init` gives the runtime.
 const RUNTIME_PAGES: u64 = 1 << 14;
 
@@ -47,6 +49,9 @@ pub struct Services {
     pub trust_ep: Arc<Endpoint>,
     pub store: Arc<Endpoint>,
     pub trust: TaskId,
+    /// The storage service and its capabilities, to start it again.
+    pub store_id: TaskId,
+    store_caps: Vec<Arc<Capability>>,
 }
 
 /// The capabilities of `id`.
@@ -119,7 +124,8 @@ pub fn setup(t: &mut TestRun) -> Option<Services> {
         Capability::new(Object::Endpoint(store.clone()), RECEIVE),
         Capability::new(Object::Endpoint(report.clone()), SEND),
     ];
-    start(t, &programs, b"bin/store", 0, caps, &report, 10_240)?;
+    let store_caps = caps.clone();
+    let store_id = start(t, &programs, b"bin/store", 0, caps, &report, STORE_PAGES)?;
     let store_send = Capability::new(Object::Endpoint(store.clone()), SEND);
     let infer = Endpoint::new();
     let caps = vec![
@@ -144,7 +150,24 @@ pub fn setup(t: &mut TestRun) -> Option<Services> {
         trust_ep,
         store,
         trust,
+        store_id,
+        store_caps,
     })
+}
+
+/// Starts the storage service again on its endpoint and disk, as `init`
+/// restarts it (#100).
+pub fn restart_store(t: &mut TestRun, s: &Services) -> Option<TaskId> {
+    let caps = s.store_caps.clone();
+    start(
+        t,
+        &s.programs,
+        b"bin/store",
+        0,
+        caps,
+        &s.report,
+        STORE_PAGES,
+    )
 }
 
 /// Starts the runtime as `init` does and registers it with `trust`.
