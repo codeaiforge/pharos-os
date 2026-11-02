@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-01 (#94).** **Implemented:** the kernel stop call (#95) and the trusted path (#96). The rest is planned. Each part is built by its issue: the kernel stop call (#95), the trusted path (#96), manifests (#97), the agent runtime (#98), durable tasks (#99), and service supervision in `init` (#100).
+**Planned. Design approved by the maintainer on 2026-11-01 (#94).** **Implemented:** the kernel stop call (#95), the trusted path (#96), and the manifest parser (#97). The rest is planned. Each part is built by its issue: the kernel stop call (#95), the trusted path (#96), manifests (#97), the agent runtime (#98), durable tasks (#99), and service supervision in `init` (#100).
 
 ## 2. Context
 
@@ -69,6 +69,7 @@ task_ms = 600000
 
 - `pages`: the agent's page limit. `models`: inference models it may use. `attempts`: tries per task, at most 10. `progress_ms`: how long it may go without a request while it has a task. `task_ms`: how long a task may run.
 - **Manifests are untrusted input:** a `no_std` parser in `pharos-proto` with checked bounds. Unknown keys, repeated keys, missing keys, and values out of range are refused. Host tests and 100,000 fuzzed inputs.
+- *Implemented (#97):* `pharos_proto::manifest`. Spaces around keys and values are ignored. `models` lists model numbers (1 to 31), comma-separated, or is empty for none. Limits: `pages` 1 to 262,144 (1 GiB), `attempts` 1 to 10, `progress_ms` 1 to one hour and at most `task_ms`, `task_ms` 1 to one day; numbers have no sign or leading zero. `program` is a relative path of at most 64 bytes with no empty, `.`, or `..` part. A refusal names its line. `Manifest::within` is the policy check: no entry for the name, another program, or anything over the entry is refused.
 - **The policy table** in the runtime is reviewed code, like `init`'s service table: for each agent name, the program and the most it may get (pages, models, attempts, timeouts). **A manifest asking for more than its entry is refused, not narrowed**, so the agent never runs with settings nobody wrote down. An agent with no entry does not start.
 
 ### Lifecycle (#98)
