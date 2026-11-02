@@ -64,6 +64,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- The emergency stop by name missed processes (M3.3 review, F1): `trust`'s `stop <agent>` stopped only the first process registered under the name, so a second task of the same agent kept running. It now stops every process registered under the name. The `trust` test registers two `worker` agents and checks `stop worker` stops both while the runtime still runs. The review is [review-m3.3-agents.md](docs/security/review-m3.3-agents.md): no new `unsafe` in M3.3; IPC round trip re-measured under KVM, median 1989 ns, within D-004's budget.
 - One inference client could erase another's `RESULT` record (M3.2 review, F1): the service kept only the last ended session's record, and any client's next `GENERATE` cleared it. Records are now kept per client until that client's next session ends. The `inference` test checks a record survives a second client's session (mutation-checked).
 - Batched prompts were slow on Pharos (#90): the 32 tokens' quantized inputs were separate vectors, which Pharos's allocator aligns to 4 KiB, so the same block of each fell in the same L1 cache set. They are now one vector. The S1 prompt on Pharos went from 12.8–13.4 s to 6.3–6.4 s, and on the host from 8.4–9.0 s to 6.1 s. Output is bit-identical (same SHA-256 as in M3.1).
 

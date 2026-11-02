@@ -133,20 +133,23 @@ fn main(arg: u64) -> u64 {
             let reads = process_status(1) == Ok(Status::Running);
             if refused && reads { 0 } else { 1 }
         }
+        // Two tasks of one agent: both registered as `worker`.
         15 => {
-            let Ok(agent) = spawn(1, 5, &[], None) else {
-                return 1;
-            };
-            let mut msg = [0u8; 64];
-            let register = Request::Register {
-                slot: 0,
-                name: b"worker",
-            };
-            let Some(n) = trust::encode(&register, &mut msg) else {
-                return 2;
-            };
-            if send(2, &msg[..n], agent, STOP | WAIT, 0).is_err() {
-                return 3;
+            for slot in 0..2 {
+                let Ok(agent) = spawn(1, 5, &[], None) else {
+                    return 1;
+                };
+                let mut msg = [0u8; 64];
+                let register = Request::Register {
+                    slot,
+                    name: b"worker",
+                };
+                let Some(n) = trust::encode(&register, &mut msg) else {
+                    return 2;
+                };
+                if send(2, &msg[..n], agent, STOP | WAIT, 0).is_err() {
+                    return 3;
+                }
             }
             spin()
         }

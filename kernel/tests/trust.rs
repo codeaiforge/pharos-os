@@ -1,12 +1,13 @@
 //! Test kernel: the trusted path and the emergency stop (#96, D-018,
 //! agents.md). The kernel starts `trust` with the virtio-console device,
 //! its endpoint, and a report endpoint, as `init` does. A stand-in agent
-//! runtime (`child` mode 15) starts an agent, registers it with `trust`,
-//! and then spins: a hung runtime. The kernel registers that process as
+//! runtime (`child` mode 15) starts two agents, registers both with
+//! `trust` as `worker`, and then spins: a hung runtime. The kernel waits
+//! for both registrations, then registers that process as
 //! the runtime under `init`'s badge, and sends an impostor agent under the
 //! wrong badge, which `trust` must drop. `cargo xtask runner` types on the
 //! trusted console (`TRUST_SCRIPT`): `list`, `stop worker`, a bad command,
-//! `list`, `stop all`. The kernel checks the agent ends while the runtime
+//! `list`, `stop all`. The kernel checks both agents end while the runtime
 //! spins, then the runtime ends, and what each process holds. Runs under
 //! UEFI (D-009).
 
@@ -17,6 +18,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::time::Duration;
 
 use pharos_kernel::arch::x86_64::{apic, gdt, idt};
@@ -155,29 +157,40 @@ fn run(t: &mut TestRun) {
     };
     let process = || Capability::new(Object::Process(record.clone()), STOP | WAIT);
 
-    // The agent the runtime started (its only child).
-    let mut agent = None;
+    // The two agents the runtime started (its only children), both
+    // registered as `worker`.
+    let mut agents: Vec<TaskId> = Vec::new();
     for _ in 0..40 {
-        agent = (runtime + 1..runtime + 4)
-            .find(|&id| process::by_id(id).is_some_and(|p| p.parent == Some(runtime)));
-        if agent.is_some() {
+        agents = (runtime + 1..runtime + 6)
+            .filter(|&id| process::by_id(id).is_some_and(|p| p.parent == Some(runtime)))
+            .collect();
+        if agents.len() == 2 {
             break;
         }
         sched::sleep(Duration::from_millis(50));
     }
-    let Some(agent) = agent else {
-        t.check("the runtime started its agent", false);
+    t.check("the runtime started its two agents", agents.len() == 2);
+    t.check(
+        "the agents hold no capability",
+        agents.iter().all(|&a| holds(a, |_| true) == 0),
+    );
+    let records: Vec<_> = agents
+        .iter()
+        .filter_map(|&a| process::by_id(a).map(|p| p.record.clone()))
+        .collect();
+    if agents.len() != 2 || records.len() != 2 {
         return;
-    };
-    t.check("the runtime started its agent", true);
-    t.check("the agent holds no capability", holds(agent, |_| true) == 0);
-    let Some(agent_record) = process::by_id(agent).map(|p| p.record.clone()) else {
-        t.check("the agent's record", false);
-        return;
-    };
+    }
     // Only now the runtime's registration, which the runner waits for
     // before it types anything; an impostor first, an agent registration
     // under `init`'s badge.
+    // Both agents are registered first, so the runner's `list` shows them.
+    for _ in 0..40 {
+        if holds(trust, |o| matches!(o, Object::Process(_))) == 2 {
+            break;
+        }
+        sched::sleep(Duration::from_millis(50));
+    }
     let mut impostor = vec![VERSION, REGISTER_OP, 1, 8];
     impostor.extend_from_slice(b"impostor");
     send(&endpoint, &impostor, process(), INIT_BADGE);
@@ -189,16 +202,16 @@ fn run(t: &mut TestRun) {
         }) == 0,
     );
 
-    // The runner types `stop worker`: the agent ends while the runtime
+    // The runner types `stop worker`: both agents end while the runtime
     // spins. (That the runtime still ran then, the runner checks: the
-    // next `list` says `runtime running`, then `worker stopped`.)
+    // next `list` says `runtime running`, then `worker stopped` twice.)
     t.check(
-        "`stop worker` on the trusted path stopped the agent",
-        end_of(&agent_record, 60) == Some(End::Stopped),
+        "`stop worker` on the trusted path stopped both agents of that name",
+        records.iter().all(|r| end_of(r, 60) == Some(End::Stopped)),
     );
     t.check(
-        "trust kept the runtime and the agent, and dropped the impostor",
-        holds(trust, |o| matches!(o, Object::Process(_))) == 2,
+        "trust kept the runtime and both agents, and dropped the impostor",
+        holds(trust, |o| matches!(o, Object::Process(_))) == 3,
     );
     t.check(
         "trust holds no console and no other device",

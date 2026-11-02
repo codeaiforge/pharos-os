@@ -1230,8 +1230,12 @@ const TRUST_SCRIPT: &[console::Step] = &[
     ("worker running", "stop worker\n"),
     ("stopped worker", "status please\n"),
     ("commands: list", "list\n"),
-    // The runtime still runs (hung) after its agent was stopped.
-    ("runtime running\r\nworker stopped", "stop all\n"),
+    // The runtime still runs (hung) after both its agents named `worker`
+    // were stopped.
+    (
+        "runtime running\r\nworker stopped\r\nworker stopped",
+        "stop all\n",
+    ),
     ("stopped all", ""),
 ];
 /// The impostor the kernel registers under `init`'s badge must be dropped.

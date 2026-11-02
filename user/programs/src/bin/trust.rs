@@ -102,11 +102,17 @@ impl Trust {
                     self.status(&a.name[..a.len], a.process);
                 }
             }
+            // Every process registered under the name: one agent may run
+            // several tasks at once, one process each.
             Command::Stop(name) => {
                 let agents = self.agents;
-                match agents.iter().flatten().find(|a| &a.name[..a.len] == name) {
-                    Some(a) => self.stop(&a.name[..a.len], a.process),
-                    None => self.say(&[b"no agent ", name]),
+                let mut found = false;
+                for a in agents.iter().flatten().filter(|a| &a.name[..a.len] == name) {
+                    self.stop(&a.name[..a.len], a.process);
+                    found = true;
+                }
+                if !found {
+                    self.say(&[b"no agent ", name]);
                 }
             }
             // The runtime first: its agents end with it (children stop
