@@ -557,7 +557,14 @@ impl Runtime {
         let max = self
             .limits(&self.tasks.list[i].agent)
             .map_or(0, |l| l.attempts);
-        match self.tasks.retry(&mut self.store, i, max) {
+        let outcome = self.tasks.retry(&mut self.store, i, max);
+        self.retried(id, max, outcome);
+    }
+
+    /// Reports a retry's outcome.
+    fn retried(&self, id: u32, max: u8, outcome: Result<bool, tasks::Error>) {
+        let Some(i) = self.tasks.find(id) else { return };
+        match outcome {
             Ok(false) => self.event(id, b"failed", None),
             Ok(true) => {
                 let mut d = [0u8; 20];
@@ -572,9 +579,39 @@ impl Runtime {
                 }
                 self.event(id, &what[..n], None);
             }
-            // Still marked running: recovered as pending at the next start.
+            // Still marked running: tried again by `retry_stranded`.
             Err(_) => self.event(id, b"not stored", None),
         }
+    }
+
+    /// Retries tasks left running without a process because the store
+    /// refused their retry. Returns whether any are still left.
+    fn retry_stranded(&mut self) -> bool {
+        let slots = &self.slots;
+        let has = |id: u32| slots.iter().flatten().any(|s| s.task == id);
+        let agents = &self.agents;
+        let max = |name: &[u8]| {
+            agents
+                .iter()
+                .find(|l| l.entry.name == name)
+                .map(|l| l.attempts)
+        };
+        let outcomes = self.tasks.retry_stranded(&mut self.store, has, max);
+        let mut left = false;
+        for (id, outcome) in outcomes {
+            if outcome.is_err() {
+                // Said once, when the first retry was refused.
+                left = true;
+                continue;
+            }
+            let max = self
+                .tasks
+                .find(id)
+                .and_then(|i| self.limits(&self.tasks.list[i].agent))
+                .map_or(0, |l| l.attempts);
+            self.retried(id, max, outcome);
+        }
+        left
     }
 
     /// `ATTACH`: maps the caller's buffer read-write.
@@ -971,8 +1008,11 @@ fn main(arg: u64) -> u64 {
     }
     let mut msg = [0u8; 256];
     loop {
+        // A refused retry is tried again within a second.
+        let stranded = r.retry_stranded();
         r.start_pending();
         let wait = r.check_deadlines();
+        let wait = if stranded { wait.min(1_000_000) } else { wait };
         match receive_timeout(SERVICE, &mut msg, wait) {
             Ok(Received::Notification(bits)) => {
                 for i in 0..SLOTS {

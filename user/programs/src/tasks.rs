@@ -438,6 +438,29 @@ impl Tasks {
         Ok(true)
     }
 
+    /// Retries every task that is running here but has no process
+    /// (`has_process` by ID): one whose failed attempt the store did not
+    /// take. Each gets [`Self::retry`] with its agent's `max_attempts`
+    /// (`None`: the agent can no longer run). Returns each task's ID and
+    /// outcome; a refused write leaves it for the next call.
+    pub fn retry_stranded(
+        &mut self,
+        f: &mut impl Files,
+        has_process: impl Fn(u32) -> bool,
+        max_attempts: impl Fn(&[u8]) -> Option<u8>,
+    ) -> Vec<(u32, Result<bool, Error>)> {
+        let stranded: Vec<usize> = (0..self.list.len())
+            .filter(|&i| self.list[i].state == State::Running && !has_process(self.list[i].id))
+            .collect();
+        stranded
+            .into_iter()
+            .map(|i| {
+                let max = max_attempts(&self.list[i].agent).unwrap_or(0);
+                (self.list[i].id, self.retry(f, i, max))
+            })
+            .collect()
+    }
+
     /// Deletes an ended task's record, unless a task that has not ended
     /// depends on it.
     pub fn forget(&mut self, f: &mut impl Files, id: u32) -> Result<(), Error> {
@@ -792,6 +815,39 @@ mod tests {
         assert_eq!(t.submit(&mut cut, b"worker", &[], b""), Err(Error::Store));
         let (mut t, _) = load(&mut cut.after_crash());
         assert_eq!(t.submit(&mut f, b"worker", &[], b""), Ok(id + 3));
+    }
+
+    #[test]
+    fn a_refused_retry_is_tried_again() {
+        let mut f = Mem::default();
+        let (mut t, _) = load(&mut f);
+        let a = t.submit(&mut f, b"worker", &[], b"").unwrap();
+        let b = t.submit(&mut f, b"worker", &[], b"").unwrap();
+        t.start(&mut f, 0).unwrap();
+        t.start(&mut f, 1).unwrap();
+        let max = |agent: &[u8]| (agent == b"worker").then_some(MAX);
+        // `a`'s agent crashed, and the store refuses the retry.
+        f.left = Some(0);
+        assert_eq!(t.retry(&mut f, 0, MAX), Err(Error::Store));
+        assert_eq!(t.list[0].state, State::Running, "nothing changed");
+        let has = |id: u32| id == b;
+        assert_eq!(
+            t.retry_stranded(&mut f, has, max),
+            [(a, Err(Error::Store))],
+            "still refused: kept for later"
+        );
+        f.left = None;
+        assert_eq!(t.retry_stranded(&mut f, has, max), [(a, Ok(true))]);
+        assert_eq!(t.list[0].state, State::Pending, "runs again");
+        assert_eq!(t.list[1].state, State::Running, "b has its process");
+        assert_eq!(t.retry_stranded(&mut f, has, max), [], "nothing left");
+        let (again, _) = load(&mut f.after_crash());
+        assert_eq!(again.list[0].state, State::Pending, "and it is stored");
+        // On its last attempt it fails instead.
+        t.start(&mut f, 0).unwrap();
+        t.list[0].attempts = MAX;
+        assert_eq!(t.retry_stranded(&mut f, has, max), [(a, Ok(false))]);
+        assert_eq!(t.list[0].result, b"retries exhausted");
     }
 
     /// What a run had confirmed before its store stopped taking writes.
