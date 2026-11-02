@@ -22,8 +22,12 @@ pub mod op {
     pub const REGISTER: u8 = 2;
 }
 
-/// The badge `init` sends with.
-pub const INIT: u32 = 1;
+/// The badge `init` sends with: none. `init` created the endpoint and is
+/// the only holder of an unbadged `SEND` on it; it grants `trust` only
+/// `RECEIVE` and every other sender a badged copy, which cannot be
+/// re-badged. (A process cannot badge its own copy: sending it to itself
+/// would block.)
+pub const INIT: u32 = 0;
 /// The badge the agent runtime sends with.
 pub const RUNTIME: u32 = 2;
 /// Agent slots (the runtime's, agents.md).

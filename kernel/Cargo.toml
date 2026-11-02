@@ -160,6 +160,10 @@ name = "trust"
 harness = false
 
 [[test]]
+name = "agents"
+harness = false
+
+[[test]]
 name = "services"
 harness = false
 

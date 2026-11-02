@@ -37,7 +37,7 @@ pharos_kernel::test_kernel!(run);
 const VERSION: u8 = 1;
 const RUNTIME_OP: u8 = 1;
 const REGISTER_OP: u8 = 2;
-const INIT_BADGE: u32 = 1;
+const INIT_BADGE: u32 = 0;
 const RUNTIME_BADGE: u32 = 2;
 
 /// Sends `bytes` to `trust` from the kernel, with `cap` and `badge`.

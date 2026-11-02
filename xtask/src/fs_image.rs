@@ -207,10 +207,34 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// The filesystem image of programs the tests use (`programs`): every
 /// program in `programs` (`bin/<name>`), and every [`bad_programs`] copy of
 /// `bin/hello`.
+/// The `agents` test kernel's manifests (#98): `worker` within its policy
+/// entry, `greedy` asking for more pages than its entry allows, and
+/// `noentry`, which has no entry.
+pub const TEST_MANIFESTS: [(&str, &str); 3] = [
+    (
+        "agents/worker.manifest",
+        "# The agents test kernel's worker.\nmanifest = 1\nname = worker\nprogram = bin/testagent\n\
+         pages = 256\nmodels = 2\nattempts = 3\nprogress_ms = 2000\ntask_ms = 20000\n",
+    ),
+    (
+        "agents/greedy.manifest",
+        "manifest = 1\nname = greedy\nprogram = bin/testagent\npages = 128\nmodels =\n\
+         attempts = 1\nprogress_ms = 2000\ntask_ms = 20000\n",
+    ),
+    (
+        "agents/noentry.manifest",
+        "manifest = 1\nname = noentry\nprogram = bin/testagent\npages = 64\nmodels =\n\
+         attempts = 1\nprogress_ms = 2000\ntask_ms = 20000\n",
+    ),
+];
+
 pub fn program_test_image(programs: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut b = Builder::new();
     for (path, bytes) in programs {
         b.add(path.as_bytes(), bytes).expect("valid path");
+    }
+    for (path, text) in TEST_MANIFESTS {
+        b.add(path.as_bytes(), text.as_bytes()).expect("valid path");
     }
     if let Some((_, hello)) = programs.iter().find(|(p, _)| p == "bin/hello") {
         for (path, bytes) in bad_programs(hello) {
@@ -280,7 +304,8 @@ pub(crate) mod tests {
         }
         let programs = [("bin/hello".to_owned(), good.clone())];
         let image = Image::mount(&program_test_image(&programs)[..]).map(|i| i.entries().count());
-        assert_eq!(image, Ok(11));
+        // The program, its bad copies, and the agents test kernel's manifests.
+        assert_eq!(image, Ok(11 + TEST_MANIFESTS.len()));
     }
 
     #[test]

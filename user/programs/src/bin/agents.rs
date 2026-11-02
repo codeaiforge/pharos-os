@@ -1,0 +1,786 @@
+//! The agent runtime (#98, agents.md): starts agents for tasks, watches
+//! them, and serves their requests. Unprivileged, and not trusted for the
+//! emergency stop: `trust` holds `STOP` on it and on every agent.
+//!
+//! Handles: 1 the console, 2 its endpoint (`RECEIVE`, `SEND`, `GRANT`, to
+//! hand agents a badged `SEND`), 3 `init`'s report endpoint, 4 the
+//! read-only filesystem (agent programs and manifests), 5 the inference
+//! service (`SEND`, badged), 6 `trust` (`SEND`, badged as the runtime).
+//! The argument selects the policy table (0: boot, empty; 1: the `agents`
+//! test kernel).
+//!
+//! Each policy entry's manifest, `agents/<name>.manifest`, is read and
+//! checked at start; an agent whose manifest is missing or refused never
+//! runs. Every task attempt is one process holding one capability: `SEND`
+//! on the runtime's endpoint, badged with its slot. The process is
+//! registered with `trust` before the runtime answers it. Tasks are kept
+//! in memory until #99 makes them durable.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+use alloc::vec::Vec;
+
+use pharos_proto::agents::{
+    self, Assigned, CONTROL, MAX_BUFFER, MAX_INPUT, MAX_RESULT, MAX_RUNNING, MAX_TASKS, NAME,
+    NO_SESSION, Request, SLOTS, State, TaskStatus, VERSION, agent_slot, parse,
+};
+use pharos_proto::infer::{self, Request as InferRequest, Started, Tokens};
+use pharos_proto::manifest::{self, Entry, Why};
+use pharos_proto::{Info, refusal, status, trust};
+use pharos_user::rights::{READ, SEND, STOP, WAIT};
+use pharos_user::{
+    Grant, Handle, Mapped, Received, Status, call_timeout, debug_write, delete, endpoint_create,
+    mem_map_buffer, mem_map_cap, mem_share, mem_unmap, open, process_status, process_stop, read,
+    receive_timeout, send, spawn_limited, try_send, uptime,
+};
+
+pharos_user::entry!(main);
+
+const CONSOLE: Handle = 1;
+const SERVICE: Handle = 2;
+const REPORT: Handle = 3;
+const ROOT: Handle = 4;
+const INFER: Handle = 5;
+const TRUST: Handle = 6;
+
+/// How long a call to the inference service may take; `GENERATE` may load
+/// a model first.
+const GENERATE_US: u64 = 60_000_000;
+const INFER_US: u64 = 10_000_000;
+/// Control clients with an attached buffer.
+const MAX_CONTROLS: usize = 4;
+
+const BOOT: &[Entry] = &[];
+
+/// The `agents` test kernel's agents, all `bin/testagent`. `greedy`'s
+/// manifest asks for more pages than its entry allows; `absent` has no
+/// manifest.
+const TEST: &[Entry] = &[
+    Entry {
+        name: b"worker",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 1 << 2,
+        attempts: 3,
+        progress_ms: 2_000,
+        task_ms: 20_000,
+    },
+    Entry {
+        name: b"greedy",
+        program: b"bin/testagent",
+        pages: 64,
+        models: 0,
+        attempts: 1,
+        progress_ms: 2_000,
+        task_ms: 20_000,
+    },
+    Entry {
+        name: b"absent",
+        program: b"bin/testagent",
+        pages: 64,
+        models: 0,
+        attempts: 1,
+        progress_ms: 2_000,
+        task_ms: 20_000,
+    },
+];
+
+/// What an accepted manifest asked for (at most its entry).
+#[derive(Clone, Copy)]
+struct Limits {
+    entry: &'static Entry,
+    pages: u32,
+    models: u32,
+    attempts: u8,
+    progress_us: u64,
+    task_us: u64,
+}
+
+struct Task {
+    id: u32,
+    agent: usize,
+    state: State,
+    /// Attempts started.
+    attempts: u8,
+    input: Vec<u8>,
+    /// The result, or why it failed.
+    result: Vec<u8>,
+}
+
+/// Why the runtime itself ended an agent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// `COMPLETE` or `FAIL`: the task's state is already set.
+    Finished,
+    Hung,
+    Cancelled,
+}
+
+/// A running agent process.
+struct Slot {
+    task: usize,
+    process: Handle,
+    buffer: Option<Mapped>,
+    started: u64,
+    last: u64,
+    session: Option<u32>,
+    ending: Option<Ending>,
+}
+
+struct Runtime {
+    agents: Vec<Limits>,
+    tasks: Vec<Task>,
+    slots: [Option<Slot>; SLOTS],
+    controls: [Option<(u32, Mapped)>; MAX_CONTROLS],
+    next_id: u32,
+    infer_buffer: Mapped,
+    reply: Handle,
+}
+
+fn decimal(mut v: u64, out: &mut [u8; 20]) -> &[u8] {
+    let mut at = out.len();
+    loop {
+        at -= 1;
+        out[at] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            return &out[at..];
+        }
+    }
+}
+
+fn say(parts: &[&[u8]]) {
+    let mut line = [0u8; 256];
+    let mut n = 0;
+    for p in parts {
+        let take = p.len().min(line.len() - n);
+        line[n..n + take].copy_from_slice(&p[..take]);
+        n += take;
+    }
+    let _ = debug_write(CONSOLE, &line[..n]);
+}
+
+/// A reply of just `OK`.
+fn done(out: &mut [u8; 256]) -> usize {
+    out[0] = status::OK;
+    1
+}
+
+fn unmap(m: Mapped) {
+    let _ = mem_unmap(m.addr(), m.len() as u64);
+}
+
+fn why(w: Why) -> &'static [u8] {
+    match w {
+        Why::TooLarge => b"too large",
+        Why::BadByte => b"bad byte",
+        Why::BadLine => b"bad line",
+        Why::UnknownKey => b"unknown key",
+        Why::RepeatedKey => b"repeated key",
+        Why::MissingKey => b"missing key",
+        Why::Version => b"version",
+        Why::BadValue => b"bad value",
+        Why::ProgressOverTask => b"progress_ms over task_ms",
+        Why::NoEntry => b"no policy entry",
+        Why::WrongProgram => b"another program",
+        Why::OverPolicy => b"asks for more than its policy entry",
+    }
+}
+
+/// Reads and checks `e`'s manifest.
+fn load(e: &'static Entry, table: &'static [Entry]) -> Result<Limits, &'static [u8]> {
+    let mut path = [0u8; 64];
+    let parts: [&[u8]; 3] = [b"agents/", e.name, b".manifest"];
+    let mut n = 0;
+    for p in parts {
+        path[n..n + p.len()].copy_from_slice(p);
+        n += p.len();
+    }
+    let file = open(ROOT, &path[..n]).map_err(|_| &b"no manifest"[..])?;
+    // One byte more than allowed, so a longer file is refused.
+    let mut text = [0u8; manifest::MAX_SIZE + 1];
+    let mut len = 0;
+    while len < text.len() {
+        // `read` takes at most 4096 bytes a call.
+        let end = text.len().min(len + 4096);
+        match read(file, len as u64, &mut text[len..end]) {
+            Ok(0) => break,
+            Ok(k) => len += k,
+            Err(_) => {
+                let _ = delete(file);
+                return Err(b"cannot read the manifest");
+            }
+        }
+    }
+    let _ = delete(file);
+    let m = manifest::parse(&text[..len]).map_err(|r| why(r.why))?;
+    let entry = m.within(table).map_err(why)?;
+    if !core::ptr::eq(entry, e) {
+        return Err(why(Why::NoEntry));
+    }
+    Ok(Limits {
+        entry: e,
+        pages: m.pages,
+        models: m.models,
+        attempts: m.attempts,
+        progress_us: u64::from(m.progress_ms) * 1000,
+        task_us: u64::from(m.task_ms) * 1000,
+    })
+}
+
+impl Runtime {
+    fn event(&self, task: usize, what: &[u8], number: Option<u64>) {
+        let t = &self.tasks[task];
+        let mut a = [0u8; 20];
+        let mut b = [0u8; 20];
+        let number = number.map_or(&b""[..], |v| decimal(v, &mut b));
+        let space: &[u8] = if number.is_empty() { b"" } else { b" " };
+        say(&[
+            b"agents: ",
+            self.agents[t.agent].entry.name,
+            b" task ",
+            decimal(u64::from(t.id), &mut a),
+            b" ",
+            what,
+            space,
+            number,
+        ]);
+    }
+
+    /// A call to the inference service; the reply's length in `out`.
+    fn infer(&self, req: &InferRequest, timeout: u64, out: &mut [u8; 256]) -> Option<usize> {
+        let mut msg = [0u8; 64];
+        let n = infer::encode(req, &mut msg)?;
+        match call_timeout(INFER, &msg[..n], self.reply, out, timeout) {
+            Ok(Received::Message { len, .. }) if len >= 1 => Some(len.min(256)),
+            _ => None,
+        }
+    }
+
+    fn cancel_session(&mut self, slot: usize) {
+        if let Some(session) = self.slots[slot].as_mut().and_then(|s| s.session.take()) {
+            let _ = self.infer(&InferRequest::Cancel { session }, INFER_US, &mut [0; 256]);
+        }
+    }
+
+    /// Ends `slot`'s process for `why`; its notification frees the slot.
+    fn end(&mut self, slot: usize, why: Ending) {
+        self.cancel_session(slot);
+        if let Some(s) = self.slots[slot].as_mut() {
+            s.ending = Some(why);
+            let _ = process_stop(s.process);
+        }
+    }
+
+    fn running(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
+
+    /// Starts pending tasks, oldest first, while slots are free.
+    fn start_pending(&mut self) {
+        while self.running() < MAX_RUNNING {
+            let Some(task) = self.tasks.iter().position(|t| t.state == State::Pending) else {
+                return;
+            };
+            let Some(slot) = self.slots.iter().position(Option::is_none) else {
+                return;
+            };
+            self.start(task, slot);
+        }
+    }
+
+    fn start(&mut self, task: usize, slot: usize) {
+        let limits = self.agents[self.tasks[task].agent];
+        let t = &mut self.tasks[task];
+        t.attempts += 1;
+        let process = open(ROOT, limits.entry.program).and_then(|file| {
+            let grant = Grant {
+                handle: SERVICE,
+                rights: SEND,
+                badge: slot as u32 + 1,
+            };
+            let notify = Some((SERVICE, slot as u32));
+            let p = spawn_limited(file, 0, &[grant], notify, limits.pages);
+            let _ = delete(file);
+            p
+        });
+        let Ok(process) = process else {
+            t.state = State::Failed;
+            t.result = b"spawn failed".to_vec();
+            self.event(task, b"failed", None);
+            return;
+        };
+        // `trust` holds the agent's STOP before the runtime answers it.
+        let mut msg = [0u8; 64];
+        let register = trust::Request::Register {
+            slot: slot as u8,
+            name: limits.entry.name,
+        };
+        let registered = trust::encode(&register, &mut msg)
+            .is_some_and(|n| send(TRUST, &msg[..n], process, STOP | WAIT, 0).is_ok());
+        let now = uptime();
+        self.slots[slot] = Some(Slot {
+            task,
+            process,
+            buffer: None,
+            started: now,
+            last: now,
+            session: None,
+            ending: None,
+        });
+        if !registered {
+            let t = &mut self.tasks[task];
+            t.state = State::Failed;
+            t.result = b"trust registration failed".to_vec();
+            self.end(slot, Ending::Finished);
+            self.event(task, b"failed", None);
+            return;
+        }
+        self.tasks[task].state = State::Running;
+        self.event(task, b"started", None);
+    }
+
+    /// Stops agents with no request for `progress_ms`, or over `task_ms`.
+    /// Returns how long until the next deadline.
+    fn check_deadlines(&mut self) -> u64 {
+        let now = uptime();
+        let mut wait = u64::MAX;
+        for i in 0..SLOTS {
+            let Some(s) = &self.slots[i] else { continue };
+            if s.ending.is_some() {
+                continue;
+            }
+            let l = self.agents[self.tasks[s.task].agent];
+            let deadline = (s.last + l.progress_us).min(s.started + l.task_us);
+            if now >= deadline {
+                let task = s.task;
+                self.end(i, Ending::Hung);
+                self.event(task, b"hung", None);
+            } else {
+                wait = wait.min(deadline - now);
+            }
+        }
+        wait
+    }
+
+    /// Slot `i`'s process ended (its notification bit).
+    fn ended(&mut self, i: usize) {
+        let status = match &self.slots[i] {
+            Some(s) => process_status(s.process),
+            None => return,
+        };
+        if status == Ok(Status::Running) {
+            return;
+        }
+        self.cancel_session(i);
+        let Some(s) = self.slots[i].take() else {
+            return;
+        };
+        let _ = delete(s.process);
+        if let Some(b) = s.buffer {
+            unmap(b);
+        }
+        let task = s.task;
+        match (s.ending, status) {
+            (Some(Ending::Finished | Ending::Cancelled), _) => {}
+            (Some(Ending::Hung), _) => self.retry(task),
+            // Stopped, but not by the runtime: the user, on the trusted path.
+            (None, Ok(Status::Stopped)) => {
+                self.tasks[task].state = State::Cancelled;
+                self.event(task, b"stopped", None);
+            }
+            (None, Ok(Status::Killed(vector))) => {
+                self.event(task, b"crashed", Some(vector));
+                self.retry(task);
+            }
+            // Ending without COMPLETE or FAIL is a failed attempt.
+            (None, Ok(Status::Exited(code))) => {
+                self.event(task, b"exited", Some(code));
+                self.retry(task);
+            }
+            (None, _) => self.retry(task),
+        }
+    }
+
+    /// A failed attempt: run again, or fail the task.
+    fn retry(&mut self, task: usize) {
+        let max = self.agents[self.tasks[task].agent].attempts;
+        let t = &mut self.tasks[task];
+        if t.attempts >= max {
+            t.state = State::Failed;
+            t.result = b"retries exhausted".to_vec();
+            self.event(task, b"failed", None);
+        } else {
+            t.state = State::Pending;
+            let mut d = [0u8; 20];
+            let mut e = [0u8; 20];
+            let next = decimal(u64::from(t.attempts) + 1, &mut d);
+            let max = decimal(u64::from(max), &mut e);
+            let mut what = [0u8; 64];
+            let mut n = 0;
+            for p in [&b"restarting "[..], next, b"/", max] {
+                what[n..n + p.len()].copy_from_slice(p);
+                n += p.len();
+            }
+            self.event(task, &what[..n], None);
+        }
+    }
+
+    /// `ATTACH`: maps the caller's buffer read-write.
+    fn attach(&mut self, badge: u32, memory: Handle, len: u64) {
+        let mapped = (len <= MAX_BUFFER)
+            .then(|| mem_map_cap(memory, true, len).ok())
+            .flatten();
+        let _ = delete(memory);
+        let Some(m) = mapped else { return };
+        if let Some(s) = agent_slot(badge).and_then(|i| self.slots[i].as_mut()) {
+            if let Some(old) = s.buffer.replace(m) {
+                unmap(old);
+            }
+        } else if badge >= CONTROL {
+            let at = self
+                .controls
+                .iter()
+                .position(|c| c.as_ref().is_some_and(|c| c.0 == badge))
+                .or_else(|| self.controls.iter().position(Option::is_none));
+            match at {
+                Some(at) => {
+                    if let Some((_, old)) = self.controls[at].replace((badge, m)) {
+                        unmap(old);
+                    }
+                }
+                None => unmap(m),
+            }
+        } else {
+            unmap(m);
+        }
+    }
+
+    fn info(&self, out: &mut [u8]) -> Option<usize> {
+        let mut details = [0u8; 2];
+        details[0] = self.agents.len() as u8;
+        details[1] = self.running() as u8;
+        Info {
+            name: NAME,
+            low: VERSION,
+            high: VERSION,
+            details: &details,
+        }
+        .encode(out)
+    }
+
+    /// One request from the agent in slot `i`.
+    fn agent(&mut self, i: usize, req: Request<'_>, out: &mut [u8; 256]) -> Result<usize, u8> {
+        let now = uptime();
+        let Some(s) = self.slots[i].as_mut().filter(|s| s.ending.is_none()) else {
+            return Err(NO_SESSION);
+        };
+        s.last = now;
+        let (task, session) = (s.task, s.session);
+        let limits = self.agents[self.tasks[task].agent];
+        let buffer = self.slots[i].as_ref().and_then(|s| s.buffer.as_ref());
+        let buffer_len = buffer.map_or(0, Mapped::len);
+        match req {
+            Request::Task => {
+                let t = &self.tasks[task];
+                if t.input.len() > buffer_len {
+                    return Err(status::NO_BUFFER);
+                }
+                if let Some(b) = buffer {
+                    b.write_bytes(0, &t.input);
+                }
+                Assigned {
+                    task: t.id,
+                    attempt: t.attempts,
+                    input_len: t.input.len() as u32,
+                }
+                .encode(out)
+                .ok_or(status::INTERNAL)
+            }
+            Request::Complete { len } => {
+                if len > MAX_RESULT {
+                    return Err(status::TOO_LARGE);
+                }
+                if len as usize > buffer_len {
+                    return Err(status::NO_BUFFER);
+                }
+                let mut result = alloc::vec![0u8; len as usize];
+                if let Some(b) = buffer {
+                    b.read_bytes(0, &mut result);
+                }
+                let t = &mut self.tasks[task];
+                t.state = State::Done;
+                t.result = result;
+                self.end(i, Ending::Finished);
+                self.event(task, b"completed", None);
+                Ok(done(out))
+            }
+            Request::Fail { reason } => {
+                let t = &mut self.tasks[task];
+                t.state = State::Failed;
+                t.result = reason.to_vec();
+                self.end(i, Ending::Finished);
+                self.event(task, b"failed", None);
+                Ok(done(out))
+            }
+            Request::Log { text } => {
+                say(&[b"agents: ", limits.entry.name, b": ", text]);
+                Ok(done(out))
+            }
+            Request::Infer {
+                model,
+                max_new,
+                prompt_len,
+            } => {
+                if model > 31 || limits.models & 1 << model == 0 {
+                    return Err(status::NO_ACCESS);
+                }
+                if prompt_len as usize > buffer_len {
+                    return Err(status::NO_BUFFER);
+                }
+                if prompt_len as usize > self.infer_buffer.len() {
+                    return Err(status::TOO_LARGE);
+                }
+                if self.slots.iter().flatten().any(|s| s.session.is_some()) {
+                    return Err(status::BUSY);
+                }
+                // Copied out of the agent's buffer before the service sees it.
+                let mut prompt = alloc::vec![0u8; prompt_len as usize];
+                if let Some(b) = buffer {
+                    b.read_bytes(0, &mut prompt);
+                }
+                self.infer_buffer.write_bytes(0, &prompt);
+                let req = InferRequest::Generate {
+                    model,
+                    max_new,
+                    prompt_len,
+                };
+                let n = self.infer(&req, GENERATE_US, out).ok_or(status::INTERNAL)?;
+                if let (Some(started), Some(s)) = (Started::parse(&out[..n]), &mut self.slots[i]) {
+                    s.session = Some(started.session);
+                }
+                Ok(n)
+            }
+            Request::Next => {
+                let session = session.ok_or(NO_SESSION)?;
+                let n = self
+                    .infer(&InferRequest::Next { session }, INFER_US, out)
+                    .ok_or(status::INTERNAL)?;
+                // Ended, or refused: the session is over either way.
+                let more = Tokens::parse(&out[..n]).is_some_and(|t| t.stop.is_none());
+                if !more {
+                    if let Some(s) = &mut self.slots[i] {
+                        s.session = None;
+                    }
+                }
+                Ok(n)
+            }
+            Request::CancelInfer => {
+                if session.is_none() {
+                    return Err(NO_SESSION);
+                }
+                self.cancel_session(i);
+                Ok(done(out))
+            }
+            Request::Info => self.info(out).ok_or(status::INTERNAL),
+            Request::Submit { .. } | Request::Status { .. } | Request::Cancel { .. } => {
+                Err(status::NO_ACCESS)
+            }
+            Request::Attach { .. } => Err(status::BAD_REQUEST),
+        }
+    }
+
+    fn control_buffer(&self, badge: u32) -> Option<&Mapped> {
+        self.controls
+            .iter()
+            .flatten()
+            .find(|c| c.0 == badge)
+            .map(|c| &c.1)
+    }
+
+    /// One request from control client `badge`.
+    fn control(&mut self, badge: u32, req: Request<'_>, out: &mut [u8; 256]) -> Result<usize, u8> {
+        let buffer_len = self.control_buffer(badge).map_or(0, Mapped::len);
+        match req {
+            Request::Submit { name, input_len } => {
+                let agent = self
+                    .agents
+                    .iter()
+                    .position(|l| l.entry.name == name)
+                    .ok_or(status::NOT_FOUND)?;
+                if input_len > MAX_INPUT || self.tasks.len() >= MAX_TASKS {
+                    return Err(status::TOO_LARGE);
+                }
+                if input_len as usize > buffer_len {
+                    return Err(status::NO_BUFFER);
+                }
+                let mut input = alloc::vec![0u8; input_len as usize];
+                if let Some(b) = self.control_buffer(badge) {
+                    b.read_bytes(0, &mut input);
+                }
+                let id = self.next_id;
+                self.next_id += 1;
+                self.tasks.push(Task {
+                    id,
+                    agent,
+                    state: State::Pending,
+                    attempts: 0,
+                    input,
+                    result: Vec::new(),
+                });
+                agents::submitted(id, out).ok_or(status::INTERNAL)
+            }
+            Request::Status { task } => {
+                let t = self
+                    .tasks
+                    .iter()
+                    .find(|t| t.id == task)
+                    .ok_or(status::NOT_FOUND)?;
+                if t.result.len() > buffer_len {
+                    return Err(status::NO_BUFFER);
+                }
+                if let Some(b) = self.control_buffer(badge) {
+                    b.write_bytes(0, &t.result);
+                }
+                TaskStatus {
+                    state: t.state,
+                    attempts: t.attempts,
+                    result_len: t.result.len() as u32,
+                }
+                .encode(out)
+                .ok_or(status::INTERNAL)
+            }
+            Request::Cancel { task } => {
+                let at = self
+                    .tasks
+                    .iter()
+                    .position(|t| t.id == task)
+                    .ok_or(status::NOT_FOUND)?;
+                match self.tasks[at].state {
+                    State::Pending => {}
+                    State::Running => {
+                        if let Some(slot) = self
+                            .slots
+                            .iter()
+                            .position(|s| s.as_ref().is_some_and(|s| s.task == at))
+                        {
+                            self.end(slot, Ending::Cancelled);
+                        }
+                    }
+                    _ => return Ok(done(out)),
+                }
+                self.tasks[at].state = State::Cancelled;
+                self.event(at, b"cancelled", None);
+                Ok(done(out))
+            }
+            Request::Info => self.info(out).ok_or(status::INTERNAL),
+            Request::Attach { .. } => Err(status::BAD_REQUEST),
+            _ => Err(status::NO_ACCESS),
+        }
+    }
+
+    /// Handles one `call`; writes the reply (status first) into `out`.
+    fn handle(&mut self, msg: &[u8], badge: u32, out: &mut [u8; 256]) -> usize {
+        let req = match parse(msg) {
+            Ok(req) => req,
+            Err(refused) => return refusal(refused, VERSION, out),
+        };
+        let result = match agent_slot(badge) {
+            Some(i) => self.agent(i, req, out),
+            None if badge >= CONTROL => self.control(badge, req, out),
+            None => Err(status::NO_ACCESS),
+        };
+        match result {
+            Ok(n) => n,
+            Err(code) => {
+                out[0] = code;
+                1
+            }
+        }
+    }
+}
+
+fn main(arg: u64) -> u64 {
+    let table: &'static [Entry] = match arg {
+        0 => BOOT,
+        1 => TEST,
+        _ => &[],
+    };
+    let Ok(reply) = endpoint_create() else {
+        return 1;
+    };
+    // The runtime's prompt buffer at the inference service.
+    let Ok(infer_buffer) = mem_map_buffer(infer::MAX_BUFFER) else {
+        return 2;
+    };
+    let attached = mem_share(infer_buffer.addr(), infer::MAX_BUFFER).is_ok_and(|memory| {
+        let mut msg = [0u8; 16];
+        let sent = infer::encode(
+            &InferRequest::Attach {
+                len: infer::MAX_BUFFER,
+            },
+            &mut msg,
+        )
+        .is_some_and(|n| send(INFER, &msg[..n], memory, READ, 0).is_ok());
+        let _ = delete(memory);
+        sent
+    });
+    if !attached {
+        return 3;
+    }
+    let mut agents = Vec::new();
+    for e in table {
+        match load(e, table) {
+            Ok(l) => {
+                say(&[b"agents: ", e.name, b" manifest accepted"]);
+                agents.push(l);
+            }
+            Err(w) => say(&[b"agents: ", e.name, b" manifest refused: ", w]),
+        }
+    }
+    let mut r = Runtime {
+        agents,
+        tasks: Vec::new(),
+        slots: Default::default(),
+        controls: Default::default(),
+        next_id: 1,
+        infer_buffer,
+        reply,
+    };
+    if send(REPORT, b"ready", 0, 0, 0).is_err() {
+        return 4;
+    }
+    let mut msg = [0u8; 256];
+    loop {
+        r.start_pending();
+        let wait = r.check_deadlines();
+        match receive_timeout(SERVICE, &mut msg, wait) {
+            Ok(Received::Notification(bits)) => {
+                for i in 0..SLOTS {
+                    if bits & 1 << i != 0 {
+                        r.ended(i);
+                    }
+                }
+            }
+            Ok(Received::Message { len, cap, badge }) => {
+                let msg = &msg[..len.min(256)];
+                if let Ok(Request::Attach { len }) = parse(msg) {
+                    if cap != 0 {
+                        r.attach(badge, cap, len);
+                    }
+                    continue;
+                }
+                let mut out = [0u8; 256];
+                let n = r.handle(msg, badge, &mut out);
+                if cap != 0 {
+                    let _ = try_send(cap, &out[..n]);
+                    let _ = delete(cap);
+                }
+            }
+            _ => {}
+        }
+    }
+}

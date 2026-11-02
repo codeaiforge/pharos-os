@@ -582,7 +582,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 21] = [
+const USER_PROGRAMS: [&str; 24] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -604,6 +604,9 @@ const USER_PROGRAMS: [&str; 21] = [
     "inferclient",
     "stopper",
     "trust",
+    "agents",
+    "testagent",
+    "agentclient",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -1212,6 +1215,9 @@ const INFERENCE_TEST: &str = "inference_tiny";
 /// The test kernel booted with a store holding the service's test model
 /// and the host's text for the test prompt (#88).
 const SERVICE_TEST: &str = "inference";
+/// The agent runtime's test kernel: the same store, for inference through
+/// the runtime (#98).
+const AGENTS_TEST: &str = "agents";
 /// The test kernel whose trusted console the runner types into (#96).
 const TRUST_TEST: &str = "trust";
 /// What the runner waits for on the trusted console, and types then.
@@ -1351,7 +1357,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     if name == INFERENCE_TEST {
         store_image::tiny(&out.join(STORE_IMAGE))?;
     }
-    if name == SERVICE_TEST {
+    if name == SERVICE_TEST || name == AGENTS_TEST {
         store_image::service(&out.join(STORE_IMAGE))?;
     }
     if name == CRASH_TEST {

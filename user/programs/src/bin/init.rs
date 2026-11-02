@@ -13,7 +13,7 @@
 #![no_std]
 #![no_main]
 
-use pharos_user::rights::{CONFIG, IRQ, MAP, RECEIVE, SEND, WRITE};
+use pharos_user::rights::{CONFIG, GRANT, IRQ, MAP, READ, RECEIVE, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
     Error, Grant, Handle, Received, Status, config_read, debug_write, endpoint_create, open,
     process_status, receive, send, spawn_limited,
@@ -63,6 +63,15 @@ enum Cap {
     InferService,
     /// The trusted service's endpoint, to receive on (the service).
     TrustService,
+    /// The agent runtime's endpoint: `RECEIVE`, and `SEND` with `GRANT`
+    /// so it can hand each agent a badged `SEND` (the runtime itself).
+    AgentsService,
+    /// The root filesystem, read-only.
+    Root,
+    /// `SEND` on the inference service, badged as this client number.
+    Inference(u32),
+    /// `SEND` on the trusted service, badged as the agent runtime.
+    TrustRuntime,
 }
 
 struct Service {
@@ -96,6 +105,15 @@ const NET: Service = Service {
 const STORE_LIMIT: u32 = 1 << 18;
 /// 1 GiB (D-011): one S1 model, its 16 MiB read window, cache, and heap.
 const INFER_LIMIT: u32 = 1 << 18;
+/// The agent runtime (#98): its own heap and buffers; agents' limits come
+/// from its policy table, each at most this.
+const AGENTS_LIMIT: u32 = 1 << 14;
+/// The program `init` registers with `trust` as the agent runtime.
+const RUNTIME_PATH: &[u8] = b"bin/agents";
+/// `pharos_proto::trust`: `RUNTIME`, sent through `init`'s own unbadged
+/// handle (badge 0, `trust::INIT`).
+const TRUST_RUNTIME: [u8; 2] = [1, 1];
+const TRUST_RUNTIME_BADGE: u32 = 2;
 /// Namespace 3, `models`, read-only (`pharos_proto::store`).
 const MODELS_READ_ONLY: u32 = 3 | 1 << 16;
 
@@ -142,8 +160,7 @@ const BOOT: &[Service] = &[
         limit: INFER_LIMIT,
     },
     // The trusted service (#96, D-018): the trusted path's device and its
-    // endpoint, nothing else. The agent runtime (#98) starts after it and
-    // `init` sends it the runtime's `STOP` capability.
+    // endpoint, nothing else.
     Service {
         name: "trust",
         path: b"bin/trust",
@@ -152,6 +169,25 @@ const BOOT: &[Service] = &[
         caps: &[Cap::Device(VIRTIO_CONSOLE), Cap::TrustService, Cap::Report],
         after: &[],
         limit: 0,
+    },
+    // The agent runtime (#98), after `trust`, which `init` then sends its
+    // `STOP` capability: the runtime never decides whether it can be
+    // stopped. Inference client 1. Its boot policy table is empty.
+    Service {
+        name: "agents",
+        path: RUNTIME_PATH,
+        arg: 0,
+        kind: Kind::Daemon,
+        caps: &[
+            Cap::Console,
+            Cap::AgentsService,
+            Cap::Report,
+            Cap::Root,
+            Cap::Inference(1),
+            Cap::TrustRuntime,
+        ],
+        after: &[3, 4],
+        limit: AGENTS_LIMIT,
     },
 ];
 
@@ -343,9 +379,16 @@ fn main(arg: u64) -> u64 {
         endpoint_create(),
         endpoint_create(),
         endpoint_create(),
+        endpoint_create(),
     );
-    let (Ok(events), Ok(net_service), Ok(store_service), Ok(infer_service), Ok(trust_service)) =
-        endpoints
+    let (
+        Ok(events),
+        Ok(net_service),
+        Ok(store_service),
+        Ok(infer_service),
+        Ok(trust_service),
+        Ok(agents_service),
+    ) = endpoints
     else {
         let _ = debug_write(CONSOLE, b"init: cannot create an endpoint");
         return 1;
@@ -412,6 +455,26 @@ fn main(arg: u64) -> u64 {
                     rights: RECEIVE,
                     badge: 0,
                 },
+                Cap::AgentsService => Grant {
+                    handle: agents_service,
+                    rights: RECEIVE | SEND | GRANT,
+                    badge: 0,
+                },
+                Cap::Root => Grant {
+                    handle: ROOT,
+                    rights: READ,
+                    badge: 0,
+                },
+                Cap::Inference(badge) => Grant {
+                    handle: infer_service,
+                    rights: SEND,
+                    badge: *badge,
+                },
+                Cap::TrustRuntime => Grant {
+                    handle: trust_service,
+                    rights: SEND,
+                    badge: TRUST_RUNTIME_BADGE,
+                },
                 Cap::Network(port) => Grant {
                     handle: net_service,
                     rights: SEND,
@@ -451,6 +514,15 @@ fn main(arg: u64) -> u64 {
         };
         let _ = pharos_user::delete(file);
         say(service.name, "started", None);
+        // `trust` gets the runtime's STOP before the runtime can start any
+        // agent; a failed send leaves the runtime unstoppable, so stop it.
+        if service.path == RUNTIME_PATH {
+            let sent = send(trust_service, &TRUST_RUNTIME, process, STOP | WAIT, 0);
+            if sent.is_err() {
+                let _ = pharos_user::process_stop(process);
+                say(service.name, "not registered with trust", None);
+            }
+        }
         state[i] = State::Running(process);
 
         // Wait until this service succeeds or fails.
