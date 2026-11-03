@@ -70,5 +70,6 @@ dependencies = [
  "pharos-elf",
  "pharos-fs",
  "pharos-infer",
+ "pharos-proto",
  "pharos-store",
 ]
