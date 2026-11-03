@@ -96,7 +96,7 @@ The prototype for D-004 showed that QEMU's default CPU under TCG, which CI uses,
 - **Delegation:** a message may carry one capability, if the sender holds `GRANT` on it. The receiver gets a new handle with the same or fewer rights (the sender chooses).
 - **Revocation: derivation tree with lazy invalidation.**
   - Each capability is a node that records the capabilities derived from it (by granting).
-  - `revoke(handle)` marks every descendant revoked; the caller keeps its own capability.
+  - `revoke(handle)` marks every descendant revoked; the caller keeps its own capability. Memory mapped through a revoked `Memory` or device capability, in any process, becomes fresh zeroed pages the process owns, with the same access, before `revoke` returns, and a revoked device is stopped first (no DMA or MSI; #104, [capabilities.md](capabilities.md)).
   - Every use checks the mark. A revoked handle returns `REVOKED` and can only be deleted.
   - Revocation needs no cooperation from the holders and costs time proportional to the subtree.
 - `delete(handle)` removes a handle from the caller's table. It does not affect derived capabilities; use `revoke` for that.

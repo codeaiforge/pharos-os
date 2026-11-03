@@ -82,7 +82,7 @@ M3.1 chose an inference engine that needs, from Pharos: floating point and SIMD 
 
 - **The `Memory` object** holds the frames of the shared mapping. `mem_share` moves the frames' ownership from the address space to the object; the sharer's mapping stays, now holding a reference. Each mapping and each capability keeps the object alive; the frames are freed when the last of them is gone. The page-table bit M2.9 uses for device memory (`DEVICE`, "not owned by this space") keeps `destroy` and `mem_unmap` from freeing the frames directly; implementing #80 showed no separate `SHARED` bit is needed. `mem_share` on an already shared mapping returns another capability on the same object. A mapping made by `mem_map_cap` cannot be shared (`BAD_ADDRESS`): that would give the receiver a capability outside the sharer's derivation tree, which the sharer's `revoke` could not reach (found by the M3.0 security review; the approved design allowed it).
 - **Rights narrow only**, as for every capability: a holder passes on `READ` alone to give read-only access. A read-only mapping is mapped without the write bit, so a write is a page fault that kills the process. Mappings are never executable.
-- **Revocation** stops new mappings; existing mappings stay until unmapped or the process ends (the limit already recorded for device memory).
+- **Revocation** stops new mappings, and turns existing ones into zeroed private pages with the same access, in every process, before `revoke` returns (#104).
 - **Only `mem_map` memory can be shared**, not program pages, the stack, device memory, or DMA buffers.
 
 ### Large files in one process
@@ -100,7 +100,7 @@ Implementing #78 also found that a device interrupt arriving while the CPU idled
 - **Vector-state leaks:** eager save and restore on every switch, a clean image for new threads, and no lazy switching (LazyFP, CVE-2018-3665). Tested with two processes and after a kill.
 - **Malformed save areas:** only the kernel writes them; user code cannot reach them.
 - **Memory exhaustion:** per-process page limits checked before allocation, at most 1,024 mappings per process, no demand paging. Not yet: limits carved from the creator's (M3.5); a process can still use its whole limit of frames.
-- **Shared memory:** rights only narrow; read-only mappings are not writable; frames live until the last user; revocation does not unmap (recorded limit).
+- **Shared memory:** rights only narrow; read-only mappings are not writable; frames live until the last user; revoked mappings become zeroed private pages (#104).
 - **Timeouts:** cannot lose or duplicate a message; a late reply cannot reach a later call.
 - **New trusted code:** the vector-state instructions in the hardware layer, the memory functions and allocator in `pharos-user`'s `syscall` module, and the `Memory` object in the kernel. AGENTS.md's list of what `pharos-user`'s `syscall` module may contain gains the memory functions and the new allocator.
 

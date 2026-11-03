@@ -1,8 +1,10 @@
 //! Test kernel: a driver process reaches its device only through a Device
 //! capability: configuration reads, MMIO mappings of its own BARs (never the
 //! MSI-X table), and DMA buffers whose frames outlive every mapping and are
-//! freed only after bus mastering is off (issue #55). The `devprobe`
-//! program does the user side. Runs under UEFI (D-009).
+//! freed only after bus mastering is off (issue #55). Revoking the device
+//! capability stops the device and turns the driver's register and DMA
+//! mappings into zeroed private pages, without ending the driver (#104).
+//! The `devprobe` program does the user side. Runs under UEFI (D-009).
 
 #![no_std]
 #![no_main]
@@ -247,5 +249,81 @@ fn run(t: &mut TestRun) {
         process::exits().iter().any(|e| e.task == id && e.code == 0)
             && hw::enabled_bits(blk.address) == (false, false)
             && free_frames() == before,
+    );
+
+    // Revocation (#104): the kernel keeps the parent capability.
+    let Some(device) = DeviceHandle::grant(blk.clone()) else {
+        t.check("granted for the revocation run", false);
+        return;
+    };
+    let root = Capability::new(Object::Device(device), MAP | CONFIG | GRANT);
+    let wait = Endpoint::new();
+    let caps = vec![
+        Capability::new(Object::DebugConsole, WRITE),
+        root.derive(MAP | CONFIG),
+        Capability::new(Object::Endpoint(wait.clone()), RECEIVE),
+    ];
+    let arg = common.unwrap_or(0) | 1 << 62;
+    let id = process::spawn_elf(&programs, b"bin/devprobe", arg, caps).unwrap_or(u64::MAX);
+    let mut mapped = false;
+    for _ in 0..40 {
+        mapped = output_of(id).iter().any(|l| l == b"mapped");
+        if mapped {
+            break;
+        }
+        sched::sleep(Duration::from_millis(25));
+    }
+    t.check("revocation run: registers and a DMA page mapped", mapped);
+    let phys = output_of(id)
+        .iter()
+        .find_map(|l| l.strip_prefix(b"dma "))
+        .and_then(|hex| core::str::from_utf8(hex).ok())
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok());
+    t.check(
+        "revoking the device capability reaches the driver's",
+        process::revoke(&root) == 1,
+    );
+    t.check(
+        "revoked: memory decoding and bus mastering off at once",
+        hw::enabled_bits(blk.address) == (false, false),
+    );
+    t.check(
+        "revoked: the DMA buffer keeps its frame and contents until the driver ends",
+        phys.is_some_and(|p| paging::read_phys_u64(p) == Some(0x1122_3344_5566_7788)),
+    );
+    ipc::send(
+        &wait,
+        Message {
+            data: [0; MAX_MESSAGE],
+            len: 1,
+            cap: None,
+            badge: 0,
+        },
+    );
+    sched::sleep(Duration::from_millis(100));
+    let lines = output_of(id);
+    for line in &lines {
+        kprintln!("  devprobe: {}", core::str::from_utf8(line).unwrap_or("?"));
+    }
+    for step in [
+        "the registers show one queue",
+        "released after the revocation",
+        "revoked: the registers read zeros",
+        "revoked: the DMA page reads zeros",
+        "revoked: writes land in private pages",
+        "revoked: the capability is refused",
+    ] {
+        let want = alloc::format!("ok {step}");
+        t.check(step, lines.iter().any(|l| l == want.as_bytes()));
+    }
+    t.check(
+        "revoked: the driver was not killed, and exited with no failures",
+        process::exits().iter().any(|e| e.task == id && e.code == 0)
+            && !process::kills().iter().any(|k| k.task == id),
+    );
+    drop(root);
+    t.check(
+        "after it ends: every frame returned, and the device can be granted again",
+        free_frames() == before && DeviceHandle::grant(blk.clone()).is_some(),
     );
 }

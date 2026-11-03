@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-03 (#103),** with zeroed pages on revocation, the trusted console as the audit chain's anchor, and approvals limited to 60 s and 4 waiting. Built by: kernel revocation of mapped memory (#104), runtime permissions (#105), approval on the trusted path (#106), the audit service (#107), auditing every consequential action (#108), agent networking (#109), and adversarial tests (#110). Nothing here is implemented yet.
+**Planned. Design approved by the maintainer on 2026-11-03 (#103),** with zeroed pages on revocation, the trusted console as the audit chain's anchor, and approvals limited to 60 s and 4 waiting. Built by: kernel revocation of mapped memory (#104), runtime permissions (#105), approval on the trusted path (#106), the audit service (#107), auditing every consequential action (#108), agent networking (#109), and adversarial tests (#110). **Implemented:** kernel revocation of mapped memory (#104).
 
 ## 2. Context
 
@@ -36,6 +36,7 @@ What M3.4 builds on:
 
 ### Kernel: revoking mapped memory (#104)
 
+- *Implemented (#104):* `process::revoke`, which the `revoke` call uses; `shared_memory` and `device_caps` test it.
 - **Revoking a `Memory` or device capability ends every mapping made through it or a capability derived from it, in every process, before `revoke` returns.** Each mapping records the capability it was mapped through, so the kernel finds them by walking the processes' mapping lists; the TLB entries of the current address space are flushed, and others are flushed when the processes are next switched to (no PCID).
 - **A revoked mapping becomes private zeroed memory, not a hole.** Its pages are replaced by fresh zeroed frames, already counted against the mapper's page limit, so the mapper reads zeros and its writes go nowhere. Reason: the side that shares a buffer is often the untrusted one. An agent shares its buffer with the runtime, so with plain unmapping it could revoke the buffer while the runtime copies from it and crash the runtime, and with it every agent. If no frames are free, the pages are unmapped instead, and the next access faults.
 - **Frames are freed** when the last mapping and capability are gone, as now; the original frames are never reachable again through a revoked capability.

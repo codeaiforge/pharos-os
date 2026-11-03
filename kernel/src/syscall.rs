@@ -478,10 +478,47 @@ mod kernel {
         handle: Handle,
         needed: cap::Rights,
     ) -> Result<alloc::sync::Arc<crate::device::DeviceHandle>, Error> {
-        match process.caps.lock().get(handle, needed)?.object() {
-            Object::Device(device) => Ok(device.clone()),
+        device_cap(process, handle, needed).map(|(_, device)| device)
+    }
+
+    /// [`device`] and the capability itself, which a mapping records so
+    /// that revoking it reaches the mapping (#104).
+    fn device_cap(
+        process: &process::Process,
+        handle: Handle,
+        needed: cap::Rights,
+    ) -> Result<
+        (
+            alloc::sync::Arc<cap::Capability>,
+            alloc::sync::Arc<crate::device::DeviceHandle>,
+        ),
+        Error,
+    > {
+        let cap = process.caps.lock().get(handle, needed)?;
+        match cap.object() {
+            Object::Device(device) => {
+                let device = device.clone();
+                Ok((cap, device))
+            }
             _ => Err(Error::MissingRight),
         }
+    }
+
+    /// Records a device mapping and keeps the device alive ([`pin`]).
+    fn record_device(
+        process: &process::Process,
+        via: alloc::sync::Arc<cap::Capability>,
+        device: alloc::sync::Arc<crate::device::DeviceHandle>,
+        start: u64,
+        pages: u64,
+    ) {
+        process.devices.lock().push(process::DeviceMapping {
+            start,
+            pages,
+            via,
+            device: device.clone(),
+        });
+        pin(process, device);
     }
 
     /// Keeps `device` alive (granted, enabled, its DMA buffers allocated)
@@ -694,6 +731,8 @@ mod kernel {
                     start: addr,
                     memory: memory.clone(),
                     own: true,
+                    via: None,
+                    writable: true,
                 });
                 memory
             }
@@ -714,7 +753,8 @@ mod kernel {
     ) -> Result<u64, Error> {
         use crate::arch::x86_64::paging::Flags;
         let needed = cap::READ | if writable { cap::WRITE } else { 0 };
-        let memory = match process.caps.lock().get(handle, needed)?.object() {
+        let via = process.caps.lock().get(handle, needed)?;
+        let memory = match via.object() {
             Object::Memory(memory) => memory.clone(),
             _ => return Err(Error::MissingRight),
         };
@@ -754,6 +794,8 @@ mod kernel {
             start,
             memory,
             own: false,
+            via: Some(via),
+            writable,
         });
         Ok(start)
     }
@@ -902,7 +944,8 @@ mod kernel {
             }
             Call::Revoke { handle } => {
                 let cap = process.caps.lock().get(handle, 0)?;
-                Ok(cap.revoke() as u64)
+                drop(process);
+                Ok(process::revoke(&cap) as u64)
             }
             Call::Open { handle, addr, len } => {
                 let parent = process.caps.lock().get(handle, cap::READ)?;
@@ -967,7 +1010,7 @@ mod kernel {
                 len,
                 addr,
             } => {
-                let device = device(&process, handle, cap::MAP)?;
+                let (via, device) = device_cap(&process, handle, cap::MAP)?;
                 let phys = crate::device::mmio_range(&device.pci, bar, offset, len).map_err(
                     |e| match e {
                         crate::device::MmioError::NoBar => Error::NotFound,
@@ -997,7 +1040,7 @@ mod kernel {
                 })
                 .ok_or(Error::BadAddress)??;
                 *process.mmio_pages.lock() += pages;
-                pin(&process, device);
+                record_device(&process, via, device, addr, pages);
                 Ok(0)
             }
             Call::DmaAlloc {
@@ -1005,7 +1048,7 @@ mod kernel {
                 pages,
                 addr,
             } => {
-                let device = device(&process, handle, cap::MAP)?;
+                let (via, device) = device_cap(&process, handle, cap::MAP)?;
                 if !device.dma_fits(pages) {
                     return Err(Error::NoMemory);
                 }
@@ -1022,7 +1065,7 @@ mod kernel {
                 })
                 .ok_or(Error::BadAddress)??;
                 device.add_dma(phys, pages);
-                pin(&process, device);
+                record_device(&process, via, device, addr, pages as u64);
                 Ok(phys)
             }
             Call::IrqCreate { handle, entry } => {

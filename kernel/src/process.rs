@@ -111,6 +111,20 @@ pub struct SharedMapping {
     /// receiver doing so would get a capability outside the sharer's
     /// derivation tree, which its `revoke` could not reach.
     pub own: bool,
+    /// The capability it was mapped through (`None` for the sharer's
+    /// own): when that is revoked, the mapping becomes zeroed pages.
+    pub via: Option<Arc<Capability>>,
+    pub writable: bool,
+}
+
+/// Device registers or a DMA buffer mapped into a process, and the device
+/// capability it was mapped through: when that is revoked, the device is
+/// stopped and the pages become zeroed ones (capabilities.md).
+pub struct DeviceMapping {
+    pub start: u64,
+    pub pages: u64,
+    pub via: Arc<Capability>,
+    pub device: Arc<crate::device::DeviceHandle>,
 }
 
 /// A process's `mem_map` mappings and its page limit (user-environment.md).
@@ -366,6 +380,8 @@ pub struct Process {
     /// Which of those mappings are shared memory (dropping one may free
     /// the frames, so it is dropped after the frame allocator's lock).
     pub shared: IrqMutex<Vec<SharedMapping>>,
+    /// Its device register and DMA mappings, until revoked.
+    pub devices: IrqMutex<Vec<DeviceMapping>>,
     /// The process that started it (`None`: the kernel did). When a
     /// process ends, the processes it started are stopped (agents.md).
     pub parent: Option<TaskId>,
@@ -419,6 +435,7 @@ pub fn start_limited(
             mmio_pages: IrqMutex::new(0),
             memory: IrqMutex::new(UserMemory::new(limit)),
             shared: IrqMutex::new(Vec::new()),
+            devices: IrqMutex::new(Vec::new()),
             parent,
             record: Arc::new(ProcessRecord {
                 id,
@@ -568,6 +585,85 @@ fn end_current(end: End) -> ! {
 /// such process runs.
 pub fn stop(id: TaskId) -> bool {
     by_id(id).is_some() && sched::stop(id)
+}
+
+/// Revokes every capability derived from `cap` (it keeps its own), and
+/// ends every mapping made through one of them, in every process, before
+/// returning (capabilities.md, #104). A mapping's pages become fresh
+/// zeroed pages the process owns, with the same access, so its next read
+/// sees zeros and its writes reach nothing shared; no process faults
+/// because another revoked memory it was using. If no frame is free, the
+/// page is left unmapped. A device is stopped (no DMA, no MSI) before its
+/// buffers are unmapped. Returns the number of capabilities revoked.
+pub fn revoke(cap: &Capability) -> usize {
+    let revoked = cap.revoke();
+    #[cfg(target_os = "none")]
+    if revoked > 0 {
+        sweep_revoked();
+    }
+    revoked
+}
+
+#[cfg(target_os = "none")]
+fn sweep_revoked() {
+    let processes: Vec<(TaskId, Arc<Process>)> = PROCESSES
+        .lock()
+        .iter()
+        .map(|(id, p)| (*id, p.clone()))
+        .collect();
+    for (id, p) in processes {
+        let shared: Vec<SharedMapping> = {
+            let mut list = p.shared.lock();
+            let (dead, live) = core::mem::take(&mut *list)
+                .into_iter()
+                .partition(|s| s.via.as_ref().is_some_and(|c| c.is_revoked()));
+            *list = live;
+            dead
+        };
+        let devices: Vec<DeviceMapping> = {
+            let mut list = p.devices.lock();
+            let (dead, live) = core::mem::take(&mut *list)
+                .into_iter()
+                .partition(|d: &DeviceMapping| d.via.is_revoked());
+            *list = live;
+            dead
+        };
+        if shared.is_empty() && devices.is_empty() {
+            continue;
+        }
+        for d in &devices {
+            d.device.stop();
+        }
+        let read_only = Flags {
+            writable: false,
+            ..Flags::USER_DATA
+        };
+        let mut pages: Vec<(u64, Flags)> = Vec::new();
+        for s in &shared {
+            let flags = if s.writable {
+                Flags::USER_DATA
+            } else {
+                read_only
+            };
+            let n = s.memory.frames().len() as u64;
+            pages.extend((0..n).map(|i| (s.start + i * FRAME_SIZE, flags)));
+        }
+        for d in &devices {
+            pages.extend((0..d.pages).map(|i| (d.start + i * FRAME_SIZE, Flags::USER_DATA)));
+        }
+        sched::with_space(id, |space| {
+            let mut guard = mm::frames();
+            let Some(frames) = guard.as_mut() else { return };
+            for (virt, flags) in pages {
+                // Not owned: the object or the device holds the frame.
+                let _ = space.unmap(virt);
+                let _ = space.map_new_page(virt, flags, &[], frames);
+            }
+        });
+        // Dropped after the frame allocator's lock: one may have been the
+        // last reference to a `Memory` object.
+        drop(shared);
+    }
 }
 
 /// Processes [`kill`] ends, with the vector their end reports.

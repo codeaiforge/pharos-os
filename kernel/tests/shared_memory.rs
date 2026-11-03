@@ -2,9 +2,10 @@
 //! `shmprobe` processes share a buffer twice: once the sharer ends first,
 //! once the receiver does. Writes are seen both ways; a read-only grant
 //! cannot be mapped writable, and writing its mapping is a page fault; the
-//! receiver's limit applies; revocation stops new mappings but not existing
-//! ones; the object lives while either side maps it, and every frame
-//! returns. Runs under UEFI (D-009).
+//! receiver's limit applies; revocation stops new mappings and turns
+//! existing ones into zeroed private pages with the same access (#104);
+//! the object lives while either side maps it, and every frame returns.
+//! Runs under UEFI (D-009).
 
 #![no_std]
 #![no_main]
@@ -136,7 +137,7 @@ fn run(t: &mut TestRun) {
         "run 1: A exited with no failures",
         process::exits().iter().any(|e| e.task == a && e.code == 0),
     );
-    // Wait until B holds the object only through its mappings.
+    // Wait until B has deleted its revoked grants.
     for _ in 0..200 {
         let dropped = process::debug_output()
             .iter()
@@ -147,8 +148,8 @@ fn run(t: &mut TestRun) {
         sched::sleep(Duration::from_millis(10));
     }
     t.check(
-        "run 1: with A gone and B's grants deleted, B's mappings keep the object alive",
-        !ended(b) && process::shared_objects() == 1,
+        "run 1: with A gone and B's grants deleted, B's revoked mappings do not keep the object",
+        !ended(b) && process::shared_objects() == 0,
     );
     wait_end(b);
     passed(
@@ -172,7 +173,8 @@ fn run(t: &mut TestRun) {
             "B: A revoked and unmapped",
             "B: revoked grants map nothing new",
             "B: dropped its grants",
-            "B: its mappings survive A's unmap and exit",
+            "B: revoked, its mappings read zeros",
+            "B: its writes stay in its own pages",
         ],
     );
     let region = process::MAP_REGION;

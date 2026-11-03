@@ -9,7 +9,9 @@
 //! (`RECEIVE`); limit 2 pages. B's: 1 the console, 2 the endpoint from A
 //! (`RECEIVE`), 3 the one to A (`SEND`); limit 4 pages. Each step prints
 //! `ok <step>` or `FAIL <step>`; the exit code is the number of failures.
-//! In run 1, B ends by writing to its read-only mapping (a page fault).
+//! In run 1, A revokes both grants while B maps them: B's mappings turn
+//! into zeroed private pages with the same access (#104), and B ends by
+//! writing to its read-only one (a page fault).
 
 #![no_std]
 #![no_main]
@@ -145,7 +147,8 @@ fn receiver(ends_first: bool) -> u64 {
         "B: revoked grants map nothing new",
         mem_map_cap(rw, false, LEN).err() == Some(Error::Revoked),
     );
-    // Now only B's mappings hold the object; the kernel checks it lives.
+    // The revoked mappings no longer hold the object; the kernel checks
+    // it is gone once B's revoked grants are deleted too.
     report(
         &mut f,
         "B: dropped its grants",
@@ -154,8 +157,14 @@ fn receiver(ends_first: bool) -> u64 {
     sleep(300_000);
     report(
         &mut f,
-        "B: its mappings survive A's unmap and exit",
-        holds(&m1, 0, b"from A") && holds(&m1, 100, b"from B"),
+        "B: revoked, its mappings read zeros",
+        holds(&m1, 0, &[0; 6]) && holds(&m1, 100, &[0; 6]),
+    );
+    m1.write_bytes(200, b"mine");
+    report(
+        &mut f,
+        "B: its writes stay in its own pages",
+        holds(&m1, 200, b"mine"),
     );
     if let Ok(m2) = m2 {
         let _ = debug_write(CONSOLE, b"B: writing the read-only mapping");

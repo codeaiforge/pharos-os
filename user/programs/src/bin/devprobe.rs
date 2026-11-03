@@ -11,6 +11,12 @@
 //! With bit 63 of the argument set, it only maps the common configuration,
 //! deletes both device handles, and waits: the mapping alone must keep the
 //! device granted and enabled.
+//!
+//! With bit 62 set (#104), it maps the common configuration and one DMA
+//! page, writes the page, prints `dma <hex>` and `mapped`, and waits; the
+//! kernel revokes its device capability and releases it. Then the
+//! registers and the buffer must read zeros, its own writes must stay in
+//! its now private pages, and the capability must be refused.
 
 #![no_std]
 #![no_main]
@@ -53,12 +59,67 @@ fn hex(value: u64) -> [u8; 20] {
 
 /// Argument bit: map registers only.
 const MMIO_ONLY: u64 = 1 << 63;
+/// Argument bit: map, then outlive the revocation of the device.
+const REVOKED: u64 = 1 << 62;
+
+/// Bit 62's run: see the module comment.
+fn revoked(bar: u8, page: u64, in_page: usize) -> u64 {
+    let mut f = 0;
+    let regs = mmio_map(DEVICE, bar, page, 4096, REGS);
+    let dma = dma_alloc(DEVICE, 1, DMA);
+    let (Ok(regs), Ok((buf, phys))) = (regs, dma) else {
+        report(&mut f, "map the registers and a DMA page", false);
+        return f;
+    };
+    report(
+        &mut f,
+        "the registers show one queue",
+        regs.read16(in_page + NUM_QUEUES) == 1,
+    );
+    buf.write64(0, 0x1122_3344_5566_7788);
+    let _ = debug_write(CONSOLE, &hex(phys));
+    let _ = debug_write(CONSOLE, b"mapped");
+    let mut msg = [0u8; 8];
+    report(
+        &mut f,
+        "released after the revocation",
+        receive(WAIT, &mut msg).is_ok(),
+    );
+    report(
+        &mut f,
+        "revoked: the registers read zeros",
+        regs.read16(in_page + NUM_QUEUES) == 0 && regs.read8(in_page + DEVICE_STATUS) == 0,
+    );
+    report(
+        &mut f,
+        "revoked: the DMA page reads zeros",
+        buf.read64(0) == 0,
+    );
+    regs.write8(in_page + DEVICE_STATUS, 1);
+    buf.write64(8, 7);
+    report(
+        &mut f,
+        "revoked: writes land in private pages",
+        regs.read8(in_page + DEVICE_STATUS) == 1 && buf.read64(8) == 7,
+    );
+    report(
+        &mut f,
+        "revoked: the capability is refused",
+        config_read(DEVICE, 0, 4).err() == Some(Error::Revoked),
+    );
+    f
+}
 
 fn main(arg: u64) -> u64 {
     let mut f = 0;
     let mmio_only = arg & MMIO_ONLY != 0;
-    let arg = arg & !MMIO_ONLY;
+    let revoke = arg & REVOKED != 0;
+    let arg = arg & !(MMIO_ONLY | REVOKED);
     let (bar, offset) = ((arg & 0xff) as u8, arg >> 8);
+    if revoke {
+        let page = offset / 4096 * 4096;
+        return revoked(bar, page, (offset - page) as usize);
+    }
     if mmio_only {
         let page = offset / 4096 * 4096;
         report(

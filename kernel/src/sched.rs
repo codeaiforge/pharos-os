@@ -17,7 +17,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -242,6 +242,9 @@ struct Scheduler {
     /// Tasks told to end ([`stop`]): they never block again, and end at
     /// their next return to user mode.
     stopping: BTreeSet<TaskId>,
+    /// Every task that has not exited, to reach its address space
+    /// ([`with_space`]).
+    tasks: BTreeMap<TaskId, Weak<Task>>,
     next_id: TaskId,
     live: usize,
     /// Timer ticks seen by the scheduler.
@@ -272,6 +275,7 @@ pub fn init() -> Result<(), SchedError> {
         timeouts: SleepQueue::new(),
         exited: None,
         stopping: BTreeSet::new(),
+        tasks: BTreeMap::new(),
         next_id: 1,
         live: 1,
         ticks: 0,
@@ -323,6 +327,7 @@ fn queue(task: Arc<Task>) -> Result<TaskId, SchedError> {
     let mut scheduler = SCHEDULER.lock();
     let scheduler = scheduler.as_mut().ok_or(SchedError::NotInitialized)?;
     scheduler.live += 1;
+    scheduler.tasks.insert(id, Arc::downgrade(&task));
     scheduler.queue.push(task);
     Ok(id)
 }
@@ -378,6 +383,21 @@ pub fn with_current_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R
         .lock()
         .as_ref()
         .map(|s| s.queue.current().clone())?;
+    let mut space = task.context.space()?;
+    Some(f(&mut space))
+}
+
+/// Runs `f` on task `id`'s process address space, locked; `None` for a
+/// kernel task or one that has exited. For changing another process's
+/// mappings (revocation): that task is not running, since system calls run
+/// with interrupts disabled on one CPU, and its TLB entries are flushed
+/// when it is next switched to (no PCID).
+pub fn with_space<R>(id: TaskId, f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
+    let task = SCHEDULER
+        .lock()
+        .as_ref()
+        .and_then(|s| s.tasks.get(&id))
+        .and_then(Weak::upgrade)?;
     let mut space = task.context.space()?;
     Some(f(&mut space))
 }
@@ -597,6 +617,7 @@ pub fn exit() -> ! {
         s.live -= 1;
         let current = s.queue.current().clone();
         s.stopping.remove(&current.id);
+        s.tasks.remove(&current.id);
         s.exited = Some(current);
     }) else {
         panic!("the last ready task exited");

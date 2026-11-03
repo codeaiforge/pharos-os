@@ -138,13 +138,21 @@ mod kernel {
         }
     }
 
-    impl Drop for DeviceHandle {
-        fn drop(&mut self) {
-            // Stop the device first: no more DMA or MSI writes.
+    impl DeviceHandle {
+        /// Stops the device: no more DMA or MSI writes. Its buffers stay
+        /// allocated until the handle is dropped.
+        pub fn stop(&self) {
             hw::set_enabled(self.pci.address, false);
             if let Some(m) = self.pci.msix {
                 hw::set_msix_control(self.pci.address, m.offset, false, true);
             }
+        }
+    }
+
+    impl Drop for DeviceHandle {
+        fn drop(&mut self) {
+            // Stop the device first: no more DMA or MSI writes.
+            self.stop();
             // Only now may its buffers be reused.
             let buffers = core::mem::take(&mut *self.dma.lock());
             if let Some(frames) = crate::mm::frames().as_mut() {
