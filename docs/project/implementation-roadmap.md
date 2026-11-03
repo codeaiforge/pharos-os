@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.3 — Agent lifecycle and orchestration.** Everything in Phases 3–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.4 — Permissions, sandboxing, auditability, and isolation.** Everything in Phases 3–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -41,7 +41,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
 | 2 | Core System | Done (v0.2.0) |
-| 3 | AI Agent Platform | **Current** (M3.3; M3.1, M3.0, and M3.2 done) |
+| 3 | AI Agent Platform | **Current** (M3.4; M3.1, M3.0, M3.2, and M3.3 done) |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
 
@@ -291,7 +291,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ## Phase 3 — AI Agent Platform
 
-**Status: Current** (M3.3; M3.1, M3.0, and M3.2 done).
+**Status: Current** (M3.4; M3.1, M3.0, M3.2, and M3.3 done).
 
 Ordering notes:
 
@@ -375,7 +375,7 @@ Ordering notes:
 
 ### M3.3 — Agent lifecycle and orchestration
 
-**Status: Current.** M3.2 gives it local inference as a service. D-018 accepted (#93): the trusted path is a virtio-console device owned by a trusted service, and stopping a process also stops the processes it spawned. Design: [agents.md](../architecture/agents.md) (#94).
+**Status: Done** — gate passed 2026-11-03: the CI jobs passed on `main` at `f5968e1` ([run 41483828684](https://github.com/codeaiforge/pharos-os/actions/runs/41483828684)) with 50 test kernels, among them `process_stop` (the `STOP` right, children stopped with their parent), `trust` (the emergency stop from typed commands while the runtime spins, two agents of one name stopped by name), `agents` (start, crash, hang, exit, and restart up to the attempt limit, inference through the runtime, idempotency keys, checkpoints, and a runtime replaced mid-task), `agents_crash` (QEMU killed 6 times while a task counts), `agents_store` (a task stranded by a storage crash restarts once the store is back), and `supervision` (ready timeouts, bounded restarts, a stopped daemon left stopped, the storage and inference services killed and restarted). Making `BEGIN` stop recording its idempotency key failed CI on a throwaway branch ([run 41519185407](https://github.com/codeaiforge/pharos-os/actions/runs/41519185407)): the host tests and the Rust 1.85 job failed at `keys_answer_go_done_unknown` and `every_store_write_cut`, and the QEMU job at `agents`. Every CI run on `main` during M3.3 passed. The IPC round trip was re-measured at a 1989 ns median, within D-004's budget (11 ns of margin). The security review ([review-m3.3-agents.md](../security/review-m3.3-agents.md)) found and fixed one issue: `stop <agent>` stopped only the first process registered under the name. The maintainer approved it on 2026-11-03. Delivered: D-018 (#93), the design (#94), the `STOP` right (#95), the trusted path (#96), manifests (#97), the agent runtime (#98), durable tasks (#99), supervision (#100), and the gate (#101). Carried: the limits in the [threat model](../security/threat-model.md#open-limits-carried-out-of-phase-2).
 
 - **Where it runs (D-020):** Pharos; task-state and manifest logic host-tested.
 - **Objective and scope:** Start, stop, supervise, and restart agents, and keep their work durable across restarts.
@@ -394,7 +394,7 @@ Ordering notes:
 
 ### M3.4 — Permissions, sandboxing, auditability, and isolation
 
-**Status: Planned.**
+**Status: Current.** M3.3 gives it agents that start with one capability and can always be stopped from the trusted path. First step: the design, `docs/architecture/capabilities.md`, with D-012 made final.
 
 - **Where it runs (D-020):** Pharos; audit-record format host-tested.
 - **Objective and scope:** Enforce explicit, least-privilege capabilities for agents, sandbox them, and record grants and sensitive actions in a protected audit trail.
@@ -666,4 +666,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, and M3.2 (local inference) on 2026-11-01. The current milestone is **M3.3 — Agent lifecycle and orchestration**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, and M3.3 (agent lifecycle) on 2026-11-03. The current milestone is **M3.4 — Permissions, sandboxing, auditability, and isolation**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

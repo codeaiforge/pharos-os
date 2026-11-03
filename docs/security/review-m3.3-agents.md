@@ -10,7 +10,7 @@
   - every new `unsafe` block.
 - **Design under review:** [agents.md](../architecture/agents.md), D-018, D-019, [services.md](../architecture/services.md).
 - **Date:** 2026-11-02, issue #101. Reviewer: AI-assisted (Claude Code), with code reading and a test for each claim. The finding was fixed in the same issue.
-- **Status:** awaiting the maintainer's approval (M3.3 gate, #101).
+- **Status:** **approved** by the maintainer on 2026-11-03 (M3.3 gate, #101).
 
 ## Method
 
