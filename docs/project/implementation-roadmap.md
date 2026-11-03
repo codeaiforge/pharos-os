@@ -394,7 +394,7 @@ Ordering notes:
 
 ### M3.4 — Permissions, sandboxing, auditability, and isolation
 
-**Status: Current.** M3.3 gives it agents that start with one capability and can always be stopped from the trusted path. D-012 accepted (#102): permissions from the policy table, and beyond it only by approval on the trusted path for one task; revocation per permission and at once, memory unmapped by the kernel; expiry on runtime grants only; default-deny networking per destination. Next: the design, `docs/architecture/capabilities.md` (#103).
+**Status: Current.** M3.3 gives it agents that start with one capability and can always be stopped from the trusted path. D-012 accepted (#102): permissions from the policy table, and beyond it only by approval on the trusted path for one task; revocation per permission and at once, memory unmapped by the kernel; expiry on runtime grants only; default-deny networking per destination. Design: [capabilities.md](../architecture/capabilities.md) (#103), approved 2026-11-03. Next: kernel revocation of mapped memory (#104).
 
 - **Where it runs (D-020):** Pharos; audit-record format host-tested.
 - **Objective and scope:** Enforce explicit, least-privilege capabilities for agents, sandbox them, and record grants and sensitive actions in a protected audit trail.
