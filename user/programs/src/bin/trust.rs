@@ -4,8 +4,13 @@
 //! what the user types or write what looks like its answers.
 //!
 //! Handles: 1 the virtio-console device, 2 its endpoint (`RECEIVE`), 3
-//! `init`'s report endpoint (`SEND`). Nothing else: it holds no serial
-//! console, storage, network, or inference capability. It receives
+//! `init`'s report endpoint (`SEND`), and 4 the audit service (`SEND`,
+//! badged as `trust`; #107), when given. Nothing else: it holds no serial
+//! console, storage, network, or inference capability.
+//!
+//! The audit trail's anchor (#107): at start and on `audit`, `trust` shows
+//! the audit service's boot, record count, and chain head, so the user can
+//! compare them with what was shown before. It receives
 //! process capabilities over [`pharos_proto::trust`]: the agent runtime's
 //! from `init`, each agent's from the runtime.
 //!
@@ -25,13 +30,13 @@
 #![no_main]
 
 use pharos_programs::virtio_console::{Console, RX_BUFFER};
-use pharos_proto::agents;
 use pharos_proto::trust::{
     self, Command, INIT, Line, Lines, MAX_NAME, Outcome, RUNTIME, Request, SLOTS, parse,
 };
+use pharos_proto::{agents, audit};
 use pharos_user::{
-    Handle, Received, Status, delete, irq_create, irq_notify, process_status, process_stop,
-    receive, send, sleep, try_send,
+    Handle, Received, Status, call_timeout, delete, endpoint_create, irq_create, irq_notify,
+    process_status, process_stop, receive, send, sleep, try_send,
 };
 
 pharos_user::entry!(main);
@@ -39,9 +44,12 @@ pharos_user::entry!(main);
 const DEVICE: Handle = 1;
 const SERVICE: Handle = 2;
 const REPORT: Handle = 3;
+const AUDIT: Handle = 4;
+/// How long `trust` waits for the audit service's `HEAD`.
+const AUDIT_US: u64 = 1_000_000;
 const BASE: u64 = 0x1000_0000;
-const HELP: &[u8] =
-    b"commands: list, stop <agent>, stop all, revoke <agent> <permission>, yes <n>, no <n>";
+const HELP: &[u8] = b"commands: list, stop <agent>, stop all, revoke <agent> <permission>, \
+yes <n>, no <n>, audit";
 /// How long a stop may take before the answer says it is still running.
 const STOP_WAIT_US: u64 = 1_000_000;
 
@@ -60,6 +68,8 @@ struct Trust {
     channel: Option<Handle>,
     /// Approval requests shown and not yet resolved.
     open: [u16; 4],
+    /// For `call`s to the audit service.
+    reply: Option<Handle>,
     agents: [Option<Agent>; SLOTS as usize],
 }
 
@@ -121,6 +131,36 @@ impl Trust {
         false
     }
 
+    /// The audit trail's anchor: boot, record count, chain head.
+    fn audit(&mut self) {
+        let mut out = [0u8; 256];
+        let msg = [audit::VERSION, audit::op::HEAD];
+        let head = self.reply.and_then(|reply| {
+            match call_timeout(AUDIT, &msg, reply, &mut out, AUDIT_US) {
+                Ok(Received::Message { len, .. }) => audit::Head::parse(&out[..len.min(256)]),
+                _ => None,
+            }
+        });
+        let Some(h) = head else {
+            self.say(&[b"audit: not answering"]);
+            return;
+        };
+        let (mut a, mut b) = ([0u8; 20], [0u8; 20]);
+        let mut hex = [0u8; 64];
+        for (i, byte) in h.head.iter().enumerate() {
+            hex[2 * i] = b"0123456789abcdef"[usize::from(byte >> 4)];
+            hex[2 * i + 1] = b"0123456789abcdef"[usize::from(byte & 15)];
+        }
+        self.say(&[
+            b"audit: boot ",
+            decimal(u64::from(h.boot), &mut a),
+            b", ",
+            decimal(h.records, &mut b),
+            b" records, head ",
+            &hex,
+        ]);
+    }
+
     fn command(&mut self, line: &[u8]) {
         match trust::command(line) {
             Command::List => {
@@ -174,6 +214,7 @@ impl Trust {
                     self.say(&[b"answer: the runtime is not answering; stop works"]);
                 }
             }
+            Command::Audit => self.audit(),
             Command::Help => self.say(&[HELP]),
         }
     }
@@ -322,12 +363,14 @@ fn main(_: u64) -> u64 {
         runtime: None,
         channel: None,
         open: [0; 4],
+        reply: endpoint_create().ok(),
         agents: [None; SLOTS as usize],
     };
     if send(REPORT, b"ready", 0, 0, 0).is_err() {
         return 4;
     }
     t.say(&[b"trust: ready; ", HELP]);
+    t.audit();
     let mut lines = Lines::new();
     let mut msg = [0u8; 256];
     let mut bytes = [0u8; RX_BUFFER];

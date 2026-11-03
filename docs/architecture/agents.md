@@ -23,7 +23,7 @@ What M3.3 builds on:
 
 | Process | Holds | Does not hold |
 | --- | --- | --- |
-| `trust` (trusted service) | the virtio-console device (PCI `1af4:1043`); its own endpoint; `init`'s report endpoint; `STOP` on `agents` (sent by `init`); `STOP` on each running agent (sent by `agents`) | storage, inference, network, the serial console |
+| `trust` (trusted service) | the virtio-console device (PCI `1af4:1043`); its own endpoint; `init`'s report endpoint; `SEND` on the audit service, badged as client 2 (#107); `STOP` on `agents` (sent by `init`); `STOP` on each running agent (sent by `agents`); `SEND` on `agents`, badged as `trust` (sent by `agents`, #105) | storage, inference, network, the serial console |
 | `agents` (the agent runtime) | the serial console; its own endpoint; `init`'s report endpoint; the read-only filesystem (agent programs and manifests); storage namespace `agents`, read-write; `SEND` on inference; `SEND` on `trust` (badged); `STOP`, `WAIT`, and `GRANT` on each agent it starts | any device; `trust`'s console |
 | an agent | **one capability for its whole life:** `SEND` on `agents`' endpoint, badged with its slot (and what it makes itself: a reply endpoint and a buffer, which reach no other process) | everything else |
 

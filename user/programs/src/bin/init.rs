@@ -79,6 +79,11 @@ enum Cap {
     Inference(u32),
     /// `SEND` on the trusted service, badged as the agent runtime.
     TrustRuntime,
+    /// The audit service's endpoint, to receive on (the service, #107).
+    AuditService,
+    /// `SEND` on the audit service, badged as this client
+    /// (`pharos_proto::audit::client`).
+    Audit(u32),
 }
 
 struct Service {
@@ -125,6 +130,10 @@ const TRUST_RUNTIME_BADGE: u32 = 2;
 const AGENTS_TASKS: u32 = 5;
 /// Namespace 3, `models`, read-only (`pharos_proto::store`).
 const MODELS_READ_ONLY: u32 = 3 | 1 << 16;
+/// Namespace 6, `audit`, read-write: the audit trail (#107).
+const AUDIT_TRAIL: u32 = 6;
+/// The audit service's client numbers (`pharos_proto::audit::client`).
+const AUDIT_TRUST: u32 = 2;
 
 const BOOT: &[Service] = &[
     Service {
@@ -168,15 +177,36 @@ const BOOT: &[Service] = &[
         after: &[2],
         limit: INFER_LIMIT,
     },
+    // The audit service (#107): the only writer of the audit trail, in
+    // namespace `audit`; before every service that writes records.
+    Service {
+        name: "audit",
+        path: b"bin/audit",
+        arg: 0,
+        kind: Kind::Daemon,
+        caps: &[
+            Cap::Console,
+            Cap::AuditService,
+            Cap::Report,
+            Cap::Storage(AUDIT_TRAIL),
+        ],
+        after: &[2],
+        limit: 0,
+    },
     // The trusted service (#96, D-018): the trusted path's device and its
-    // endpoint, nothing else.
+    // endpoint, and the audit service, whose chain head it shows (#107).
     Service {
         name: "trust",
         path: b"bin/trust",
         arg: 0,
         kind: Kind::Daemon,
-        caps: &[Cap::Device(VIRTIO_CONSOLE), Cap::TrustService, Cap::Report],
-        after: &[],
+        caps: &[
+            Cap::Device(VIRTIO_CONSOLE),
+            Cap::TrustService,
+            Cap::Report,
+            Cap::Audit(AUDIT_TRUST),
+        ],
+        after: &[4],
         limit: 0,
     },
     // The agent runtime (#98), after `trust`, which `init` then sends its
@@ -196,7 +226,7 @@ const BOOT: &[Service] = &[
             Cap::TrustRuntime,
             Cap::Storage(AGENTS_TASKS),
         ],
-        after: &[2, 3, 4],
+        after: &[2, 3, 5],
         limit: AGENTS_LIMIT,
     },
 ];
@@ -462,6 +492,7 @@ struct Init {
     infer: Handle,
     trust: Handle,
     agents: Handle,
+    audit: Handle,
     devices: [(Handle, u32); 8],
     device_count: usize,
     state: [State; MAX_SERVICES],
@@ -492,6 +523,8 @@ impl Init {
             Cap::Root => g(ROOT, READ, 0),
             Cap::Inference(badge) => g(self.infer, SEND, *badge),
             Cap::TrustRuntime => g(self.trust, SEND, TRUST_RUNTIME_BADGE),
+            Cap::AuditService => g(self.audit, RECEIVE, 0),
+            Cap::Audit(badge) => g(self.audit, SEND, *badge),
             Cap::Network(port) => g(self.net, SEND, u32::from(*port)),
             Cap::Device(id) | Cap::SecondDevice(id) => {
                 let nth = usize::from(matches!(cap, Cap::SecondDevice(_)));
@@ -697,7 +730,7 @@ fn main(arg: u64) -> u64 {
         3 => SUPERVISE,
         _ => &[],
     };
-    let mut handles = [0; 7];
+    let mut handles = [0; 8];
     for h in handles.iter_mut() {
         match endpoint_create() {
             Ok(e) => *h = e,
@@ -707,7 +740,7 @@ fn main(arg: u64) -> u64 {
             }
         }
     }
-    let [events, reply, net, store, infer, trust, agents] = handles;
+    let [events, reply, net, store, infer, trust, agents, audit] = handles;
     let (devices, device_count) = devices();
     let mut init = Init {
         table,
@@ -718,6 +751,7 @@ fn main(arg: u64) -> u64 {
         infer,
         trust,
         agents,
+        audit,
         devices,
         device_count,
         state: [State::Pending; MAX_SERVICES],

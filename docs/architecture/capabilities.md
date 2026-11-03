@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-03 (#103),** with zeroed pages on revocation, the trusted console as the audit chain's anchor, and approvals limited to 60 s and 4 waiting. Built by: kernel revocation of mapped memory (#104), runtime permissions (#105), approval on the trusted path (#106), the audit service (#107), auditing every consequential action (#108), agent networking (#109), and adversarial tests (#110). **Implemented:** kernel revocation of mapped memory (#104), runtime permissions with `revoke` on the trusted console (#105), and approval on the trusted path (#106).
+**Planned. Design approved by the maintainer on 2026-11-03 (#103),** with zeroed pages on revocation, the trusted console as the audit chain's anchor, and approvals limited to 60 s and 4 waiting. Built by: kernel revocation of mapped memory (#104), runtime permissions (#105), approval on the trusted path (#106), the audit service (#107), auditing every consequential action (#108), agent networking (#109), and adversarial tests (#110). **Implemented:** kernel revocation of mapped memory (#104), runtime permissions with `revoke` on the trusted console (#105), approval on the trusted path (#106), and the audit service (#107).
 
 ## 2. Context
 
@@ -63,7 +63,8 @@ What M3.4 builds on:
 - **A record** is binary and fixed in form: sequence number, `uptime`, client, actor (agent name, task, attempt, or the user for `trust`), action, permission or capability, the service used, outcome, and up to 64 bytes of detail. Text fields are checked as names are. The store chains each record's SHA-256 with the previous one and checks the chain on mount (D-017).
 - **Write before acting.** A consequential action (D-012 item 11) is preceded by an `INTENT` record and followed by an `OUTCOME` record. The runtime acts only after the `INTENT` was stored; if the service cannot write (store full, failing, or unreachable within its timeout), the action is refused with a new status, `NO_AUDIT`. A missing `OUTCOME` (crash between) shows as an intent without an outcome.
 - **The anchor is the trusted console.** At start and on the `audit` command, `trust` prints the newest chain head and record count, which the service reports to it; the user can compare them with what was shown before. A disk edited offline cannot recompute the chain to a head the user already saw, and a truncated stream shows a smaller count. A secret-keyed anchor would need a key outside the store and outside the reproducible boot image; it is left to signed updates and keys (M4.3).
-- **Reading** the trail is a host tool: `cargo xtask audit <store image>` verifies the chain and prints the records; one operation can be reconstructed from its `INTENT` and `OUTCOME` (#108).
+- **Reading** the trail is a host tool: `cargo xtask store audit <store image>` verifies the chain and prints the records; one operation can be reconstructed from its `INTENT` and `OUTCOME` (#108).
+- *Implemented (#107):* `bin/audit` and `pharos_proto::audit` (`APPEND`, `HEAD`, the record format, client numbers 1 `init`, 2 `trust`, 3 the runtime), namespace 6 `audit`, `init` starting it after the store and before `trust` (which gets client 2 and shows the anchor at start and on `audit`), and `cargo xtask store audit`, which also checks that sequence numbers run from 0 and record 0 is the service's `boot` event. The new status for refused actions is the service's `UNWRITABLE`; `NO_AUDIT` for agents comes with #108. With no store, the service still runs and answers `UNWRITABLE`; a restarted service starts a new stream. No client writes records yet except the tests (#108). Records stay well under the store's 200-byte inline limit (at most 172 bytes).
 
 ### What is audited (#108)
 

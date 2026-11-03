@@ -234,6 +234,8 @@ pub enum Command<'a> {
     Revoke(&'a [u8], Permission),
     /// `yes <n>` or `no <n>`: the answer to approval request `n` (#106).
     Answer(u16, bool),
+    /// `audit`: the audit trail's boot, record count, and chain head (#107).
+    Audit,
     /// Anything else: the service answers with the commands it knows.
     Help,
 }
@@ -261,6 +263,7 @@ pub fn command(line: &[u8]) -> Command<'_> {
     }
     match (words.next(), words.next(), words.next()) {
         (Some(b"list"), None, None) => Command::List,
+        (Some(b"audit"), None, None) => Command::Audit,
         (Some(b"stop"), Some(b"all"), None) => Command::StopAll,
         (Some(b"stop"), Some(name), None) if valid_name(name) => Command::Stop(name),
         (Some(word @ (b"yes" | b"no")), Some(n), None) => match request_number(n) {
@@ -441,6 +444,8 @@ mod tests {
         assert_eq!(command(b"stop all"), Command::StopAll);
         assert_eq!(command(b"stop\tworker-1"), Command::Stop(b"worker-1"));
         assert_eq!(command(b"yes 3"), Command::Answer(3, true));
+        assert_eq!(command(b"audit"), Command::Audit);
+        assert_eq!(command(b"audit x"), Command::Help);
         assert_eq!(command(b" no  65535"), Command::Answer(65_535, false));
         assert_eq!(
             command(b"revoke worker model 2"),

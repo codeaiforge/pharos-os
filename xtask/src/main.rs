@@ -96,6 +96,10 @@ COMMANDS:
                             regular files under DIR (storage.md part 8).
     store ls <IMAGE>        Mount a store with the storage service's code, check
                             every object, and list them.
+    store audit <IMAGE>     Check every audit stream (log/<boot>) in a store: each
+                            record's CRC-32 and SHA-256 chain, its format, and
+                            consecutive sequence numbers from a boot record; then
+                            print the records (capabilities.md).
     bench-ipc [--runs <N>]  Measure the IPC round trip against D-004's 2 us budget:
                             build the release `ipc` test kernel with 100,000
                             round trips and boot it N times (default 5) under
@@ -149,6 +153,9 @@ enum Task {
         blocks: u64,
     },
     StoreLs {
+        image: PathBuf,
+    },
+    StoreAudit {
         image: PathBuf,
     },
     BenchIpc {
@@ -270,9 +277,16 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                     image: PathBuf::from(image),
                 }
             }
+            Some("audit") => {
+                let image = args.next().ok_or("store audit needs an image path")?;
+                Task::StoreAudit {
+                    image: PathBuf::from(image),
+                }
+            }
             _ => {
                 return Err(
-                    "store needs 'build <DIR> <IMAGE> --blocks <N>' or 'ls <IMAGE>'".to_owned(),
+                    "store needs 'build <DIR> <IMAGE> --blocks <N>', 'ls <IMAGE>', or 'audit <IMAGE>'"
+                        .to_owned(),
                 );
             }
         },
@@ -582,7 +596,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 24] = [
+const USER_PROGRAMS: [&str; 26] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -607,6 +621,8 @@ const USER_PROGRAMS: [&str; 24] = [
     "agents",
     "testagent",
     "agentclient",
+    "audit",
+    "auditclient",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -1278,6 +1294,14 @@ const PERMISSIONS_SCRIPT: &[console::Step] = &[
     ("approve #3: no answer; refused", "yes 3\n"),
     ("no request #3", ""),
 ];
+/// The audit service (#107): a tiny fresh store, so it fills.
+const AUDIT_TEST: &str = "audit";
+const AUDIT_BLOCKS: u64 = 16;
+/// `trust` shows the anchor at start; then the runner types `audit`.
+const AUDIT_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("audit: boot 1, 1 records, head ", "audit\n"),
+];
 /// A refused permission is never asked for again.
 const PERMISSIONS_REFUSED: &[&str] = &["approve #4"];
 const MODEL_ENV: &str = "PHAROS_MODEL";
@@ -1321,6 +1345,54 @@ const AGENTS_CRASH: Crash = Crash {
     ok: "agents check: ok",
     finished: "agents check: done",
 };
+
+/// After the `audit` test kernel (#107): every audit stream in the store
+/// verifies, as `cargo xtask store audit` checks it; boot 1 holds the 6
+/// records the first client left and boot 2 at least a dozen; and the
+/// chain head `trust` showed at start is the image's after boot 1's first
+/// record, recomputed here from the stored bytes (the anchor).
+fn audit_checks(image: &Path, console: &str) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let count = |name: &str| {
+        streams
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(0, |(_, lines)| lines.len())
+    };
+    let (first, second) = (count("audit/log/1"), count("audit/log/2"));
+    println!("  audit trail: log/1 {first} records, log/2 {second} records, all chains verified");
+    if streams.len() != 2 || first != 6 || second < 12 {
+        return Err(format!(
+            "expected log/1 with 6 records and log/2 with at least 12, got {streams:?}"
+        ));
+    }
+    // The service stamps each record with the badge it came under: the
+    // first client's two capabilities are clients 4 and 5.
+    let clients: Vec<&str> = streams[0]
+        .1
+        .iter()
+        .filter_map(|l| l.split(" client ").nth(1)?.split(' ').next())
+        .collect();
+    if clients != ["0", "4", "5", "4", "4", "4"] {
+        return Err(format!("log/1's records name clients {clients:?}"));
+    }
+    let shown = console
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("audit: boot 1, 1 records, head "))
+        .ok_or("trust did not show the anchor at start")?;
+    let want = store_image::first_chain_value(image, b"audit/log/1")?;
+    let want: String = want.iter().map(|b| format!("{b:02x}")).collect();
+    if shown.trim() != want {
+        return Err(format!(
+            "trust showed head {shown}, but the image's first record chains to {want}"
+        ));
+    }
+    if console.matches("audit: boot 1, ").count() < 2 {
+        return Err("the typed `audit` command showed nothing".into());
+    }
+    println!("  the anchor trust showed matches the image");
+    Ok(())
+}
 
 /// Crash injection: boots the kernel `c.rounds` times on the same store
 /// disk, killing QEMU at a random moment after it prints `c.started`.
@@ -1440,6 +1512,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     if name == SERVICE_TEST || name == AGENTS_TEST || name == PERMISSIONS_TEST {
         store_image::service(&out.join(STORE_IMAGE))?;
     }
+    if name == AUDIT_TEST {
+        store_image::fresh(&out.join(STORE_IMAGE), AUDIT_BLOCKS)?;
+    }
     if name == SUPERVISION_TEST {
         store_image::supervision(&out.join(STORE_IMAGE))?;
     }
@@ -1451,6 +1526,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     let (steps, refused): (&'static [console::Step], &[&str]) = match name.as_str() {
         TRUST_TEST => (TRUST_SCRIPT, TRUST_REFUSED),
         PERMISSIONS_TEST => (PERMISSIONS_SCRIPT, PERMISSIONS_REFUSED),
+        AUDIT_TEST => (AUDIT_SCRIPT, &[]),
         _ => (&[], &[]),
     };
     let script = if steps.is_empty() {
@@ -1469,11 +1545,15 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     )?;
     let label = format!("test kernel {name} (uefi)");
     let typed = script.map_or(Ok(()), |s| {
-        s.finish(refused).map(|output| {
+        s.finish(refused).and_then(|output| {
             println!("  trusted console:");
             for line in output.lines() {
                 println!("    {line}");
             }
+            if name == AUDIT_TEST {
+                audit_checks(&out.join(STORE_IMAGE), &output)?;
+            }
+            Ok(())
         })
     });
     match evaluate_boot(&run, TESTS_MARKER, timeout).and(typed) {
@@ -1511,6 +1591,14 @@ fn main() -> ExitCode {
             Task::FsLs { image } => fs_image::ls(&image),
             Task::StoreBuild { dir, image, blocks } => store_image::build(&dir, &image, blocks),
             Task::StoreLs { image } => store_image::ls(&image),
+            Task::StoreAudit { image } => store_image::audit(&image).map(|streams| {
+                for (name, lines) in streams {
+                    println!("{name}: {} records", lines.len());
+                    for line in lines {
+                        println!("  {line}");
+                    }
+                }
+            }),
             Task::BenchIpc { runs } => bench::ipc(&paths, runs),
             Task::BenchInfer { runs } => bench::infer(&paths, runs),
         }
@@ -1609,6 +1697,12 @@ mod tests {
         assert_eq!(
             parse(args(&["store", "ls", "s.img"])),
             Ok(Task::StoreLs {
+                image: PathBuf::from("s.img")
+            })
+        );
+        assert_eq!(
+            parse(args(&["store", "audit", "s.img"])),
+            Ok(Task::StoreAudit {
                 image: PathBuf::from("s.img")
             })
         );

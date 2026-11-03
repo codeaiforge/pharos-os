@@ -82,6 +82,8 @@ pub const NAMESPACES: &[(u16, &[u8])] = &[
     (4, b"crash"),
     // The agent runtime's tasks (#99), held only by the runtime.
     (5, b"agents"),
+    // The audit trail (#107), held only by the audit service.
+    (6, b"audit"),
 ];
 
 /// The namespace prefix for `badge` and whether it is read-only; `None`

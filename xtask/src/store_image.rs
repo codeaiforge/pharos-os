@@ -164,6 +164,88 @@ pub fn ls(image: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `cargo xtask store audit <image>`: every audit stream, `audit/log/<n>`,
+/// read with the store's checks (each record's CRC-32 and chain value, the
+/// head), then each record checked as `pharos_proto::audit` defines it:
+/// it parses, sequence numbers run from 0, and record 0 is the audit
+/// service's `boot` event. Returns each stream's name and its records as
+/// text lines, or the first problem.
+pub fn audit(image: &Path) -> Result<Vec<(String, Vec<String>)>> {
+    use pharos_proto::audit::{Kind as RecordKind, Record, action, client};
+    let mut store =
+        Store::mount(FileDevice::open(image)?).map_err(|e| format!("{}: {e}", image.display()))?;
+    let paths: Vec<Vec<u8>> = store.list(b"audit/log/").map(<[u8]>::to_vec).collect();
+    let mut out = Vec::new();
+    for path in paths {
+        let name = String::from_utf8_lossy(&path).into_owned();
+        let mut lines = Vec::new();
+        let mut problem = None;
+        store
+            .records(&path, |bytes| {
+                let n = lines.len() as u64;
+                let Some(r) = Record::parse(bytes) else {
+                    problem.get_or_insert(format!("record {n} is not an audit record"));
+                    return;
+                };
+                if r.sequence != n {
+                    problem.get_or_insert(format!("record {n} has sequence number {}", r.sequence));
+                }
+                let boot = r.client == client::AUDIT
+                    && r.entry.action == action::BOOT
+                    && r.entry.kind == RecordKind::Event;
+                if (n == 0) != boot {
+                    problem.get_or_insert(format!("record {n}: a boot record only comes first"));
+                }
+                let e = r.entry;
+                let mut t = [0u8; 32];
+                let permission = e
+                    .permission
+                    .map(|p| String::from_utf8_lossy(p.text(&mut t)).into_owned())
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "#{} {:.3} s client {} {:?}{} {} {} task {}/{} {} {} outcome {} {}",
+                    r.sequence,
+                    r.time as f64 / 1e6,
+                    r.client,
+                    e.kind,
+                    if e.refers != 0 {
+                        format!(" of #{}", e.refers)
+                    } else {
+                        String::new()
+                    },
+                    action::name(e.action),
+                    String::from_utf8_lossy(e.actor),
+                    e.task,
+                    e.attempt,
+                    permission,
+                    String::from_utf8_lossy(e.service),
+                    e.outcome,
+                    String::from_utf8_lossy(e.detail),
+                ));
+            })
+            .map_err(|e| format!("{name}: {e}"))?;
+        if let Some(p) = problem {
+            return Err(format!("{name}: {p}"));
+        }
+        out.push((name, lines));
+    }
+    Ok(out)
+}
+
+/// The chain value after the first record of the stream at `path`:
+/// SHA-256 of 32 zero bytes and the record (D-017).
+pub fn first_chain_value(image: &Path, path: &[u8]) -> Result<[u8; 32]> {
+    let mut store =
+        Store::mount(FileDevice::open(image)?).map_err(|e| format!("{}: {e}", image.display()))?;
+    let mut first = None;
+    store
+        .records(path, |bytes| {
+            first.get_or_insert_with(|| pharos_store::sha256(&[&[0u8; 32], bytes]));
+        })
+        .map_err(|e| format!("{}: {e}", String::from_utf8_lossy(path)))?;
+    first.ok_or_else(|| format!("{} is empty", String::from_utf8_lossy(path)))
+}
+
 /// Size of the M3.1 target model, Qwen2.5-0.5B-Instruct q8_0
 /// (inference-evaluation.md).
 pub const MODEL_LEN: usize = 675_710_816;
@@ -463,6 +545,87 @@ mod tests {
         bytes[BLOCK] ^= 1;
         fs::write(&image, &bytes).unwrap();
         assert!(ls(&image).unwrap_err().contains("no valid superblock"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A store holding `audit/log/1` with these records, at `image`.
+    fn audit_store(image: &Path, records: &[std::vec::Vec<u8>]) {
+        let mut store = Store::format(FileDevice::create(image, 32).unwrap()).unwrap();
+        for r in records {
+            store.append(b"audit/log/1", r).unwrap();
+        }
+    }
+
+    fn record(sequence: u64, client: u8, action: u8, detail: &'static [u8]) -> std::vec::Vec<u8> {
+        use pharos_proto::audit::{Entry, Kind, Record, outcome};
+        let rec = Record {
+            sequence,
+            time: 1,
+            client,
+            entry: Entry {
+                kind: Kind::Event,
+                refers: 0,
+                actor: b"",
+                task: 0,
+                attempt: 0,
+                action,
+                permission: None,
+                service: b"",
+                outcome: outcome::OK,
+                detail,
+            },
+        };
+        let mut buf = [0u8; 256];
+        let n = rec.encode(&mut buf).unwrap();
+        buf[..n].to_vec()
+    }
+
+    #[test]
+    fn audit_trails_are_checked() {
+        use pharos_proto::audit::{action, client};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/xtask")
+            .join(format!("audit-test-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let image = root.join("store.img");
+        let boot = record(0, client::AUDIT, action::BOOT, b"");
+        audit_store(
+            &image,
+            &[boot.clone(), record(1, 4, action::SUBMIT, b"MARK")],
+        );
+        let streams = audit(&image).unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].1.len(), 2);
+        assert!(streams[0].1[1].contains("client 4") && streams[0].1[1].contains("MARK"));
+        let first = first_chain_value(&image, b"audit/log/1").unwrap();
+        assert_eq!(first, pharos_store::sha256(&[&[0u8; 32], &boot]));
+        // A changed byte in a stored record breaks its CRC and chain.
+        let mut bytes = fs::read(&image).unwrap();
+        let at = bytes.windows(4).position(|w| w == b"MARK").unwrap();
+        bytes[at] ^= 1;
+        fs::write(&image, &bytes).unwrap();
+        assert!(audit(&image).is_err(), "tampered");
+        // A gap in sequence numbers, a missing or late boot record, and a
+        // record that is not one are each reported.
+        for (records, problem) in [
+            (
+                std::vec![boot.clone(), record(2, 4, action::SUBMIT, b"")],
+                "sequence number",
+            ),
+            (std::vec![record(0, 4, action::SUBMIT, b"")], "boot record"),
+            (
+                std::vec![boot.clone(), record(1, client::AUDIT, action::BOOT, b"")],
+                "boot record",
+            ),
+            (
+                std::vec![boot.clone(), b"junk".to_vec()],
+                "not an audit record",
+            ),
+        ] {
+            audit_store(&image, &records);
+            let err = audit(&image).unwrap_err();
+            assert!(err.contains(problem), "{err}");
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 }
