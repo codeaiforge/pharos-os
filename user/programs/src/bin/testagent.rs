@@ -43,6 +43,16 @@
 //! - `keeper-d` (#108): started after the audit service died, so its grants
 //!   could not be recorded and it has none: reading its file is refused;
 //!   completes with `d ok`.
+//! - `net-quiet` (agent `listener`, the `agents_net` kernel, #109): holds
+//!   the same grant as `net-talk` but never sends, and must receive nothing
+//!   while `net-talk` runs; completes with `quiet ok`.
+//! - `net-talk` (agent `netter`): a destination it does not hold is refused, an oversized
+//!   datagram too; it exchanges one with the host echo server, sends `late`
+//!   there and does not read the echo; asking for a destination not
+//!   askable is refused, asking for `10.0.2.2:47001` waits for the user's
+//!   `yes`, and then sending there works; once the user revokes
+//!   `10.0.2.2:47000`, the `late` echo is never delivered and sending
+//!   there is refused; completes with `talk ok`.
 
 #![no_std]
 #![no_main]
@@ -52,8 +62,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use pharos_proto::agents::{
-    Asked, Assigned, Begun, CHECKPOINT_AT, Deps, KEY, MAX_BUFFER, NO_AUDIT, NO_SESSION, Request,
-    encode,
+    Asked, Assigned, Begun, CHECKPOINT_AT, Datagram, Deps, KEY, MAX_BUFFER, MAX_DATAGRAM, NO_AUDIT,
+    NO_SESSION, Request, encode,
 };
 use pharos_proto::infer::{Started, Tokens};
 use pharos_proto::permission::Permission;
@@ -255,6 +265,107 @@ impl Agent {
             return self.fail(b"an unanswered request was not refused");
         }
         self.complete(b"ask ok")
+    }
+
+    fn send_to(&self, addr: [u8; 4], port: u16, payload: &[u8]) -> u8 {
+        self.buffer.write_bytes(0, payload);
+        let len = payload.len() as u32;
+        self.call(&Request::SendTo { addr, port, len }, &mut [0; 256])
+            .0
+    }
+
+    /// `RECEIVE_FROM`: the datagram and its payload, or the status.
+    fn receive_from(&self) -> Result<(Datagram, Vec<u8>), u8> {
+        let mut out = [0u8; 256];
+        let (code, n) = self.call(&Request::ReceiveFrom, &mut out);
+        let d = Datagram::parse(&out[..n]).ok_or(code)?;
+        let mut bytes = alloc::vec![0u8; d.len as usize];
+        self.buffer.read_bytes(0, &mut bytes);
+        Ok((d, bytes))
+    }
+
+    fn net_quiet(&self) -> u64 {
+        // 4 s, while `net-talk` exchanges its datagrams.
+        for _ in 0..40 {
+            if self.receive_from() != Err(status::NOT_FOUND) {
+                return self.fail(b"an agent that sent nothing received a datagram");
+            }
+            sleep(100_000);
+        }
+        self.complete(b"quiet ok")
+    }
+
+    fn net_talk(&self) -> u64 {
+        const ECHO: [u8; 4] = [10, 0, 2, 2];
+        let asked = Permission::Net {
+            addr: ECHO,
+            port: 47_001,
+        };
+        let echo = Permission::Net {
+            addr: ECHO,
+            port: 47_000,
+        };
+        if self.send_to(ECHO, 47_001, b"no") != status::NO_ACCESS {
+            return self.fail(b"a destination not granted was not refused");
+        }
+        let big = [0u8; MAX_DATAGRAM as usize + 1];
+        if self.send_to(ECHO, 47_000, &big) != status::TOO_LARGE {
+            return self.fail(b"an oversized datagram was not refused");
+        }
+        if self.send_to(ECHO, 47_000, b"agent echo") != status::OK {
+            return self.fail(b"sending to the granted destination failed");
+        }
+        let mut echoed = false;
+        for _ in 0..50 {
+            match self.receive_from() {
+                Ok((d, bytes)) => {
+                    echoed = d.addr == ECHO && d.port == 47_000 && bytes == b"agent echo";
+                    break;
+                }
+                Err(status::NOT_FOUND) => sleep(100_000),
+                Err(_) => break,
+            }
+        }
+        if !echoed {
+            return self.fail(b"no echo from 10.0.2.2:47000");
+        }
+        if self.send_to(ECHO, 47_000, b"late") != status::OK {
+            return self.fail(b"sending late failed");
+        }
+        let other = Permission::Net {
+            addr: ECHO,
+            port: 47_002,
+        };
+        if self.ask(other, 0) != Some(Asked::Refused) {
+            return self.fail(b"a destination not askable was not refused");
+        }
+        if self.ask(asked, 0) != Some(Asked::Pending)
+            || self.wait_ask(asked, 0, 30) != Some(Asked::Granted)
+        {
+            return self.fail(b"the user's yes did not grant 10.0.2.2:47001");
+        }
+        if self.send_to(ECHO, 47_001, b"asked") != status::OK {
+            return self.fail(b"sending to the approved destination failed");
+        }
+        // The user revokes 10.0.2.2:47000 once the approval shows.
+        let mut revoked = false;
+        for _ in 0..200 {
+            if self.ask(echo, 0) == Some(Asked::Refused) {
+                revoked = true;
+                break;
+            }
+            sleep(100_000);
+        }
+        if !revoked {
+            return self.fail(b"10.0.2.2:47000 was never revoked");
+        }
+        if self.receive_from() != Err(status::NOT_FOUND) {
+            return self.fail(b"a datagram from a revoked destination was delivered");
+        }
+        if self.send_to(ECHO, 47_000, b"after") != status::NO_ACCESS {
+            return self.fail(b"sending was not refused after the revocation");
+        }
+        self.complete(b"talk ok")
     }
 
     fn keeper_c(&self) -> u64 {
@@ -587,6 +698,8 @@ fn main(_: u64) -> u64 {
         b"keeper-b" => a.keeper_b(&task),
         b"ask" => a.asker(),
         b"keeper-c" => a.keeper_c(),
+        b"net-quiet" => a.net_quiet(),
+        b"net-talk" => a.net_talk(),
         b"keeper-d" if a.get(b"notes").0 == status::NO_ACCESS => a.complete(b"d ok"),
         b"keeper-d" => a.fail(b"a grant was given without its record"),
         b"wait" => loop {

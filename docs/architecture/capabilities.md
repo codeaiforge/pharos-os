@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-03 (#103),** with zeroed pages on revocation, the trusted console as the audit chain's anchor, and approvals limited to 60 s and 4 waiting. Built by: kernel revocation of mapped memory (#104), runtime permissions (#105), approval on the trusted path (#106), the audit service (#107), auditing every consequential action (#108), agent networking (#109), and adversarial tests (#110). **Implemented:** kernel revocation of mapped memory (#104), runtime permissions with `revoke` on the trusted console (#105), approval on the trusted path (#106), the audit service (#107), and auditing every grant, revocation, and consequential action (#108).
+**Planned. Design approved by the maintainer on 2026-11-03 (#103),** with zeroed pages on revocation, the trusted console as the audit chain's anchor, and approvals limited to 60 s and 4 waiting. Built by: kernel revocation of mapped memory (#104), runtime permissions (#105), approval on the trusted path (#106), the audit service (#107), auditing every consequential action (#108), agent networking (#109), and adversarial tests (#110). **Implemented:** kernel revocation of mapped memory (#104), runtime permissions with `revoke` on the trusted console (#105), approval on the trusted path (#106), the audit service (#107), auditing every grant, revocation, and consequential action (#108), and agent networking (#109).
 
 ## 2. Context
 
@@ -17,7 +17,7 @@ M3.3 runs agents that hold one capability, `SEND` on the agent runtime, and are 
 What M3.4 builds on:
 - **Kernel revocation** marks every capability derived from the revoked one, and each fails its next lookup (M2.7). Memory already mapped through a revoked `Memory` or device capability stays mapped (carried from M2.9 and M3.0).
 - **The store's streams** are append-only and chain each record with SHA-256, checked on mount (D-017). Nothing writes audit records yet, and the chain's head is not anchored.
-- **The network service** gives each client one UDP port (its badge) and lets it send anywhere (carried from M2.10).
+- **The network service** gives each client one UDP port (its badge) and lets it send anywhere (carried from M2.10; per-client destinations since #109).
 
 ## 3. Design
 
@@ -33,7 +33,7 @@ What M3.4 builds on:
 - **Revocation** takes a grant away while the agent runs: the next request that needs it answers `NO_ACCESS`, and an inference session or network flow opened with it is ended at once. The agent keeps running and can finish without it.
 - **Who revokes:** the user on the trusted console (`revoke <agent> <permission>`), and the runtime itself on expiry. Revocations are audited.
 - **The logic** (a task's grants, checks, expiry, revocation) is a host-tested `no_std` module, as the task logic is.
-- *Implemented (#105):* `pharos_proto::permission` (the wire and typed forms), `pharos_programs::grants`, the manifest key `data` with the policy entry's `data` field, `DATA_PUT` and `DATA_GET`, and `revoke` on the trusted console. The *may ask for* list and approvals come with #106, network grants with #109. Revoking `data read` or `data write` takes all data access. A revocation also holds when the task's agent restarts (the runtime keeps it by task, in memory). `trust` sends `REVOKE` with a non-blocking send for at most 2 s and says the runtime is not answering if it cannot; the runtime answers `REVOKED` the same way, for at most 1 s.
+- *Implemented (#105):* `pharos_proto::permission` (the wire and typed forms), `pharos_programs::grants`, the manifest key `data` with the policy entry's `data` field, `DATA_PUT` and `DATA_GET`, and `revoke` on the trusted console. The *may ask for* list and approvals came with #106, network grants with #109. Revoking `data read` or `data write` takes all data access. A revocation also holds when the task's agent restarts (the runtime keeps it by task, in memory). `trust` sends `REVOKE` with a non-blocking send for at most 2 s and says the runtime is not answering if it cannot; the runtime answers `REVOKED` the same way, for at most 1 s.
 
 ### Kernel: revoking mapped memory (#104)
 
@@ -49,13 +49,14 @@ What M3.4 builds on:
 - **The runtime asks `trust`** with a new `trust` operation, `APPROVE` (request number, agent slot, task ID, permission kind and value, optional deadline), all fields structured. `trust` builds the console text itself from them: `approve #3: worker task 12 wants net 10.0.2.2:47000 for this task? (yes 3 / no 3)`. An agent controls only which listed permission it asks for, never the text.
 - **The user answers** `yes <n>` or `no <n>`. `trust` sends the answer to the runtime with a non-blocking send on a `SEND` capability badged for answers, which the runtime gives it at start; `trust` never waits on the runtime. **No answer within 60 s, `no`, a full queue, or `trust` unreachable mean no** (D-018 item 4). At most 4 requests wait at once; more are refused without asking.
 - **Approvals hold for the task** (or until their deadline) and are audited with the user's answer.
-- *Implemented (#106):* `ASK` (`GRANTED`, `REFUSED`, `PENDING`) and `ANSWER` in `agents`, `APPROVE` and `RESOLVED` in `trust`, and the policy entry's `ask_models` and `ask_data` (network destinations become askable with #109). The runtime decides every outcome, including the timeout (60 s; 5 s with the test policy table, so the test fits the runner's limit), and tells `trust` with `RESOLVED`, which `trust` shows: `granted`, `refused`, `no answer; refused`, or `the task ended`. `trust` keeps the open request numbers only to answer `no request #<n>` for any other. A refusal or an unanswered request holds for the task: asking again is refused without a prompt. An approval also comes back when the task's agent restarts. Auditing comes with #108.
+- *Implemented (#106):* `ASK` (`GRANTED`, `REFUSED`, `PENDING`) and `ANSWER` in `agents`, `APPROVE` and `RESOLVED` in `trust`, and the policy entry's `ask_models` and `ask_data` (network destinations became askable with #109: `ask_net`). The runtime decides every outcome, including the timeout (60 s; 5 s with the test policy table, so the test fits the runner's limit), and tells `trust` with `RESOLVED`, which `trust` shows: `granted`, `refused`, `no answer; refused`, or `the task ended`. `trust` keeps the open request numbers only to answer `no request #<n>` for any other. A refusal or an unanswered request holds for the task: asking again is refused without a prompt. An approval also comes back when the task's agent restarts. Auditing comes with #108.
 
 ### Agent networking (#109)
 
 - **Agents have no network unless granted** `net <address>:<port>`. Datagrams go through new runtime requests (`SEND_TO`, `RECEIVE_FROM`, payload through the agent's buffer); the runtime checks the grant and forwards to the network service on its own client port.
 - **The network service checks destinations too.** `init`'s table gives each network client a list of allowed destinations as well as its port, sent with a new request accepted only under `init`'s badge, as `RELEASE` is. A client sending elsewhere gets `NO_ACCESS`. The runtime's list is the union of the destinations in the policy table, so a runtime bug cannot reach anything nobody listed.
 - Replies are delivered only from the granted destination.
+- *Implemented (#109):* the manifest key `net` (destinations, comma-separated, at most 4, each in the entry's `net`) and the policy entry's `net` and `ask_net`; `SEND_TO` (14) and `RECEIVE_FROM` (15) in `agents` with the `Datagram` reply; handle 9 of the runtime, `SEND` on the network service badged with its port 40100; `ALLOW` and `POLL` in `net` ([networking.md](networking.md)), with `init` sending every client's list each time the service reports ready (the runtime's boot list is empty, as its boot policy table is). A send needs the grant, at most 248 bytes, and its `INTENT` stored (else `NO_AUDIT`); the network service's own answer (`NO_ACCESS` for a destination it does not list, `BUSY` while one waits for ARP) is passed on. The runtime cannot wait on a deferred `recv` (it serves one message at a time, and the service drops a reply its caller is not waiting for), so `RECEIVE_FROM` polls the service (`POLL`), keeps each datagram for every running agent that sent to its source (at most 4 each, the oldest dropped), and gives one only if the agent still holds that grant, so a revoked or expired destination's replies are dropped. `RECEIVE_FROM` answers `NOT_FOUND` at once when nothing is waiting; the agent polls. Revoking `net` takes only that destination. Limit: two agents granted the same destination that both sent to it both get its replies, since they share the runtime's port.
 
 ### The audit service (#107)
 
@@ -71,7 +72,7 @@ What M3.4 builds on:
 - **Grants and revocations:** `init`'s grants at service start, each task attempt's grants, approvals and refusals, revocations, expiries, and stops from the trusted console.
 - **Consequential agent actions** (D-012 item 11): inference, store writes for the agent, network sends, and task submissions and cancellations.
 - **Not audited:** reads of the agent's own task, checkpoints, `LOG` lines (on the console), and control requests that change nothing.
-- *Implemented (#108):* the runtime (client 3, handle 8) records each grant at the start of an attempt and gives none whose record fails; an approval is given only once recorded (else it is refused); revocations, expiries, and refusals always take effect and are recorded when the trail can be; inference, `DATA_PUT`, `SUBMIT`, and `CANCEL` are each an `INTENT` stored before acting (else `NO_AUDIT`, the new status in `agents`) and an `OUTCOME` after. An audit record may take 2 s before the action is refused. `trust` (client 2) records the user's stops (after stopping), revocations, and answers as actor `user`; `init` (no badge, client 1) records a `start` for each service, also those started before the audit service was ready. Network sends come with #109. While the trail is down, `SUBMIT` and `CANCEL` are refused too; stopping agents never depends on it (the trusted console's `stop` works regardless).
+- *Implemented (#108):* the runtime (client 3, handle 8) records each grant at the start of an attempt and gives none whose record fails; an approval is given only once recorded (else it is refused); revocations, expiries, and refusals always take effect and are recorded when the trail can be; inference, `DATA_PUT`, `SUBMIT`, and `CANCEL` are each an `INTENT` stored before acting (else `NO_AUDIT`, the new status in `agents`) and an `OUTCOME` after. An audit record may take 2 s before the action is refused. `trust` (client 2) records the user's stops (after stopping), revocations, and answers as actor `user`; `init` (no badge, client 1) records a `start` for each service, also those started before the audit service was ready. Network sends are recorded the same way since #109 (`net send`, with the destination). While the trail is down, `SUBMIT` and `CANCEL` are refused too; stopping agents never depends on it (the trusted console's `stop` works regardless).
 
 ### The sandbox
 
@@ -99,7 +100,7 @@ CPU time is not limited per agent yet (M3.5).
   - permissions: an agent loses a model mid-task and is refused, without a restart; an expired grant (#105);
   - approval: the runner answers yes, no, and nothing (#106);
   - audit: a task's operations reconstructed from the trail; an action refused while the store is full; a crash between `INTENT` and `OUTCOME` (#107, #108);
-  - networking: a granted destination reaches the host echo endpoint, others are refused by the runtime and, for a direct client, by the network service (#109);
+  - networking: a granted destination reaches the host echo endpoint, others are refused by the runtime and, for a direct client, by the network service (#109; `agents_net` and `network`);
   - adversarial: the hostile agent of #110.
 
 ## 6. Alternatives

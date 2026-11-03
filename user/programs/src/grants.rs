@@ -4,7 +4,7 @@
 //! and gone at their deadline. Nothing here outlives the attempt.
 
 use alloc::vec::Vec;
-use pharos_proto::manifest::Data;
+use pharos_proto::manifest::{Data, Dest};
 use pharos_proto::permission::Permission;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,9 +20,9 @@ pub struct Grants {
 }
 
 impl Grants {
-    /// What an attempt gets: model `n` for each bit `n` of `models`, and
-    /// `data`. None of them expires.
-    pub fn new(models: u32, data: Data) -> Self {
+    /// What an attempt gets: model `n` for each bit `n` of `models`,
+    /// `data`, and each destination in `net`. None of them expires.
+    pub fn new(models: u32, data: Data, net: &[Dest]) -> Self {
         let mut g = Self::default();
         for n in 1..=pharos_proto::permission::MAX_MODEL {
             if models & 1 << n != 0 {
@@ -33,6 +33,9 @@ impl Grants {
             Data::None => {}
             Data::Read => g.add(Permission::DataRead, None),
             Data::Write => g.add(Permission::DataWrite, None),
+        }
+        for &(addr, port) in net {
+            g.add(Permission::Net { addr, port }, None);
         }
         g
     }
@@ -84,20 +87,27 @@ mod tests {
 
     #[test]
     fn built_from_the_entry() {
-        let g = Grants::new(1 << 2 | 1 << 31, Data::Read);
+        let g = Grants::new(1 << 2 | 1 << 31, Data::Read, &[]);
         assert!(g.allows(&Permission::Model(2), 0));
         assert!(g.allows(&Permission::Model(31), 0));
         assert!(!g.allows(&Permission::Model(1), 0));
         assert!(g.allows(&Permission::DataRead, 0));
         assert!(!g.allows(&Permission::DataWrite, 0));
         assert!(!g.allows(&NET, 0), "nothing else");
-        assert_eq!(Grants::new(1, Data::None).list(), &[], "no model 0");
-        assert!(Grants::new(0, Data::Write).allows(&Permission::DataRead, 0));
+        let g = Grants::new(0, Data::None, &[([10, 0, 2, 2], 47_000)]);
+        assert!(g.allows(&NET, 0));
+        let other = Permission::Net {
+            addr: [10, 0, 2, 2],
+            port: 47_001,
+        };
+        assert!(!g.allows(&other, 0), "only that destination");
+        assert_eq!(Grants::new(1, Data::None, &[]).list(), &[], "no model 0");
+        assert!(Grants::new(0, Data::Write, &[]).allows(&Permission::DataRead, 0));
     }
 
     #[test]
     fn revoked_at_once() {
-        let mut g = Grants::new(1 << 2 | 1 << 3, Data::Write);
+        let mut g = Grants::new(1 << 2 | 1 << 3, Data::Write, &[]);
         assert!(g.revoke(&Permission::Model(2)));
         assert!(!g.allows(&Permission::Model(2), 0));
         assert!(g.allows(&Permission::Model(3), 0), "only that one");
@@ -105,14 +115,14 @@ mod tests {
         assert!(g.revoke(&Permission::DataRead), "read takes write too");
         assert!(!g.allows(&Permission::DataRead, 0));
         assert!(!g.allows(&Permission::DataWrite, 0));
-        let mut g = Grants::new(0, Data::Read);
+        let mut g = Grants::new(0, Data::Read, &[]);
         assert!(g.revoke(&Permission::DataWrite), "write takes read too");
         assert!(!g.allows(&Permission::DataRead, 0));
     }
 
     #[test]
     fn expire_at_their_deadline() {
-        let mut g = Grants::new(0, Data::None);
+        let mut g = Grants::new(0, Data::None, &[]);
         g.add(NET, Some(100));
         g.add(Permission::Model(1), None);
         assert!(g.allows(&NET, 99));

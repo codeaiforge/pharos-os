@@ -6,10 +6,13 @@
 //! - Argument 1, port 40000: pings the gateway, exchanges a datagram with
 //!   the host echo server at `10.0.2.2:47000` (run by `cargo xtask`, issue
 //!   #64), sends a datagram to port 40001 on our own address and gets `pong` back, sends one to a port no
-//!   client holds, and checks the service's counters.
+//!   client holds, and checks the service's counters. Each is a
+//!   destination `init` listed for it (#109); one it did not list, a ping
+//!   to an address it did not list, and an `ALLOW` of its own are refused
+//!   with `NO_ACCESS`, and `POLL` with nothing waiting answers `NOT_FOUND`.
 //! - Argument 2, port 40001: registers, reports ready, answers one
 //!   datagram with `pong`, then idles.
-//! - Argument 3, badge 0: must be refused.
+//! - Argument 3, a badge over 16 bits: must be refused.
 //!
 //! Each step prints `ok <step>` or `FAIL <step>`; the exit code is the
 //! number of failures.
@@ -19,7 +22,7 @@
 
 use pharos_programs::net::client::{NO_PORT, OK, ping, raw, recv, send_to, stats};
 use pharos_programs::net::{GATEWAY, OUR_IP, stat};
-use pharos_proto::net::{NAME, Request, VERSION, encode};
+use pharos_proto::net::{Allowed, NAME, NO_ACCESS, NOT_FOUND, Request, VERSION, encode};
 use pharos_proto::{Info, versions};
 use pharos_user::{Error, debug_write, endpoint_create, receive, send, try_send};
 
@@ -104,6 +107,33 @@ fn main(arg: u64) -> u64 {
                 "sender: datagram to a port nobody holds accepted",
                 send_to(NET, reply, OUR_IP, 40999, b"lost") == Ok(OK),
             );
+            report(
+                &mut f,
+                "sender: datagram to an unlisted destination refused with NO_ACCESS",
+                send_to(NET, reply, GATEWAY, HOST_ECHO_PORT + 1, b"no") == Ok(NO_ACCESS),
+            );
+            report(
+                &mut f,
+                "sender: ping to an unlisted address refused with NO_ACCESS",
+                ping(NET, reply, [10, 0, 2, 3], 2) == Ok(NO_ACCESS),
+            );
+            let mut msg = [0u8; 64];
+            let allow = Request::Allow {
+                client: 40000,
+                dests: Allowed::new(&[([10, 0, 2, 3], 53)]).unwrap_or(Allowed::NONE),
+            };
+            let n = encode(&allow, &mut msg).unwrap_or(0);
+            report(
+                &mut f,
+                "sender: its own ALLOW refused with NO_ACCESS",
+                raw(NET, reply, &msg[..n]).is_ok_and(|(r, len)| len == 1 && r[0] == NO_ACCESS),
+            );
+            let n = encode(&Request::Poll, &mut msg).unwrap_or(0);
+            report(
+                &mut f,
+                "sender: POLL with nothing waiting answers NOT_FOUND",
+                raw(NET, reply, &msg[..n]).is_ok_and(|(r, len)| len == 1 && r[0] == NOT_FOUND),
+            );
             let counters = stats(NET, reply);
             report(
                 &mut f,
@@ -163,7 +193,7 @@ fn main(arg: u64) -> u64 {
         3 => {
             report(
                 &mut f,
-                "unbadged: refused with NO_PORT",
+                "unported: refused with NO_PORT",
                 send_to(NET, reply, GATEWAY, 1, b"x") == Ok(NO_PORT),
             );
             f

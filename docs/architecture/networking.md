@@ -70,7 +70,7 @@ All parsing is in `pharos_programs::net`: safe Rust, no allocation per packet, e
 
 ### Network capability and client interface
 
-- **A client's network capability is a `SEND` capability on the service's endpoint,** badged by `init` with the one UDP port the client may use (1–65535). Badge 0, which `init`'s own unbadged capability has, is refused. Revoking the capability ends the client's access. The service binds a port to a client on first use and never lets another badge use it.
+- **A client's network capability is a `SEND` capability on the service's endpoint,** badged by `init` with the one UDP port the client may use (1–65535). Badge 0, which `init`'s own unbadged capability has, may only send `ALLOW` (#109); anything else under it is refused, and `init` never gives a client badge 0. Revoking the capability ends the client's access. The service binds a port to a client on first use and never lets another badge use it.
 - **Requests use `call`** (below). Each request and reply is one message, with little-endian fields. Since #92 this is interface `net`, version 1 (D-019): the codec is `pharos_proto::net`, shared by the service and its clients and fuzzed on the host. Every request starts with the version (1) and the operation; the byte that was padding before #92 now holds the version.
 
   | Op | Request | Reply |
@@ -79,12 +79,16 @@ All parsing is in `pharos_programs::net`: safe Rust, no allocation per packet, e
   | 2 `recv` | `[1, 2]` | `[status, 0, src_port:u16, src_ip:[u8;4], payload…]`, deferred until a datagram arrives |
   | 3 `ping` | `[1, 3, seq:u16, dst_ip:[u8;4]]` | `[status, 0, seq:u16]`, deferred until the echo reply |
   | 4 `stats` | `[1, 4]` | `[status, 0, 0, 0, counters (u32 each)…]`: frames received and sent, drops by reason |
+  | 5 `ALLOW` (#109) | `[1, 5, client_port:u16, count, (ip:[u8;4], port:u16)…]` (at most 8), only without a badge (`init`) | `[status]` |
+  | 6 `POLL` (#109) | `[1, 6]` | as `recv`, or `[7]` (not found) at once: never deferred |
   | 0xF0 `INFO` (common) | `[1, 0xF0]` | `[status, 1, 1, 3, "net"]`: versions 1 to 1, no details |
 
-  Status codes: the common ones (D-019): 0 OK, 1 bad request (including a malformed request), 2 `VERSION` (another version: the reply is `[2, 1, 1]`, the supported range), 4 busy (a receive or ping is already outstanding, or a datagram already waits for ARP); and the interface's own: 32 no port (badge 0 or above 65535), 33 no room (8 clients already known). Before #92, codes 2–5 were too large, busy, no port, and no room; a payload over 248 bytes cannot arrive in a 256-byte message, so "too large" is gone.
+  Status codes: the common ones (D-019): 0 OK, 1 bad request (including a malformed request), 2 `VERSION` (another version: the reply is `[2, 1, 1]`, the supported range), 3 no access (a destination or ping address not listed for the client, or `ALLOW` from a client), 4 busy (a receive or ping is already outstanding, or a datagram already waits for ARP), 7 not found (`POLL` with nothing waiting); and the interface's own: 32 no port (badge 0 or above 65535), 33 no room (8 clients already known). Before #92, codes 2–5 were too large, busy, no port, and no room; a payload over 248 bytes cannot arrive in a 256-byte message, so "too large" is gone.
 - **Counters** (`stats`): frames received and sent, frames dropped by the parser (malformed or not for us), datagrams for a port no client holds, replies dropped because the client was not waiting, and datagrams dropped from a full queue.
 - **Clients are known by port from their first request** and stay known; with 8 ports seen, new ones get `NO_ROOM`. A client registers by making any request (the echoer in the tests asks for `stats` first), so datagrams that arrive before its first `recv` are queued.
-- **No destination policy in M2.10:** a client may send to any address and port. Per-destination grants come with D-012 (M3.4).
+- **Destinations (#109, D-012):** a client may send only to the destinations listed for it, and ping only their addresses; anything else is refused with `NO_ACCESS`. A client with no list sends nowhere. The lists come from `init`'s table (each network capability names its port and destinations), sent with `ALLOW` each time the service reports ready, so a restarted service gets them again. `ALLOW` is accepted only without a badge, which only `init` holds; `init` never hands out a network capability with badge 0.
+  - *Implemented (#109):* `ALLOW`, `POLL` (for the agent runtime, which serves one message at a time and cannot wait on a deferred `recv`; the service's queue keeps 4 datagrams per client), and the checks. Incoming datagrams are not filtered by source: the runtime delivers an agent only replies from its granted destinations ([capabilities.md](capabilities.md)).
+  - *Carried from M2.10:* before #109 a client could send to any address and port.
 
 ### IPC additions (kernel)
 
@@ -117,7 +121,8 @@ All parsing is in `pharos_programs::net`: safe Rust, no allocation per packet, e
   - replies never block the service;
   - per-client queues and outstanding requests are bounded.
 - **Device:** as in drivers.md; DMA has no IOMMU (D-008 limit).
-- **Limits:** no destination policy and no rate limits beyond the queues and the transmit ring; no TCP; the service has no timeouts, so a ping to a silent host stays outstanding until the client gives up or ends.
+- **Destinations:** each client reaches only what `init` listed (#109).
+- **Limits:** no rate limits beyond the queues and the transmit ring; no TCP; the service has no timeouts, so a ping to a silent host stays outstanding until the client gives up or ends.
 - The threat model gains a "Networking" section (planned).
 
 ## 5. Testing
@@ -130,7 +135,7 @@ All parsing is in `pharos_programs::net`: safe Rust, no allocation per packet, e
 | Host, `xtask` | The echo server starts, echoes, stops, and reports a taken port |
 | QEMU, `ipc` additions | `call` gets its reply even when the server answers at once; a non-blocking send with no receiver returns `WOULD_BLOCK` and queues nothing |
 | QEMU, `virtio_net` | The driver reads the MAC, resolves the gateway with ARP, and sends and receives a frame; a driver killed mid-transfer leaves its device stopped and every frame returned |
-| QEMU, `network` | `init` starts the network service and clients with port badges 40000 and 40001: a UDP datagram to `10.0.2.2:47000` comes back from the host echo server, a ping to the gateway is answered, and a datagram between the two clients over `10.0.2.15` gets a reply. Refused: a client with badge 0. A datagram to a port with no client is counted. `stats` reports the counts. (Two clients with the same port are not tested: `init` sets every badge, so that would be an `init` bug, not a client's choice.) |
+| QEMU, `network` | `init` starts the network service and clients with port badges 40000 and 40001: a UDP datagram to `10.0.2.2:47000` comes back from the host echo server, a ping to the gateway is answered, and a datagram between the two clients over `10.0.2.15` gets a reply. Refused: a client whose badge is no port (over 16 bits); a destination and a ping address not listed for the client, and its own `ALLOW` (`NO_ACCESS`, #109). `POLL` with nothing waiting answers not found. A datagram to a port with no client is counted. `stats` reports the counts. (Two clients with the same port are not tested: `init` sets every badge, so that would be an `init` bug, not a client's choice.) |
 
 ## 6. Alternatives
 
@@ -142,6 +147,6 @@ All parsing is in `pharos_programs::net`: safe Rust, no allocation per packet, e
 ## 7. Open questions
 
 - **TCP:** our own or `smoltcp`, and when.
-- **Destination policy and rate limits** for clients (D-012, M3.4).
+- **Rate limits** for clients.
 - **Larger datagrams for clients** (shared memory or several messages).
 - **IPv6 and DNS.**

@@ -12,6 +12,9 @@
 //! the task if the store has none, and waits for it to end. Argument 2:
 //! the `permissions` kernel (#105): `keeper-a`, then `keeper-b`, whose
 //! permissions the runner revokes on the trusted console while it runs.
+//! Argument 3: the `agents_net` kernel (#109): a `netter` task that talks
+//! to the host echo server, and a `listener` task (the same grant) that
+//! sends nothing.
 
 #![no_std]
 #![no_main]
@@ -163,13 +166,16 @@ fn main(arg: u64) -> u64 {
     if arg == 2 {
         return permissions(c);
     }
+    if arg == 3 {
+        return net(c);
+    }
     let mut out = [0u8; 256];
 
     let (_, n) = c.call(&Request::Info, &mut out);
     let info = Info::parse(&out[..n]);
     c.step(
-        "INFO: interface agents, four agents accepted, none running",
-        info.is_some_and(|i| i.name == NAME && i.details == [4, 0]),
+        "INFO: interface agents, six agents accepted, none running",
+        info.is_some_and(|i| i.name == NAME && i.details == [6, 0]),
     );
     let refused = [&b"greedy"[..], b"absent", b"noentry"]
         .iter()
@@ -263,7 +269,7 @@ fn main(arg: u64) -> u64 {
         .iter()
         .all(|&t| c.status(t).is_some_and(|s| s.state == State::Cancelled));
     let (_, n) = c.call(&Request::Info, &mut out);
-    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [4, 0]);
+    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [6, 0]);
     c.step(
         "cancelling running and pending tasks stops their agents",
         cancelled && all && idle,
@@ -398,6 +404,34 @@ fn permissions(mut c: Client) -> u64 {
     c.step(
         "and a new task cannot be submitted (NO_AUDIT)",
         c.submit(b"keeper", b"keeper-a") == Err(pharos_proto::agents::NO_AUDIT),
+    );
+    let _ = send(REPORT, b"done", 0, 0, 0);
+    c.failed
+}
+
+/// The `agents_net` kernel: `net-quiet` runs while `net-talk` exchanges
+/// datagrams.
+fn net(mut c: Client) -> u64 {
+    let quiet = c.submit(b"listener", b"net-quiet");
+    let talk = c.submit(b"netter", b"net-talk");
+    let ended = |c: &Client, task: Result<u32, u8>, want: &[u8]| {
+        let Some((s, result)) = task.ok().and_then(|t| c.wait(t, 60)) else {
+            return false;
+        };
+        if result != want {
+            let mut line = Vec::from(&b"net result: "[..]);
+            line.extend_from_slice(&result[..result.len().min(200)]);
+            let _ = debug_write(CONSOLE, &line);
+        }
+        s.state == State::Done && result == want
+    };
+    c.step(
+        "an agent sends only to granted destinations and gets their replies until revoked",
+        ended(&c, talk, b"talk ok"),
+    );
+    c.step(
+        "another agent with the same grant that sent nothing receives nothing",
+        ended(&c, quiet, b"quiet ok"),
     );
     let _ = send(REPORT, b"done", 0, 0, 0);
     c.failed

@@ -7,7 +7,8 @@
 //! read-only filesystem (agent programs and manifests), 5 the inference
 //! service (`SEND`, badged), 6 `trust` (`SEND`, badged as the runtime), 7
 //! the storage service, badged for namespace `agents` (read-write), 8 the
-//! audit service (`SEND`, client 3; #108). The
+//! audit service (`SEND`, client 3; #108), 9 the network service (`SEND`,
+//! badged with the runtime's UDP port; #109). The
 //! argument selects the policy table (0: boot, empty; 1: the `agents` and
 //! `agents_crash` test kernels).
 //!
@@ -41,6 +42,14 @@
 //! record and acted on only once it is stored, else refused with
 //! `NO_AUDIT`; an `OUTCOME` record follows. Revocations, expiries, and
 //! refusals always take effect and are recorded when the trail can be.
+//!
+//! Networking (#109): an agent sends a datagram (`SEND_TO`) only to a
+//! destination it holds `net` for; each send is audited like the other
+//! consequential actions, and goes out on the runtime's own port. The
+//! network service lets that port reach only what `init` listed: the union
+//! of the policy table's destinations. `RECEIVE_FROM` polls the service
+//! and keeps each datagram for every agent that sent to its source; it is
+//! delivered only if the agent still holds that grant when it takes it.
 
 #![no_std]
 #![no_main]
@@ -58,7 +67,8 @@ use pharos_proto::agents::{
 };
 use pharos_proto::audit::{self, Entry as Record, Kind, action, outcome};
 use pharos_proto::infer::{self, Request as InferRequest, Started, Tokens};
-use pharos_proto::manifest::{self, Data, Entry, Why};
+use pharos_proto::manifest::{self, Data, Dest, Entry, Why};
+use pharos_proto::net::{self, Request as NetRequest};
 use pharos_proto::permission::Permission;
 use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::{Info, refusal, status, trust};
@@ -79,6 +89,13 @@ const INFER: Handle = 5;
 const TRUST: Handle = 6;
 const STORE: Handle = 7;
 const AUDIT: Handle = 8;
+const NET: Handle = 9;
+/// How long the network service may take to answer.
+const NET_US: u64 = 1_000_000;
+/// Datagrams kept for one agent; the oldest goes first.
+const MAX_INBOX: usize = 4;
+/// The host echo server (`cargo xtask`, networking.md), through slirp.
+const HOST_ECHO: Dest = ([10, 0, 2, 2], 47_000);
 /// How long an audit record may take before the action is refused.
 const AUDIT_US: u64 = 2_000_000;
 /// The runtime's buffer at the storage service: the largest task file.
@@ -114,6 +131,8 @@ const TEST: &[Entry] = &[
         data: Data::None,
         ask_models: 0,
         ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
     },
     Entry {
         name: b"greedy",
@@ -126,6 +145,8 @@ const TEST: &[Entry] = &[
         data: Data::None,
         ask_models: 0,
         ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
     },
     Entry {
         name: b"absent",
@@ -138,6 +159,8 @@ const TEST: &[Entry] = &[
         data: Data::None,
         ask_models: 0,
         ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
     },
     Entry {
         name: b"counter",
@@ -150,6 +173,8 @@ const TEST: &[Entry] = &[
         data: Data::None,
         ask_models: 0,
         ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
     },
     // The `permissions` kernel's (#105).
     Entry {
@@ -163,6 +188,8 @@ const TEST: &[Entry] = &[
         data: Data::Write,
         ask_models: 0,
         ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
     },
     // Gets nothing; may ask for model 2 and data access (#106).
     Entry {
@@ -176,6 +203,39 @@ const TEST: &[Entry] = &[
         data: Data::None,
         ask_models: 1 << 2,
         ask_data: Data::Write,
+        net: &[],
+        ask_net: &[],
+    },
+    // The `agents_net` kernel's (#109): gets the host echo server, may
+    // ask for the port after it.
+    Entry {
+        name: b"netter",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 0,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
+        net: &[HOST_ECHO],
+        ask_net: &[(HOST_ECHO.0, HOST_ECHO.1 + 1)],
+    },
+    // The same grant as `netter`, which the user's `revoke netter` leaves.
+    Entry {
+        name: b"listener",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 0,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
+        net: &[HOST_ECHO],
+        ask_net: &[],
     },
 ];
 
@@ -189,6 +249,7 @@ struct Limits {
     progress_us: u64,
     task_us: u64,
     data: Data,
+    net: manifest::Net,
 }
 
 /// The storage service as [`Files`], through the runtime's buffer there.
@@ -363,6 +424,9 @@ struct Slot {
     session_model: u8,
     ending: Option<Ending>,
     grants: Grants,
+    /// Destinations it sent to, and datagrams from them kept for it.
+    peers: Vec<Dest>,
+    inbox: Vec<(Dest, Vec<u8>)>,
 }
 
 struct Runtime {
@@ -399,8 +463,7 @@ fn askable(entry: &Entry, p: &Permission) -> bool {
         Permission::Model(n) => n <= 31 && entry.ask_models & 1 << n != 0,
         Permission::DataRead => entry.ask_data >= Data::Read,
         Permission::DataWrite => entry.ask_data == Data::Write,
-        // Network grants come with #109.
-        Permission::Net { .. } => false,
+        Permission::Net { addr, port } => entry.ask_net.contains(&(addr, port)),
     }
 }
 
@@ -503,6 +566,7 @@ fn load(e: &'static Entry, table: &'static [Entry]) -> Result<Limits, &'static [
         progress_us: u64::from(m.progress_ms) * 1000,
         task_us: u64::from(m.task_ms) * 1000,
         data: m.data,
+        net: m.net,
     })
 }
 
@@ -636,10 +700,12 @@ impl Runtime {
             session_model: 0,
             ending: None,
             grants: Grants::default(),
+            peers: Vec::new(),
+            inbox: Vec::new(),
         });
         // Every grant is recorded before it is given; none is given if a
         // record fails (#108).
-        let mut g = Grants::new(limits.models, limits.data);
+        let mut g = Grants::new(limits.models, limits.data, limits.net.as_slice());
         for (_, p, until) in self.approved.iter().filter(|(t, ..)| *t == id) {
             g.add(*p, *until);
         }
@@ -1084,6 +1150,69 @@ impl Runtime {
                 out[1..5].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
                 Ok(5)
             }
+            Request::SendTo { addr, port, len } => {
+                let p = Permission::Net { addr, port };
+                let allowed = self.slots[i]
+                    .as_ref()
+                    .is_some_and(|s| s.grants.allows(&p, now));
+                if !allowed {
+                    return Err(status::NO_ACCESS);
+                }
+                if len > agents::MAX_DATAGRAM {
+                    return Err(status::TOO_LARGE);
+                }
+                if len as usize > buffer_len {
+                    return Err(status::NO_BUFFER);
+                }
+                let mut payload = alloc::vec![0u8; len as usize];
+                if let Some(b) = buffer {
+                    b.read_bytes(0, &mut payload);
+                }
+                let req = NetRequest::Send {
+                    ip: addr,
+                    port,
+                    payload: &payload,
+                };
+                let mut msg = [0u8; 256];
+                let n = net::encode(&req, &mut msg).ok_or(status::INTERNAL)?;
+                let agent = limits.entry.name;
+                let seq = self.intent(agent, id, action::NET_SEND, Some(p), net::NAME, b"")?;
+                // The request is sent from the reply buffer too.
+                let mut reply = [0u8; 256];
+                let code = match call_timeout(NET, &msg[..n], self.reply, &mut reply, NET_US) {
+                    Ok(Received::Message { len, .. }) if len >= 1 => reply[0],
+                    _ => status::INTERNAL,
+                };
+                self.outcome(seq, agent, id, action::NET_SEND, code == net::OK, b"");
+                if code != net::OK {
+                    return Err(code);
+                }
+                if let Some(s) = self.slots[i].as_mut() {
+                    if !s.peers.contains(&(addr, port)) {
+                        s.peers.push((addr, port));
+                    }
+                }
+                Ok(done(out))
+            }
+            Request::ReceiveFrom => {
+                self.poll_net();
+                let s = self.slots[i].as_mut().ok_or(NO_SESSION)?;
+                while !s.inbox.is_empty() {
+                    let ((addr, port), bytes) = s.inbox.remove(0);
+                    // Revoked or expired since it arrived: dropped.
+                    if !s.grants.allows(&Permission::Net { addr, port }, now) {
+                        continue;
+                    }
+                    let b = s.buffer.as_ref().filter(|b| b.len() >= bytes.len());
+                    let b = b.ok_or(status::NO_BUFFER)?;
+                    b.write_bytes(0, &bytes);
+                    let len = bytes.len() as u32;
+                    return agents::Datagram { addr, port, len }
+                        .encode(out)
+                        .ok_or(status::INTERNAL);
+                }
+                Err(status::NOT_FOUND)
+            }
             Request::Info => self.info(out).ok_or(status::INTERNAL),
             Request::Ask { permission, for_ms } => self
                 .ask(i, id, limits.entry, permission, for_ms)
@@ -1095,6 +1224,35 @@ impl Runtime {
             | Request::Cancel { .. }
             | Request::Forget { .. } => Err(status::NO_ACCESS),
             Request::Attach { .. } => Err(status::BAD_REQUEST),
+        }
+    }
+
+    /// Takes the datagrams waiting at the network service and keeps each
+    /// for every agent that sent to its source (`RECEIVE_FROM` checks the
+    /// grant when the agent takes it).
+    fn poll_net(&mut self) {
+        // The service keeps at most four for us.
+        for _ in 0..4 {
+            let mut msg = [0u8; 2];
+            let Some(poll) = net::encode(&NetRequest::Poll, &mut msg) else {
+                return;
+            };
+            let mut out = [0u8; 256];
+            let len = match call_timeout(NET, &msg[..poll], self.reply, &mut out, NET_US) {
+                Ok(Received::Message { len, .. }) => len.min(256),
+                _ => return,
+            };
+            let Some((addr, port, payload)) = net::parse_datagram(&out[..len]) else {
+                return;
+            };
+            for s in self.slots.iter_mut().flatten() {
+                if s.peers.contains(&(addr, port)) {
+                    if s.inbox.len() == MAX_INBOX {
+                        s.inbox.remove(0);
+                    }
+                    s.inbox.push(((addr, port), payload.to_vec()));
+                }
+            }
         }
     }
 

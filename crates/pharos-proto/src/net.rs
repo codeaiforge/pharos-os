@@ -3,8 +3,14 @@
 //! its UDP port; the service builds every header itself.
 //!
 //! Requests: `[version, op, port or sequence (u16), IPv4 address (4),
-//! payload]` for `SEND` and `PING`, `[version, op]` otherwise. Replies
-//! start with a status.
+//! payload]` for `SEND` and `PING`; `[version, ALLOW, client port (u16),
+//! count, (IPv4 address, port (u16)) each]`; `[version, op]` otherwise.
+//! Replies start with a status.
+//!
+//! Destinations (#109): a client may send only to the destinations `init`
+//! listed for it with `ALLOW`, and ping only their addresses; anything
+//! else is `NO_ACCESS`. A client with no list can send nowhere. `ALLOW` is
+//! accepted only without a badge: only `init` holds such a capability.
 
 use crate::{Reader, Refused, Writer, op as common, split, status};
 
@@ -17,11 +23,17 @@ pub mod op {
     pub const RECV: u8 = 2;
     pub const PING: u8 = 3;
     pub const STATS: u8 = 4;
+    /// `init` only: the destinations of client `port`, replacing any.
+    pub const ALLOW: u8 = 5;
+    /// A waiting datagram, or `NOT_FOUND` at once: never deferred.
+    pub const POLL: u8 = 6;
 }
 
 pub const OK: u8 = status::OK;
 pub const BAD_REQUEST: u8 = status::BAD_REQUEST;
 pub const BUSY: u8 = status::BUSY;
+pub const NO_ACCESS: u8 = status::NO_ACCESS;
+pub const NOT_FOUND: u8 = status::NOT_FOUND;
 /// The client's badge is not a port (0, or over 16 bits).
 pub const NO_PORT: u8 = status::OWN;
 /// Every client slot is taken.
@@ -31,6 +43,50 @@ pub const NO_ROOM: u8 = status::OWN + 1;
 pub const MAX_PAYLOAD: usize = 248;
 /// Counters the service reports with `STATS`.
 pub const STATS: usize = 6;
+/// Most destinations one client may have.
+pub const MAX_ALLOWED: usize = 8;
+
+/// A UDP destination: IPv4 address and port.
+pub type Dest = ([u8; 4], u16);
+
+/// A client's destinations; unused entries are zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Allowed {
+    list: [Dest; MAX_ALLOWED],
+    len: u8,
+}
+
+impl Allowed {
+    pub const NONE: Self = Self {
+        list: [([0; 4], 0); MAX_ALLOWED],
+        len: 0,
+    };
+
+    /// `None` if more than [`MAX_ALLOWED`] or one has port 0.
+    pub fn new(dests: &[Dest]) -> Option<Self> {
+        let mut a = Self::default();
+        for (slot, d) in a.list.iter_mut().zip(dests) {
+            *slot = *d;
+        }
+        let ok = dests.len() <= MAX_ALLOWED && dests.iter().all(|d| d.1 != 0);
+        a.len = dests.len() as u8;
+        ok.then_some(a)
+    }
+
+    pub fn as_slice(&self) -> &[Dest] {
+        &self.list[..usize::from(self.len)]
+    }
+
+    /// True if `ip:port` is listed.
+    pub fn sends_to(&self, ip: [u8; 4], port: u16) -> bool {
+        self.as_slice().contains(&(ip, port))
+    }
+
+    /// True if any destination has address `ip` (for `PING`).
+    pub fn pings(&self, ip: [u8; 4]) -> bool {
+        self.as_slice().iter().any(|d| d.0 == ip)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request<'a> {
@@ -46,6 +102,11 @@ pub enum Request<'a> {
     },
     Stats,
     Info,
+    Allow {
+        client: u16,
+        dests: Allowed,
+    },
+    Poll,
 }
 
 /// Parses a request. A payload over [`MAX_PAYLOAD`] is `Bad`; it cannot
@@ -64,6 +125,17 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
         op::PING => addressed(&mut r).map(|(seq, ip)| Request::Ping { ip, seq }),
         op::RECV => Some(Request::Recv),
         op::STATS => Some(Request::Stats),
+        op::POLL => Some(Request::Poll),
+        op::ALLOW => (|| {
+            let client = r.u16()?;
+            let count = usize::from(r.u8()?);
+            let mut list = [([0u8; 4], 0u16); MAX_ALLOWED];
+            for d in list.get_mut(..count)? {
+                *d = (r.take(4)?.try_into().ok()?, r.u16()?);
+            }
+            let dests = Allowed::new(&list[..count])?;
+            Some(Request::Allow { client, dests })
+        })(),
         common::INFO => Some(Request::Info),
         _ => None,
     };
@@ -92,6 +164,16 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
         }
         Request::Recv => w.bytes(&[VERSION, op::RECV])?,
         Request::Stats => w.bytes(&[VERSION, op::STATS])?,
+        Request::Poll => w.bytes(&[VERSION, op::POLL])?,
+        Request::Allow { client, dests } => {
+            w.bytes(&[VERSION, op::ALLOW])?;
+            w.u16(client)?;
+            w.bytes(&[dests.len])?;
+            for (ip, port) in dests.as_slice() {
+                w.bytes(ip)?;
+                w.u16(*port)?;
+            }
+        }
         Request::Info => w.bytes(&[VERSION, common::INFO])?,
     }
     Some(w.len())
@@ -175,6 +257,15 @@ mod tests {
             Request::Recv,
             Request::Stats,
             Request::Info,
+            Request::Poll,
+            Request::Allow {
+                client: 40_100,
+                dests: Allowed::new(&[([10, 0, 2, 2], 47_000); MAX_ALLOWED]).unwrap(),
+            },
+            Request::Allow {
+                client: 1,
+                dests: Allowed::default(),
+            },
         ];
         for req in reqs {
             let mut buf = [0u8; 300];
@@ -210,6 +301,17 @@ mod tests {
             payload: &[0; MAX_PAYLOAD + 1],
         };
         assert_eq!(encode(&too_big, &mut [0; 300]), None);
+        let mut allow = [VERSION, op::ALLOW, 1, 0, 1, 10, 0, 2, 2, 0, 0];
+        assert_eq!(parse(&allow), Err(Refused::Bad), "port 0");
+        allow[9] = 1;
+        assert!(parse(&allow).is_ok());
+        allow[4] = MAX_ALLOWED as u8 + 1;
+        assert_eq!(parse(&allow), Err(Refused::Bad), "more than the maximum");
+        assert_eq!(Allowed::new(&[([1; 4], 1); MAX_ALLOWED + 1]), None);
+        let a = Allowed::new(&[([10, 0, 2, 2], 47_000)]).unwrap();
+        assert!(a.sends_to([10, 0, 2, 2], 47_000) && a.pings([10, 0, 2, 2]));
+        assert!(!a.sends_to([10, 0, 2, 2], 47_001) && !a.pings([10, 0, 2, 3]));
+        assert!(!Allowed::default().sends_to([0; 4], 0), "none: nothing");
         crate::fuzz(100_000, 6, |m| {
             let mut v = [0u8; 302];
             v[0] = VERSION;

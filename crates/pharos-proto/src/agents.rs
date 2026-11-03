@@ -14,6 +14,12 @@
 //! `trust` sends `REVOKE` with a plain `send` under [`TRUST`] (#105); the
 //! runtime answers with `trust`'s `REVOKED`, never a reply, so `trust`
 //! never waits on it.
+//!
+//! Networking (#109): `SEND_TO` sends the first bytes of the agent's
+//! buffer to one granted destination; `RECEIVE_FROM` copies the oldest
+//! datagram waiting for the agent into its buffer ([`Datagram`]), or
+//! answers `NOT_FOUND` at once. Only replies from a granted destination
+//! the agent sent to last are kept for it.
 
 use crate::{Reader, Refused, Writer, op as common, split, status};
 
@@ -35,6 +41,8 @@ pub mod op {
     pub const DATA_PUT: u8 = 11;
     pub const DATA_GET: u8 = 12;
     pub const ASK: u8 = 13;
+    pub const SEND_TO: u8 = 14;
+    pub const RECEIVE_FROM: u8 = 15;
     pub const SUBMIT: u8 = 16;
     pub const STATUS: u8 = 17;
     pub const CANCEL: u8 = 18;
@@ -76,6 +84,39 @@ pub const NO_SESSION: u8 = status::OWN;
 /// Refused: the audit trail could not record the action (#108, D-012
 /// item 11).
 pub const NO_AUDIT: u8 = status::OWN + 1;
+
+/// Largest datagram an agent sends or receives.
+pub const MAX_DATAGRAM: u32 = crate::net::MAX_PAYLOAD as u32;
+
+/// The `RECEIVE_FROM` reply: `[OK, source IPv4, source port u16, length
+/// u32]`; the payload is at the start of the agent's buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Datagram {
+    pub addr: [u8; 4],
+    pub port: u16,
+    pub len: u32,
+}
+
+impl Datagram {
+    pub fn encode(&self, out: &mut [u8]) -> Option<usize> {
+        let mut w = Writer::new(out);
+        w.bytes(&[status::OK])?;
+        w.bytes(&self.addr)?;
+        w.u16(self.port)?;
+        w.u32(self.len)?;
+        Some(w.len())
+    }
+    pub fn parse(reply: &[u8]) -> Option<Self> {
+        let mut r = Reader::new(reply);
+        let ok = r.u8()? == status::OK;
+        let d = Self {
+            addr: r.take(4)?.try_into().ok()?,
+            port: r.u16()?,
+            len: r.u32()?,
+        };
+        (ok && r.is_empty() && d.len <= MAX_DATAGRAM).then_some(d)
+    }
+}
 
 /// Agent slots: badges 1 to 16.
 pub const SLOTS: usize = 16;
@@ -207,6 +248,15 @@ pub enum Request<'a> {
         permission: crate::permission::Permission,
         for_ms: u32,
     },
+    /// Agent: the first `len` bytes of its buffer as one UDP datagram to
+    /// `addr:port` (needs `net addr:port`).
+    SendTo {
+        addr: [u8; 4],
+        port: u16,
+        len: u32,
+    },
+    /// Agent: the oldest datagram waiting for it, into its buffer.
+    ReceiveFrom,
     /// `trust`: the user's answer to approval request `number`.
     Answer {
         number: u16,
@@ -314,6 +364,12 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                 permission: crate::permission::Permission::read(&mut r)?,
                 for_ms: r.u32()?,
             },
+            op::SEND_TO => Request::SendTo {
+                addr: r.take(4)?.try_into().ok()?,
+                port: r.u16()?,
+                len: r.u32()?,
+            },
+            op::RECEIVE_FROM => Request::ReceiveFrom,
             op::ANSWER => Request::Answer {
                 number: r.u16()?,
                 yes: match r.u8()? {
@@ -421,6 +477,13 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             permission.write(&mut w)?;
             w.u32(for_ms)?;
         }
+        Request::SendTo { addr, port, len } => {
+            head(&mut w, op::SEND_TO)?;
+            w.bytes(&addr)?;
+            w.u16(port)?;
+            w.u32(len)?;
+        }
+        Request::ReceiveFrom => head(&mut w, op::RECEIVE_FROM)?,
         Request::Answer { number, yes } => {
             head(&mut w, op::ANSWER)?;
             w.u16(number)?;
@@ -669,6 +732,12 @@ mod tests {
                 number: 7,
                 yes: true,
             },
+            Request::SendTo {
+                addr: [10, 0, 2, 2],
+                port: 47_000,
+                len: MAX_DATAGRAM,
+            },
+            Request::ReceiveFrom,
             Request::Answer {
                 number: u16::MAX,
                 yes: false,
@@ -848,6 +917,27 @@ mod tests {
         }
         assert_eq!(Asked::parse(&[status::OK, 3]), None);
         assert_eq!(Asked::parse(&[status::NO_ACCESS, 0]), None);
+    }
+
+    #[test]
+    fn datagram_replies_round_trip() {
+        let mut out = [0u8; 16];
+        let d = Datagram {
+            addr: [10, 0, 2, 2],
+            port: 47_000,
+            len: MAX_DATAGRAM,
+        };
+        let n = d.encode(&mut out).unwrap();
+        assert_eq!(Datagram::parse(&out[..n]), Some(d));
+        assert_eq!(Datagram::parse(&out[..n - 1]), None, "truncated");
+        let too_long = Datagram {
+            len: MAX_DATAGRAM + 1,
+            ..d
+        };
+        let n = too_long.encode(&mut out).unwrap();
+        assert_eq!(Datagram::parse(&out[..n]), None, "over the maximum");
+        out[0] = status::NOT_FOUND;
+        assert_eq!(Datagram::parse(&out[..n]), None);
         assert_eq!(Asked::parse(&[status::OK, 0, 0]), None);
     }
 

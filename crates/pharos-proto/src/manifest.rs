@@ -13,17 +13,21 @@
 //! progress_ms = 30000
 //! task_ms = 600000
 //! data = read
+//! net = 10.0.2.2:47000
 //! ```
 //!
 //! `models` lists model numbers, comma-separated, or is empty for none.
 //! `data` is `none`, `read`, or `write`: the agent's own files, kept by the
 //! runtime (capabilities.md, #105); `write` includes reading.
+//! `net` lists UDP destinations, `address:port`, comma-separated, at most
+//! [`MAX_NET`], or is empty for none (#109).
 //! A manifest is untrusted: [`parse`] refuses unknown, repeated, and
 //! missing keys and values out of range, and never panics. It only asks:
 //! [`Manifest::within`] checks it against the runtime's reviewed policy
 //! entry, and a manifest asking for more is refused, never narrowed.
 
 use crate::Writer;
+use crate::permission::Permission;
 use crate::trust::valid_name;
 
 pub const VERSION: u32 = 1;
@@ -41,6 +45,37 @@ pub const MAX_ATTEMPTS: u8 = 10;
 pub const MAX_PROGRESS_MS: u32 = 3_600_000;
 /// Longest `task_ms`: one day.
 pub const MAX_TASK_MS: u32 = 86_400_000;
+/// Most network destinations a manifest may list.
+pub const MAX_NET: usize = 4;
+
+/// A UDP destination: IPv4 address and port (1 or above).
+pub type Dest = ([u8; 4], u16);
+
+/// The destinations a manifest lists; unused entries are zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Net {
+    list: [Dest; MAX_NET],
+    len: u8,
+}
+
+impl Net {
+    /// `None` if more than [`MAX_NET`], repeated, or with port 0.
+    pub fn new(dests: &[Dest]) -> Option<Self> {
+        let mut n = Self::default();
+        for (i, d) in dests.iter().enumerate() {
+            if d.1 == 0 || dests[..i].contains(d) {
+                return None;
+            }
+            *n.list.get_mut(i)? = *d;
+        }
+        n.len = dests.len() as u8;
+        Some(n)
+    }
+
+    pub fn as_slice(&self) -> &[Dest] {
+        &self.list[..usize::from(self.len)]
+    }
+}
 
 /// Access to the agent's own files; `Write` includes reading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -62,6 +97,7 @@ pub struct Manifest<'a> {
     pub progress_ms: u32,
     pub task_ms: u32,
     pub data: Data,
+    pub net: Net,
 }
 
 /// What the runtime's policy table allows one agent: the most it may get.
@@ -80,6 +116,10 @@ pub struct Entry {
     /// asks while it runs, and gets each only with the user's approval.
     pub ask_models: u32,
     pub ask_data: Data,
+    /// UDP destinations it may get (#109); the network service lets the
+    /// runtime reach only the union of every entry's `net` and `ask_net`.
+    pub net: &'static [Dest],
+    pub ask_net: &'static [Dest],
 }
 
 /// Why a manifest was refused.
@@ -114,7 +154,7 @@ pub struct Refusal {
     pub why: Why,
 }
 
-const KEYS: [&[u8]; 9] = [
+const KEYS: [&[u8]; 10] = [
     b"manifest",
     b"name",
     b"program",
@@ -124,6 +164,7 @@ const KEYS: [&[u8]; 9] = [
     b"progress_ms",
     b"task_ms",
     b"data",
+    b"net",
 ];
 
 fn trim(s: &[u8]) -> &[u8] {
@@ -178,12 +219,29 @@ fn models(v: &[u8]) -> Option<u32> {
     Some(mask)
 }
 
+/// Destinations, comma-separated (spaces allowed around them), as the
+/// trusted console types them after `net `; empty for none.
+fn destinations(v: &[u8]) -> Option<Net> {
+    let mut list = [([0u8; 4], 0u16); MAX_NET + 1];
+    let mut n = 0;
+    if !v.is_empty() {
+        for part in v.split(|b| *b == b',') {
+            let Permission::Net { addr, port } = Permission::parse(&[b"net", trim(part)])? else {
+                return None;
+            };
+            *list.get_mut(n)? = (addr, port);
+            n += 1;
+        }
+    }
+    Net::new(&list[..n])
+}
+
 pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
     let whole = |why| Refusal { line: 0, why };
     if text.len() > MAX_SIZE {
         return Err(whole(Why::TooLarge));
     }
-    let mut values: [Option<&[u8]>; 9] = [None; 9];
+    let mut values: [Option<&[u8]>; 10] = [None; 10];
     for (i, line) in text.split(|b| *b == b'\n').enumerate() {
         let at = |why| Refusal { line: i + 1, why };
         if !line.iter().all(|b| (b' '..=b'~').contains(b)) {
@@ -206,7 +264,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
             return Err(at(Why::RepeatedKey));
         }
     }
-    let mut v = [&b""[..]; 9];
+    let mut v = [&b""[..]; 10];
     for (out, value) in v.iter_mut().zip(values) {
         *out = value.ok_or(whole(Why::MissingKey))?;
     }
@@ -220,6 +278,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
         progress,
         task,
         data,
+        net,
     ] = v;
     let bad = whole(Why::BadValue);
     if number(version, u32::MAX) != Some(VERSION) {
@@ -239,6 +298,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
             b"write" => Data::Write,
             _ => return Err(bad),
         },
+        net: destinations(net).ok_or(bad)?,
     };
     if m.progress_ms > m.task_ms {
         return Err(whole(Why::ProgressOverTask));
@@ -278,7 +338,8 @@ impl Manifest<'_> {
             && self.attempts <= e.attempts
             && self.progress_ms <= e.progress_ms
             && self.task_ms <= e.task_ms
-            && self.data <= e.data;
+            && self.data <= e.data
+            && self.net.as_slice().iter().all(|d| e.net.contains(d));
         if fits { Ok(e) } else { Err(Why::OverPolicy) }
     }
 
@@ -308,10 +369,20 @@ impl Manifest<'_> {
         w.bytes(b"\ntask_ms = ")?;
         decimal(&mut w, self.task_ms)?;
         w.bytes(match self.data {
-            Data::None => b"\ndata = none\n",
-            Data::Read => b"\ndata = read\n",
-            Data::Write => b"\ndata = write\n",
+            Data::None => b"\ndata = none",
+            Data::Read => b"\ndata = read",
+            Data::Write => b"\ndata = write",
         })?;
+        w.bytes(b"\nnet =")?;
+        let mut sep = &b" "[..];
+        for &(addr, port) in self.net.as_slice() {
+            let mut text = [0u8; 32];
+            w.bytes(sep)?;
+            // Without the `net ` the typed form starts with.
+            w.bytes(&Permission::Net { addr, port }.text(&mut text)[4..])?;
+            sep = b", ";
+        }
+        w.bytes(b"\n")?;
         Some(w.len())
     }
 }
@@ -321,7 +392,7 @@ mod tests {
     use super::*;
 
     const S: &[u8] = b"manifest = 1\nname = summarize\nprogram = agents/summarize\n\
-pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\ndata = read\n";
+pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\ndata = read\nnet = 10.0.2.2:47000\n";
 
     const TABLE: &[Entry] = &[Entry {
         name: b"summarize",
@@ -334,6 +405,8 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
         data: Data::Read,
         ask_models: 0,
         ask_data: Data::None,
+        net: &[([10, 0, 2, 2], 47_000), ([10, 0, 2, 3], 53)],
+        ask_net: &[],
     }];
 
     fn with(key: &str, value: &str) -> std::string::String {
@@ -367,10 +440,11 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
                 progress_ms: 30_000,
                 task_ms: 600_000,
                 data: Data::Read,
+                net: Net::new(&[([10, 0, 2, 2], 47_000)]).unwrap(),
             }
         );
         let text = "# an agent\n\n  manifest=1  \nname =summarize\nprogram= agents/summarize\n\
-pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\ntask_ms = 86400000\ndata=write";
+pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\ntask_ms = 86400000\ndata=write\nnet=";
         let m = parse(text.as_bytes()).unwrap();
         assert_eq!(
             (m.pages, m.models, m.attempts, m.progress_ms, m.task_ms),
@@ -378,6 +452,16 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
             "spaces, comments, maxima, no final newline"
         );
         assert_eq!(parse(with("models", "").as_bytes()).unwrap().models, 0);
+        let four = "1.2.3.4:1 , 10.0.2.2:47000,0.0.0.0:65535, 255.255.255.255:9";
+        assert_eq!(
+            parse(with("net", four).as_bytes()).unwrap().net.as_slice(),
+            &[
+                ([1, 2, 3, 4], 1),
+                ([10, 0, 2, 2], 47_000),
+                ([0, 0, 0, 0], 65_535),
+                ([255, 255, 255, 255], 9)
+            ]
+        );
         assert_eq!(parse(with("pages", "1").as_bytes()).unwrap().pages, 1);
         let program = std::format!("a/{}", "b".repeat(MAX_PROGRAM - 2));
         assert!(parse(with("program", &program).as_bytes()).is_ok());
@@ -390,6 +474,8 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
             with("models", ""),
             with("models", "3, 1, 31"),
             with("name", &"n".repeat(32)),
+            with("net", ""),
+            with("net", "10.0.2.3:53, 10.0.2.2:47000"),
         ] {
             let m = parse(text.as_bytes()).unwrap();
             let mut out = [0u8; MAX_SIZE];
@@ -442,7 +528,7 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
         assert_eq!(
             at(&extra),
             Some(Refusal {
-                line: 10,
+                line: 11,
                 why: Why::UnknownKey
             })
         );
@@ -455,7 +541,7 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
         assert_eq!(
             at(&twice),
             Some(Refusal {
-                line: 10,
+                line: 11,
                 why: Why::RepeatedKey
             })
         );
@@ -514,6 +600,17 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
             ("data", ""),
             ("data", "Read"),
             ("data", "rw"),
+            ("net", "10.0.2.2"),
+            ("net", "10.0.2.2:0"),
+            ("net", "10.0.2.2:65536"),
+            ("net", "10.0.2.256:1"),
+            ("net", "10.0.2:1"),
+            ("net", "10.0.2.2.1:1"),
+            ("net", "10.0.2.2:01"),
+            ("net", "10.0.2.2:1,"),
+            ("net", "10.0.2.2:1,10.0.2.2:1"),
+            ("net", "1.1.1.1:1,1.1.1.1:2,1.1.1.1:3,1.1.1.1:4,1.1.1.1:5"),
+            ("net", "net 10.0.2.2:1"),
         ] {
             assert_eq!(
                 why(with(key, value).as_bytes()),
@@ -542,6 +639,8 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
         assert_eq!(check("models", "2, 1"), Ok(()));
         assert_eq!(check("models", ""), Ok(()));
         assert_eq!(check("data", "none"), Ok(()), "less than the entry");
+        assert_eq!(check("net", ""), Ok(()));
+        assert_eq!(check("net", "10.0.2.3:53, 10.0.2.2:47000"), Ok(()));
         assert_eq!(check("name", "other"), Err(Why::NoEntry));
         assert_eq!(check("program", "agents/other"), Err(Why::WrongProgram));
         for (key, value) in [
@@ -552,6 +651,8 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
             ("progress_ms", "30001"),
             ("task_ms", "600001"),
             ("data", "write"),
+            ("net", "10.0.2.2:47001"),
+            ("net", "10.0.2.2:47000, 10.0.2.4:53"),
         ] {
             assert_eq!(check(key, value), Err(Why::OverPolicy), "{key} = {value}");
         }
@@ -561,7 +662,7 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
     #[test]
     fn fuzzed() {
         // Bytes from a manifest's alphabet, then mutations of a valid one.
-        let alphabet = b"manifest=1\n #,.0/_-pgsoidkr";
+        let alphabet = b"manifest=1\n #,.0/_-pgsoidkr:";
         crate::fuzz(100_000, alphabet.len() as u8, |m| {
             let text: std::vec::Vec<u8> = m.iter().map(|b| alphabet[usize::from(*b)]).collect();
             let _ = parse(&text);

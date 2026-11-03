@@ -103,15 +103,15 @@ Design: [services.md](../architecture/services.md) and [D-015](../project/decisi
 
 ### Networking (M2.10)
 
-Design: [networking.md](../architecture/networking.md). The first four rows are **implemented** (#62–#64: the parser is fuzzed on the host; `network` checks badges, the refused unbadged client, the counters, and a round trip to the host echo server) and were reviewed at the M2.10 gate; the rest are accepted limits.
+Design: [networking.md](../architecture/networking.md). The first four rows are **implemented** (#62–#64: the parser is fuzzed on the host; `network` checks badges, the refused unbadged client, the counters, and a round trip to the host echo server) and were reviewed at the M2.10 gate; the fifth is **implemented** (#109); the rest are accepted limits.
 
 | Threat | Mitigation |
 | --- | --- |
 | A malformed or hostile packet crashes or corrupts the network service | Every layer is parsed by safe, allocation-free code with checked lengths and checksums, fuzzed on the host; bad frames are dropped and counted |
-| A process uses the network without permission | Network access only through a badged `SEND` capability on the service's endpoint; badge 0 is refused; revocable |
+| A process uses the network without permission | Network access only through a badged `SEND` capability on the service's endpoint; a badge that is no port is refused; badge 0 is `init`'s, which may only list destinations (`ALLOW`); revocable |
 | A client impersonates another client or spoofs addresses | Identity is the kernel-delivered badge (one UDP port per client); the service builds every header itself |
 | A client blocks or floods the service | Replies are non-blocking sends; per-client queues and outstanding requests are bounded; drops are counted |
-| A client reaches arbitrary hosts | **Limit:** no destination policy in M2.10; per-destination grants come with D-012 (M3.4) |
+| A client reaches arbitrary hosts | Each client sends only to the destinations `init`'s table lists for it, and pings only their addresses; a client with no list sends nowhere; only `init` can set a list (**implemented, #109**: the `network` kernel checks an unlisted destination, an unlisted ping address, and a client's own `ALLOW` are refused; mutation-checked). Before #109: any destination |
 | A virtio-net device DMAs anywhere | **Limit:** no IOMMU (D-008) |
 | A forged ARP message redirects traffic | **Limit:** ARP is believed, as in any ARP; on slirp the only other host is the gateway |
 | A guest program reaches beyond the host in tests | **Limit:** slirp's NAT is not restricted (`restrict=on` would also block the echo server); nothing in the guest sends anywhere but `10.0.2.2` |
@@ -164,7 +164,7 @@ Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-in
 | Revocation does not unmap device registers or DMA buffers; ending the process is the full revocation. **Resolved (#104):** revoking a device capability stops the device and turns the driver's register and DMA mappings into zeroed private pages | M2.9 | M3.4 (revocable agent permissions) |
 | No timeouts on pings or service start (`receive`, `call`, `irq_wait`, and `sleep` have them since #76). **Resolved (#100):** `init` stops a daemon that sends no `ready` within 10 s, restarts a crashed daemon at most 3 times, and never restarts a stopped one | M2.7 | M3.3 (supervision) |
 | No per-process quotas on processes, handles, or network use | M2.10 | M3.5 (resource accounting and limits) |
-| No network destination policy | M2.10 | M3.4 (D-012) |
+| No network destination policy. **Resolved (#109):** per-client destination lists from `init`, checked by the network service | M2.10 | M3.4 (D-012) |
 | `rdtsc` in user mode (timing side channels) | M2.7 | M4.2 |
 | Shared-memory bookkeeping (8 bytes per page) on the fixed 4 MiB kernel heap, which panics when full: up to 1/512 of a process's page limit | M3.0 | M3.5 (resource accounting) |
 | Page limits not carved from the creator's; a large `mem_map` zeroes pages with interrupts disabled | M3.0 | M3.5 |
@@ -223,7 +223,7 @@ Everything below is **planned**; none of it is implemented.
 | The untrusted side of a shared buffer revokes it to crash the trusted side | A revoked mapping becomes private zeroed pages, not a hole, so the mapper reads zeros instead of faulting (**implemented, #104**: `shared_memory` and `device_caps`, a driver reading zeros from revoked registers and DMA without being killed; mutation-checked) | M3.4 |
 | Audit records are changed, removed, or rewritten on the disk | One writer (`audit`) stamping each record with the sending service's badge; the store's SHA-256 chain, checked on mount and by `cargo xtask store audit`; the head and count shown on the trusted console at start and on `audit` for the user to compare (**implemented, #107**: the `audit` kernel checks the stamped badges, the chains, and that the head shown is the image's; host tests detect a changed record, a gap in sequence numbers, and a missing boot record; mutation-checked); consequential actions refused while the trail cannot be written, and every grant, revocation, approval, and start recorded (**implemented, #108**: the `permissions` kernel kills the audit service and its agent gets `NO_AUDIT`, the runner reconstructs a task from the trail, and the boot check finds a start record for every service; mutation-checked). No secret-keyed anchor before M4.3 | M3.4 |
 | Resource exhaustion by an agent | Per-agent CPU, memory, storage, and network quotas | M3.5 |
-| Agent data exfiltration over network | Default-deny networking; per-destination grants (one IPv4 address and UDP port each), checked by the agent runtime and again by the network service; every send audited (**planned, decided in D-012**: #109, #108) | M3.4 |
+| Agent data exfiltration over network | Default-deny networking; per-destination grants (one IPv4 address and UDP port each, from the manifest within its policy entry or by approval), checked by the agent runtime on every send and again by the network service, which lets the runtime's port reach only the union of the policy table's destinations; every send recorded before it goes out (else `NO_AUDIT`); replies kept only for the agents that sent to that destination and delivered only while the grant holds (**implemented, #109**: the `agents_net` kernel exchanges a datagram with the host echo server, is refused other destinations and one not askable, gets one by the user's `yes`, loses one by `revoke` with its late reply dropped, and checks an agent holding the same grant that sent nothing receives nothing; the runner checks every send's intent and outcome in the trail; mutation-checked). Limit: agents granted the same destination and that both sent to it both get its replies (they share the runtime's port) | M3.4 |
 | Kernel memory-safety bug | Safe Rust by default; reviewed `unsafe`; fuzzing of syscall interfaces | M2.2 onward |
 | Malicious DMA from devices | IOMMU use where available; limited device set (M2.9 limits the device set; the IOMMU is still open) | M4.4, M5.2 |
 | Tampered boot chain | Reproducible builds; Secure Boot evaluation | M4.3, M5.5 |

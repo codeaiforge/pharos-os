@@ -8,6 +8,11 @@
 //! `call`, and replies go out with non-blocking sends, so a client that is
 //! not waiting can never block the service. Interrupts arrive as
 //! notification bit 0 on the same endpoint: one blocking point.
+//!
+//! Destinations (#109): each client may send only to the destinations
+//! `init` listed for it with `ALLOW` (sent on `init`'s unbadged capability,
+//! which no client holds), and ping only their addresses. A client with no
+//! list yet can send nowhere.
 
 #![no_std]
 #![no_main]
@@ -17,8 +22,8 @@ use pharos_programs::net::{
 };
 use pharos_programs::virtio_net::Net;
 use pharos_proto::net::{
-    BUSY, MAX_PAYLOAD, NAME, NO_PORT, NO_ROOM, OK, Request, VERSION, encode_datagram, encode_pong,
-    encode_stats, parse,
+    Allowed, BUSY, MAX_PAYLOAD, NAME, NO_ACCESS, NO_PORT, NO_ROOM, NOT_FOUND, OK, Request, VERSION,
+    encode_datagram, encode_pong, encode_stats, parse,
 };
 use pharos_proto::{Info, refusal};
 use pharos_user::{
@@ -83,6 +88,8 @@ struct Client {
     ping: Option<Ping>,
     /// One datagram waiting for ARP: `(destination, payload)`.
     parked: Option<Datagram>,
+    /// Where it may send (`ALLOW`); none until `init` says.
+    allowed: Allowed,
 }
 
 impl Client {
@@ -94,6 +101,7 @@ impl Client {
         recv: None,
         ping: None,
         parked: None,
+        allowed: Allowed::NONE,
     };
 
     fn push(&mut self, d: Datagram) -> bool {
@@ -328,15 +336,6 @@ impl Service {
             self.stats[stat::REPLY_DROPPED] += 1;
             return;
         }
-        let Ok(port) = u16::try_from(badge) else {
-            return answer(&mut self.stats, reply, &[NO_PORT]);
-        };
-        if port == 0 {
-            return answer(&mut self.stats, reply, &[NO_PORT]);
-        }
-        let Some(i) = self.client(port) else {
-            return answer(&mut self.stats, reply, &[NO_ROOM]);
-        };
         let req = match parse(req) {
             Ok(req) => req,
             Err(refused) => {
@@ -345,11 +344,43 @@ impl Service {
                 return answer(&mut self.stats, reply, &out[..n]);
             }
         };
+        if let Request::Allow { client, dests } = req {
+            // Only `init`'s capability has no badge.
+            let status = if badge != 0 {
+                NO_ACCESS
+            } else if client == 0 {
+                NO_PORT
+            } else if let Some(c) = self.client(client) {
+                self.clients[c].allowed = dests;
+                OK
+            } else {
+                NO_ROOM
+            };
+            return answer(&mut self.stats, reply, &[status]);
+        }
+        let Some(port) = u16::try_from(badge).ok().filter(|p| *p != 0) else {
+            return answer(&mut self.stats, reply, &[NO_PORT]);
+        };
+        let Some(i) = self.client(port) else {
+            return answer(&mut self.stats, reply, &[NO_ROOM]);
+        };
+        let allowed = self.clients[i].allowed;
         match req {
+            Request::Send { ip, port, .. } if !allowed.sends_to(ip, port) => {
+                answer(&mut self.stats, reply, &[NO_ACCESS]);
+            }
+            Request::Ping { ip, .. } if !allowed.pings(ip) => {
+                answer(&mut self.stats, reply, &[NO_ACCESS]);
+            }
             Request::Send { ip, port, payload } => {
                 let status = self.send_udp(i, Datagram::new(ip, port, payload));
                 answer(&mut self.stats, reply, &[status]);
             }
+            Request::Poll => match self.clients[i].pop() {
+                Some(d) => datagram_reply(&mut self.stats, reply, &d),
+                None => answer(&mut self.stats, reply, &[NOT_FOUND]),
+            },
+            Request::Allow { .. } => {}
             Request::Recv => {
                 if self.clients[i].recv.is_some() {
                     return answer(&mut self.stats, reply, &[BUSY]);

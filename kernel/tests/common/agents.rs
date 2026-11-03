@@ -1,5 +1,5 @@
-//! What the `agents`, `agents_crash`, `agents_store`, and `permissions`
-//! test kernels share (#98, #99):
+//! What the `agents`, `agents_crash`, `agents_store`, `permissions`, and
+//! `agents_net` test kernels share (#98, #99, #109):
 //! starting `store`, `infer`, `trust`, and the agent runtime with the
 //! capabilities `init` gives them, replacing the runtime, and starting
 //! the control client.
@@ -46,6 +46,11 @@ const CONTROL: u32 = 0x100;
 const STORE_PAGES: u64 = 10_240;
 /// As `init` gives the runtime.
 const RUNTIME_PAGES: u64 = 1 << 14;
+/// The runtime's UDP port, and the union of its test table's
+/// destinations (`net` and `ask_net`), as `init` would list them (#109).
+const RUNTIME_PORT: u32 = 40_100;
+const RUNTIME_DESTINATIONS: [([u8; 4], u16); 2] =
+    [([10, 0, 2, 2], 47_000), ([10, 0, 2, 2], 47_001)];
 
 pub struct Services {
     pub programs: Arc<fs::Fs>,
@@ -61,6 +66,9 @@ pub struct Services {
     /// The audit service (#108), for tests that kill it.
     pub audit: Arc<Endpoint>,
     pub audit_id: TaskId,
+    /// The network service, if [`start_net`] started it: the runtime then
+    /// gets handle 9 on it.
+    pub net: Option<Arc<Endpoint>>,
 }
 
 /// The capabilities of `id`.
@@ -173,7 +181,58 @@ pub fn setup(t: &mut TestRun) -> Option<Services> {
         store_caps,
         audit,
         audit_id,
+        net: None,
     })
+}
+
+/// Starts the network service on the virtio-net device and, as `init`
+/// does once it is ready, lists the runtime's destinations (`ALLOW` under
+/// `init`'s badge, 0).
+pub fn start_net(t: &mut TestRun, s: &mut Services) -> bool {
+    let nic = pci::devices()
+        .into_iter()
+        .find(|d| (d.vendor, d.device) == (0x1af4, 0x1041))
+        .and_then(DeviceHandle::grant);
+    let Some(nic) = nic else {
+        t.check("the network card is found", false);
+        return false;
+    };
+    let net = Endpoint::new();
+    let caps = vec![
+        Capability::new(Object::DebugConsole, WRITE),
+        Capability::new(Object::Device(nic), MAP | CONFIG | IRQ),
+        Capability::new(Object::Endpoint(net.clone()), RECEIVE),
+        Capability::new(Object::Endpoint(s.report.clone()), SEND),
+    ];
+    if start(t, &s.programs, b"bin/net", 0, caps, &s.report, 0).is_none() {
+        return false;
+    }
+    // `pharos_proto::net`'s `ALLOW`: version, op, port, count, then each
+    // address and port.
+    let mut data = [0u8; MAX_MESSAGE];
+    let port = (RUNTIME_PORT as u16).to_le_bytes();
+    data[..5].copy_from_slice(&[1, 5, port[0], port[1], RUNTIME_DESTINATIONS.len() as u8]);
+    let mut len = 5;
+    for (addr, port) in RUNTIME_DESTINATIONS {
+        data[len..len + 4].copy_from_slice(&addr);
+        data[len + 4..len + 6].copy_from_slice(&port.to_le_bytes());
+        len += 6;
+    }
+    // The service answers with a non-blocking send, which cannot reach a
+    // kernel thread; `send` returns once it took the request, before any
+    // later one. If the list did not take, every agent send is refused.
+    let answers = Endpoint::new();
+    ipc::send(
+        &net,
+        Message {
+            data,
+            len,
+            cap: Some(Capability::new(Object::Endpoint(answers), SEND)),
+            badge: INIT_BADGE,
+        },
+    );
+    s.net = Some(net);
+    true
 }
 
 /// Starts the storage service again on its endpoint and disk, as `init`
@@ -209,6 +268,12 @@ pub fn start_runtime(t: &mut TestRun, s: &Services) -> Option<TaskId> {
         store_send.derive_badged(SEND, AGENTS_TASKS),
         Capability::new(Object::Endpoint(s.audit.clone()), SEND).derive_badged(SEND, AUDIT_RUNTIME),
     ];
+    let mut caps = caps;
+    if let Some(net) = &s.net {
+        caps.push(
+            Capability::new(Object::Endpoint(net.clone()), SEND).derive_badged(SEND, RUNTIME_PORT),
+        );
+    }
     let runtime = start(
         t,
         &s.programs,

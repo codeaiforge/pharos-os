@@ -176,6 +176,10 @@ name = "permissions"
 harness = false
 
 [[test]]
+name = "agents_net"
+harness = false
+
+[[test]]
 name = "audit"
 harness = false
 

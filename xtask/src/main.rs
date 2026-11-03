@@ -1332,6 +1332,22 @@ const PERMISSIONS_SCRIPT: &[console::Step] = &[
     ("approve #3: no answer; refused", "yes 3\n"),
     ("no request #3", ""),
 ];
+/// Agent networking (#109): the host echo server, and the trusted console.
+const AGENTS_NET_TEST: &str = "agents_net";
+/// `net-talk` (task 2) asks for `10.0.2.2:47001`; once approved, the
+/// user revokes `10.0.2.2:47000`.
+const AGENTS_NET_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("registered runtime", ""),
+    (
+        "approve #1: netter task 2 wants net 10.0.2.2:47001 for this task? (yes 1 / no 1)",
+        "yes 1\n",
+    ),
+    ("approve #1: granted", "revoke netter net 10.0.2.2:47000\n"),
+    ("revoked net 10.0.2.2:47000 from netter", ""),
+];
+/// `10.0.2.2:47002` is not askable: never a prompt.
+const AGENTS_NET_REFUSED: &[&str] = &["approve #2"];
 /// The audit service (#107): a tiny fresh store, so it fills.
 const AUDIT_TEST: &str = "audit";
 const AUDIT_BLOCKS: u64 = 16;
@@ -1488,6 +1504,50 @@ fn permissions_audit(image: &Path) -> Result<()> {
     Ok(())
 }
 
+/// After the `agents_net` test kernel (#109): the network grants, the
+/// approval, and the revocation are recorded, and every send is an intent
+/// with its outcome (three that went out from `net-talk`, task 2).
+fn agents_net_audit(image: &Path) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    for want in [
+        "client 3 Event grant listener task 1/1 net 10.0.2.2:47000",
+        "client 3 Event grant netter task 2/1 net 10.0.2.2:47000",
+        "client 3 Event approve netter task 2/1 net 10.0.2.2:47001",
+        "client 3 Event revoke netter task 2/1 net 10.0.2.2:47000",
+        "client 3 Intent net send netter task 2/1 net 10.0.2.2:47001 net",
+    ] {
+        if !lines.iter().any(|l| l.contains(want)) {
+            return Err(format!("the audit trail has no record like {want:?}"));
+        }
+    }
+    let sends: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains(" Intent net send netter task 2/1 "))
+        .collect();
+    let answered = |l: &&String| {
+        let of = format!(" of {} ", l.split(' ').next().unwrap_or_default());
+        lines
+            .iter()
+            .any(|o| o.contains(" Outcome") && o.contains(" net send ") && o.contains(&of))
+    };
+    if sends.len() != 3 || !sends.iter().all(answered) {
+        return Err(format!(
+            "expected 3 sends, each with its outcome: {sends:?}"
+        ));
+    }
+    if lines.iter().any(|l| l.contains("net send listener ")) {
+        return Err("listener, which sends nothing, has a send recorded".into());
+    }
+    println!("  audit trail: {} records; the sends:", lines.len());
+    for l in lines.iter().filter(|l| l.contains("net send")) {
+        println!("    {l}");
+    }
+    Ok(())
+}
+
 /// Crash injection: boots the kernel `c.rounds` times on the same store
 /// disk, killing QEMU at a random moment after it prints `c.started`.
 /// Each boot must first find its state consistent (`c.ok`), so every round
@@ -1603,7 +1663,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     if name == INFERENCE_TEST {
         store_image::tiny(&out.join(STORE_IMAGE))?;
     }
-    if name == SERVICE_TEST || name == AGENTS_TEST || name == PERMISSIONS_TEST {
+    if [SERVICE_TEST, AGENTS_TEST, PERMISSIONS_TEST, AGENTS_NET_TEST].contains(&name.as_str()) {
         store_image::service(&out.join(STORE_IMAGE))?;
     }
     if name == AUDIT_TEST {
@@ -1620,6 +1680,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     let (steps, refused): (&'static [console::Step], &[&str]) = match name.as_str() {
         TRUST_TEST => (TRUST_SCRIPT, TRUST_REFUSED),
         PERMISSIONS_TEST => (PERMISSIONS_SCRIPT, PERMISSIONS_REFUSED),
+        AGENTS_NET_TEST => (AGENTS_NET_SCRIPT, AGENTS_NET_REFUSED),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
         _ => (&[], &[]),
     };
@@ -1649,6 +1710,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == PERMISSIONS_TEST {
                 permissions_audit(&out.join(STORE_IMAGE))?;
+            }
+            if name == AGENTS_NET_TEST {
+                agents_net_audit(&out.join(STORE_IMAGE))?;
             }
             Ok(())
         })

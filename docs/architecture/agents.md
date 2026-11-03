@@ -68,9 +68,11 @@ attempts = 3
 progress_ms = 30000
 task_ms = 600000
 data = read
+net =
 ```
 
 - `data` (#105): `none`, `read`, or `write` (which includes reading), the agent's own files kept by the runtime ([capabilities.md](capabilities.md)).
+- `net` (#109): UDP destinations, `address:port`, comma-separated, at most 4, each only once, or empty for none; each must be in the policy entry's `net` ([capabilities.md](capabilities.md)).
 - `pages`: the agent's page limit. `models`: inference models it may use. `attempts`: tries per task, at most 10. `progress_ms`: how long it may go without a request while it has a task. `task_ms`: how long a task may run.
 - **Manifests are untrusted input:** a `no_std` parser in `pharos-proto` with checked bounds. Unknown keys, repeated keys, missing keys, and values out of range are refused. Host tests and 100,000 fuzzed inputs.
 - *Implemented (#97):* `pharos_proto::manifest`. Spaces around keys and values are ignored. `models` lists model numbers (1 to 31), comma-separated, or is empty for none. Limits: `pages` 1 to 262,144 (1 GiB), `attempts` 1 to 10, `progress_ms` 1 to one hour and at most `task_ms`, `task_ms` 1 to one day; numbers have no sign or leading zero. `program` is a relative path of at most 64 bytes with no empty, `.`, or `..` part. A refusal names its line. `Manifest::within` is the policy check: no entry for the name, another program, or anything over the entry is refused.
@@ -93,7 +95,7 @@ data = read
 - **Crash:** the end notification and `process_status` (exit code or fault vector). **Hang:** no request from the agent for `progress_ms` while it has a task, or the task over `task_ms`. The runtime then stops the agent (`process_stop`) and counts the attempt.
 - **Events** are console lines from the runtime: `agents: <name> task <id> started`, `completed`, `crashed <vector>`, `hung`, `restarting <n>/<max>`, `failed`, `cancelled`, `stopped`. Agents' own `LOG` lines are written as `agents: <name>: <text>`.
 
-- *Implemented (#98):* `bin/agents`, started by `init` after `trust` with a 64 MiB limit (handles: console, its endpoint with `RECEIVE`, `SEND`, and `GRANT`, the report endpoint, the root filesystem read-only, inference client 1, `trust` badged as the runtime, storage namespace `agents`, and the audit service as client 3, #108). The policy table is selected by its argument: empty at boot, three entries for the `agents` test kernel. At start it reads `agents/<name>.manifest` for each entry and prints `manifest accepted` or `manifest refused: <why>`; only accepted agents can be given tasks. A task attempt opens the entry's program, spawns it with the manifest's page limit, one capability (`SEND` on the runtime, badge slot + 1), and its end bound to notification bit *slot*, then sends `trust` `REGISTER` with `STOP` and `WAIT`; the runtime handles no request from that process until the send returned, since it serves one message at a time. An agent may make its own reply endpoint and buffer: they reach nothing. An attempt that ends without `COMPLETE` or `FAIL` (exit with any code, fault, or hang) counts against `attempts`; after the last, the task fails with `retries exhausted`. The runtime stops the agent after `COMPLETE` or `FAIL`. An agent that `trust` stopped ends its task as cancelled (`stopped`). Tasks are kept in the store (#99).
+- *Implemented (#98):* `bin/agents`, started by `init` after `trust` with a 64 MiB limit (handles: console, its endpoint with `RECEIVE`, `SEND`, and `GRANT`, the report endpoint, the root filesystem read-only, inference client 1, `trust` badged as the runtime, storage namespace `agents`, the audit service as client 3, #108, and the network service badged with port 40100, #109). The policy table is selected by its argument: empty at boot, three entries for the `agents` test kernel. At start it reads `agents/<name>.manifest` for each entry and prints `manifest accepted` or `manifest refused: <why>`; only accepted agents can be given tasks. A task attempt opens the entry's program, spawns it with the manifest's page limit, one capability (`SEND` on the runtime, badge slot + 1), and its end bound to notification bit *slot*, then sends `trust` `REGISTER` with `STOP` and `WAIT`; the runtime handles no request from that process until the send returned, since it serves one message at a time. An agent may make its own reply endpoint and buffer: they reach nothing. An attempt that ends without `COMPLETE` or `FAIL` (exit with any code, fault, or hang) counts against `attempts`; after the last, the task fails with `retries exhausted`. The runtime stops the agent after `COMPLETE` or `FAIL`. An agent that `trust` stopped ends its task as cancelled (`stopped`). Tasks are kept in the store (#99).
 
 ### The runtime's interface (`agents`, version 1)
 
@@ -110,6 +112,8 @@ Clients are told apart by badge: agent slots, and control clients that `init`'s 
 | `LOG` | agent | one console line, at most 200 bytes, printable characters only | 1 s |
 | `DATA_PUT`, `DATA_GET` | agent | writes or reads one of the agent's own files (a name as agent names are, up to 64 KiB, through its buffer), kept by the runtime at `data/<agent>/<name>` in its store namespace; needs `data write` or `data read` (#105) | 10 s |
 | `ASK` | agent | asks the user, through `trust`, for a permission its policy entry lists as askable, for some milliseconds or the rest of the task: `GRANTED`, `REFUSED`, or `PENDING` (ask again); see [capabilities.md](capabilities.md) (#106) | 1 s |
+| `SEND_TO` | agent | one UDP datagram of up to 248 bytes from its buffer to a destination it holds `net` for, through the runtime's port (#109) | 1 s |
+| `RECEIVE_FROM` | agent | the oldest datagram kept for it (only from a destination it sent to and still holds), into its buffer, with its source; `NOT_FOUND` at once if none (#109) | 1 s |
 | `ANSWER` | `trust` | the user's `yes` or `no` to an approval request (#106) | none (a plain `send`) |
 | `REVOKE` | `trust` | takes a permission from every running task of an agent, for the rest of the task; answered with `trust`'s `REVOKED` (#105) | none (a plain `send`) |
 | `SUBMIT` | control | a new task: agent name, up to 4 task IDs it depends on, input from the client's buffer; returns the task ID | 10 s |
@@ -118,7 +122,7 @@ Clients are told apart by badge: agent slots, and control clients that `init`'s 
 | `FORGET` | control | deletes an ended task's record | 10 s |
 | `INFO`, `ATTACH` | both | as D-019 | 1 s |
 
-Inference, `DATA_PUT`, `SUBMIT`, and `CANCEL` are audited first (#108): if the audit trail cannot record the intent within 2 s, the request answers `NO_AUDIT` and nothing is done ([capabilities.md](capabilities.md)).
+Inference, `DATA_PUT`, `SEND_TO` (#109), `SUBMIT`, and `CANCEL` are audited first (#108): if the audit trail cannot record the intent within 2 s, the request answers `NO_AUDIT` and nothing is done ([capabilities.md](capabilities.md)).
 
 - An agent sees only its own task: the badge gives the slot, the slot the task. A request about another task answers `NO_SESSION`.
 - Everything an agent sends is checked and copied out of its buffer before use, as in the inference service. Inference output reaches the agent as data, never interpreted by the runtime.

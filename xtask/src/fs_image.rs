@@ -212,36 +212,46 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// entry allows, `noentry`, which has no entry, and `keeper`, the
 /// `permissions` kernel's, which may write its own files (#105), and
 /// `asker`, which gets nothing and asks (#106).
-pub const TEST_MANIFESTS: [(&str, &str); 6] = [
+pub const TEST_MANIFESTS: [(&str, &str); 8] = [
     (
         "agents/worker.manifest",
         "# The agents test kernel's worker.\nmanifest = 1\nname = worker\nprogram = bin/testagent\n\
-         pages = 256\nmodels = 2\nattempts = 3\nprogress_ms = 2000\ntask_ms = 20000\ndata = none\n",
+         pages = 256\nmodels = 2\nattempts = 3\nprogress_ms = 2000\ntask_ms = 20000\ndata = none\nnet =\n",
     ),
     (
         "agents/greedy.manifest",
         "manifest = 1\nname = greedy\nprogram = bin/testagent\npages = 128\nmodels =\n\
-         attempts = 1\nprogress_ms = 2000\ntask_ms = 20000\ndata = none\n",
+         attempts = 1\nprogress_ms = 2000\ntask_ms = 20000\ndata = none\nnet =\n",
     ),
     (
         "agents/counter.manifest",
         "manifest = 1\nname = counter\nprogram = bin/testagent\npages = 64\nmodels =\n\
-         attempts = 10\nprogress_ms = 5000\ntask_ms = 120000\ndata = none\n",
+         attempts = 10\nprogress_ms = 5000\ntask_ms = 120000\ndata = none\nnet =\n",
     ),
     (
         "agents/noentry.manifest",
         "manifest = 1\nname = noentry\nprogram = bin/testagent\npages = 64\nmodels =\n\
-         attempts = 1\nprogress_ms = 2000\ntask_ms = 20000\ndata = none\n",
+         attempts = 1\nprogress_ms = 2000\ntask_ms = 20000\ndata = none\nnet =\n",
     ),
     (
         "agents/keeper.manifest",
         "manifest = 1\nname = keeper\nprogram = bin/testagent\npages = 256\nmodels = 2\n\
-         attempts = 2\nprogress_ms = 5000\ntask_ms = 60000\ndata = write\n",
+         attempts = 2\nprogress_ms = 5000\ntask_ms = 60000\ndata = write\nnet =\n",
     ),
     (
         "agents/asker.manifest",
         "manifest = 1\nname = asker\nprogram = bin/testagent\npages = 256\nmodels =\n\
-         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\n",
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet =\n",
+    ),
+    (
+        "agents/netter.manifest",
+        "manifest = 1\nname = netter\nprogram = bin/testagent\npages = 256\nmodels =\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet = 10.0.2.2:47000\n",
+    ),
+    (
+        "agents/listener.manifest",
+        "manifest = 1\nname = listener\nprogram = bin/testagent\npages = 256\nmodels =\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet = 10.0.2.2:47000\n",
     ),
 ];
 

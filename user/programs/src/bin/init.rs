@@ -14,12 +14,16 @@
 //! clients reach the new one; one that was stopped is never restarted.
 //! When any service ends, `init` sends the storage and inference services
 //! `RELEASE` for the badges it gave it, so they free its slots.
+//! Each time the network service reports ready, `init` sends it every
+//! network client's destinations (`ALLOW`, #109), on its own unbadged
+//! capability: a client can send only where its entry lists.
 
 #![no_std]
 #![no_main]
 
 use pharos_proto::audit;
 use pharos_proto::infer::{self, Request as InferRequest};
+use pharos_proto::net::{self, Allowed, Dest, Request as NetRequest};
 use pharos_proto::store::{self, Request as StoreRequest};
 use pharos_user::rights::{CONFIG, GRANT, IRQ, MAP, READ, RECEIVE, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
@@ -62,8 +66,9 @@ enum Cap {
     /// The network service's endpoint, to receive on (the service itself).
     NetService,
     /// A network capability: `SEND` on the service endpoint, badged with
-    /// this UDP port (0: an unbadged capability, which the service refuses).
-    Network(u16),
+    /// this UDP port, and the destinations it may send to (#109). Never
+    /// badge 0: that is `init`'s own, which may send `ALLOW`.
+    Network(u32, &'static [Dest]),
     /// A storage capability: `SEND` on the storage service, badged with a
     /// namespace and the read-only bit (`pharos_proto::store`).
     Storage(u32),
@@ -136,6 +141,11 @@ const AUDIT_TRAIL: u32 = 6;
 /// The audit service's client numbers (`pharos_proto::audit::client`).
 const AUDIT_TRUST: u32 = 2;
 const AUDIT_RUNTIME: u32 = 3;
+/// The runtime's UDP port, for its agents' datagrams (#109).
+const RUNTIME_PORT: u32 = 40_100;
+/// The slirp gateway, where `cargo xtask` runs the host echo server.
+const HOST_ECHO: Dest = ([10, 0, 2, 2], 47_000);
+const OUR_IP: [u8; 4] = [10, 0, 2, 15];
 
 const BOOT: &[Service] = &[
     Service {
@@ -228,6 +238,8 @@ const BOOT: &[Service] = &[
             Cap::TrustRuntime,
             Cap::Storage(AGENTS_TASKS),
             Cap::Audit(AUDIT_RUNTIME),
+            // The union of its policy table's destinations: none.
+            Cap::Network(RUNTIME_PORT, &[]),
         ],
         after: &[2, 3, 5],
         limit: AGENTS_LIMIT,
@@ -241,7 +253,11 @@ const NETWORK: &[Service] = &[
         path: b"bin/netclient",
         arg: 2,
         kind: Kind::Daemon,
-        caps: &[Cap::Console, Cap::Network(40001), Cap::Report],
+        caps: &[
+            Cap::Console,
+            Cap::Network(40001, &[(OUR_IP, 40000)]),
+            Cap::Report,
+        ],
         after: &[0],
         limit: 0,
     },
@@ -250,16 +266,20 @@ const NETWORK: &[Service] = &[
         path: b"bin/netclient",
         arg: 1,
         kind: Kind::OneShot,
-        caps: &[Cap::Console, Cap::Network(40000)],
+        caps: &[
+            Cap::Console,
+            Cap::Network(40000, &[HOST_ECHO, (OUR_IP, 40001), (OUR_IP, 40999)]),
+        ],
         after: &[1],
         limit: 0,
     },
+    // A badge over 16 bits is no port.
     Service {
-        name: "unbadged",
+        name: "unported",
         path: b"bin/netclient",
         arg: 3,
         kind: Kind::OneShot,
-        caps: &[Cap::Console, Cap::Network(0)],
+        caps: &[Cap::Console, Cap::Network(1 << 16, &[HOST_ECHO])],
         after: &[0],
         limit: 0,
     },
@@ -544,7 +564,8 @@ impl Init {
             Cap::TrustRuntime => g(self.trust, SEND, TRUST_RUNTIME_BADGE),
             Cap::AuditService => g(self.audit, RECEIVE, 0),
             Cap::Audit(badge) => g(self.audit, SEND, *badge),
-            Cap::Network(port) => g(self.net, SEND, u32::from(*port)),
+            Cap::Network(0, _) => None,
+            Cap::Network(port, _) => g(self.net, SEND, *port),
             Cap::Device(id) | Cap::SecondDevice(id) => {
                 let nth = usize::from(matches!(cap, Cap::SecondDevice(_)));
                 let &(handle, _) = self.devices[..self.device_count]
@@ -688,6 +709,38 @@ impl Init {
         }
     }
 
+    /// Sends the network service every client's destinations (#109).
+    fn allow(&self) {
+        for (service, cap) in self
+            .table
+            .iter()
+            .flat_map(|s| s.caps.iter().map(move |c| (s, c)))
+        {
+            let Cap::Network(port, dests) = *cap else {
+                continue;
+            };
+            let req = Allowed::new(dests)
+                .zip(u16::try_from(port).ok())
+                .map(|(dests, client)| NetRequest::Allow { client, dests });
+            let mut msg = [0u8; 64];
+            let Some(n) = req.and_then(|r| net::encode(&r, &mut msg)) else {
+                continue;
+            };
+            // The request is sent from this buffer too.
+            let mut buf = [0u8; 64];
+            let answered = call_timeout(self.net, &msg[..n], self.reply, &mut buf, RELEASE_US)
+                .is_ok_and(|r| matches!(r, Received::Message { len, .. } if len >= 1))
+                && buf[0] == net::OK;
+            if !answered {
+                say(
+                    service.name,
+                    "destinations not sent, port",
+                    Some(port.into()),
+                );
+            }
+        }
+    }
+
     /// Service `j`'s process ended (its notification bit was set).
     fn ended(&mut self, j: usize) {
         let (State::Running(p) | State::Ok(p)) = self.state[j] else {
@@ -779,6 +832,9 @@ impl Init {
                     if service.kind == Kind::Daemon {
                         say(service.name, "ready", None);
                         self.state[i] = State::Ok(p);
+                        if service.path == b"bin/net" {
+                            self.allow();
+                        }
                     }
                 }
             }
