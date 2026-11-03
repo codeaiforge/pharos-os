@@ -583,7 +583,8 @@ mod kernel {
                 false => Err(Error::WouldBlock),
             };
         }
-        ipc::send(&endpoint, message);
+        // System calls run with interrupts off.
+        ipc::send_now(&endpoint, message);
         Ok(0)
     }
 
@@ -629,7 +630,7 @@ mod kernel {
         };
         sched::with_current_space(|space| space.read_user(addr, &mut message.data[..len]))
             .ok_or(Error::BadAddress)??;
-        let received = ipc::call(endpoint, message, reply_endpoint, sched::deadline(timeout));
+        let received = ipc::call_now(endpoint, message, reply_endpoint, sched::deadline(timeout));
         one_shot.revoke();
         deliver(process, received.ok_or(Error::UnknownCall)?, addr, max)
     }
@@ -938,8 +939,8 @@ mod kernel {
                 if process.caps.lock().len() >= MAX_HANDLES {
                     return Err(Error::NoMemory);
                 }
-                let received =
-                    ipc::receive(&endpoint, sched::deadline(timeout)).ok_or(Error::UnknownCall)?;
+                let received = ipc::receive_now(&endpoint, sched::deadline(timeout))
+                    .ok_or(Error::UnknownCall)?;
                 deliver(&process, received, addr, max_len)
             }
             Call::Revoke { handle } => {

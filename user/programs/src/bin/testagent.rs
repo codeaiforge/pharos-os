@@ -438,7 +438,9 @@ impl Agent {
         if mem_map(4 << 20).is_ok() {
             return self.fail(b"memory over the page limit was mapped");
         }
-        if self.send_to([10, 0, 2, 2], 47_000, b"x") != status::NO_ACCESS {
+        if self.send_to([10, 0, 2, 2], 47_000, b"x") != status::NO_ACCESS
+            || self.receive_from() != Err(status::NO_ACCESS)
+        {
             return self.fail(b"the network was reachable without a grant");
         }
         if self.generate(4).0 != status::NO_ACCESS {

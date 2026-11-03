@@ -1564,7 +1564,7 @@ fn agents_net_audit(image: &Path) -> Result<()> {
 
 /// After the `hostile` test kernel (#110): each kind of refusal of task 1
 /// is recorded exactly once, with its first example, and the attempt's
-/// total once it ended (453; at least 450, so a kind not counted shows);
+/// total once it ended (454; at least 450, so a kind not counted shows);
 /// its approval requests ended with it;
 /// the agent beside it, task 2, has its grants and its write and inference.
 fn hostile_audit(image: &Path) -> Result<()> {

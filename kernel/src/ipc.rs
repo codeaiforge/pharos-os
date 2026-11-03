@@ -176,16 +176,29 @@ pub enum Taken {
 }
 
 #[cfg(target_os = "none")]
-pub use kernel::{call, notify, poll, receive, send, try_send};
+pub use kernel::{call, call_now, notify, poll, receive, receive_now, send, send_now, try_send};
 
 #[cfg(target_os = "none")]
 mod kernel {
     use super::*;
+    use crate::arch::x86_64::without_interrupts;
     use crate::{process, sched};
+
+    // `send`, `call`, and `receive` turn interrupts off: a thread
+    // preempted after it queued itself but before it blocked would miss its
+    // waker's `wake` (a no-op for a thread not blocked) and block forever
+    // (M3.4 review F2). Kernel threads (the test kernels) call them with
+    // interrupts on. System calls, which run with interrupts off already,
+    // call the `_now` forms and skip the cost.
 
     /// Sends `message` on `endpoint` from the running thread; returns once
     /// a receiver has it.
     pub fn send(endpoint: &Endpoint, message: Message) {
+        without_interrupts(|| send_now(endpoint, message));
+    }
+
+    /// [`send`] for a caller with interrupts off.
+    pub fn send_now(endpoint: &Endpoint, message: Message) {
         let me = sched::current_id().unwrap_or(0);
         match endpoint.offer(me, message) {
             Some((receiver, message)) => {
@@ -249,6 +262,16 @@ mod kernel {
         reply: &Endpoint,
         deadline: Option<u64>,
     ) -> Option<Received> {
+        without_interrupts(|| call_now(endpoint, message, reply, deadline))
+    }
+
+    /// [`call`] for a caller with interrupts off.
+    pub fn call_now(
+        endpoint: &Endpoint,
+        message: Message,
+        reply: &Endpoint,
+        deadline: Option<u64>,
+    ) -> Option<Received> {
         let me = sched::current_id().unwrap_or(0);
         if let Some(taken) = reply.take(me) {
             // The caller checked `reply` is idle, with interrupts off since.
@@ -286,6 +309,11 @@ mod kernel {
     /// pending notification bits, else a message, waiting if neither is
     /// there, until tick `deadline` (`None`: forever).
     pub fn receive(endpoint: &Endpoint, deadline: Option<u64>) -> Option<Received> {
+        without_interrupts(|| receive_now(endpoint, deadline))
+    }
+
+    /// [`receive`] for a caller with interrupts off.
+    pub fn receive_now(endpoint: &Endpoint, deadline: Option<u64>) -> Option<Received> {
         let me = sched::current_id().unwrap_or(0);
         match endpoint.take(me) {
             Some(Taken::Notification(bits)) => Some(Received::Notification(bits)),

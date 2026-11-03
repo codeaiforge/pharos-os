@@ -1237,7 +1237,21 @@ impl Runtime {
                 Ok(done(out))
             }
             Request::ReceiveFrom => {
-                self.poll_net();
+                // Only with a destination held (M3.4 review F1): else any
+                // agent could make the runtime wait on the network service.
+                let (net, sent) = self.slots[i].as_ref().map_or((false, false), |s| {
+                    let net = s.grants.list().iter().any(|g| {
+                        matches!(g.permission, Permission::Net { .. })
+                            && g.until.is_none_or(|u| now < u)
+                    });
+                    (net, !s.peers.is_empty())
+                });
+                if !net {
+                    return Err(status::NO_ACCESS);
+                }
+                if sent {
+                    self.poll_net();
+                }
                 let s = self.slots[i].as_mut().ok_or(NO_SESSION)?;
                 while !s.inbox.is_empty() {
                     let ((addr, port), bytes) = s.inbox.remove(0);
