@@ -1260,7 +1260,26 @@ const PERMISSIONS_SCRIPT: &[console::Step] = &[
     ("no agent nobody runs", "revoke keeper data read\n"),
     ("revoked data read from keeper", "revoke keeper model 2\n"),
     ("revoked model 2 from keeper", ""),
+    // `asker` (#106): yes, no, then no answer (and a late one).
+    (
+        "approve #1: asker task 3 wants model 2 for 2000 ms? (yes 1 / no 1)",
+        "yes 1\n",
+    ),
+    ("approve #1: granted", ""),
+    (
+        "approve #2: asker task 3 wants data write for this task? (yes 2 / no 2)",
+        "no 2\n",
+    ),
+    ("approve #2: refused", ""),
+    (
+        "approve #3: asker task 3 wants data read for this task? (yes 3 / no 3)",
+        "",
+    ),
+    ("approve #3: no answer; refused", "yes 3\n"),
+    ("no request #3", ""),
 ];
+/// A refused permission is never asked for again.
+const PERMISSIONS_REFUSED: &[&str] = &["approve #4"];
 const MODEL_ENV: &str = "PHAROS_MODEL";
 /// Its time limit at least: about 45 s on the reference host.
 const LARGE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -1431,7 +1450,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     }
     let (steps, refused): (&'static [console::Step], &[&str]) = match name.as_str() {
         TRUST_TEST => (TRUST_SCRIPT, TRUST_REFUSED),
-        PERMISSIONS_TEST => (PERMISSIONS_SCRIPT, &[]),
+        PERMISSIONS_TEST => (PERMISSIONS_SCRIPT, PERMISSIONS_REFUSED),
         _ => (&[], &[]),
     };
     let script = if steps.is_empty() {

@@ -210,8 +210,9 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// The `agents` test kernels' manifests (#98, #99): `worker` and `counter`
 /// within their policy entries, `greedy` asking for more pages than its
 /// entry allows, `noentry`, which has no entry, and `keeper`, the
-/// `permissions` kernel's, which may write its own files (#105).
-pub const TEST_MANIFESTS: [(&str, &str); 5] = [
+/// `permissions` kernel's, which may write its own files (#105), and
+/// `asker`, which gets nothing and asks (#106).
+pub const TEST_MANIFESTS: [(&str, &str); 6] = [
     (
         "agents/worker.manifest",
         "# The agents test kernel's worker.\nmanifest = 1\nname = worker\nprogram = bin/testagent\n\
@@ -236,6 +237,11 @@ pub const TEST_MANIFESTS: [(&str, &str); 5] = [
         "agents/keeper.manifest",
         "manifest = 1\nname = keeper\nprogram = bin/testagent\npages = 256\nmodels = 2\n\
          attempts = 2\nprogress_ms = 5000\ntask_ms = 60000\ndata = write\n",
+    ),
+    (
+        "agents/asker.manifest",
+        "manifest = 1\nname = asker\nprogram = bin/testagent\npages = 256\nmodels =\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\n",
     ),
 ];
 

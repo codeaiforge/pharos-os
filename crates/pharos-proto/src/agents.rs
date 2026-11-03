@@ -34,11 +34,40 @@ pub mod op {
     pub const LOG: u8 = 10;
     pub const DATA_PUT: u8 = 11;
     pub const DATA_GET: u8 = 12;
+    pub const ASK: u8 = 13;
     pub const SUBMIT: u8 = 16;
     pub const STATUS: u8 = 17;
     pub const CANCEL: u8 = 18;
     pub const FORGET: u8 = 19;
     pub const REVOKE: u8 = 20;
+    pub const ANSWER: u8 = 21;
+}
+
+/// The `ASK` reply's outcome, after `OK` (#106).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Asked {
+    /// Held now (already, or approved).
+    Granted = 0,
+    /// Not askable, refused, revoked, or not answered in time.
+    Refused = 1,
+    /// Waiting for the user: ask again.
+    Pending = 2,
+}
+
+impl Asked {
+    pub fn encode(self, out: &mut [u8]) -> Option<usize> {
+        out.get_mut(..2)?.copy_from_slice(&[status::OK, self as u8]);
+        Some(2)
+    }
+    pub fn parse(reply: &[u8]) -> Option<Self> {
+        match reply {
+            [status::OK, 0] => Some(Self::Granted),
+            [status::OK, 1] => Some(Self::Refused),
+            [status::OK, 2] => Some(Self::Pending),
+            _ => None,
+        }
+    }
 }
 
 /// The interface's own status code: the caller has no task, inference
@@ -168,6 +197,18 @@ pub enum Request<'a> {
     DataGet {
         name: &'a [u8],
     },
+    /// Agent: asks for `permission` beyond what it was given, for
+    /// `for_ms` milliseconds (0: the rest of the task); the reply is
+    /// [`Asked`] (#106).
+    Ask {
+        permission: crate::permission::Permission,
+        for_ms: u32,
+    },
+    /// `trust`: the user's answer to approval request `number`.
+    Answer {
+        number: u16,
+        yes: bool,
+    },
     /// `trust`: takes `permission` from every running agent `name`.
     Revoke {
         name: &'a [u8],
@@ -266,6 +307,18 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             op::DATA_GET => Request::DataGet {
                 name: name(&mut r)?,
             },
+            op::ASK => Request::Ask {
+                permission: crate::permission::Permission::read(&mut r)?,
+                for_ms: r.u32()?,
+            },
+            op::ANSWER => Request::Answer {
+                number: r.u16()?,
+                yes: match r.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return None,
+                },
+            },
             op::REVOKE => Request::Revoke {
                 name: name(&mut r)?,
                 permission: crate::permission::Permission::read(&mut r)?,
@@ -359,6 +412,16 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
         Request::DataGet { name } => {
             head(&mut w, op::DATA_GET)?;
             write_name(&mut w, name)?;
+        }
+        Request::Ask { permission, for_ms } => {
+            head(&mut w, op::ASK)?;
+            permission.write(&mut w)?;
+            w.u32(for_ms)?;
+        }
+        Request::Answer { number, yes } => {
+            head(&mut w, op::ANSWER)?;
+            w.u16(number)?;
+            w.bytes(&[u8::from(yes)])?;
         }
         Request::Revoke { name, permission } => {
             head(&mut w, op::REVOKE)?;
@@ -591,6 +654,22 @@ mod tests {
                 name: b"worker",
                 permission: crate::permission::Permission::Model(2),
             },
+            Request::Ask {
+                permission: crate::permission::Permission::DataWrite,
+                for_ms: 0,
+            },
+            Request::Ask {
+                permission: crate::permission::Permission::Model(3),
+                for_ms: u32::MAX,
+            },
+            Request::Answer {
+                number: 7,
+                yes: true,
+            },
+            Request::Answer {
+                number: u16::MAX,
+                yes: false,
+            },
             Request::Revoke {
                 name: b"w",
                 permission: crate::permission::Permission::Net {
@@ -755,6 +834,18 @@ mod tests {
         for code in 1..=5 {
             assert_eq!(State::from_code(code).map(|s| s as u8), Some(code));
         }
+    }
+
+    #[test]
+    fn ask_replies_round_trip() {
+        for a in [Asked::Granted, Asked::Refused, Asked::Pending] {
+            let mut out = [0u8; 4];
+            let n = a.encode(&mut out).unwrap();
+            assert_eq!(Asked::parse(&out[..n]), Some(a));
+        }
+        assert_eq!(Asked::parse(&[status::OK, 3]), None);
+        assert_eq!(Asked::parse(&[status::NO_ACCESS, 0]), None);
+        assert_eq!(Asked::parse(&[status::OK, 0, 0]), None);
     }
 
     #[test]

@@ -75,6 +75,11 @@ pub struct Entry {
     pub progress_ms: u32,
     pub task_ms: u32,
     pub data: Data,
+    /// What the agent may ask the user for on top (#106): models, and data
+    /// access up to this level. A manifest cannot ask for these; the agent
+    /// asks while it runs, and gets each only with the user's approval.
+    pub ask_models: u32,
+    pub ask_data: Data,
 }
 
 /// Why a manifest was refused.
@@ -327,6 +332,8 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
         progress_ms: 30_000,
         task_ms: 600_000,
         data: Data::Read,
+        ask_models: 0,
+        ask_data: Data::None,
     }];
 
     fn with(key: &str, value: &str) -> std::string::String {

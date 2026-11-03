@@ -8,8 +8,12 @@
 //! a permission `keeper` does not hold, an agent that does not run, then
 //! `revoke keeper data read` and `revoke keeper model 2`. `keeper-b` must
 //! be refused after each without a restart and its session ended; then it
-//! crashes, and on attempt 2 both must still be refused. Runs under UEFI
-//! (D-009).
+//! crashes, and on attempt 2 both must still be refused. Then an `asker`
+//! task asks for permissions (#106): the runner answers `yes` to model 2
+//! for 2 s, `no` to `data write`, and nothing to `data read` (refused after
+//! the test table's 5 s), then answers that one late (`no request #3`).
+//! A refused permission must not be asked for again (`approve #4`). Runs
+//! under UEFI (D-009).
 
 #![no_std]
 #![no_main]
@@ -75,6 +79,7 @@ fn run(t: &mut TestRun) {
     for step in [
         "with its grants, an agent writes and reads its own file and generates from model 2",
         "revoked while it runs: refused at once, its session ended, and still after a restart",
+        "asked: approved for 2 s then refused again, refused by the user, unanswered refused",
     ] {
         let want = alloc::format!("ok {step}");
         t.check(step, passed.iter().any(|l| l == want.as_bytes()));
@@ -99,6 +104,10 @@ fn run(t: &mut TestRun) {
     for line in &said {
         kprintln!("  runtime: {}", core::str::from_utf8(line).unwrap_or("?"));
     }
+    t.check(
+        "the runtime accepted asker's manifest",
+        said.iter().any(|l| l == b"agents: asker manifest accepted"),
+    );
     t.check(
         "the runtime accepted keeper's manifest",
         said.iter()

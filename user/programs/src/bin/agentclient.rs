@@ -168,8 +168,8 @@ fn main(arg: u64) -> u64 {
     let (_, n) = c.call(&Request::Info, &mut out);
     let info = Info::parse(&out[..n]);
     c.step(
-        "INFO: interface agents, three agents accepted, none running",
-        info.is_some_and(|i| i.name == NAME && i.details == [3, 0]),
+        "INFO: interface agents, four agents accepted, none running",
+        info.is_some_and(|i| i.name == NAME && i.details == [4, 0]),
     );
     let refused = [&b"greedy"[..], b"absent", b"noentry"]
         .iter()
@@ -263,7 +263,7 @@ fn main(arg: u64) -> u64 {
         .iter()
         .all(|&t| c.status(t).is_some_and(|s| s.state == State::Cancelled));
     let (_, n) = c.call(&Request::Info, &mut out);
-    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [3, 0]);
+    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [4, 0]);
     c.step(
         "cancelling running and pending tasks stops their agents",
         cancelled && all && idle,
@@ -346,8 +346,14 @@ fn permissions(mut c: Client) -> u64 {
             b"b ok",
             "revoked while it runs: refused at once, its session ended, and still after a restart",
         ),
+        (
+            b"ask",
+            b"ask ok",
+            "asked: approved for 2 s then refused again, refused by the user, unanswered refused",
+        ),
     ] {
-        let Ok(task) = c.submit(b"keeper", input) else {
+        let agent: &[u8] = if input == b"ask" { b"asker" } else { b"keeper" };
+        let Ok(task) = c.submit(agent, input) else {
             c.step(step, false);
             continue;
         };

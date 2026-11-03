@@ -12,7 +12,13 @@
 //!   badged [`crate::agents::TRUST`], on which `trust` sends `REVOKE`
 //!   without ever waiting;
 //! - `REVOKED` `[version, op, outcome, name length, name, permission]`,
-//!   the runtime's answer to a `REVOKE`, carrying no capability.
+//!   the runtime's answer to a `REVOKE`, carrying no capability;
+//! - `APPROVE` `[version, op, number (2), name length, name, task (4),
+//!   permission, for_ms (4)]` (#106): ask the user; `trust` writes the
+//!   prompt itself from these fields;
+//! - `RESOLVED` `[version, op, number (2), result]`: how request `number`
+//!   ended, decided by the runtime (granted, refused, or not answered in
+//!   time).
 //!
 //! The badge says who sends: [`INIT`] or [`RUNTIME`]. There is no reply:
 //! the sender's blocking `send` returns once the service has the message,
@@ -30,6 +36,20 @@ pub mod op {
     pub const REGISTER: u8 = 2;
     pub const CHANNEL: u8 = 3;
     pub const REVOKED: u8 = 4;
+    pub const APPROVE: u8 = 5;
+    pub const RESOLVED: u8 = 6;
+}
+
+/// How an approval request ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Resolution {
+    Granted = 0,
+    Refused = 1,
+    /// No answer within the runtime's timeout: refused.
+    Unanswered = 2,
+    /// The task ended first.
+    Ended = 3,
 }
 
 /// What a `REVOKE` did.
@@ -73,6 +93,17 @@ pub enum Request<'a> {
         name: &'a [u8],
     },
     Channel,
+    Approve {
+        number: u16,
+        name: &'a [u8],
+        task: u32,
+        permission: Permission,
+        for_ms: u32,
+    },
+    Resolved {
+        number: u16,
+        resolution: Resolution,
+    },
     Revoked {
         outcome: Outcome,
         name: &'a [u8],
@@ -92,6 +123,29 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             Some(Request::Register { slot, name })
         })(),
         op::CHANNEL => Some(Request::Channel),
+        op::APPROVE => (|| {
+            let number = r.u16()?;
+            let len = usize::from(r.u8()?);
+            let name = r.take(len).filter(|n| valid_name(n))?;
+            Some(Request::Approve {
+                number,
+                name,
+                task: r.u32()?,
+                permission: Permission::read(&mut r)?,
+                for_ms: r.u32()?,
+            })
+        })(),
+        op::RESOLVED => (|| {
+            let number = r.u16()?;
+            let resolution = match r.u8()? {
+                0 => Resolution::Granted,
+                1 => Resolution::Refused,
+                2 => Resolution::Unanswered,
+                3 => Resolution::Ended,
+                _ => return None,
+            };
+            Some(Request::Resolved { number, resolution })
+        })(),
         op::REVOKED => (|| {
             let outcome = match r.u8()? {
                 0 => Outcome::Revoked,
@@ -128,6 +182,29 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.bytes(name)?;
         }
         Request::Channel => w.bytes(&[VERSION, op::CHANNEL])?,
+        Request::Approve {
+            number,
+            name,
+            task,
+            permission,
+            for_ms,
+        } => {
+            if !valid_name(name) {
+                return None;
+            }
+            w.bytes(&[VERSION, op::APPROVE])?;
+            w.u16(number)?;
+            w.bytes(&[name.len() as u8])?;
+            w.bytes(name)?;
+            w.u32(task)?;
+            permission.write(&mut w)?;
+            w.u32(for_ms)?;
+        }
+        Request::Resolved { number, resolution } => {
+            w.bytes(&[VERSION, op::RESOLVED])?;
+            w.u16(number)?;
+            w.bytes(&[resolution as u8])?;
+        }
         Request::Revoked {
             outcome,
             name,
@@ -155,6 +232,8 @@ pub enum Command<'a> {
     StopAll,
     /// `revoke <agent> <permission>` (#105).
     Revoke(&'a [u8], Permission),
+    /// `yes <n>` or `no <n>`: the answer to approval request `n` (#106).
+    Answer(u16, bool),
     /// Anything else: the service answers with the commands it knows.
     Help,
 }
@@ -184,8 +263,21 @@ pub fn command(line: &[u8]) -> Command<'_> {
         (Some(b"list"), None, None) => Command::List,
         (Some(b"stop"), Some(b"all"), None) => Command::StopAll,
         (Some(b"stop"), Some(name), None) if valid_name(name) => Command::Stop(name),
+        (Some(word @ (b"yes" | b"no")), Some(n), None) => match request_number(n) {
+            Some(n) => Command::Answer(n, word == b"yes"),
+            None => Command::Help,
+        },
         _ => Command::Help,
     }
+}
+
+/// An approval request's number: 1 to 65535, no leading zero.
+fn request_number(v: &[u8]) -> Option<u16> {
+    if v.is_empty() || v.len() > 5 || v[0] == b'0' || !v.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let n = v.iter().fold(0u32, |n, b| n * 10 + u32::from(b - b'0'));
+    u16::try_from(n).ok()
 }
 
 /// Collects typed bytes into lines of at most [`Lines::MAX`] bytes. A line
@@ -273,6 +365,17 @@ mod tests {
                 name: &long,
             },
             Request::Channel,
+            Request::Approve {
+                number: 3,
+                name: b"asker",
+                task: 12,
+                permission: Permission::Model(2),
+                for_ms: 2_000,
+            },
+            Request::Resolved {
+                number: u16::MAX,
+                resolution: Resolution::Ended,
+            },
             Request::Revoked {
                 outcome: Outcome::NotHeld,
                 name: b"worker",
@@ -337,6 +440,8 @@ mod tests {
         assert_eq!(command(b"  list "), Command::List);
         assert_eq!(command(b"stop all"), Command::StopAll);
         assert_eq!(command(b"stop\tworker-1"), Command::Stop(b"worker-1"));
+        assert_eq!(command(b"yes 3"), Command::Answer(3, true));
+        assert_eq!(command(b" no  65535"), Command::Answer(65_535, false));
         assert_eq!(
             command(b"revoke worker model 2"),
             Command::Revoke(b"worker", Permission::Model(2))
@@ -364,6 +469,12 @@ mod tests {
             b"revoke worker model 0",
             b"revoke wor;ker data read",
             b"revoke worker data read extra",
+            b"yes",
+            b"yes 0",
+            b"yes 03",
+            b"no 65536",
+            b"yes 1 2",
+            b"Yes 1",
         ] {
             assert_eq!(command(line), Command::Help, "{line:?}");
         }

@@ -30,6 +30,12 @@
 //!   until `NO_ACCESS`; then its session must be gone and writing refused,
 //!   and it crashes. On attempt 2 both must still be refused (a revocation
 //!   holds for the task); completes with `b ok`.
+//! - `ask` (agent `asker`, #106): `ASK` for a network destination (not
+//!   askable) is refused at once, and model 2 is refused before it asks;
+//!   asked for 2 s, model 2 is pending until the user answers `yes`, then
+//!   generates, and is refused again once the 2 s are over; `data write`
+//!   is refused by the user and refused again without a new prompt; `data
+//!   read` is refused when nobody answers in time; completes with `ask ok`.
 
 #![no_std]
 #![no_main]
@@ -39,14 +45,15 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use pharos_proto::agents::{
-    Assigned, Begun, CHECKPOINT_AT, Deps, KEY, MAX_BUFFER, NO_SESSION, Request, encode,
+    Asked, Assigned, Begun, CHECKPOINT_AT, Deps, KEY, MAX_BUFFER, NO_SESSION, Request, encode,
 };
 use pharos_proto::infer::{Started, Tokens};
+use pharos_proto::permission::Permission;
 use pharos_proto::status;
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
     Handle, Mapped, Received, call_timeout, delete, endpoint_create, mem_map_buffer, mem_share,
-    send, sleep,
+    send, sleep, uptime,
 };
 
 pharos_user::entry!(main);
@@ -168,6 +175,78 @@ impl Agent {
         };
         let (code, n) = self.call(&req, &mut out);
         (code, Started::parse(&out[..n]).is_some())
+    }
+
+    fn ask(&self, permission: Permission, for_ms: u32) -> Option<Asked> {
+        let mut out = [0u8; 256];
+        let (_, n) = self.call(&Request::Ask { permission, for_ms }, &mut out);
+        Asked::parse(&out[..n])
+    }
+
+    /// Asks until the answer is not pending, at most `secs`.
+    fn wait_ask(&self, permission: Permission, for_ms: u32, secs: u32) -> Option<Asked> {
+        for _ in 0..secs * 10 {
+            match self.ask(permission, for_ms) {
+                Some(Asked::Pending) => sleep(100_000),
+                other => return other,
+            }
+        }
+        Some(Asked::Pending)
+    }
+
+    fn asker(&self) -> u64 {
+        let mut out = [0u8; 256];
+        let net = Permission::Net {
+            addr: [10, 0, 2, 2],
+            port: 1,
+        };
+        if self.ask(net, 0) != Some(Asked::Refused) {
+            return self.fail(b"a permission not askable was not refused");
+        }
+        if self.generate(4).0 != status::NO_ACCESS {
+            return self.fail(b"model 2 was not refused before it was asked for");
+        }
+        let model = Permission::Model(2);
+        if self.ask(model, 2_000) != Some(Asked::Pending) {
+            return self.fail(b"asking for model 2 was not pending");
+        }
+        if self.wait_ask(model, 2_000, 30) != Some(Asked::Granted) {
+            return self.fail(b"the approval did not grant model 2");
+        }
+        let granted = uptime();
+        if !self.generate(4).1 {
+            return self.fail(b"GENERATE with the approved model failed");
+        }
+        loop {
+            let (_, n) = self.call(&Request::Next, &mut out);
+            match Tokens::parse(&out[..n]) {
+                Some(t) if t.stop.is_none() => {}
+                Some(_) => break,
+                None => return self.fail(b"NEXT failed"),
+            }
+        }
+        let over = granted + 2_500_000;
+        while uptime() < over {
+            self.call(&Request::Info, &mut out);
+            sleep(200_000);
+        }
+        if self.generate(4).0 != status::NO_ACCESS {
+            return self.fail(b"model 2 was not refused after its 2 s");
+        }
+        if self.ask(Permission::DataWrite, 0) != Some(Asked::Pending)
+            || self.wait_ask(Permission::DataWrite, 0, 30) != Some(Asked::Refused)
+        {
+            return self.fail(b"the user's no did not refuse data write");
+        }
+        if self.ask(Permission::DataWrite, 0) != Some(Asked::Refused) {
+            return self.fail(b"a refused permission was asked for again");
+        }
+        if self.ask(Permission::DataRead, 0) != Some(Asked::Pending)
+            || self.wait_ask(Permission::DataRead, 0, 30) != Some(Asked::Refused)
+        {
+            return self.fail(b"an unanswered request was not refused");
+        }
+        self.complete(b"ask ok")
     }
 
     fn keeper_a(&self) -> u64 {
@@ -469,6 +548,7 @@ fn main(_: u64) -> u64 {
         b"count" => a.count(&task),
         b"keeper-a" => a.keeper_a(),
         b"keeper-b" => a.keeper_b(&task),
+        b"ask" => a.asker(),
         b"wait" => loop {
             a.call(&Request::Info, &mut out);
             sleep(200_000);

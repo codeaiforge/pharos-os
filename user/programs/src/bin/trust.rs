@@ -14,6 +14,12 @@
 //! runtime with a non-blocking send on the capability the runtime gave it
 //! (`CHANNEL`), so a hung runtime never holds `trust`; the runtime's
 //! `REVOKED` answer is shown when it comes.
+//!
+//! Approvals (#106): the runtime's `APPROVE` becomes a prompt that `trust`
+//! writes from its fields alone, `approve #<n>: <agent> task <id> wants
+//! <permission> for this task? (yes <n> / no <n>)`; the user answers
+//! `yes <n>` or `no <n>`. The runtime decides the outcome (including the
+//! timeout) and says so with `RESOLVED`, which `trust` shows.
 
 #![no_std]
 #![no_main]
@@ -34,7 +40,8 @@ const DEVICE: Handle = 1;
 const SERVICE: Handle = 2;
 const REPORT: Handle = 3;
 const BASE: u64 = 0x1000_0000;
-const HELP: &[u8] = b"commands: list, stop <agent>, stop all, revoke <agent> <permission>";
+const HELP: &[u8] =
+    b"commands: list, stop <agent>, stop all, revoke <agent> <permission>, yes <n>, no <n>";
 /// How long a stop may take before the answer says it is still running.
 const STOP_WAIT_US: u64 = 1_000_000;
 
@@ -51,6 +58,8 @@ struct Trust {
     runtime: Option<Handle>,
     /// `SEND` on the runtime, badged as `trust` (`CHANNEL`).
     channel: Option<Handle>,
+    /// Approval requests shown and not yet resolved.
+    open: [u16; 4],
     agents: [Option<Agent>; SLOTS as usize],
 }
 
@@ -58,7 +67,7 @@ impl Trust {
     /// One line on the trusted console, `\r\n` added. Dropped if the
     /// console is full: output never makes the service wait.
     fn say(&mut self, parts: &[&[u8]]) {
-        let mut line = [0u8; 128];
+        let mut line = [0u8; 192];
         let mut n = 0;
         for p in parts.iter().chain([&&b"\r\n"[..]]) {
             let take = p.len().min(line.len() - n);
@@ -94,6 +103,22 @@ impl Trust {
             Ok(Status::Running) => self.say(&[b"stopping ", label, b": still running"]),
             _ => self.say(&[b"stopped ", label]),
         }
+    }
+
+    /// Sends `req` on the channel without blocking, for at most 2 s: the
+    /// runtime may be busy or hung, and `stop` must keep working.
+    fn tell_runtime(&self, req: &agents::Request<'_>) -> bool {
+        let mut msg = [0u8; 64];
+        let (Some(c), Some(n)) = (self.channel, agents::encode(req, &mut msg)) else {
+            return false;
+        };
+        for _ in 0..200 {
+            if try_send(c, &msg[..n]).is_ok() {
+                return true;
+            }
+            sleep(10_000);
+        }
+        false
     }
 
     fn command(&mut self, line: &[u8]) {
@@ -136,23 +161,17 @@ impl Trust {
                 self.say(&[b"stopped all"]);
             }
             Command::Revoke(name, permission) => {
-                let mut msg = [0u8; 64];
-                let req = agents::Request::Revoke { name, permission };
-                let n = agents::encode(&req, &mut msg).unwrap_or(0);
-                // At most 2 s, never blocking: the runtime may be busy or
-                // hung, and `stop` must keep working.
-                let mut sent = false;
-                if let Some(c) = self.channel {
-                    for _ in 0..200 {
-                        sent = try_send(c, &msg[..n]).is_ok();
-                        if sent {
-                            break;
-                        }
-                        sleep(10_000);
-                    }
-                }
-                if !sent {
+                if !self.tell_runtime(&agents::Request::Revoke { name, permission }) {
                     self.say(&[b"revoke: the runtime is not answering; stop works"]);
+                }
+            }
+            Command::Answer(number, yes) => {
+                let mut d = [0u8; 20];
+                let n = decimal(u64::from(number), &mut d);
+                if number == 0 || !self.open.contains(&number) {
+                    self.say(&[b"no request #", n]);
+                } else if !self.tell_runtime(&agents::Request::Answer { number, yes }) {
+                    self.say(&[b"answer: the runtime is not answering; stop works"]);
                 }
             }
             Command::Help => self.say(&[HELP]),
@@ -167,6 +186,70 @@ impl Trust {
             Ok(Request::Channel) if badge == RUNTIME && cap != 0 && !valid => {
                 if let Some(old) = self.channel.replace(cap) {
                     let _ = delete(old);
+                }
+            }
+            Ok(Request::Approve {
+                number,
+                name,
+                task,
+                permission,
+                for_ms,
+            }) if badge == RUNTIME && number != 0 => {
+                if let Some(free) = self.open.iter_mut().find(|n| **n == 0) {
+                    *free = number;
+                }
+                let (mut a, mut b, mut c) = ([0u8; 20], [0u8; 20], [0u8; 20]);
+                let n = decimal(u64::from(number), &mut a);
+                let id = decimal(u64::from(task), &mut b);
+                let mut t = [0u8; 32];
+                let p = permission.text(&mut t);
+                let mut how = [0u8; 40];
+                let how: &[u8] = if for_ms == 0 {
+                    b"for this task"
+                } else {
+                    let ms = decimal(u64::from(for_ms), &mut c);
+                    let k = 4 + ms.len() + 3;
+                    how[..4].copy_from_slice(b"for ");
+                    how[4..4 + ms.len()].copy_from_slice(ms);
+                    how[4 + ms.len()..k].copy_from_slice(b" ms");
+                    &how[..k]
+                };
+                self.say(&[
+                    b"approve #",
+                    n,
+                    b": ",
+                    name,
+                    b" task ",
+                    id,
+                    b" wants ",
+                    p,
+                    b" ",
+                    how,
+                    b"? (yes ",
+                    n,
+                    b" / no ",
+                    n,
+                    b")",
+                ]);
+                if cap != 0 {
+                    let _ = delete(cap);
+                }
+            }
+            Ok(Request::Resolved { number, resolution }) if badge == RUNTIME => {
+                for open in self.open.iter_mut().filter(|n| **n == number) {
+                    *open = 0;
+                }
+                let mut a = [0u8; 20];
+                let n = decimal(u64::from(number), &mut a);
+                let what: &[u8] = match resolution {
+                    trust::Resolution::Granted => b"granted",
+                    trust::Resolution::Refused => b"refused",
+                    trust::Resolution::Unanswered => b"no answer; refused",
+                    trust::Resolution::Ended => b"the task ended",
+                };
+                self.say(&[b"approve #", n, b": ", what]);
+                if cap != 0 {
+                    let _ = delete(cap);
                 }
             }
             Ok(Request::Revoked {
@@ -238,6 +321,7 @@ fn main(_: u64) -> u64 {
         console,
         runtime: None,
         channel: None,
+        open: [0; 4],
         agents: [None; SLOTS as usize],
     };
     if send(REPORT, b"ready", 0, 0, 0).is_err() {

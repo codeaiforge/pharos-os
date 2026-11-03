@@ -25,6 +25,13 @@
 //! runs: `trust` sends `REVOKE` on the capability the runtime gives it at
 //! start (`CHANNEL`), and the runtime answers with `REVOKED`. A revocation
 //! holds for the rest of the task, across restarts.
+//!
+//! Approvals (#106): an agent may `ASK` for what its policy entry lists as
+//! askable. The runtime asks `trust` (`APPROVE`, structured fields only),
+//! answers `PENDING` until the user's `yes` or `no` comes back (`ANSWER`)
+//! or the timeout passes (60 s; 5 s with the test table), and tells `trust`
+//! how it ended (`RESOLVED`). At most 4 wait at once. An approval holds for
+//! that task only; a refusal too, so the agent cannot ask again.
 
 #![no_std]
 #![no_main]
@@ -36,7 +43,7 @@ use alloc::vec::Vec;
 use pharos_programs::grants::Grants;
 use pharos_programs::tasks::{self, Begin, Files, StoreFailed, Tasks};
 use pharos_proto::agents::{
-    self, Assigned, Begun, CHECKPOINT_AT, CONTROL, MAX_BUFFER, MAX_CHECKPOINT, MAX_INPUT,
+    self, Asked, Assigned, Begun, CHECKPOINT_AT, CONTROL, MAX_BUFFER, MAX_CHECKPOINT, MAX_INPUT,
     MAX_RESULT, MAX_RUNNING, NAME, NO_SESSION, Request, SLOTS, State, TaskStatus, VERSION,
     agent_slot, parse,
 };
@@ -69,6 +76,11 @@ const STORE_US: u64 = 10_000_000;
 /// a model first.
 const GENERATE_US: u64 = 60_000_000;
 const INFER_US: u64 = 10_000_000;
+/// How long the user has to answer an approval request: boot table, test
+/// table.
+const APPROVE_US: [u64; 2] = [60_000_000, 5_000_000];
+/// Most approval requests waiting at once.
+const MAX_PENDING: usize = 4;
 /// Control clients with an attached buffer.
 const MAX_CONTROLS: usize = 4;
 
@@ -87,6 +99,8 @@ const TEST: &[Entry] = &[
         progress_ms: 2_000,
         task_ms: 20_000,
         data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
     },
     Entry {
         name: b"greedy",
@@ -97,6 +111,8 @@ const TEST: &[Entry] = &[
         progress_ms: 2_000,
         task_ms: 20_000,
         data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
     },
     Entry {
         name: b"absent",
@@ -107,6 +123,8 @@ const TEST: &[Entry] = &[
         progress_ms: 2_000,
         task_ms: 20_000,
         data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
     },
     Entry {
         name: b"counter",
@@ -117,6 +135,8 @@ const TEST: &[Entry] = &[
         progress_ms: 5_000,
         task_ms: 120_000,
         data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
     },
     // The `permissions` kernel's (#105).
     Entry {
@@ -128,6 +148,21 @@ const TEST: &[Entry] = &[
         progress_ms: 5_000,
         task_ms: 60_000,
         data: Data::Write,
+        ask_models: 0,
+        ask_data: Data::None,
+    },
+    // Gets nothing; may ask for model 2 and data access (#106).
+    Entry {
+        name: b"asker",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 0,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::None,
+        ask_models: 1 << 2,
+        ask_data: Data::Write,
     },
 ];
 
@@ -201,6 +236,22 @@ fn data_path(agent: &[u8], file: &[u8]) -> Vec<u8> {
     p.push(b'/');
     p.extend_from_slice(file);
     p
+}
+
+/// Sends `req` to `trust` without blocking, trying for at most 1 s:
+/// `trust` waits in `receive` almost always, and is never waited on long.
+fn tell_trust(req: &trust::Request<'_>) -> bool {
+    let mut msg = [0u8; 96];
+    let Some(n) = trust::encode(req, &mut msg) else {
+        return false;
+    };
+    for _ in 0..100 {
+        if try_send(TRUST, &msg[..n]).is_ok() {
+            return true;
+        }
+        pharos_user::sleep(10_000);
+    }
+    false
 }
 
 fn u64_at(b: &[u8], at: usize) -> u64 {
@@ -311,6 +362,33 @@ struct Runtime {
     reply: Handle,
     /// Permissions revoked from running tasks, kept for their restarts.
     revoked: Vec<(u32, Permission)>,
+    /// Approval requests waiting for the user (#106).
+    pending: Vec<Pending>,
+    next_request: u16,
+    approve_us: u64,
+    /// Approved for a task (and until when), kept for its restarts.
+    approved: Vec<(u32, Permission, Option<u64>)>,
+    /// Refused, or not answered, for a task: not asked again.
+    refused: Vec<(u32, Permission)>,
+}
+
+struct Pending {
+    number: u16,
+    task: u32,
+    permission: Permission,
+    for_ms: u32,
+    deadline: u64,
+}
+
+/// True if `entry` lets its agent ask for `p`.
+fn askable(entry: &Entry, p: &Permission) -> bool {
+    match *p {
+        Permission::Model(n) => n <= 31 && entry.ask_models & 1 << n != 0,
+        Permission::DataRead => entry.ask_data >= Data::Read,
+        Permission::DataWrite => entry.ask_data == Data::Write,
+        // Network grants come with #109.
+        Permission::Net { .. } => false,
+    }
 }
 
 fn decimal(mut v: u64, out: &mut [u8; 20]) -> &[u8] {
@@ -546,6 +624,9 @@ impl Runtime {
             ending: None,
             grants: {
                 let mut g = Grants::new(limits.models, limits.data);
+                for (_, p, until) in self.approved.iter().filter(|(t, ..)| *t == id) {
+                    g.add(*p, *until);
+                }
                 for (_, p) in self.revoked.iter().filter(|(t, _)| *t == id) {
                     g.revoke(p);
                 }
@@ -608,6 +689,16 @@ impl Runtime {
             unmap(b);
         }
         let id = s.task;
+        // Its open requests end with it.
+        let open: Vec<u16> = self
+            .pending
+            .iter()
+            .filter(|q| q.task == id)
+            .map(|q| q.number)
+            .collect();
+        for number in open {
+            self.resolve(number, trust::Resolution::Ended);
+        }
         match (s.ending, status) {
             (Some(Ending::Finished | Ending::Cancelled), _) => {}
             (Some(Ending::Hung), _) => self.retry(id),
@@ -937,7 +1028,11 @@ impl Runtime {
                 Ok(5)
             }
             Request::Info => self.info(out).ok_or(status::INTERNAL),
-            Request::Revoke { .. } => Err(status::NO_ACCESS),
+            Request::Ask { permission, for_ms } => self
+                .ask(i, id, limits.entry, permission, for_ms)
+                .encode(out)
+                .ok_or(status::INTERNAL),
+            Request::Revoke { .. } | Request::Answer { .. } => Err(status::NO_ACCESS),
             Request::Submit { .. }
             | Request::Status { .. }
             | Request::Cancel { .. }
@@ -972,22 +1067,99 @@ impl Runtime {
                 }
             }
         }
-        let mut msg = [0u8; 64];
-        let answer = trust::Request::Revoked {
+        tell_trust(&trust::Request::Revoked {
             outcome,
             name,
             permission,
-        };
-        // `trust` waits in `receive` almost always; it is never waited on
-        // for long.
-        if let Some(n) = trust::encode(&answer, &mut msg) {
-            for _ in 0..100 {
-                if try_send(TRUST, &msg[..n]).is_ok() {
-                    break;
-                }
-                pharos_user::sleep(10_000);
-            }
+        });
+    }
+
+    /// `ASK` from the agent in slot `i`, running task `task` of `entry`.
+    fn ask(&mut self, i: usize, task: u32, entry: &Entry, p: Permission, for_ms: u32) -> Asked {
+        let now = uptime();
+        if self.slots[i]
+            .as_ref()
+            .is_some_and(|s| s.grants.allows(&p, now))
+        {
+            return Asked::Granted;
         }
+        let closed = |list: &[(u32, Permission)]| list.iter().any(|(t, q)| *t == task && *q == p);
+        if !askable(entry, &p) || closed(&self.revoked) || closed(&self.refused) {
+            return Asked::Refused;
+        }
+        if self
+            .pending
+            .iter()
+            .any(|q| q.task == task && q.permission == p)
+        {
+            return Asked::Pending;
+        }
+        if self.pending.len() >= MAX_PENDING {
+            return Asked::Refused;
+        }
+        self.next_request = self.next_request.wrapping_add(1).max(1);
+        let number = self.next_request;
+        let asked = tell_trust(&trust::Request::Approve {
+            number,
+            name: entry.name,
+            task,
+            permission: p,
+            for_ms,
+        });
+        // `trust` unreachable means no (D-018 item 4).
+        if !asked {
+            self.refused.push((task, p));
+            return Asked::Refused;
+        }
+        self.pending.push(Pending {
+            number,
+            task,
+            permission: p,
+            for_ms,
+            deadline: now + self.approve_us,
+        });
+        Asked::Pending
+    }
+
+    /// Ends approval request `number` as `how`, and tells `trust`.
+    fn resolve(&mut self, number: u16, how: trust::Resolution) {
+        let Some(at) = self.pending.iter().position(|q| q.number == number) else {
+            return;
+        };
+        let q = self.pending.remove(at);
+        if how == trust::Resolution::Granted {
+            let until = (q.for_ms > 0).then(|| uptime() + u64::from(q.for_ms) * 1000);
+            self.approved.push((q.task, q.permission, until));
+            for s in self.slots.iter_mut().flatten().filter(|s| s.task == q.task) {
+                s.grants.add(q.permission, until);
+            }
+        } else {
+            self.refused.push((q.task, q.permission));
+        }
+        tell_trust(&trust::Request::Resolved {
+            number,
+            resolution: how,
+        });
+    }
+
+    /// Requests past their deadline are refused; returns the wait until
+    /// the next one.
+    fn expire_pending(&mut self) -> u64 {
+        let now = uptime();
+        let due: Vec<u16> = self
+            .pending
+            .iter()
+            .filter(|q| q.deadline <= now)
+            .map(|q| q.number)
+            .collect();
+        for number in due {
+            self.resolve(number, trust::Resolution::Unanswered);
+        }
+        self.pending
+            .iter()
+            .map(|q| q.deadline - now)
+            .min()
+            .unwrap_or(u64::MAX)
     }
 
     fn control_buffer(&self, badge: u32) -> Option<&Mapped> {
@@ -1086,6 +1258,15 @@ impl Runtime {
                     self.revoke(name, permission);
                     Ok(done(out))
                 }
+                Request::Answer { number, yes } => {
+                    let how = if yes {
+                        trust::Resolution::Granted
+                    } else {
+                        trust::Resolution::Refused
+                    };
+                    self.resolve(number, how);
+                    Ok(done(out))
+                }
                 _ => Err(status::NO_ACCESS),
             },
             None => Err(status::NO_ACCESS),
@@ -1177,6 +1358,11 @@ fn main(arg: u64) -> u64 {
         infer_buffer,
         reply,
         revoked: Vec::new(),
+        pending: Vec::new(),
+        next_request: 0,
+        approve_us: APPROVE_US[usize::from(arg == 1)],
+        approved: Vec::new(),
+        refused: Vec::new(),
     };
     // `trust`'s way to send `REVOKE`, badged so only it is served as `trust`.
     let mut msg = [0u8; 8];
@@ -1193,7 +1379,7 @@ fn main(arg: u64) -> u64 {
         // A refused retry is tried again within a second.
         let stranded = r.retry_stranded();
         r.start_pending();
-        let wait = r.check_deadlines();
+        let wait = r.check_deadlines().min(r.expire_pending());
         let wait = if stranded { wait.min(1_000_000) } else { wait };
         match receive_timeout(SERVICE, &mut msg, wait) {
             Ok(Received::Notification(bits)) => {
