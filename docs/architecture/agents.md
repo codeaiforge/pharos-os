@@ -45,6 +45,7 @@ What M3.3 builds on:
 - **Commands**, one per line, each answered on the same console:
   - `list`: the registered agents and whether each is running;
   - `stop <agent>`: `process_stop` on every process registered under that name (one agent may run several tasks at once, one process each);
+  - `revoke <agent> <permission>` (#105): `model <n>`, `data read`, `data write`, or `net <a.b.c.d>:<port>`, taken from every running task of that agent; `trust` passes it to the runtime and shows the runtime's answer (`revoked …`, `… does not hold …`, `no agent … runs`) ([capabilities.md](capabilities.md));
   - `stop all`: `process_stop` on `agents`, which ends every agent. This is the emergency stop and safe mode: `init` does not restart a service that was stopped (#100), so everything stays stopped until reboot.
 - **"Revoke" in M3.3 is a stop.** An agent's one capability is deleted with its process, and in M3.3 kernel revocation did not unmap memory, so ending the process was the full revocation (M3.4 unmaps it, #104). Revoking one capability while the agent keeps running comes with M3.4.
 - **`trust`'s interface** (`pharos_proto::trust`, version 1) has two operations, each carrying a process capability with `STOP` and `WAIT` (`WAIT` so `list` can show whether it runs): `RUNTIME`, accepted only under `init`'s badge (no badge: `init` created the endpoint and is the only holder of an unbadged `SEND` on it, since it gives every other sender a badged copy, which cannot be re-badged; a process cannot badge its own copy, because a send to itself would block), and `REGISTER` (agent slot and name), accepted only under the runtime's badge. Anything else is dropped and its capability deleted. It keeps at most 16 agents, replacing an agent's entry when its slot is reused. There is no reply: the sender's blocking `send` returns once `trust` has the message, and `trust` never refuses a valid one. Neither operation can make `trust` do anything but remember a process.
@@ -65,8 +66,10 @@ models = 1
 attempts = 3
 progress_ms = 30000
 task_ms = 600000
+data = read
 ```
 
+- `data` (#105): `none`, `read`, or `write` (which includes reading), the agent's own files kept by the runtime ([capabilities.md](capabilities.md)).
 - `pages`: the agent's page limit. `models`: inference models it may use. `attempts`: tries per task, at most 10. `progress_ms`: how long it may go without a request while it has a task. `task_ms`: how long a task may run.
 - **Manifests are untrusted input:** a `no_std` parser in `pharos-proto` with checked bounds. Unknown keys, repeated keys, missing keys, and values out of range are refused. Host tests and 100,000 fuzzed inputs.
 - *Implemented (#97):* `pharos_proto::manifest`. Spaces around keys and values are ignored. `models` lists model numbers (1 to 31), comma-separated, or is empty for none. Limits: `pages` 1 to 262,144 (1 GiB), `attempts` 1 to 10, `progress_ms` 1 to one hour and at most `task_ms`, `task_ms` 1 to one day; numbers have no sign or leading zero. `program` is a relative path of at most 64 bytes with no empty, `.`, or `..` part. A refusal names its line. `Manifest::within` is the policy check: no entry for the name, another program, or anything over the entry is refused.
@@ -104,6 +107,8 @@ Clients are told apart by badge: agent slots, and control clients that `init`'s 
 | `COMPLETE`, `FAIL` | agent | ends the task with a result (up to 4 KiB) or a reason | 10 s |
 | `INFER`, `NEXT`, `CANCEL_INFER` | agent | inference through the runtime: the prompt is copied from the agent's buffer into the runtime's own buffer at the inference service; models only from the agent's manifest | as `inference` |
 | `LOG` | agent | one console line, at most 200 bytes, printable characters only | 1 s |
+| `DATA_PUT`, `DATA_GET` | agent | writes or reads one of the agent's own files (a name as agent names are, up to 64 KiB, through its buffer), kept by the runtime at `data/<agent>/<name>` in its store namespace; needs `data write` or `data read` (#105) | 10 s |
+| `REVOKE` | `trust` | takes a permission from every running task of an agent, for the rest of the task; answered with `trust`'s `REVOKED` (#105) | none (a plain `send`) |
 | `SUBMIT` | control | a new task: agent name, up to 4 task IDs it depends on, input from the client's buffer; returns the task ID | 10 s |
 | `STATUS` | control | a task's state, attempts, and result | 1 s |
 | `CANCEL` | control | stops the task's agent, cancels its inference session, marks it cancelled | 10 s |

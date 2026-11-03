@@ -18,6 +18,13 @@
 //! in the store ([`pharos_programs::tasks`], #99): every change is stored
 //! before it is answered or acted on, and at start the runtime recovers
 //! them, a task that was running becoming pending again.
+//!
+//! Permissions (#105, capabilities.md): each attempt's grants are built
+//! from its manifest within the policy entry, checked on every request
+//! that needs one (inference, the agent's files), and revocable while it
+//! runs: `trust` sends `REVOKE` on the capability the runtime gives it at
+//! start (`CHANNEL`), and the runtime answers with `REVOKED`. A revocation
+//! holds for the rest of the task, across restarts.
 
 #![no_std]
 #![no_main]
@@ -26,6 +33,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use pharos_programs::grants::Grants;
 use pharos_programs::tasks::{self, Begin, Files, StoreFailed, Tasks};
 use pharos_proto::agents::{
     self, Assigned, Begun, CHECKPOINT_AT, CONTROL, MAX_BUFFER, MAX_CHECKPOINT, MAX_INPUT,
@@ -33,7 +41,8 @@ use pharos_proto::agents::{
     agent_slot, parse,
 };
 use pharos_proto::infer::{self, Request as InferRequest, Started, Tokens};
-use pharos_proto::manifest::{self, Entry, Why};
+use pharos_proto::manifest::{self, Data, Entry, Why};
+use pharos_proto::permission::Permission;
 use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::{Info, refusal, status, trust};
 use pharos_user::rights::{READ, SEND, STOP, WAIT, WRITE};
@@ -77,6 +86,7 @@ const TEST: &[Entry] = &[
         attempts: 3,
         progress_ms: 2_000,
         task_ms: 20_000,
+        data: Data::None,
     },
     Entry {
         name: b"greedy",
@@ -86,6 +96,7 @@ const TEST: &[Entry] = &[
         attempts: 1,
         progress_ms: 2_000,
         task_ms: 20_000,
+        data: Data::None,
     },
     Entry {
         name: b"absent",
@@ -95,6 +106,7 @@ const TEST: &[Entry] = &[
         attempts: 1,
         progress_ms: 2_000,
         task_ms: 20_000,
+        data: Data::None,
     },
     Entry {
         name: b"counter",
@@ -104,6 +116,18 @@ const TEST: &[Entry] = &[
         attempts: 10,
         progress_ms: 5_000,
         task_ms: 120_000,
+        data: Data::None,
+    },
+    // The `permissions` kernel's (#105).
+    Entry {
+        name: b"keeper",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 1 << 2,
+        attempts: 2,
+        progress_ms: 5_000,
+        task_ms: 60_000,
+        data: Data::Write,
     },
 ];
 
@@ -116,6 +140,7 @@ struct Limits {
     attempts: u8,
     progress_us: u64,
     task_us: u64,
+    data: Data,
 }
 
 /// The storage service as [`Files`], through the runtime's buffer there.
@@ -167,6 +192,15 @@ impl Store {
             _ => Err(StoreFailed),
         }
     }
+}
+
+/// `data/<agent>/<file>`, in the runtime's namespace.
+fn data_path(agent: &[u8], file: &[u8]) -> Vec<u8> {
+    let mut p = Vec::from(&b"data/"[..]);
+    p.extend_from_slice(agent);
+    p.push(b'/');
+    p.extend_from_slice(file);
+    p
 }
 
 fn u64_at(b: &[u8], at: usize) -> u64 {
@@ -260,8 +294,11 @@ struct Slot {
     buffer: Option<Mapped>,
     started: u64,
     last: u64,
+    /// The open inference session and its model.
     session: Option<u32>,
+    session_model: u8,
     ending: Option<Ending>,
+    grants: Grants,
 }
 
 struct Runtime {
@@ -272,6 +309,8 @@ struct Runtime {
     controls: [Option<(u32, Mapped)>; MAX_CONTROLS],
     infer_buffer: Mapped,
     reply: Handle,
+    /// Permissions revoked from running tasks, kept for their restarts.
+    revoked: Vec<(u32, Permission)>,
 }
 
 fn decimal(mut v: u64, out: &mut [u8; 20]) -> &[u8] {
@@ -372,6 +411,7 @@ fn load(e: &'static Entry, table: &'static [Entry]) -> Result<Limits, &'static [
         attempts: m.attempts,
         progress_us: u64::from(m.progress_ms) * 1000,
         task_us: u64::from(m.task_ms) * 1000,
+        data: m.data,
     })
 }
 
@@ -502,7 +542,15 @@ impl Runtime {
             started: now,
             last: now,
             session: None,
+            session_model: 0,
             ending: None,
+            grants: {
+                let mut g = Grants::new(limits.models, limits.data);
+                for (_, p) in self.revoked.iter().filter(|(t, _)| *t == id) {
+                    g.revoke(p);
+                }
+                g
+            },
         });
         if !registered {
             self.finish(id, State::Failed, b"trust registration failed");
@@ -785,7 +833,10 @@ impl Runtime {
                 max_new,
                 prompt_len,
             } => {
-                if model > 31 || limits.models & 1 << model == 0 {
+                let allowed = self.slots[i]
+                    .as_ref()
+                    .is_some_and(|s| s.grants.allows(&Permission::Model(model), now));
+                if !allowed {
                     return Err(status::NO_ACCESS);
                 }
                 if prompt_len as usize > buffer_len {
@@ -814,6 +865,7 @@ impl Runtime {
                 }
                 if let (Some(started), Some(s)) = (Started::parse(&out[..n]), &mut self.slots[i]) {
                     s.session = Some(started.session);
+                    s.session_model = model;
                 }
                 Ok(n)
             }
@@ -838,12 +890,103 @@ impl Runtime {
                 self.cancel_session(i);
                 Ok(done(out))
             }
+            Request::DataPut { name, len } => {
+                let allowed = self.slots[i]
+                    .as_ref()
+                    .is_some_and(|s| s.grants.allows(&Permission::DataWrite, now));
+                if !allowed {
+                    return Err(status::NO_ACCESS);
+                }
+                if len > agents::MAX_DATA {
+                    return Err(status::TOO_LARGE);
+                }
+                if len as usize > buffer_len {
+                    return Err(status::NO_BUFFER);
+                }
+                let mut bytes = alloc::vec![0u8; len as usize];
+                if let Some(b) = buffer {
+                    b.read_bytes(0, &mut bytes);
+                }
+                let path = data_path(limits.entry.name, name);
+                self.store
+                    .write(&path, &bytes)
+                    .map_err(|_| status::INTERNAL)?;
+                Ok(done(out))
+            }
+            Request::DataGet { name } => {
+                let allowed = self.slots[i]
+                    .as_ref()
+                    .is_some_and(|s| s.grants.allows(&Permission::DataRead, now));
+                if !allowed {
+                    return Err(status::NO_ACCESS);
+                }
+                let path = data_path(limits.entry.name, name);
+                let bytes = self
+                    .store
+                    .read(&path)
+                    .map_err(|_| status::INTERNAL)?
+                    .ok_or(status::NOT_FOUND)?;
+                if bytes.len() > buffer_len {
+                    return Err(status::NO_BUFFER);
+                }
+                if let Some(b) = self.slots[i].as_ref().and_then(|s| s.buffer.as_ref()) {
+                    b.write_bytes(0, &bytes);
+                }
+                out[0] = status::OK;
+                out[1..5].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+                Ok(5)
+            }
             Request::Info => self.info(out).ok_or(status::INTERNAL),
+            Request::Revoke { .. } => Err(status::NO_ACCESS),
             Request::Submit { .. }
             | Request::Status { .. }
             | Request::Cancel { .. }
             | Request::Forget { .. } => Err(status::NO_ACCESS),
             Request::Attach { .. } => Err(status::BAD_REQUEST),
+        }
+    }
+
+    /// `REVOKE` from `trust`: takes `permission` from every running task
+    /// of agent `name`, ends a session opened with it, and tells `trust`.
+    fn revoke(&mut self, name: &[u8], permission: Permission) {
+        let mut outcome = trust::Outcome::NoAgent;
+        for i in 0..SLOTS {
+            let Some(s) = self.slots[i].as_mut() else {
+                continue;
+            };
+            let named = self
+                .tasks
+                .find(s.task)
+                .is_some_and(|t| self.tasks.list[t].agent == name);
+            if !named {
+                continue;
+            }
+            if outcome == trust::Outcome::NoAgent {
+                outcome = trust::Outcome::NotHeld;
+            }
+            if s.grants.revoke(&permission) {
+                outcome = trust::Outcome::Revoked;
+                self.revoked.push((s.task, permission));
+                if permission == Permission::Model(s.session_model) {
+                    self.cancel_session(i);
+                }
+            }
+        }
+        let mut msg = [0u8; 64];
+        let answer = trust::Request::Revoked {
+            outcome,
+            name,
+            permission,
+        };
+        // `trust` waits in `receive` almost always; it is never waited on
+        // for long.
+        if let Some(n) = trust::encode(&answer, &mut msg) {
+            for _ in 0..100 {
+                if try_send(TRUST, &msg[..n]).is_ok() {
+                    break;
+                }
+                pharos_user::sleep(10_000);
+            }
         }
     }
 
@@ -938,6 +1081,13 @@ impl Runtime {
         let result = match agent_slot(badge) {
             Some(i) => self.agent(i, req, out),
             None if badge >= CONTROL => self.control(badge, req, out),
+            None if badge == agents::TRUST => match req {
+                Request::Revoke { name, permission } => {
+                    self.revoke(name, permission);
+                    Ok(done(out))
+                }
+                _ => Err(status::NO_ACCESS),
+            },
             None => Err(status::NO_ACCESS),
         };
         match result {
@@ -1026,7 +1176,15 @@ fn main(arg: u64) -> u64 {
         controls: Default::default(),
         infer_buffer,
         reply,
+        revoked: Vec::new(),
     };
+    // `trust`'s way to send `REVOKE`, badged so only it is served as `trust`.
+    let mut msg = [0u8; 8];
+    let channel = trust::encode(&trust::Request::Channel, &mut msg)
+        .is_some_and(|n| send(TRUST, &msg[..n], SERVICE, SEND, agents::TRUST).is_ok());
+    if !channel {
+        return 8;
+    }
     if send(REPORT, b"ready", 0, 0, 0).is_err() {
         return 4;
     }

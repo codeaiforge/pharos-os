@@ -10,6 +10,10 @@
 //!
 //! An agent's buffer holds its task's input at 0 and its last checkpoint
 //! at [`CHECKPOINT_AT`]; `CHECKPOINT` takes the new one from there too.
+//!
+//! `trust` sends `REVOKE` with a plain `send` under [`TRUST`] (#105); the
+//! runtime answers with `trust`'s `REVOKED`, never a reply, so `trust`
+//! never waits on it.
 
 use crate::{Reader, Refused, Writer, op as common, split, status};
 
@@ -28,10 +32,13 @@ pub mod op {
     pub const NEXT: u8 = 8;
     pub const CANCEL_INFER: u8 = 9;
     pub const LOG: u8 = 10;
+    pub const DATA_PUT: u8 = 11;
+    pub const DATA_GET: u8 = 12;
     pub const SUBMIT: u8 = 16;
     pub const STATUS: u8 = 17;
     pub const CANCEL: u8 = 18;
     pub const FORGET: u8 = 19;
+    pub const REVOKE: u8 = 20;
 }
 
 /// The interface's own status code: the caller has no task, inference
@@ -44,6 +51,10 @@ pub const SLOTS: usize = 16;
 pub const MAX_RUNNING: usize = 4;
 /// The first control client's badge.
 pub const CONTROL: u32 = 0x100;
+/// The badge on the capability the runtime gives `trust` (#105).
+pub const TRUST: u32 = 0x80;
+/// Largest file an agent keeps with `DATA_PUT`.
+pub const MAX_DATA: u32 = 64 << 10;
 /// Most tasks kept.
 pub const MAX_TASKS: usize = 256;
 /// Longest `LOG` line and `FAIL` reason.
@@ -146,6 +157,22 @@ pub enum Request<'a> {
     Log {
         text: &'a [u8],
     },
+    /// Agent: the first `len` bytes of its buffer become its file `name`
+    /// (needs `data write`).
+    DataPut {
+        name: &'a [u8],
+        len: u32,
+    },
+    /// Agent: its file `name` into its buffer; the reply is `[OK, length]`
+    /// (needs `data read`).
+    DataGet {
+        name: &'a [u8],
+    },
+    /// `trust`: takes `permission` from every running agent `name`.
+    Revoke {
+        name: &'a [u8],
+        permission: crate::permission::Permission,
+    },
     /// Control: a new task for agent `name`, input from the buffer, run
     /// once every task in `deps` is done.
     Submit {
@@ -169,6 +196,20 @@ pub enum Request<'a> {
         len: u64,
     },
     Info,
+}
+
+/// A length-prefixed agent or file name.
+fn name<'a>(r: &mut Reader<'a>) -> Option<&'a [u8]> {
+    let n = usize::from(r.u8()?);
+    r.take(n).filter(|n| crate::trust::valid_name(n))
+}
+
+fn write_name(w: &mut Writer<'_>, name: &[u8]) -> Option<()> {
+    if !crate::trust::valid_name(name) {
+        return None;
+    }
+    w.bytes(&[name.len() as u8])?;
+    w.bytes(name)
 }
 
 pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
@@ -218,6 +259,17 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                     deps: Deps::new(&ids[..count])?,
                 }
             }
+            op::DATA_PUT => Request::DataPut {
+                name: name(&mut r)?,
+                len: r.u32()?,
+            },
+            op::DATA_GET => Request::DataGet {
+                name: name(&mut r)?,
+            },
+            op::REVOKE => Request::Revoke {
+                name: name(&mut r)?,
+                permission: crate::permission::Permission::read(&mut r)?,
+            },
             op::STATUS => Request::Status { task: r.u32()? },
             op::CANCEL => Request::Cancel { task: r.u32()? },
             op::FORGET => Request::Forget { task: r.u32()? },
@@ -298,6 +350,20 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             for id in deps.as_slice() {
                 w.u32(*id)?;
             }
+        }
+        Request::DataPut { name, len } => {
+            head(&mut w, op::DATA_PUT)?;
+            write_name(&mut w, name)?;
+            w.u32(len)?;
+        }
+        Request::DataGet { name } => {
+            head(&mut w, op::DATA_GET)?;
+            write_name(&mut w, name)?;
+        }
+        Request::Revoke { name, permission } => {
+            head(&mut w, op::REVOKE)?;
+            write_name(&mut w, name)?;
+            permission.write(&mut w)?;
         }
         Request::Status { task } => {
             head(&mut w, op::STATUS)?;
@@ -516,6 +582,22 @@ mod tests {
             },
             Request::Attach { len: 1 << 16 },
             Request::Info,
+            Request::DataPut {
+                name: b"notes",
+                len: MAX_DATA,
+            },
+            Request::DataGet { name: &[b'n'; 32] },
+            Request::Revoke {
+                name: b"worker",
+                permission: crate::permission::Permission::Model(2),
+            },
+            Request::Revoke {
+                name: b"w",
+                permission: crate::permission::Permission::Net {
+                    addr: [10, 0, 2, 2],
+                    port: 1,
+                },
+            },
         ] {
             let mut buf = [0u8; 256];
             let n = encode(&req, &mut buf).unwrap();

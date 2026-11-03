@@ -18,6 +18,7 @@ pub mod agents;
 pub mod infer;
 pub mod manifest;
 pub mod net;
+pub mod permission;
 pub mod store;
 pub mod trust;
 

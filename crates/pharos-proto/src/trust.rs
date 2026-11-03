@@ -7,10 +7,18 @@
 //! - `REGISTER` `[version, op, slot, name length, name]`, from the runtime
 //!   only: an agent, before the runtime grants it anything.
 //!
+//! And from the runtime only (#105):
+//! - `CHANNEL` `[version, op]`, carrying `SEND` on the runtime's endpoint
+//!   badged [`crate::agents::TRUST`], on which `trust` sends `REVOKE`
+//!   without ever waiting;
+//! - `REVOKED` `[version, op, outcome, name length, name, permission]`,
+//!   the runtime's answer to a `REVOKE`, carrying no capability.
+//!
 //! The badge says who sends: [`INIT`] or [`RUNTIME`]. There is no reply:
 //! the sender's blocking `send` returns once the service has the message,
 //! and the service never refuses a valid one (it replaces a slot's entry).
 
+use crate::permission::Permission;
 use crate::{Reader, Refused, Writer, split};
 
 pub const NAME: &[u8] = b"trust";
@@ -20,6 +28,20 @@ pub const VERSION: u8 = 1;
 pub mod op {
     pub const RUNTIME: u8 = 1;
     pub const REGISTER: u8 = 2;
+    pub const CHANNEL: u8 = 3;
+    pub const REVOKED: u8 = 4;
+}
+
+/// What a `REVOKE` did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Outcome {
+    /// Taken from at least one running agent of that name.
+    Revoked = 0,
+    /// Agents of that name run, but none held it.
+    NotHeld = 1,
+    /// No agent of that name runs.
+    NoAgent = 2,
 }
 
 /// The badge `init` sends with: none. `init` created the endpoint and is
@@ -46,7 +68,16 @@ pub fn valid_name(name: &[u8]) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request<'a> {
     Runtime,
-    Register { slot: u8, name: &'a [u8] },
+    Register {
+        slot: u8,
+        name: &'a [u8],
+    },
+    Channel,
+    Revoked {
+        outcome: Outcome,
+        name: &'a [u8],
+        permission: Permission,
+    },
 }
 
 pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
@@ -59,6 +90,23 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             let len = usize::from(r.u8()?);
             let name = r.take(len).filter(|n| valid_name(n))?;
             Some(Request::Register { slot, name })
+        })(),
+        op::CHANNEL => Some(Request::Channel),
+        op::REVOKED => (|| {
+            let outcome = match r.u8()? {
+                0 => Outcome::Revoked,
+                1 => Outcome::NotHeld,
+                2 => Outcome::NoAgent,
+                _ => return None,
+            };
+            let len = usize::from(r.u8()?);
+            let name = r.take(len).filter(|n| valid_name(n))?;
+            let permission = Permission::read(&mut r)?;
+            Some(Request::Revoked {
+                outcome,
+                name,
+                permission,
+            })
         })(),
         _ => None,
     };
@@ -79,6 +127,19 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.bytes(&[VERSION, op::REGISTER, slot, name.len() as u8])?;
             w.bytes(name)?;
         }
+        Request::Channel => w.bytes(&[VERSION, op::CHANNEL])?,
+        Request::Revoked {
+            outcome,
+            name,
+            permission,
+        } => {
+            if !valid_name(name) {
+                return None;
+            }
+            w.bytes(&[VERSION, op::REVOKED, outcome as u8, name.len() as u8])?;
+            w.bytes(name)?;
+            permission.write(&mut w)?;
+        }
     }
     Some(w.len())
 }
@@ -92,6 +153,8 @@ pub enum Command<'a> {
     Stop(&'a [u8]),
     /// `stop all`: the runtime, so every agent (the emergency stop).
     StopAll,
+    /// `revoke <agent> <permission>` (#105).
+    Revoke(&'a [u8], Permission),
     /// Anything else: the service answers with the commands it knows.
     Help,
 }
@@ -102,6 +165,21 @@ pub fn command(line: &[u8]) -> Command<'_> {
     let mut words = line
         .split(|b| *b == b' ' || *b == b'\t')
         .filter(|w| !w.is_empty());
+    let mut all: [&[u8]; 5] = [b""; 5];
+    let mut count = 0;
+    for w in words.clone() {
+        if count == all.len() {
+            return Command::Help;
+        }
+        all[count] = w;
+        count += 1;
+    }
+    if let [b"revoke", name, rest @ ..] = &all[..count] {
+        return match Permission::parse(rest) {
+            Some(p) if valid_name(name) => Command::Revoke(name, p),
+            _ => Command::Help,
+        };
+    }
     match (words.next(), words.next(), words.next()) {
         (Some(b"list"), None, None) => Command::List,
         (Some(b"stop"), Some(b"all"), None) => Command::StopAll,
@@ -194,6 +272,20 @@ mod tests {
                 slot: SLOTS - 1,
                 name: &long,
             },
+            Request::Channel,
+            Request::Revoked {
+                outcome: Outcome::NotHeld,
+                name: b"worker",
+                permission: Permission::DataWrite,
+            },
+            Request::Revoked {
+                outcome: Outcome::NoAgent,
+                name: &long,
+                permission: Permission::Net {
+                    addr: [1, 2, 3, 4],
+                    port: 9,
+                },
+            },
         ] {
             let mut buf = [0u8; 64];
             let n = encode(&req, &mut buf).unwrap();
@@ -219,6 +311,9 @@ mod tests {
         assert_eq!(parse(&reg(0, b"a b")), Err(Refused::Bad), "space");
         assert_eq!(parse(&reg(0, b"a\n")), Err(Refused::Bad), "newline");
         assert_eq!(parse(&[VERSION, 9]), Err(Refused::Bad), "unknown op");
+        let mut revoked = std::vec![VERSION, op::REVOKED, 3, 1, b'w'];
+        revoked.extend_from_slice(&[1, 2, 0, 0, 0, 0, 0]);
+        assert_eq!(parse(&revoked), Err(Refused::Bad), "unknown outcome");
         let bad = Request::Register {
             slot: 0,
             name: b"x y",
@@ -242,6 +337,20 @@ mod tests {
         assert_eq!(command(b"  list "), Command::List);
         assert_eq!(command(b"stop all"), Command::StopAll);
         assert_eq!(command(b"stop\tworker-1"), Command::Stop(b"worker-1"));
+        assert_eq!(
+            command(b"revoke worker model 2"),
+            Command::Revoke(b"worker", Permission::Model(2))
+        );
+        assert_eq!(
+            command(b" revoke  w  net 10.0.2.2:47000 "),
+            Command::Revoke(
+                b"w",
+                Permission::Net {
+                    addr: [10, 0, 2, 2],
+                    port: 47_000
+                }
+            )
+        );
         for line in [
             &b""[..],
             b"lis",
@@ -250,6 +359,11 @@ mod tests {
             b"stop a b",
             b"stop wor;ker",
             b"STOP all",
+            b"revoke worker",
+            b"revoke worker model",
+            b"revoke worker model 0",
+            b"revoke wor;ker data read",
+            b"revoke worker data read extra",
         ] {
             assert_eq!(command(line), Command::Help, "{line:?}");
         }

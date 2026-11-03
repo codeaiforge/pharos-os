@@ -12,9 +12,12 @@
 //! attempts = 3
 //! progress_ms = 30000
 //! task_ms = 600000
+//! data = read
 //! ```
 //!
 //! `models` lists model numbers, comma-separated, or is empty for none.
+//! `data` is `none`, `read`, or `write`: the agent's own files, kept by the
+//! runtime (capabilities.md, #105); `write` includes reading.
 //! A manifest is untrusted: [`parse`] refuses unknown, repeated, and
 //! missing keys and values out of range, and never panics. It only asks:
 //! [`Manifest::within`] checks it against the runtime's reviewed policy
@@ -39,6 +42,14 @@ pub const MAX_PROGRESS_MS: u32 = 3_600_000;
 /// Longest `task_ms`: one day.
 pub const MAX_TASK_MS: u32 = 86_400_000;
 
+/// Access to the agent's own files; `Write` includes reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Data {
+    None,
+    Read,
+    Write,
+}
+
 /// A parsed manifest, borrowing its text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Manifest<'a> {
@@ -50,6 +61,7 @@ pub struct Manifest<'a> {
     pub attempts: u8,
     pub progress_ms: u32,
     pub task_ms: u32,
+    pub data: Data,
 }
 
 /// What the runtime's policy table allows one agent: the most it may get.
@@ -62,6 +74,7 @@ pub struct Entry {
     pub attempts: u8,
     pub progress_ms: u32,
     pub task_ms: u32,
+    pub data: Data,
 }
 
 /// Why a manifest was refused.
@@ -96,7 +109,7 @@ pub struct Refusal {
     pub why: Why,
 }
 
-const KEYS: [&[u8]; 8] = [
+const KEYS: [&[u8]; 9] = [
     b"manifest",
     b"name",
     b"program",
@@ -105,6 +118,7 @@ const KEYS: [&[u8]; 8] = [
     b"attempts",
     b"progress_ms",
     b"task_ms",
+    b"data",
 ];
 
 fn trim(s: &[u8]) -> &[u8] {
@@ -164,7 +178,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
     if text.len() > MAX_SIZE {
         return Err(whole(Why::TooLarge));
     }
-    let mut values: [Option<&[u8]>; 8] = [None; 8];
+    let mut values: [Option<&[u8]>; 9] = [None; 9];
     for (i, line) in text.split(|b| *b == b'\n').enumerate() {
         let at = |why| Refusal { line: i + 1, why };
         if !line.iter().all(|b| (b' '..=b'~').contains(b)) {
@@ -187,7 +201,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
             return Err(at(Why::RepeatedKey));
         }
     }
-    let mut v = [&b""[..]; 8];
+    let mut v = [&b""[..]; 9];
     for (out, value) in v.iter_mut().zip(values) {
         *out = value.ok_or(whole(Why::MissingKey))?;
     }
@@ -200,6 +214,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
         attempts,
         progress,
         task,
+        data,
     ] = v;
     let bad = whole(Why::BadValue);
     if number(version, u32::MAX) != Some(VERSION) {
@@ -213,6 +228,12 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
         attempts: number(attempts, u32::from(MAX_ATTEMPTS)).ok_or(bad)? as u8,
         progress_ms: number(progress, MAX_PROGRESS_MS).ok_or(bad)?,
         task_ms: number(task, MAX_TASK_MS).ok_or(bad)?,
+        data: match data {
+            b"none" => Data::None,
+            b"read" => Data::Read,
+            b"write" => Data::Write,
+            _ => return Err(bad),
+        },
     };
     if m.progress_ms > m.task_ms {
         return Err(whole(Why::ProgressOverTask));
@@ -251,7 +272,8 @@ impl Manifest<'_> {
             && self.models & !e.models == 0
             && self.attempts <= e.attempts
             && self.progress_ms <= e.progress_ms
-            && self.task_ms <= e.task_ms;
+            && self.task_ms <= e.task_ms
+            && self.data <= e.data;
         if fits { Ok(e) } else { Err(Why::OverPolicy) }
     }
 
@@ -280,7 +302,11 @@ impl Manifest<'_> {
         decimal(&mut w, self.progress_ms)?;
         w.bytes(b"\ntask_ms = ")?;
         decimal(&mut w, self.task_ms)?;
-        w.bytes(b"\n")?;
+        w.bytes(match self.data {
+            Data::None => b"\ndata = none\n",
+            Data::Read => b"\ndata = read\n",
+            Data::Write => b"\ndata = write\n",
+        })?;
         Some(w.len())
     }
 }
@@ -290,7 +316,7 @@ mod tests {
     use super::*;
 
     const S: &[u8] = b"manifest = 1\nname = summarize\nprogram = agents/summarize\n\
-pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\n";
+pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\ndata = read\n";
 
     const TABLE: &[Entry] = &[Entry {
         name: b"summarize",
@@ -300,6 +326,7 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\n"
         attempts: 3,
         progress_ms: 30_000,
         task_ms: 600_000,
+        data: Data::Read,
     }];
 
     fn with(key: &str, value: &str) -> std::string::String {
@@ -332,10 +359,11 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\n"
                 attempts: 3,
                 progress_ms: 30_000,
                 task_ms: 600_000,
+                data: Data::Read,
             }
         );
         let text = "# an agent\n\n  manifest=1  \nname =summarize\nprogram= agents/summarize\n\
-pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\ntask_ms = 86400000";
+pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\ntask_ms = 86400000\ndata=write";
         let m = parse(text.as_bytes()).unwrap();
         assert_eq!(
             (m.pages, m.models, m.attempts, m.progress_ms, m.task_ms),
@@ -407,7 +435,7 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
         assert_eq!(
             at(&extra),
             Some(Refusal {
-                line: 9,
+                line: 10,
                 why: Why::UnknownKey
             })
         );
@@ -420,7 +448,7 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
         assert_eq!(
             at(&twice),
             Some(Refusal {
-                line: 9,
+                line: 10,
                 why: Why::RepeatedKey
             })
         );
@@ -476,6 +504,9 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
             ("progress_ms", "3600001"),
             ("task_ms", "0"),
             ("task_ms", "86400001"),
+            ("data", ""),
+            ("data", "Read"),
+            ("data", "rw"),
         ] {
             assert_eq!(
                 why(with(key, value).as_bytes()),
@@ -503,6 +534,7 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
         assert_eq!(check("pages", "4096"), Ok(()), "the entry's maximum");
         assert_eq!(check("models", "2, 1"), Ok(()));
         assert_eq!(check("models", ""), Ok(()));
+        assert_eq!(check("data", "none"), Ok(()), "less than the entry");
         assert_eq!(check("name", "other"), Err(Why::NoEntry));
         assert_eq!(check("program", "agents/other"), Err(Why::WrongProgram));
         for (key, value) in [
@@ -512,6 +544,7 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
             ("attempts", "4"),
             ("progress_ms", "30001"),
             ("task_ms", "600001"),
+            ("data", "write"),
         ] {
             assert_eq!(check(key, value), Err(Why::OverPolicy), "{key} = {value}");
         }

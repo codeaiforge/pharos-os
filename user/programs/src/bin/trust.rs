@@ -9,18 +9,23 @@
 //! process capabilities over [`pharos_proto::trust`]: the agent runtime's
 //! from `init`, each agent's from the runtime.
 //!
-//! Commands, one per line: `list`, `stop <agent>`, `stop all`.
+//! Commands, one per line: `list`, `stop <agent>`, `stop all`, and
+//! `revoke <agent> <permission>` (#105), which `trust` passes to the
+//! runtime with a non-blocking send on the capability the runtime gave it
+//! (`CHANNEL`), so a hung runtime never holds `trust`; the runtime's
+//! `REVOKED` answer is shown when it comes.
 
 #![no_std]
 #![no_main]
 
 use pharos_programs::virtio_console::{Console, RX_BUFFER};
+use pharos_proto::agents;
 use pharos_proto::trust::{
-    self, Command, INIT, Line, Lines, MAX_NAME, RUNTIME, Request, SLOTS, parse,
+    self, Command, INIT, Line, Lines, MAX_NAME, Outcome, RUNTIME, Request, SLOTS, parse,
 };
 use pharos_user::{
     Handle, Received, Status, delete, irq_create, irq_notify, process_status, process_stop,
-    receive, send, sleep,
+    receive, send, sleep, try_send,
 };
 
 pharos_user::entry!(main);
@@ -29,6 +34,7 @@ const DEVICE: Handle = 1;
 const SERVICE: Handle = 2;
 const REPORT: Handle = 3;
 const BASE: u64 = 0x1000_0000;
+const HELP: &[u8] = b"commands: list, stop <agent>, stop all, revoke <agent> <permission>";
 /// How long a stop may take before the answer says it is still running.
 const STOP_WAIT_US: u64 = 1_000_000;
 
@@ -43,6 +49,8 @@ struct Agent {
 struct Trust {
     console: Console,
     runtime: Option<Handle>,
+    /// `SEND` on the runtime, badged as `trust` (`CHANNEL`).
+    channel: Option<Handle>,
     agents: [Option<Agent>; SLOTS as usize],
 }
 
@@ -127,7 +135,27 @@ impl Trust {
                 }
                 self.say(&[b"stopped all"]);
             }
-            Command::Help => self.say(&[b"commands: list, stop <agent>, stop all"]),
+            Command::Revoke(name, permission) => {
+                let mut msg = [0u8; 64];
+                let req = agents::Request::Revoke { name, permission };
+                let n = agents::encode(&req, &mut msg).unwrap_or(0);
+                // At most 2 s, never blocking: the runtime may be busy or
+                // hung, and `stop` must keep working.
+                let mut sent = false;
+                if let Some(c) = self.channel {
+                    for _ in 0..200 {
+                        sent = try_send(c, &msg[..n]).is_ok();
+                        if sent {
+                            break;
+                        }
+                        sleep(10_000);
+                    }
+                }
+                if !sent {
+                    self.say(&[b"revoke: the runtime is not answering; stop works"]);
+                }
+            }
+            Command::Help => self.say(&[HELP]),
         }
     }
 
@@ -136,6 +164,27 @@ impl Trust {
     fn message(&mut self, msg: &[u8], cap: Handle, badge: u32) {
         let valid = cap != 0 && process_status(cap).is_ok();
         match parse(msg) {
+            Ok(Request::Channel) if badge == RUNTIME && cap != 0 && !valid => {
+                if let Some(old) = self.channel.replace(cap) {
+                    let _ = delete(old);
+                }
+            }
+            Ok(Request::Revoked {
+                outcome,
+                name,
+                permission,
+            }) if badge == RUNTIME => {
+                let mut t = [0u8; 32];
+                let p = permission.text(&mut t);
+                match outcome {
+                    Outcome::Revoked => self.say(&[b"revoked ", p, b" from ", name]),
+                    Outcome::NotHeld => self.say(&[name, b" does not hold ", p]),
+                    Outcome::NoAgent => self.say(&[b"no agent ", name, b" runs"]),
+                }
+                if cap != 0 {
+                    let _ = delete(cap);
+                }
+            }
             Ok(Request::Runtime) if badge == INIT && valid => {
                 if let Some(old) = self.runtime.replace(cap) {
                     let _ = delete(old);
@@ -188,12 +237,13 @@ fn main(_: u64) -> u64 {
     let mut t = Trust {
         console,
         runtime: None,
+        channel: None,
         agents: [None; SLOTS as usize],
     };
     if send(REPORT, b"ready", 0, 0, 0).is_err() {
         return 4;
     }
-    t.say(&[b"trust: ready; commands: list, stop <agent>, stop all"]);
+    t.say(&[b"trust: ready; ", HELP]);
     let mut lines = Lines::new();
     let mut msg = [0u8; 256];
     let mut bytes = [0u8; RX_BUFFER];

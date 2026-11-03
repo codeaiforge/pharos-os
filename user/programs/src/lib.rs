@@ -5,6 +5,7 @@
 extern crate alloc;
 
 pub mod fp;
+pub mod grants;
 pub mod models;
 pub mod net;
 pub mod tasks;

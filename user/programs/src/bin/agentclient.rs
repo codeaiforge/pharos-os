@@ -9,7 +9,9 @@
 //! Argument 0: the `agents` test kernel. Argument 1: the `agents_crash`
 //! kernel, booted several times and killed while its `counter` task runs:
 //! each boot prints `agents check: ok` once the runtime answers, submits
-//! the task if the store has none, and waits for it to end.
+//! the task if the store has none, and waits for it to end. Argument 2:
+//! the `permissions` kernel (#105): `keeper-a`, then `keeper-b`, whose
+//! permissions the runner revokes on the trusted console while it runs.
 
 #![no_std]
 #![no_main]
@@ -158,13 +160,16 @@ fn main(arg: u64) -> u64 {
     if arg == 1 {
         return crash(c);
     }
+    if arg == 2 {
+        return permissions(c);
+    }
     let mut out = [0u8; 256];
 
     let (_, n) = c.call(&Request::Info, &mut out);
     let info = Info::parse(&out[..n]);
     c.step(
-        "INFO: interface agents, two agents accepted, none running",
-        info.is_some_and(|i| i.name == NAME && i.details == [2, 0]),
+        "INFO: interface agents, three agents accepted, none running",
+        info.is_some_and(|i| i.name == NAME && i.details == [3, 0]),
     );
     let refused = [&b"greedy"[..], b"absent", b"noentry"]
         .iter()
@@ -258,7 +263,7 @@ fn main(arg: u64) -> u64 {
         .iter()
         .all(|&t| c.status(t).is_some_and(|s| s.state == State::Cancelled));
     let (_, n) = c.call(&Request::Info, &mut out);
-    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [2, 0]);
+    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [3, 0]);
     c.step(
         "cancelling running and pending tasks stops their agents",
         cancelled && all && idle,
@@ -329,6 +334,44 @@ fn durable_cases(c: &mut Client) {
 }
 
 /// One boot of the `agents_crash` kernel.
+fn permissions(mut c: Client) -> u64 {
+    for (input, want, step) in [
+        (
+            &b"keeper-a"[..],
+            &b"a ok"[..],
+            "with its grants, an agent writes and reads its own file and generates from model 2",
+        ),
+        (
+            b"keeper-b",
+            b"b ok",
+            "revoked while it runs: refused at once, its session ended, and still after a restart",
+        ),
+    ] {
+        let Ok(task) = c.submit(b"keeper", input) else {
+            c.step(step, false);
+            continue;
+        };
+        let ended = c.wait(task, 60);
+        if let Some((s, result)) = &ended {
+            if result != want {
+                let mut line = Vec::from(&b"keeper result: "[..]);
+                line.extend_from_slice(&result[..result.len().min(200)]);
+                let _ = debug_write(CONSOLE, &line);
+            }
+            // `keeper-b` crashes once after its checks, on purpose.
+            let attempts = if input == b"keeper-b" { 2 } else { 1 };
+            c.step(
+                step,
+                s.state == State::Done && result == want && s.attempts == attempts,
+            );
+        } else {
+            c.step(step, false);
+        }
+    }
+    let _ = send(REPORT, b"done", 0, 0, 0);
+    c.failed
+}
+
 fn crash(mut c: Client) -> u64 {
     let mut out = [0u8; 256];
     let task = match c.call(&Request::Status { task: 1 }, &mut out).0 {

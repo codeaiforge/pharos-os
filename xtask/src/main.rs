@@ -1240,6 +1240,27 @@ const TRUST_SCRIPT: &[console::Step] = &[
 ];
 /// The impostor the kernel registers under `init`'s badge must be dropped.
 const TRUST_REFUSED: &[&str] = &["impostor"];
+/// Agent permissions revoked on the trusted console (#105): the
+/// `inference` test's store, for model 2.
+const PERMISSIONS_TEST: &str = "permissions";
+/// Once `keeper`'s second task registers (it holds a session and polls):
+/// a permission it does not hold, an agent that does not run, then data
+/// and the model.
+const PERMISSIONS_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("registered runtime", ""),
+    (
+        "registered keeper\r\nregistered keeper",
+        "revoke keeper net 10.0.2.2:1\n",
+    ),
+    (
+        "keeper does not hold net 10.0.2.2:1",
+        "revoke nobody model 1\n",
+    ),
+    ("no agent nobody runs", "revoke keeper data read\n"),
+    ("revoked data read from keeper", "revoke keeper model 2\n"),
+    ("revoked model 2 from keeper", ""),
+];
 const MODEL_ENV: &str = "PHAROS_MODEL";
 /// Its time limit at least: about 45 s on the reference host.
 const LARGE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -1397,7 +1418,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     if name == INFERENCE_TEST {
         store_image::tiny(&out.join(STORE_IMAGE))?;
     }
-    if name == SERVICE_TEST || name == AGENTS_TEST {
+    if name == SERVICE_TEST || name == AGENTS_TEST || name == PERMISSIONS_TEST {
         store_image::service(&out.join(STORE_IMAGE))?;
     }
     if name == SUPERVISION_TEST {
@@ -1408,11 +1429,16 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             crash_rounds(c, &iso, &out.join("ovmf-vars.fd"), &logs, &extra)?;
         }
     }
-    let script = if name == TRUST_TEST {
-        let base = console::fifos(&out)?;
-        Some(console::Script::start(&base, TRUST_SCRIPT)?)
-    } else {
+    let (steps, refused): (&'static [console::Step], &[&str]) = match name.as_str() {
+        TRUST_TEST => (TRUST_SCRIPT, TRUST_REFUSED),
+        PERMISSIONS_TEST => (PERMISSIONS_SCRIPT, &[]),
+        _ => (&[], &[]),
+    };
+    let script = if steps.is_empty() {
         None
+    } else {
+        let base = console::fifos(&out)?;
+        Some(console::Script::start(&base, steps)?)
     };
     let run = boot_headless(
         &iso,
@@ -1424,7 +1450,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     )?;
     let label = format!("test kernel {name} (uefi)");
     let typed = script.map_or(Ok(()), |s| {
-        s.finish(TRUST_REFUSED).map(|output| {
+        s.finish(refused).map(|output| {
             println!("  trusted console:");
             for line in output.lines() {
                 println!("    {line}");

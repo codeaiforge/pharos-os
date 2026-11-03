@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-03 (#103),** with zeroed pages on revocation, the trusted console as the audit chain's anchor, and approvals limited to 60 s and 4 waiting. Built by: kernel revocation of mapped memory (#104), runtime permissions (#105), approval on the trusted path (#106), the audit service (#107), auditing every consequential action (#108), agent networking (#109), and adversarial tests (#110). **Implemented:** kernel revocation of mapped memory (#104).
+**Planned. Design approved by the maintainer on 2026-11-03 (#103),** with zeroed pages on revocation, the trusted console as the audit chain's anchor, and approvals limited to 60 s and 4 waiting. Built by: kernel revocation of mapped memory (#104), runtime permissions (#105), approval on the trusted path (#106), the audit service (#107), auditing every consequential action (#108), agent networking (#109), and adversarial tests (#110). **Implemented:** kernel revocation of mapped memory (#104), and runtime permissions with `revoke` on the trusted console (#105).
 
 ## 2. Context
 
@@ -33,6 +33,7 @@ What M3.4 builds on:
 - **Revocation** takes a grant away while the agent runs: the next request that needs it answers `NO_ACCESS`, and an inference session or network flow opened with it is ended at once. The agent keeps running and can finish without it.
 - **Who revokes:** the user on the trusted console (`revoke <agent> <permission>`), and the runtime itself on expiry. Revocations are audited.
 - **The logic** (a task's grants, checks, expiry, revocation) is a host-tested `no_std` module, as the task logic is.
+- *Implemented (#105):* `pharos_proto::permission` (the wire and typed forms), `pharos_programs::grants`, the manifest key `data` with the policy entry's `data` field, `DATA_PUT` and `DATA_GET`, and `revoke` on the trusted console. The *may ask for* list and approvals come with #106, network grants with #109. Revoking `data read` or `data write` takes all data access. A revocation also holds when the task's agent restarts (the runtime keeps it by task, in memory). `trust` sends `REVOKE` with a non-blocking send for at most 2 s and says the runtime is not answering if it cannot; the runtime answers `REVOKED` the same way, for at most 1 s.
 
 ### Kernel: revoking mapped memory (#104)
 

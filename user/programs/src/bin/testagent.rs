@@ -21,6 +21,15 @@
 //! - `count` (the `agents_crash` kernel): counts to [`COUNT`], one keyed
 //!   operation and one checkpoint per step, checking on every attempt that
 //!   each step before its checkpoint is recorded as done.
+//! - `keeper-a` (the `permissions` kernel, #105): its file `notes` is not
+//!   found, then written and read back, and it generates from model 2;
+//!   completes with `a ok`;
+//! - `keeper-b`: opens a session on model 2, logs `holding a session`,
+//!   and polls until `trust` revokes its permissions: reading `notes`
+//!   until `NO_ACCESS`, then `INFER` (`BUSY` while its session is open)
+//!   until `NO_ACCESS`; then its session must be gone and writing refused,
+//!   and it crashes. On attempt 2 both must still be refused (a revocation
+//!   holds for the task); completes with `b ok`.
 
 #![no_std]
 #![no_main]
@@ -126,6 +135,129 @@ impl Agent {
             return self.fail(b"no text");
         }
         self.complete(&text)
+    }
+
+    /// `DATA_GET name`: the status, and the file if found.
+    fn get(&self, name: &[u8]) -> (u8, Vec<u8>) {
+        let mut out = [0u8; 256];
+        let (code, n) = self.call(&Request::DataGet { name }, &mut out);
+        if code != status::OK || n != 5 {
+            return (code, Vec::new());
+        }
+        let len = u32::from_le_bytes([out[1], out[2], out[3], out[4]]) as usize;
+        let mut bytes = alloc::vec![0u8; len.min(BUFFER as usize)];
+        self.buffer.read_bytes(0, &mut bytes);
+        (code, bytes)
+    }
+
+    fn put(&self, name: &[u8], bytes: &[u8]) -> u8 {
+        self.buffer.write_bytes(0, bytes);
+        let len = bytes.len() as u32;
+        self.call(&Request::DataPut { name, len }, &mut [0; 256]).0
+    }
+
+    /// Starts a session on model 2; true if it started.
+    fn generate(&self, max_new: u16) -> (u8, bool) {
+        let prompt = b"hello hello";
+        self.buffer.write_bytes(0, prompt);
+        let mut out = [0u8; 256];
+        let req = Request::Infer {
+            model: 2,
+            max_new,
+            prompt_len: prompt.len() as u32,
+        };
+        let (code, n) = self.call(&req, &mut out);
+        (code, Started::parse(&out[..n]).is_some())
+    }
+
+    fn keeper_a(&self) -> u64 {
+        if self.get(b"notes").0 != status::NOT_FOUND {
+            return self.fail(b"a missing file was not NOT_FOUND");
+        }
+        if self.put(b"notes", b"hello") != status::OK {
+            return self.fail(b"DATA_PUT failed");
+        }
+        self.buffer.write_bytes(0, &[0; 8]);
+        if self.get(b"notes") != (status::OK, Vec::from(&b"hello"[..])) {
+            return self.fail(b"DATA_GET did not return the file");
+        }
+        if !self.generate(4).1 {
+            return self.fail(b"GENERATE through the runtime failed");
+        }
+        let mut out = [0u8; 256];
+        loop {
+            let (_, n) = self.call(&Request::Next, &mut out);
+            match Tokens::parse(&out[..n]) {
+                Some(t) if t.stop.is_none() => {}
+                Some(_) => break,
+                None => return self.fail(b"NEXT failed"),
+            }
+        }
+        self.complete(b"a ok")
+    }
+
+    fn keeper_b(&self, task: &Assigned) -> u64 {
+        let mut out = [0u8; 256];
+        if task.attempt > 1 {
+            let data = self.get(b"notes").0 == status::NO_ACCESS;
+            let model = self.generate(4).0 == status::NO_ACCESS;
+            return if data && model {
+                self.complete(b"b ok")
+            } else {
+                self.fail(b"a revoked permission came back with the restart")
+            };
+        }
+        if !self.generate(20).1 {
+            return self.fail(b"GENERATE through the runtime failed");
+        }
+        self.call(
+            &Request::Log {
+                text: b"holding a session",
+            },
+            &mut out,
+        );
+        // Each poll counts as progress; 30 s at most.
+        let mut data_gone = false;
+        for _ in 0..300 {
+            match self.get(b"notes") {
+                (status::NO_ACCESS, _) => {
+                    data_gone = true;
+                    break;
+                }
+                (status::OK, f) if f == b"hello" => sleep(100_000),
+                _ => return self.fail(b"reading notes failed before the revocation"),
+            }
+        }
+        if !data_gone {
+            return self.fail(b"data was never revoked");
+        }
+        let mut model_gone = false;
+        for _ in 0..300 {
+            match self.generate(4).0 {
+                status::NO_ACCESS => {
+                    model_gone = true;
+                    break;
+                }
+                status::BUSY => sleep(100_000),
+                _ => return self.fail(b"INFER was not BUSY while the session was open"),
+            }
+        }
+        if !model_gone {
+            return self.fail(b"the model was never revoked");
+        }
+        if self.call(&Request::Next, &mut out).0 != NO_SESSION {
+            return self.fail(b"the session outlived its model's revocation");
+        }
+        if self.put(b"notes", b"x") != status::NO_ACCESS {
+            return self.fail(b"writing was not refused after data read was revoked");
+        }
+        self.call(
+            &Request::Log {
+                text: b"refused; crashing",
+            },
+            &mut out,
+        );
+        overflow(0)
     }
 
     fn probe(&self) -> u64 {
@@ -335,6 +467,8 @@ fn main(_: u64) -> u64 {
         b"resume" => a.fail(b"the checkpoint was lost"),
         b"durable" => a.durable(&task),
         b"count" => a.count(&task),
+        b"keeper-a" => a.keeper_a(),
+        b"keeper-b" => a.keeper_b(&task),
         b"wait" => loop {
             a.call(&Request::Info, &mut out);
             sleep(200_000);
