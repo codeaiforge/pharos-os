@@ -394,7 +394,7 @@ Ordering notes:
 
 ### M3.4 — Permissions, sandboxing, auditability, and isolation
 
-**Status: Current.** M3.3 gives it agents that start with one capability and can always be stopped from the trusted path. First step: the design, `docs/architecture/capabilities.md`, with D-012 made final.
+**Status: Current.** M3.3 gives it agents that start with one capability and can always be stopped from the trusted path. D-012 accepted (#102): permissions from the policy table, and beyond it only by approval on the trusted path for one task; revocation per permission and at once, memory unmapped by the kernel; expiry on runtime grants only; default-deny networking per destination. Next: the design, `docs/architecture/capabilities.md` (#103).
 
 - **Where it runs (D-020):** Pharos; audit-record format host-tested.
 - **Objective and scope:** Enforce explicit, least-privilege capabilities for agents, sandbox them, and record grants and sensitive actions in a protected audit trail.
@@ -639,7 +639,7 @@ Ordering notes:
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part and D-018 on 2026-11-01; D-012 has a recorded direction; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part and D-018 on 2026-11-01; D-012 (final, with D-018) on 2026-11-03; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -656,10 +656,10 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-011 | CPU/GPU support, memory/VRAM | M3.1, M3.2 | **Requirements accepted:** CPU only; SSE2 required, AVX2 used when present; 1 GiB for the inference service, 2 GiB guest; no threads. **Implementation part accepted (#91):** SSE2 only, no AVX2 or FMA (both S1 targets met); 686 MiB peak within 1 GiB |
 | D-015 | Network stack and service model | M2.10 | **Accepted:** own minimal stack (Ethernet, ARP, IPv4, ICMP echo, UDP; no TCP) inside the virtio-net driver's process; badged capabilities as network capabilities (amended, #59); static slirp addresses; the kernel starts `init`, which starts services |
 | D-014 | IPC model and system-call mechanism | M2.7 | **Accepted:** `syscall`/`sysret`; synchronous endpoints, 256-byte messages plus one capability, bounded per-thread buffers |
-| D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | **Direction:** kernel-enforced capabilities (per-process handle tables, rights, grant over IPC, revocation), policy in user space; final at M3.4 |
+| D-012 | Agent sandboxing, tool permissions, network isolation | M2.7 (direction), M3.4 | **Accepted** (final, #102): kernel-enforced capabilities, policy in the agent runtime; permissions from the policy table, beyond it only by approval on the trusted path for one task; revocation per permission and at once, memory unmapped by the kernel; expiry on runtime grants only; default-deny networking per destination, checked by the runtime and the network service; every consequential action audited, and refused while the trail cannot be written |
 | D-016 | User execution environment: SIMD state, user memory, timeouts | M3.0 | **Accepted:** user programs built for `x86_64-unknown-linux-gnu` as `no_std` static programs; eager XSAVE/FXSAVE per thread; `mem_map`/`mem_unmap` with a per-process limit; timeout argument and `TIMED_OUT`; `libm` in user space |
 | D-017 | Writable persistent storage and audit integrity | M3.0, M3.4 | **Accepted:** new `pharos-store` crate; copy-on-write with two superblock roots; whole-file objects and append-only streams; SHA-256-chained audit records; storage service in the virtio-blk driver's process; shared-memory capabilities for bulk data |
-| D-018 | Authority model: capabilities, identity, human control | M3.3 | **Accepted** (final with D-012 at M3.4): authority only from capabilities; identity for attribution and audit; delegation narrows; a trusted path for emergency stop and revocation that needs no agent or model, on a virtio-console device owned by a trusted service; a `STOP` right that also stops a process's children, held by the agent runtime and by the trusted service; M3.3 grants only from a reviewed table |
+| D-018 | Authority model: capabilities, identity, human control | M3.3 | **Accepted** (final with D-012, #102): authority only from capabilities; identity for attribution and audit; delegation narrows; a trusted path for emergency stop and revocation that needs no agent or model, on a virtio-console device owned by a trusted service; a `STOP` right that also stops a process's children, held by the agent runtime and by the trusted service; M3.3 grants only from a reviewed table |
 | D-019 | Service interfaces and versioning | M3.2, M3.3 | **Accepted:** hand-written codecs in a shared `no_std` crate `pharos-proto` (no interface language); every message starts with interface version and operation, `VERSION` refused with the supported range; common status codes and the common operations `INFO` (discovery) and `ATTACH` (bulk data through shared memory); capabilities handed out by `init`, no registry; per-operation timeouts, long results pulled with `NEXT`/`CANCEL`; network and storage move to it in M3.2 (#92) |
 | D-020 | Where Phase 3 runs first | M3.1 | **Accepted:** one codebase of `no_std` crates tested on the host and run on Pharos; measurements on the host; enforcement shown only on Pharos; M3.0 on the critical path from M3.2 |
 | D-013 | Scheduling model | M2.6 | **Accepted:** preemptive round-robin on one CPU, 10 ms slice, kernel threads on guarded stacks, no lock held across a switch |

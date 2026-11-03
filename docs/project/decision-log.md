@@ -751,8 +751,9 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-012: Agent sandboxing, tool permissions, and network isolation
 
-- **Status:** Open — direction recorded 2026-10-27 (M2.7, issue #36); final at M3.4
+- **Status:** Accepted — direction recorded 2026-10-27 (M2.7, issue #36); final 2026-11-03 (M3.4, issue #102)
 - **Needed by:** direction by M2.7 (so syscalls/IPC support it); final at M3.4
+- **Date accepted:** 2026-11-03 (issue #102)
 
 **Options.** Kernel-enforced capabilities; user-space policy service; combination. Permission prompts versus pre-declared manifests. Default-deny networking with per-destination grants.
 
@@ -777,9 +778,34 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
    Memory, process, and interrupt capabilities follow with their milestones.
 
+**Evidence (2026-11-03, issue #102, for M3.4):**
+- **The mechanism exists.** Capability tables, rights, grant over IPC, and revocation of every derived capability (M2.7); process, device, interrupt, and memory capabilities followed (M2.9, M3.0, M3.3). A revoked capability fails its next lookup, but memory already mapped through it stays mapped: device registers and DMA buffers (M2.9) and shared memory (M3.0), a limit carried to M3.4.
+- **Policy is already in user space.** An agent holds one capability, `SEND` on the agent runtime badged with its slot; every service is reached through the runtime, which grants from a compiled-in policy table and a manifest that only asks, refusing anything beyond the table (M3.3, D-018 item 10). Nothing is granted or taken back while an agent runs: stopping it is the revocation.
+- **A trusted path exists.** `trust` owns a virtio-console device no other process can reach, and stops agents from typed commands while the runtime is hung (#96). It is the only place a human can be asked.
+- **The network grants by port only.** The network service's badge is the one UDP port a client may use; any destination address and port is allowed (carried from M2.10). Agents have no network today.
+- **Records can be chained.** The store's append-only streams already chain each record with SHA-256 and check the chain on mount (D-017, M3.0); the head is not anchored, and no service writes audit records yet.
+
+**Decision (final, 2026-11-03; the maintainer chose each recommendation):**
+
+7. **Permissions come from the policy table, and beyond it only by approval, for one task.**
+   - Within the agent's policy entry and manifest: granted automatically when its task starts, as in M3.3.
+   - Beyond them: the runtime asks `trust`, which shows the request on the trusted console. An approval holds for that one task and is never remembered. No answer within a timeout, a refusal, or an unreachable `trust` means no (D-018 items 4 and 6).
+   - Rejected: manifests only (leaves D-018 item 6 unimplemented); remembered approvals (more state to audit and revoke, and one approval silently widens later tasks).
+8. **Revocation takes effect at once, per permission, and for memory in the kernel.**
+   - A permission (a model, a store namespace, a network destination) is a grant in the runtime, revocable while the agent runs without ending it; the agent's next request that needs it is refused, and any session or buffer opened with it is ended.
+   - Revoking a memory or device capability unmaps every mapping made through it or its descendants, in every process, before the call returns (#104).
+   - Rejected: revocation only by ending the agent (the roadmap requires revocation to take effect immediately, and killing the agent for every change loses its work).
+9. **Expiry on runtime grants only.** A runtime permission may carry a deadline, measured with `uptime` (D-021) and checked on every request that uses it; an approval may be granted until a deadline instead of for the whole task. Kernel capabilities carry no expiry. Rejected: no expiry (D-018 item 3 allows it, and time-limited approvals need it); expiry in the kernel's capability check (a clock read on every lookup, for no use that the runtime cannot cover).
+10. **Networking for agents is default-deny, per destination.**
+    - An agent has no network unless granted; a grant names one IPv4 address and UDP port.
+    - Sends go through the runtime, which checks the grant, and the network service also checks each client's allowed destinations, so a capability handed out by mistake still reaches only its destinations (closing the M2.10 limit).
+    - Rejected: no network for agents in M3.4 (leaves the exfiltration and destination-policy rows of the threat model open).
+11. **Consequential actions** are every action that leaves the agent: inference, store writes, network sends, and task submissions and cancellations, plus every grant, revocation, approval, and stop. Each is audited, and refused while the audit trail cannot be written (D-017 item 5).
+12. **Unchanged from the direction:** the kernel enforces capabilities; policy stays in user space, in the agent runtime, with `trust` as the only path to a human.
+
 ### D-018: Authority model: capabilities, identity, and human control
 
-- **Status:** Accepted (final with D-012 at M3.4)
+- **Status:** Accepted; final with D-012 on 2026-11-03 (issue #102)
 - **Needed by:** M3.3 (final with D-012 at M3.4)
 - **Date accepted:** 2026-11-01 (issue #93)
 
@@ -809,5 +835,5 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
    - The kernel's stop call (#95) takes a process capability with a `STOP` right, and stopping a process also stops every process it spawned.
    - `init` starts the trusted service before the agent runtime and gives it `STOP` on the runtime. Stopping the runtime therefore stops every agent, even when the runtime is hung.
    - The runtime starts each agent with no capabilities, hands a `STOP` capability on it to the trusted service, and only then grants the agent anything. An agent the runtime never reported holds nothing, and stopping the runtime ends it too.
-9. **Delegation with expiry: left to M3.4, with D-012.** M3.3 grants an agent only what a reviewed table allows (below), so it needs no time-limited grants yet.
+9. **Delegation with expiry: left to M3.4, with D-012** (decided there: expiry on runtime grants only, D-012 item 9). M3.3 grants an agent only what a reviewed table allows (below), so it needs no time-limited grants yet.
 10. **Human approval in M3.3: none needed, because nothing beyond the reviewed table is granted.** The runtime grants an agent only capabilities listed for it in a compiled-in table, like `init`'s; a manifest asking for more is refused. Approvals for anything beyond it come with M3.4's permission model.
