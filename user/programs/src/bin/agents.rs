@@ -50,6 +50,12 @@
 //! of the policy table's destinations. `RECEIVE_FROM` polls the service
 //! and keeps each datagram for every agent that sent to its source; it is
 //! delivered only if the agent still holds that grant when it takes it.
+//!
+//! Refusals (#110): an agent's refused requests are recorded once per kind
+//! per attempt (malformed or out of bounds, a missing grant, a request not
+//! for agents, a permission not askable), each with its first example, and
+//! the attempt's total when it ends, so a flooding agent cannot fill the
+//! trail.
 
 #![no_std]
 #![no_main]
@@ -96,6 +102,14 @@ const NET_US: u64 = 1_000_000;
 const MAX_INBOX: usize = 4;
 /// The host echo server (`cargo xtask`, networking.md), through slirp.
 const HOST_ECHO: Dest = ([10, 0, 2, 2], 47_000);
+
+/// Kinds of refused agent requests, recorded once each per attempt.
+mod refusal {
+    pub const MALFORMED: u8 = 1;
+    pub const NO_GRANT: u8 = 2;
+    pub const NOT_FOR_AGENTS: u8 = 4;
+    pub const NOT_ASKABLE: u8 = 8;
+}
 /// How long an audit record may take before the action is refused.
 const AUDIT_US: u64 = 2_000_000;
 /// The runtime's buffer at the storage service: the largest task file.
@@ -235,6 +249,22 @@ const TEST: &[Entry] = &[
         ask_models: 0,
         ask_data: Data::None,
         net: &[HOST_ECHO],
+        ask_net: &[],
+    },
+    // The `hostile` kernel's (#110): its own files, and five models to ask
+    // for, one more than the approval queue holds.
+    Entry {
+        name: b"hostile",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 0,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::Write,
+        ask_models: 1 << 3 | 1 << 4 | 1 << 5 | 1 << 6 | 1 << 7,
+        ask_data: Data::Write,
+        net: &[],
         ask_net: &[],
     },
 ];
@@ -427,6 +457,9 @@ struct Slot {
     /// Destinations it sent to, and datagrams from them kept for it.
     peers: Vec<Dest>,
     inbox: Vec<(Dest, Vec<u8>)>,
+    /// Refused requests this attempt, and the kinds already recorded.
+    refused: u32,
+    noted: u8,
 }
 
 struct Runtime {
@@ -702,6 +735,8 @@ impl Runtime {
             grants: Grants::default(),
             peers: Vec::new(),
             inbox: Vec::new(),
+            refused: 0,
+            noted: 0,
         });
         // Every grant is recorded before it is given; none is given if a
         // record fails (#108).
@@ -801,6 +836,13 @@ impl Runtime {
             unmap(b);
         }
         let id = s.task;
+        if s.refused > 0 {
+            let mut d = [0u8; 20];
+            let mut detail = Vec::from(decimal(u64::from(s.refused), &mut d));
+            detail.extend_from_slice(b" requests refused");
+            let agent = self.agent_of(id);
+            self.refusal_event(&agent, id, None, &detail);
+        }
         // Its open requests end with it.
         let open: Vec<u16> = self
             .pending
@@ -1214,10 +1256,13 @@ impl Runtime {
                 Err(status::NOT_FOUND)
             }
             Request::Info => self.info(out).ok_or(status::INTERNAL),
-            Request::Ask { permission, for_ms } => self
-                .ask(i, id, limits.entry, permission, for_ms)
-                .encode(out)
-                .ok_or(status::INTERNAL),
+            Request::Ask { permission, for_ms } => {
+                let asked = self.ask(i, id, limits.entry, permission, for_ms);
+                if asked == Asked::Refused && !askable(limits.entry, &permission) {
+                    self.note(i, refusal::NOT_ASKABLE, Some(permission));
+                }
+                asked.encode(out).ok_or(status::INTERNAL)
+            }
             Request::Revoke { .. } | Request::Answer { .. } => Err(status::NO_ACCESS),
             Request::Submit { .. }
             | Request::Status { .. }
@@ -1339,6 +1384,43 @@ impl Runtime {
             detail,
         })
         .is_some()
+    }
+
+    /// Counts a refused request from slot `i`; the first of its `kind` this
+    /// attempt is recorded (best effort, as other refusals).
+    fn note(&mut self, i: usize, kind: u8, p: Option<Permission>) {
+        let Some(s) = self.slots[i].as_mut() else {
+            return;
+        };
+        s.refused = s.refused.saturating_add(1);
+        if s.noted & kind != 0 {
+            return;
+        }
+        s.noted |= kind;
+        let task = s.task;
+        let why: &[u8] = match kind {
+            refusal::MALFORMED => b"malformed",
+            refusal::NO_GRANT => b"no grant",
+            refusal::NOT_FOR_AGENTS => b"not for agents",
+            _ => b"not askable",
+        };
+        let agent = self.agent_of(task);
+        self.refusal_event(&agent, task, p, why);
+    }
+
+    fn refusal_event(&self, actor: &[u8], task: u32, p: Option<Permission>, detail: &[u8]) {
+        self.audit(&Record {
+            kind: Kind::Event,
+            refers: 0,
+            actor,
+            task,
+            attempt: self.attempt(task),
+            action: action::REFUSE,
+            permission: p,
+            service: b"",
+            outcome: outcome::REFUSED,
+            detail,
+        });
     }
 
     /// The agent name of task `id`.
@@ -1608,10 +1690,28 @@ impl Runtime {
     fn handle(&mut self, msg: &[u8], badge: u32, out: &mut [u8; 256]) -> usize {
         let req = match parse(msg) {
             Ok(req) => req,
-            Err(refused) => return refusal(refused, VERSION, out),
+            Err(refused) => {
+                if let Some(i) = agent_slot(badge) {
+                    self.note(i, refusal::MALFORMED, None);
+                }
+                return refusal(refused, VERSION, out);
+            }
         };
         let result = match agent_slot(badge) {
-            Some(i) => self.agent(i, req, out),
+            Some(i) => {
+                let result = self.agent(i, req, out);
+                match result {
+                    Err(status::NO_ACCESS) => match needed(&req) {
+                        Some(p) => self.note(i, refusal::NO_GRANT, Some(p)),
+                        None => self.note(i, refusal::NOT_FOR_AGENTS, None),
+                    },
+                    Err(status::BAD_REQUEST | status::TOO_LARGE | status::NO_BUFFER) => {
+                        self.note(i, refusal::MALFORMED, None);
+                    }
+                    _ => {}
+                }
+                result
+            }
             None if badge >= CONTROL => self.control(badge, req, out),
             None if badge == agents::TRUST => match req {
                 Request::Revoke { name, permission } => {
@@ -1638,6 +1738,17 @@ impl Runtime {
                 1
             }
         }
+    }
+}
+
+/// The permission an agent request needs, if any.
+fn needed(req: &Request<'_>) -> Option<Permission> {
+    match *req {
+        Request::Infer { model, .. } => Some(Permission::Model(model)),
+        Request::DataPut { .. } => Some(Permission::DataWrite),
+        Request::DataGet { .. } => Some(Permission::DataRead),
+        Request::SendTo { addr, port, .. } => Some(Permission::Net { addr, port }),
+        _ => None,
     }
 }
 

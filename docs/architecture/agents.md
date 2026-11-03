@@ -122,7 +122,7 @@ Clients are told apart by badge: agent slots, and control clients that `init`'s 
 | `FORGET` | control | deletes an ended task's record | 10 s |
 | `INFO`, `ATTACH` | both | as D-019 | 1 s |
 
-Inference, `DATA_PUT`, `SEND_TO` (#109), `SUBMIT`, and `CANCEL` are audited first (#108): if the audit trail cannot record the intent within 2 s, the request answers `NO_AUDIT` and nothing is done ([capabilities.md](capabilities.md)).
+Inference, `DATA_PUT`, `SEND_TO` (#109), `SUBMIT`, and `CANCEL` are audited first (#108): if the audit trail cannot record the intent within 2 s, the request answers `NO_AUDIT` and nothing is done ([capabilities.md](capabilities.md)). An agent's refused requests are recorded once per kind per attempt, with the attempt's total when it ends (#110).
 
 - An agent sees only its own task: the badge gives the slot, the slot the task. A request about another task answers `NO_SESSION`.
 - Everything an agent sends is checked and copied out of its buffer before use, as in the inference service. Inference output reaches the agent as data, never interpreted by the runtime.

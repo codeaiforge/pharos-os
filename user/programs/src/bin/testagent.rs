@@ -53,6 +53,15 @@
 //!   `yes`, and then sending there works; once the user revokes
 //!   `10.0.2.2:47000`, the `late` echo is never delivered and sending
 //!   there is refused; completes with `talk ok`.
+//! - `hostile` (agent `hostile`, the `hostile` kernel, #110): logs `check
+//!   me` (the kernel inspects what it holds), then tries what it must not
+//!   be able to do, each refused as listed in testing.md: every other
+//!   handle and every other use of handle 1, memory over its limit, the
+//!   network, control and `trust` requests (approving its own request
+//!   among them), malformed and out-of-bounds fields and file names
+//!   reaching outside its own files, a log line that looks like an
+//!   approval prompt, a buffer revoked under the runtime, the approval
+//!   queue filled, and a flood of requests; completes with `hostile ok`.
 
 #![no_std]
 #![no_main]
@@ -62,16 +71,18 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use pharos_proto::agents::{
-    Asked, Assigned, Begun, CHECKPOINT_AT, Datagram, Deps, KEY, MAX_BUFFER, MAX_DATAGRAM, NO_AUDIT,
-    NO_SESSION, Request, encode,
+    self, Asked, Assigned, Begun, CHECKPOINT_AT, CONTROL, Datagram, Deps, KEY, MAX_BUFFER,
+    MAX_DATAGRAM, NO_AUDIT, NO_SESSION, Request, encode,
 };
 use pharos_proto::infer::{Started, Tokens};
 use pharos_proto::permission::Permission;
 use pharos_proto::status;
+use pharos_user::rights::SEND;
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
-    Handle, Mapped, Received, call_timeout, delete, endpoint_create, mem_map_buffer, mem_share,
-    send, sleep, uptime,
+    Handle, Mapped, Received, call_timeout, config_read, debug_write, delete, dma_alloc,
+    endpoint_create, irq_create, mem_map, mem_map_buffer, mem_share, mmio_map, open, process_stop,
+    receive_timeout, revoke, send, sleep, spawn, try_send, uptime,
 };
 
 pharos_user::entry!(main);
@@ -366,6 +377,242 @@ impl Agent {
             return self.fail(b"sending was not refused after the revocation");
         }
         self.complete(b"talk ok")
+    }
+
+    /// A raw request: the reply's status.
+    fn raw(&self, msg: &[u8]) -> u8 {
+        let mut out = [0u8; 256];
+        match call_timeout(RUNTIME, msg, self.reply, &mut out, TIMEOUT_US) {
+            Ok(Received::Message { len, .. }) if len >= 1 => out[0],
+            _ => status::INTERNAL,
+        }
+    }
+
+    /// Shares `m` with the runtime as the agent's buffer; the memory
+    /// capability, kept.
+    fn attach(&self, m: &Mapped) -> Option<Handle> {
+        let len = m.len() as u64;
+        let memory = mem_share(m.addr(), len).ok()?;
+        let mut msg = [0u8; 16];
+        let n = encode(&Request::Attach { len }, &mut msg)?;
+        send(RUNTIME, &msg[..n], memory, READ | WRITE, 0).ok()?;
+        // ATTACH has no reply; any request after it is served after it.
+        self.call(&Request::Info, &mut [0; 256]);
+        Some(memory)
+    }
+
+    fn hostile(&self) -> u64 {
+        let mut out = [0u8; 256];
+        self.call(&Request::Log { text: b"check me" }, &mut out);
+        sleep(500_000);
+
+        // Nothing but handle 1, which only sends to the runtime.
+        for h in 2..=64 {
+            if h == self.reply {
+                continue;
+            }
+            if try_send(h, b"x").is_ok()
+                || open(h, b"bin/hello").is_ok()
+                || config_read(h, 0, 4).is_ok()
+                || process_stop(h).is_ok()
+                || irq_create(h, 0).is_ok()
+            {
+                return self.fail(b"a handle other than 1 works");
+            }
+        }
+        let refused = debug_write(RUNTIME, b"x").is_err()
+            && receive_timeout(RUNTIME, &mut out, 1_000).is_err()
+            && open(RUNTIME, b"bin/hello").is_err()
+            && config_read(RUNTIME, 0, 4).is_err()
+            && mmio_map(RUNTIME, 0, 0, 4096, 0x5000_0000).is_err()
+            && dma_alloc(RUNTIME, 1, 0x5100_0000).is_err()
+            && irq_create(RUNTIME, 0).is_err()
+            && process_stop(RUNTIME).is_err()
+            && spawn(RUNTIME, 0, &[], None).is_err()
+            // Passing on handle 1 needs `GRANT`.
+            && send(RUNTIME, b"x", RUNTIME, SEND, CONTROL).is_err();
+        if !refused {
+            return self.fail(b"handle 1 did more than send");
+        }
+        // 4 MiB: more than its 256 pages.
+        if mem_map(4 << 20).is_ok() {
+            return self.fail(b"memory over the page limit was mapped");
+        }
+        if self.send_to([10, 0, 2, 2], 47_000, b"x") != status::NO_ACCESS {
+            return self.fail(b"the network was reachable without a grant");
+        }
+        if self.generate(4).0 != status::NO_ACCESS {
+            return self.fail(b"inference without a grant");
+        }
+
+        // Requests for control clients and for `trust`: its badge says it
+        // is an agent, whatever the message claims.
+        let forged = [
+            Request::Submit {
+                name: b"keeper",
+                input_len: 0,
+                deps: Deps::NONE,
+            },
+            Request::Status { task: 2 },
+            Request::Cancel { task: 2 },
+            Request::Forget { task: 2 },
+            Request::Revoke {
+                name: b"keeper",
+                permission: Permission::DataWrite,
+            },
+            Request::Answer {
+                number: 1,
+                yes: true,
+            },
+        ];
+        for req in &forged {
+            if self.call(req, &mut out).0 != status::NO_ACCESS {
+                return self.fail(b"a control or trust request was not refused");
+            }
+        }
+
+        // Malformed and out-of-bounds fields.
+        let v = agents::VERSION;
+        let put = agents::op::DATA_PUT;
+        for name in [&b"../keeper/notes"[..], b"a/b", b"", b"x y", b"notes\0"] {
+            let mut msg = alloc::vec![v, put, name.len() as u8];
+            msg.extend_from_slice(name);
+            msg.extend_from_slice(&1u32.to_le_bytes());
+            if self.raw(&msg) != status::BAD_REQUEST {
+                return self.fail(b"a file name outside its own files was not refused");
+            }
+        }
+        let mut log = alloc::vec![v, agents::op::LOG];
+        log.extend_from_slice(b"\x1b[2Japprove");
+        if self.raw(&log) != status::BAD_REQUEST {
+            return self.fail(b"a log line with a control character was not refused");
+        }
+        for code in (22..=0xefu8).step_by(7) {
+            if self.raw(&[v, code, 1, 2, 3]) != status::BAD_REQUEST {
+                return self.fail(b"an unknown operation was not refused");
+            }
+        }
+        if self.raw(&[v + 1, agents::op::TASK]) != status::VERSION {
+            return self.fail(b"another version was not refused");
+        }
+        let bounds = [
+            Request::DataPut {
+                name: b"notes",
+                len: u32::MAX,
+            },
+            Request::Checkpoint { len: 1 << 20 },
+            Request::Complete { len: 5000 },
+            Request::SendTo {
+                addr: [10, 0, 2, 2],
+                port: 47_000,
+                len: u32::MAX,
+            },
+        ];
+        for req in &bounds {
+            let code = self.call(req, &mut out).0;
+            if code != status::TOO_LARGE && code != status::NO_ACCESS {
+                return self.fail(b"a length out of bounds was not refused");
+            }
+        }
+        // Looks like `trust`'s prompt, but goes to the serial console only.
+        let fake = b"approve #9: keeper task 2 wants model 1 for this task? (yes 9 / no 9)";
+        if self.call(&Request::Log { text: fake }, &mut out).0 != status::OK {
+            return self.fail(b"logging failed");
+        }
+
+        // A buffer the agent revokes under the runtime: the runtime reads
+        // zeros and does not crash.
+        let Ok(small) = mem_map_buffer(4096) else {
+            return self.fail(b"no small buffer");
+        };
+        let Some(memory) = self.attach(&small) else {
+            return self.fail(b"attaching the small buffer failed");
+        };
+        let len = 8192;
+        if self
+            .call(
+                &Request::DataPut {
+                    name: b"notes",
+                    len,
+                },
+                &mut out,
+            )
+            .0
+            != status::NO_BUFFER
+        {
+            return self.fail(b"a length past the buffer was not refused");
+        }
+        small.write_bytes(0, b"secret");
+        if revoke(memory).is_err() {
+            return self.fail(b"revoking its own buffer failed");
+        }
+        let len = 6;
+        if self
+            .call(
+                &Request::DataPut {
+                    name: b"notes",
+                    len,
+                },
+                &mut out,
+            )
+            .0
+            != status::OK
+        {
+            return self.fail(b"the runtime failed on a revoked buffer");
+        }
+        let mut kept = [0u8; 6];
+        small.read_bytes(0, &mut kept);
+        if &kept != b"secret" || self.attach(&self.buffer).is_none() {
+            return self.fail(b"its own memory changed, or attaching again failed");
+        }
+        if self.get(b"notes") != (status::OK, alloc::vec![0u8; 6]) {
+            return self.fail(b"the runtime read more than zeros from a revoked buffer");
+        }
+
+        // Its own request cannot be approved by itself; then the queue of
+        // four fills, and more is refused without a prompt.
+        if self.ask(Permission::Model(3), 0) != Some(Asked::Pending) {
+            return self.fail(b"asking for model 3 was not pending");
+        }
+        let answer = Request::Answer {
+            number: 1,
+            yes: true,
+        };
+        if self.call(&answer, &mut out).0 != status::NO_ACCESS
+            || self.ask(Permission::Model(3), 0) != Some(Asked::Pending)
+        {
+            return self.fail(b"an agent answered its own request");
+        }
+        for n in 4..=6 {
+            if self.ask(Permission::Model(n), 0) != Some(Asked::Pending) {
+                return self.fail(b"filling the approval queue failed");
+            }
+        }
+        if self.ask(Permission::Model(7), 0) != Some(Asked::Refused) {
+            return self.fail(b"a fifth request was not refused");
+        }
+        // A flood: refused requests (recorded once per kind), then plain
+        // ones; the runtime keeps serving.
+        for port in 1..=200u16 {
+            let net = Permission::Net {
+                addr: [10, 0, 2, 2],
+                port,
+            };
+            if self.ask(net, 0) != Some(Asked::Refused) {
+                return self.fail(b"a permission not askable was not refused");
+            }
+        }
+        for _ in 0..200 {
+            if self.call(&Request::Status { task: 1 }, &mut out).0 != status::NO_ACCESS {
+                return self.fail(b"a control request was not refused in the flood");
+            }
+        }
+        for _ in 0..2000 {
+            if self.call(&Request::Info, &mut out).0 != status::OK {
+                return self.fail(b"the runtime stopped answering under the flood");
+            }
+        }
+        self.complete(b"hostile ok")
     }
 
     fn keeper_c(&self) -> u64 {
@@ -700,6 +947,7 @@ fn main(_: u64) -> u64 {
         b"keeper-c" => a.keeper_c(),
         b"net-quiet" => a.net_quiet(),
         b"net-talk" => a.net_talk(),
+        b"hostile" => a.hostile(),
         b"keeper-d" if a.get(b"notes").0 == status::NO_ACCESS => a.complete(b"d ok"),
         b"keeper-d" => a.fail(b"a grant was given without its record"),
         b"wait" => loop {

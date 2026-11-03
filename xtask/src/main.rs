@@ -1348,6 +1348,20 @@ const AGENTS_NET_SCRIPT: &[console::Step] = &[
 ];
 /// `10.0.2.2:47002` is not askable: never a prompt.
 const AGENTS_NET_REFUSED: &[&str] = &["approve #2"];
+/// The hostile agent (#110): its four approval requests fill the queue
+/// (nobody answers; they end with its task).
+const HOSTILE_TEST: &str = "hostile";
+const HOSTILE_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("registered runtime", ""),
+    (
+        "approve #4: hostile task 1 wants model 6 for this task? (yes 4 / no 4)",
+        "",
+    ),
+];
+/// No fifth request reaches the user, and the prompt `hostile` logged goes
+/// to the serial console only.
+const HOSTILE_REFUSED: &[&str] = &["approve #5", "approve #9"];
 /// The audit service (#107): a tiny fresh store, so it fills.
 const AUDIT_TEST: &str = "audit";
 const AUDIT_BLOCKS: u64 = 16;
@@ -1548,6 +1562,67 @@ fn agents_net_audit(image: &Path) -> Result<()> {
     Ok(())
 }
 
+/// After the `hostile` test kernel (#110): each kind of refusal of task 1
+/// is recorded exactly once, with its first example, and the attempt's
+/// total once it ended (453; at least 450, so a kind not counted shows);
+/// its approval requests ended with it;
+/// the agent beside it, task 2, has its grants and its write and inference.
+fn hostile_audit(image: &Path) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    let refusals: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("client 3 Event refuse hostile task 1/1 "))
+        .collect();
+    for kind in [
+        "net 10.0.2.2:47000  outcome 2 no grant",
+        "outcome 2 not for agents",
+        "outcome 2 malformed",
+        "net 10.0.2.2:1  outcome 2 not askable",
+    ] {
+        let n = refusals.iter().filter(|l| l.contains(kind)).count();
+        if n != 1 {
+            return Err(format!("{n} refusal records like {kind:?}, expected 1"));
+        }
+    }
+    let total = refusals
+        .iter()
+        .find_map(|l| {
+            l.split("outcome 2 ")
+                .nth(1)?
+                .strip_suffix(" requests refused")
+        })
+        .and_then(|n| n.trim().parse::<u32>().ok())
+        .ok_or("no record of the attempt's refused requests in all")?;
+    let ended = refusals.iter().filter(|l| l.contains("task ended")).count();
+    // The four kinds, the total, and the four requests that ended with it.
+    if total < 450 || ended != 4 || refusals.len() != 9 {
+        return Err(format!(
+            "expected 9 refusal records (4 ended requests, at least 450 in all), got: {refusals:?}"
+        ));
+    }
+    for want in [
+        "client 3 Event grant keeper task 2/1 data write",
+        "client 3 Intent data write keeper task 2/1 data write store",
+        "client 3 Intent infer keeper task 2/1 model 2 infer",
+    ] {
+        if !lines.iter().any(|l| l.contains(want)) {
+            return Err(format!("the audit trail has no record like {want:?}"));
+        }
+    }
+    println!(
+        "  audit trail: {} records; hostile's {total} refused requests in {} records:",
+        lines.len(),
+        refusals.len()
+    );
+    for l in &refusals {
+        println!("    {l}");
+    }
+    Ok(())
+}
+
 /// Crash injection: boots the kernel `c.rounds` times on the same store
 /// disk, killing QEMU at a random moment after it prints `c.started`.
 /// Each boot must first find its state consistent (`c.ok`), so every round
@@ -1663,7 +1738,14 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     if name == INFERENCE_TEST {
         store_image::tiny(&out.join(STORE_IMAGE))?;
     }
-    if [SERVICE_TEST, AGENTS_TEST, PERMISSIONS_TEST, AGENTS_NET_TEST].contains(&name.as_str()) {
+    let service_store = [
+        SERVICE_TEST,
+        AGENTS_TEST,
+        PERMISSIONS_TEST,
+        AGENTS_NET_TEST,
+        HOSTILE_TEST,
+    ];
+    if service_store.contains(&name.as_str()) {
         store_image::service(&out.join(STORE_IMAGE))?;
     }
     if name == AUDIT_TEST {
@@ -1681,6 +1763,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         TRUST_TEST => (TRUST_SCRIPT, TRUST_REFUSED),
         PERMISSIONS_TEST => (PERMISSIONS_SCRIPT, PERMISSIONS_REFUSED),
         AGENTS_NET_TEST => (AGENTS_NET_SCRIPT, AGENTS_NET_REFUSED),
+        HOSTILE_TEST => (HOSTILE_SCRIPT, HOSTILE_REFUSED),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
         _ => (&[], &[]),
     };
@@ -1713,6 +1796,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == AGENTS_NET_TEST {
                 agents_net_audit(&out.join(STORE_IMAGE))?;
+            }
+            if name == HOSTILE_TEST {
+                hostile_audit(&out.join(STORE_IMAGE))?;
             }
             Ok(())
         })

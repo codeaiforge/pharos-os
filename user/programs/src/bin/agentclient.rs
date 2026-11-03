@@ -14,7 +14,8 @@
 //! permissions the runner revokes on the trusted console while it runs.
 //! Argument 3: the `agents_net` kernel (#109): a `netter` task that talks
 //! to the host echo server, and a `listener` task (the same grant) that
-//! sends nothing.
+//! sends nothing. Argument 4: the `hostile` kernel (#110): a `hostile`
+//! task beside a `keeper` task.
 
 #![no_std]
 #![no_main]
@@ -169,13 +170,16 @@ fn main(arg: u64) -> u64 {
     if arg == 3 {
         return net(c);
     }
+    if arg == 4 {
+        return hostile(c);
+    }
     let mut out = [0u8; 256];
 
     let (_, n) = c.call(&Request::Info, &mut out);
     let info = Info::parse(&out[..n]);
     c.step(
-        "INFO: interface agents, six agents accepted, none running",
-        info.is_some_and(|i| i.name == NAME && i.details == [6, 0]),
+        "INFO: interface agents, seven agents accepted, none running",
+        info.is_some_and(|i| i.name == NAME && i.details == [7, 0]),
     );
     let refused = [&b"greedy"[..], b"absent", b"noentry"]
         .iter()
@@ -269,7 +273,7 @@ fn main(arg: u64) -> u64 {
         .iter()
         .all(|&t| c.status(t).is_some_and(|s| s.state == State::Cancelled));
     let (_, n) = c.call(&Request::Info, &mut out);
-    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [6, 0]);
+    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [7, 0]);
     c.step(
         "cancelling running and pending tasks stops their agents",
         cancelled && all && idle,
@@ -432,6 +436,39 @@ fn net(mut c: Client) -> u64 {
     c.step(
         "another agent with the same grant that sent nothing receives nothing",
         ended(&c, quiet, b"quiet ok"),
+    );
+    let _ = send(REPORT, b"done", 0, 0, 0);
+    c.failed
+}
+
+/// The `hostile` kernel: `hostile` (task 1) and `keeper-a` (task 2) run
+/// side by side.
+fn hostile(mut c: Client) -> u64 {
+    let bad = c.submit(b"hostile", b"hostile");
+    let good = c.submit(b"keeper", b"keeper-a");
+    let ended = |c: &Client, task: Result<u32, u8>, want: &[u8]| {
+        let Some((s, result)) = task.ok().and_then(|t| c.wait(t, 60)) else {
+            return false;
+        };
+        if result != want {
+            let mut line = Vec::from(&b"hostile kernel result: "[..]);
+            line.extend_from_slice(&result[..result.len().min(200)]);
+            let _ = debug_write(CONSOLE, &line);
+        }
+        s.state == State::Done && result == want && s.attempts == 1
+    };
+    c.step(
+        "a hostile agent is refused everything it should not do",
+        ended(&c, bad, b"hostile ok"),
+    );
+    c.step(
+        "an agent beside it completes unaffected",
+        ended(&c, good, b"a ok"),
+    );
+    let mut out = [0u8; 256];
+    c.step(
+        "the runtime still serves control requests",
+        c.call(&Request::Info, &mut out).0 == status::OK,
     );
     let _ = send(REPORT, b"done", 0, 0, 0);
     c.failed

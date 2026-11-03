@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-03 (#103),** with zeroed pages on revocation, the trusted console as the audit chain's anchor, and approvals limited to 60 s and 4 waiting. Built by: kernel revocation of mapped memory (#104), runtime permissions (#105), approval on the trusted path (#106), the audit service (#107), auditing every consequential action (#108), agent networking (#109), and adversarial tests (#110). **Implemented:** kernel revocation of mapped memory (#104), runtime permissions with `revoke` on the trusted console (#105), approval on the trusted path (#106), the audit service (#107), auditing every grant, revocation, and consequential action (#108), and agent networking (#109).
+**Planned. Design approved by the maintainer on 2026-11-03 (#103),** with zeroed pages on revocation, the trusted console as the audit chain's anchor, and approvals limited to 60 s and 4 waiting. Built by: kernel revocation of mapped memory (#104), runtime permissions (#105), approval on the trusted path (#106), the audit service (#107), auditing every consequential action (#108), agent networking (#109), and adversarial tests (#110). **Implemented:** kernel revocation of mapped memory (#104), runtime permissions with `revoke` on the trusted console (#105), approval on the trusted path (#106), the audit service (#107), auditing every grant, revocation, and consequential action (#108), agent networking (#109), and adversarial tests (#110).
 
 ## 2. Context
 
@@ -78,12 +78,14 @@ What M3.4 builds on:
 
 What an agent process can do on Pharos, each a check in the adversarial tests (#110):
 - it holds exactly one capability, `SEND` on the runtime with its slot's badge, and cannot get another (no message carries one to it: the runtime's replies carry none);
-- it cannot spawn, open files, map devices, or create endpoints, because each needs a capability it lacks;
+- it cannot spawn, open files, or map devices, because each needs a capability it lacks; it can create endpoints and map memory of its own (within its limit), which reach nothing;
 - its memory is limited by its manifest's page limit within the policy entry;
 - every request is checked against its own slot's grants, so another slot's badge, task, session, or buffer is unreachable;
 - it cannot reach the trusted console, the audit service, or the store, except through runtime requests that are checked and audited.
 
 CPU time is not limited per agent yet (M3.5).
+
+- *Implemented (#110):* the `hostile` test kernel checks each of these with an agent that tries them (listed in [testing.md](../development/testing.md)), beside an agent that must be unaffected. The runtime records an agent's refused requests once per kind per attempt (malformed or out of bounds, no grant, not a request for agents, not askable), each with its first example, and the attempt's total when it ends, so a flood cannot fill the trail (the maintainer's choice, 2026-11-03). Limit: the approval queue (4) is shared, so one agent can keep it full and others' requests are refused until its requests end (each at most 60 s, or with its task).
 
 ## 4. Security
 

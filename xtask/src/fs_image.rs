@@ -212,7 +212,7 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// entry allows, `noentry`, which has no entry, and `keeper`, the
 /// `permissions` kernel's, which may write its own files (#105), and
 /// `asker`, which gets nothing and asks (#106).
-pub const TEST_MANIFESTS: [(&str, &str); 8] = [
+pub const TEST_MANIFESTS: [(&str, &str); 9] = [
     (
         "agents/worker.manifest",
         "# The agents test kernel's worker.\nmanifest = 1\nname = worker\nprogram = bin/testagent\n\
@@ -252,6 +252,11 @@ pub const TEST_MANIFESTS: [(&str, &str); 8] = [
         "agents/listener.manifest",
         "manifest = 1\nname = listener\nprogram = bin/testagent\npages = 256\nmodels =\n\
          attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet = 10.0.2.2:47000\n",
+    ),
+    (
+        "agents/hostile.manifest",
+        "manifest = 1\nname = hostile\nprogram = bin/testagent\npages = 256\nmodels =\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = write\nnet =\n",
     ),
 ];
 

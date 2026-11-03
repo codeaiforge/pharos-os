@@ -180,6 +180,10 @@ name = "agents_net"
 harness = false
 
 [[test]]
+name = "hostile"
+harness = false
+
+[[test]]
 name = "audit"
 harness = false
 
