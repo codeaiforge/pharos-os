@@ -7,8 +7,10 @@
 //! - `HEAD` `[version, op]`: `[OK, boot (4), records (8), head (32)]`, the
 //!   current boot's stream, record count, and chain head.
 //!
-//! The badge says which client sends (`init`, `trust`, the runtime, as
-//! `init` grants them; 0 is refused). The service adds the sequence
+//! The badge says which client sends: none is `init` (the only holder of
+//! an unbadged capability), and `trust` and the runtime have the badges
+//! `init` gives them; badge 1 is refused, so no one else can write as
+//! `init`. The service adds the sequence
 //! number, the time, and that badge to every entry, so a client cannot
 //! write as another. Records are one stream per boot, `log/<boot>`, in the
 //! store's `audit` namespace, chained there with SHA-256 (D-017).

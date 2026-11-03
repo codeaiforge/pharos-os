@@ -73,6 +73,9 @@ impl Asked {
 /// The interface's own status code: the caller has no task, inference
 /// session, or task of that number.
 pub const NO_SESSION: u8 = status::OWN;
+/// Refused: the audit trail could not record the action (#108, D-012
+/// item 11).
+pub const NO_AUDIT: u8 = status::OWN + 1;
 
 /// Agent slots: badges 1 to 16.
 pub const SLOTS: usize = 16;

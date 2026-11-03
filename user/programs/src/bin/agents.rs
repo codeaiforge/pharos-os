@@ -6,7 +6,8 @@
 //! hand agents a badged `SEND`), 3 `init`'s report endpoint, 4 the
 //! read-only filesystem (agent programs and manifests), 5 the inference
 //! service (`SEND`, badged), 6 `trust` (`SEND`, badged as the runtime), 7
-//! the storage service, badged for namespace `agents` (read-write). The
+//! the storage service, badged for namespace `agents` (read-write), 8 the
+//! audit service (`SEND`, client 3; #108). The
 //! argument selects the policy table (0: boot, empty; 1: the `agents` and
 //! `agents_crash` test kernels).
 //!
@@ -32,6 +33,14 @@
 //! or the timeout passes (60 s; 5 s with the test table), and tells `trust`
 //! how it ended (`RESOLVED`). At most 4 wait at once. An approval holds for
 //! that task only; a refusal too, so the agent cannot ask again.
+//!
+//! Audit (#108): handle 8 is `SEND` on the audit service (client 3). Every
+//! grant and approval is recorded before it is given, and not given if the
+//! record fails. Each consequential action (inference, writing the agent's
+//! files, submitting and cancelling tasks) is preceded by an `INTENT`
+//! record and acted on only once it is stored, else refused with
+//! `NO_AUDIT`; an `OUTCOME` record follows. Revocations, expiries, and
+//! refusals always take effect and are recorded when the trail can be.
 
 #![no_std]
 #![no_main]
@@ -44,9 +53,10 @@ use pharos_programs::grants::Grants;
 use pharos_programs::tasks::{self, Begin, Files, StoreFailed, Tasks};
 use pharos_proto::agents::{
     self, Asked, Assigned, Begun, CHECKPOINT_AT, CONTROL, MAX_BUFFER, MAX_CHECKPOINT, MAX_INPUT,
-    MAX_RESULT, MAX_RUNNING, NAME, NO_SESSION, Request, SLOTS, State, TaskStatus, VERSION,
-    agent_slot, parse,
+    MAX_RESULT, MAX_RUNNING, NAME, NO_AUDIT, NO_SESSION, Request, SLOTS, State, TaskStatus,
+    VERSION, agent_slot, parse,
 };
+use pharos_proto::audit::{self, Entry as Record, Kind, action, outcome};
 use pharos_proto::infer::{self, Request as InferRequest, Started, Tokens};
 use pharos_proto::manifest::{self, Data, Entry, Why};
 use pharos_proto::permission::Permission;
@@ -68,6 +78,9 @@ const ROOT: Handle = 4;
 const INFER: Handle = 5;
 const TRUST: Handle = 6;
 const STORE: Handle = 7;
+const AUDIT: Handle = 8;
+/// How long an audit record may take before the action is refused.
+const AUDIT_US: u64 = 2_000_000;
 /// The runtime's buffer at the storage service: the largest task file.
 const STORE_BUFFER: u64 = 128 << 10;
 const STORE_US: u64 = 10_000_000;
@@ -622,17 +635,32 @@ impl Runtime {
             session: None,
             session_model: 0,
             ending: None,
-            grants: {
-                let mut g = Grants::new(limits.models, limits.data);
-                for (_, p, until) in self.approved.iter().filter(|(t, ..)| *t == id) {
-                    g.add(*p, *until);
-                }
-                for (_, p) in self.revoked.iter().filter(|(t, _)| *t == id) {
-                    g.revoke(p);
-                }
-                g
-            },
+            grants: Grants::default(),
         });
+        // Every grant is recorded before it is given; none is given if a
+        // record fails (#108).
+        let mut g = Grants::new(limits.models, limits.data);
+        for (_, p, until) in self.approved.iter().filter(|(t, ..)| *t == id) {
+            g.add(*p, *until);
+        }
+        for (_, p) in self.revoked.iter().filter(|(t, _)| *t == id) {
+            g.revoke(p);
+        }
+        let recorded = g.list().iter().all(|grant| {
+            self.permission_event(
+                limits.entry.name,
+                id,
+                action::GRANT,
+                grant.permission,
+                outcome::OK,
+                b"",
+            )
+        });
+        if recorded {
+            if let Some(s) = self.slots[slot].as_mut() {
+                s.grants = g;
+            }
+        }
         if !registered {
             self.finish(id, State::Failed, b"trust registration failed");
             self.end(slot, Ending::Finished);
@@ -647,6 +675,24 @@ impl Runtime {
     fn check_deadlines(&mut self) -> u64 {
         let now = uptime();
         let mut wait = u64::MAX;
+        // Grants past their deadline: gone (as `allows` already treats
+        // them), and recorded.
+        for i in 0..SLOTS {
+            let Some(s) = self.slots[i].as_mut() else {
+                continue;
+            };
+            let task = s.task;
+            let gone = s.grants.expire(now);
+            if let Some(u) = s.grants.list().iter().filter_map(|g| g.until).min() {
+                wait = wait.min(u.saturating_sub(now));
+            }
+            if !gone.is_empty() {
+                let agent = self.agent_of(task);
+                for p in gone {
+                    self.permission_event(&agent, task, action::EXPIRE, p, outcome::OK, b"");
+                }
+            }
+        }
         for i in 0..SLOTS {
             let Some(s) = &self.slots[i] else { continue };
             if s.ending.is_some() {
@@ -950,11 +996,17 @@ impl Runtime {
                     max_new,
                     prompt_len,
                 };
-                let mut n = self.infer(&req, GENERATE_US, out).ok_or(status::INTERNAL)?;
-                if out[0] == status::NO_BUFFER && attach_prompt(&self.infer_buffer) {
-                    n = self.infer(&req, GENERATE_US, out).ok_or(status::INTERNAL)?;
+                let name = limits.entry.name;
+                let infer_permission = Some(Permission::Model(model));
+                let seq = self.intent(name, id, action::INFER, infer_permission, b"infer", b"")?;
+                let mut n = self.infer(&req, GENERATE_US, out);
+                if n.is_some() && out[0] == status::NO_BUFFER && attach_prompt(&self.infer_buffer) {
+                    n = self.infer(&req, GENERATE_US, out);
                 }
-                if let (Some(started), Some(s)) = (Started::parse(&out[..n]), &mut self.slots[i]) {
+                let started = n.and_then(|n| Started::parse(&out[..n]));
+                self.outcome(seq, name, id, action::INFER, started.is_some(), b"");
+                let n = n.ok_or(status::INTERNAL)?;
+                if let (Some(started), Some(s)) = (started, &mut self.slots[i]) {
                     s.session = Some(started.session);
                     s.session_model = model;
                 }
@@ -998,10 +1050,15 @@ impl Runtime {
                 if let Some(b) = buffer {
                     b.read_bytes(0, &mut bytes);
                 }
-                let path = data_path(limits.entry.name, name);
-                self.store
-                    .write(&path, &bytes)
-                    .map_err(|_| status::INTERNAL)?;
+                let agent = limits.entry.name;
+                let path = data_path(agent, name);
+                let write = Some(Permission::DataWrite);
+                let seq = self.intent(agent, id, action::DATA_WRITE, write, b"store", name)?;
+                let written = self.store.write(&path, &bytes).is_ok();
+                self.outcome(seq, agent, id, action::DATA_WRITE, written, name);
+                if !written {
+                    return Err(status::INTERNAL);
+                }
                 Ok(done(out))
             }
             Request::DataGet { name } => {
@@ -1041,6 +1098,98 @@ impl Runtime {
         }
     }
 
+    /// Appends `e` to the audit trail; its sequence number if stored.
+    fn audit(&self, e: &Record<'_>) -> Option<u64> {
+        let mut msg = [0u8; 256];
+        let n = audit::encode(&audit::Request::Append(*e), &mut msg)?;
+        let mut out = [0u8; 256];
+        match call_timeout(AUDIT, &msg[..n], self.reply, &mut out, AUDIT_US) {
+            Ok(Received::Message { len: 9, .. }) if out[0] == status::OK => Some(u64_at(&out, 1)),
+            _ => None,
+        }
+    }
+
+    /// The attempt task `id` is on.
+    fn attempt(&self, id: u32) -> u8 {
+        self.tasks
+            .find(id)
+            .map_or(0, |t| self.tasks.list[t].attempts)
+    }
+
+    /// Records an `INTENT` for `act` by `actor` on `task`; its sequence
+    /// number, or `NO_AUDIT` (the action must not happen).
+    fn intent(
+        &self,
+        actor: &[u8],
+        task: u32,
+        act: u8,
+        permission: Option<Permission>,
+        service: &[u8],
+        detail: &[u8],
+    ) -> Result<u64, u8> {
+        self.audit(&Record {
+            kind: Kind::Intent,
+            refers: 0,
+            actor,
+            task,
+            attempt: self.attempt(task),
+            action: act,
+            permission,
+            service,
+            outcome: outcome::NONE,
+            detail,
+        })
+        .ok_or(NO_AUDIT)
+    }
+
+    /// The `OUTCOME` of intent `seq` (best effort: the action happened).
+    fn outcome(&self, seq: u64, actor: &[u8], task: u32, act: u8, ok: bool, detail: &[u8]) {
+        self.audit(&Record {
+            kind: Kind::Outcome,
+            refers: seq,
+            actor,
+            task,
+            attempt: self.attempt(task),
+            action: act,
+            permission: None,
+            service: b"",
+            outcome: if ok { outcome::OK } else { outcome::FAILED },
+            detail,
+        });
+    }
+
+    /// An event about `task`'s `permission`; true if recorded.
+    fn permission_event(
+        &self,
+        actor: &[u8],
+        task: u32,
+        act: u8,
+        permission: Permission,
+        result: u8,
+        detail: &[u8],
+    ) -> bool {
+        self.audit(&Record {
+            kind: Kind::Event,
+            refers: 0,
+            actor,
+            task,
+            attempt: self.attempt(task),
+            action: act,
+            permission: Some(permission),
+            service: b"",
+            outcome: result,
+            detail,
+        })
+        .is_some()
+    }
+
+    /// The agent name of task `id`.
+    fn agent_of(&self, id: u32) -> Vec<u8> {
+        self.tasks
+            .find(id)
+            .map_or_else(Vec::new, |t| self.tasks.list[t].agent.clone())
+    }
+
     /// `REVOKE` from `trust`: takes `permission` from every running task
     /// of agent `name`, ends a session opened with it, and tells `trust`.
     fn revoke(&mut self, name: &[u8], permission: Permission) {
@@ -1061,10 +1210,20 @@ impl Runtime {
             }
             if s.grants.revoke(&permission) {
                 outcome = trust::Outcome::Revoked;
-                self.revoked.push((s.task, permission));
-                if permission == Permission::Model(s.session_model) {
+                let (task, model) = (s.task, s.session_model);
+                self.revoked.push((task, permission));
+                if permission == Permission::Model(model) {
                     self.cancel_session(i);
                 }
+                // Always taken away; recorded when the trail can be.
+                self.permission_event(
+                    name,
+                    task,
+                    action::REVOKE,
+                    permission,
+                    audit::outcome::OK,
+                    b"user",
+                );
             }
         }
         tell_trust(&trust::Request::Revoked {
@@ -1127,6 +1286,38 @@ impl Runtime {
             return;
         };
         let q = self.pending.remove(at);
+        let agent = self.agent_of(q.task);
+        // An approval is given only once recorded; anything else is a
+        // refusal, recorded when the trail can be.
+        let approved = how == trust::Resolution::Granted
+            && self.permission_event(
+                &agent,
+                q.task,
+                action::APPROVE,
+                q.permission,
+                outcome::OK,
+                b"user",
+            );
+        let how = if how == trust::Resolution::Granted && !approved {
+            trust::Resolution::Refused
+        } else {
+            how
+        };
+        if how != trust::Resolution::Granted {
+            let why: &[u8] = match how {
+                trust::Resolution::Unanswered => b"no answer",
+                trust::Resolution::Ended => b"task ended",
+                _ => b"user",
+            };
+            self.permission_event(
+                &agent,
+                q.task,
+                action::REFUSE,
+                q.permission,
+                outcome::REFUSED,
+                why,
+            );
+        }
         if how == trust::Resolution::Granted {
             let until = (q.for_ms > 0).then(|| uptime() + u64::from(q.for_ms) * 1000);
             self.approved.push((q.task, q.permission, until));
@@ -1192,10 +1383,17 @@ impl Runtime {
                 if let Some(b) = self.control_buffer(badge) {
                     b.read_bytes(0, &mut input);
                 }
-                let id = self
+                let seq = self.intent(name, 0, action::SUBMIT, None, NAME, b"")?;
+                let submitted = self
                     .tasks
-                    .submit(&mut self.store, name, deps.as_slice(), &input)
-                    .map_err(store_error)?;
+                    .submit(&mut self.store, name, deps.as_slice(), &input);
+                let mut d = [0u8; 20];
+                let detail = match &submitted {
+                    Ok(id) => decimal(u64::from(*id), &mut d),
+                    Err(_) => &b""[..],
+                };
+                self.outcome(seq, name, 0, action::SUBMIT, submitted.is_ok(), detail);
+                let id = submitted.map_err(store_error)?;
                 agents::submitted(id, out).ok_or(status::INTERNAL)
             }
             Request::Status { task } => {
@@ -1219,9 +1417,13 @@ impl Runtime {
                 if self.tasks.list[at].ended() {
                     return Ok(done(out));
                 }
-                self.tasks
-                    .finish(&mut self.store, at, State::Cancelled, b"cancelled")
-                    .map_err(store_error)?;
+                let agent = self.agent_of(task);
+                let seq = self.intent(&agent, task, action::CANCEL, None, NAME, b"")?;
+                let cancelled =
+                    self.tasks
+                        .finish(&mut self.store, at, State::Cancelled, b"cancelled");
+                self.outcome(seq, &agent, task, action::CANCEL, cancelled.is_ok(), b"");
+                cancelled.map_err(store_error)?;
                 if let Some(slot) = self
                     .slots
                     .iter()

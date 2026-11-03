@@ -1188,8 +1188,46 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
     if failures > 0 {
         return Err(format!("{failures} of 2 boot checks failed"));
     }
+    // Both boots wrote the same store: one audit stream each (#108).
+    let store = iso.with_file_name(STORE_IMAGE);
+    match boot_audit(&store) {
+        Ok(n) => {
+            println!("boot audit trail: {n} streams, each with a start record for every service")
+        }
+        Err(reason) => return Err(format!("boot audit trail ({}): {reason}", store.display())),
+    }
     println!("All boot checks passed.");
     Ok(())
+}
+
+/// The boot's services, as `init`'s boot table names them.
+const BOOT_SERVICES: [&str; 7] = [
+    "virtio-blk",
+    "net",
+    "store",
+    "infer",
+    "audit",
+    "trust",
+    "agents",
+];
+
+/// Every audit stream the boot checks left verifies, and `init` (client 1)
+/// recorded a start for each boot service in each, including those started
+/// before the audit service was ready (#108). Returns the stream count.
+fn boot_audit(store: &Path) -> Result<usize> {
+    let streams = store_image::audit(store)?;
+    if streams.len() != 2 {
+        return Err(format!("expected 2 streams, got {}", streams.len()));
+    }
+    for (name, lines) in &streams {
+        for service in BOOT_SERVICES {
+            let want = format!("client 1 Event start {service} task 0/0  init outcome 1");
+            if !lines.iter().any(|l| l.contains(&want)) {
+                return Err(format!("{name} has no start record for {service}"));
+            }
+        }
+    }
+    Ok(streams.len())
 }
 
 /// Test name from a Cargo test binary path such as
@@ -1394,6 +1432,62 @@ fn audit_checks(image: &Path, console: &str) -> Result<()> {
     Ok(())
 }
 
+/// After the `permissions` test kernel (#108): the audit trail holds every
+/// grant, revocation (the user's command and what the runtime took),
+/// approval, refusal, and expiry, and each consequential action as an
+/// intent with its outcome, except at most one: the last record, the write
+/// in flight when the kernel killed the audit service. Prints task 1's
+/// records: its operations reconstructed from the trail alone.
+fn permissions_audit(image: &Path) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    for want in [
+        "client 3 Event grant keeper task 1/1 model 2",
+        "client 3 Event grant keeper task 1/1 data write",
+        "client 3 Intent data write keeper task 1/1 data write store",
+        "client 3 Intent infer keeper task 1/1 model 2 infer",
+        "client 2 Event revoke user task 0/0 data read trust outcome 1 keeper",
+        "client 3 Event revoke keeper task 2/1 data read",
+        "client 3 Event revoke keeper task 2/1 model 2",
+        "client 2 Event approve user task 0/0  trust outcome 1 #1",
+        "client 2 Event refuse user task 0/0  trust outcome 1 #2",
+        "client 3 Event approve asker task 3/1 model 2",
+        "client 3 Event expire asker task 3/1 model 2",
+        "client 3 Event refuse asker task 3/1 data write  outcome 2 user",
+        "client 3 Event refuse asker task 3/1 data read  outcome 2 no answer",
+    ] {
+        if !lines.iter().any(|l| l.contains(want)) {
+            return Err(format!("the audit trail has no record like {want:?}"));
+        }
+    }
+    let seq = |l: &str| l.split(' ').next().map(str::to_owned);
+    let unmatched: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains(" Intent "))
+        .filter(|l| {
+            let of = format!(" of {}", seq(l).unwrap_or_default());
+            !lines
+                .iter()
+                .any(|o| o.contains(" Outcome") && o.contains(&format!("{of} ")))
+        })
+        .collect();
+    let last_is_the_cut_write =
+        |l: &String| Some(l) == lines.last() && l.contains("Intent data write keeper task 4/1");
+    if unmatched.len() > 1 || !unmatched.iter().all(|l| last_is_the_cut_write(l)) {
+        return Err(format!("intents without an outcome: {unmatched:?}"));
+    }
+    println!(
+        "  audit trail: {} records; task 1 reconstructed:",
+        lines.len()
+    );
+    for l in lines.iter().filter(|l| l.contains("keeper task 1/1")) {
+        println!("    {l}");
+    }
+    Ok(())
+}
+
 /// Crash injection: boots the kernel `c.rounds` times on the same store
 /// disk, killing QEMU at a random moment after it prints `c.started`.
 /// Each boot must first find its state consistent (`c.ok`), so every round
@@ -1552,6 +1646,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == AUDIT_TEST {
                 audit_checks(&out.join(STORE_IMAGE), &output)?;
+            }
+            if name == PERMISSIONS_TEST {
+                permissions_audit(&out.join(STORE_IMAGE))?;
             }
             Ok(())
         })

@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-03 (#103),** with zeroed pages on revocation, the trusted console as the audit chain's anchor, and approvals limited to 60 s and 4 waiting. Built by: kernel revocation of mapped memory (#104), runtime permissions (#105), approval on the trusted path (#106), the audit service (#107), auditing every consequential action (#108), agent networking (#109), and adversarial tests (#110). **Implemented:** kernel revocation of mapped memory (#104), runtime permissions with `revoke` on the trusted console (#105), approval on the trusted path (#106), and the audit service (#107).
+**Planned. Design approved by the maintainer on 2026-11-03 (#103),** with zeroed pages on revocation, the trusted console as the audit chain's anchor, and approvals limited to 60 s and 4 waiting. Built by: kernel revocation of mapped memory (#104), runtime permissions (#105), approval on the trusted path (#106), the audit service (#107), auditing every consequential action (#108), agent networking (#109), and adversarial tests (#110). **Implemented:** kernel revocation of mapped memory (#104), runtime permissions with `revoke` on the trusted console (#105), approval on the trusted path (#106), the audit service (#107), and auditing every grant, revocation, and consequential action (#108).
 
 ## 2. Context
 
@@ -71,6 +71,7 @@ What M3.4 builds on:
 - **Grants and revocations:** `init`'s grants at service start, each task attempt's grants, approvals and refusals, revocations, expiries, and stops from the trusted console.
 - **Consequential agent actions** (D-012 item 11): inference, store writes for the agent, network sends, and task submissions and cancellations.
 - **Not audited:** reads of the agent's own task, checkpoints, `LOG` lines (on the console), and control requests that change nothing.
+- *Implemented (#108):* the runtime (client 3, handle 8) records each grant at the start of an attempt and gives none whose record fails; an approval is given only once recorded (else it is refused); revocations, expiries, and refusals always take effect and are recorded when the trail can be; inference, `DATA_PUT`, `SUBMIT`, and `CANCEL` are each an `INTENT` stored before acting (else `NO_AUDIT`, the new status in `agents`) and an `OUTCOME` after. An audit record may take 2 s before the action is refused. `trust` (client 2) records the user's stops (after stopping), revocations, and answers as actor `user`; `init` (no badge, client 1) records a `start` for each service, also those started before the audit service was ready. Network sends come with #109. While the trail is down, `SUBMIT` and `CANCEL` are refused too; stopping agents never depends on it (the trusted console's `stop` works regardless).
 
 ### The sandbox
 

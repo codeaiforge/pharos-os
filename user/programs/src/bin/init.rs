@@ -18,6 +18,7 @@
 #![no_std]
 #![no_main]
 
+use pharos_proto::audit;
 use pharos_proto::infer::{self, Request as InferRequest};
 use pharos_proto::store::{self, Request as StoreRequest};
 use pharos_user::rights::{CONFIG, GRANT, IRQ, MAP, READ, RECEIVE, SEND, STOP, WAIT, WRITE};
@@ -134,6 +135,7 @@ const MODELS_READ_ONLY: u32 = 3 | 1 << 16;
 const AUDIT_TRAIL: u32 = 6;
 /// The audit service's client numbers (`pharos_proto::audit::client`).
 const AUDIT_TRUST: u32 = 2;
+const AUDIT_RUNTIME: u32 = 3;
 
 const BOOT: &[Service] = &[
     Service {
@@ -225,6 +227,7 @@ const BOOT: &[Service] = &[
             Cap::Inference(1),
             Cap::TrustRuntime,
             Cap::Storage(AGENTS_TASKS),
+            Cap::Audit(AUDIT_RUNTIME),
         ],
         after: &[2, 3, 5],
         limit: AGENTS_LIMIT,
@@ -445,6 +448,18 @@ fn say(name: &str, what: &str, number: Option<u64>) {
     let _ = debug_write(CONSOLE, &line[..n]);
 }
 
+fn decimal(mut v: u64, out: &mut [u8; 20]) -> &[u8] {
+    let mut at = out.len();
+    loop {
+        at -= 1;
+        out[at] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            return &out[at..];
+        }
+    }
+}
+
 /// The devices the kernel passed: `(handle, vendor and device ID)`.
 fn devices() -> ([(Handle, u32); 8], usize) {
     let mut found = [(0, 0); 8];
@@ -480,6 +495,8 @@ const READY_US: u64 = 10_000_000;
 /// Restarts of a daemon that crashed or exited (#100). One that was
 /// stopped is never restarted: the trusted path's safe mode.
 const MAX_RESTARTS: u8 = 3;
+/// How long `init` waits for an audit record.
+const AUDIT_US: u64 = 1_000_000;
 /// How long a service may take to answer `RELEASE`.
 const RELEASE_US: u64 = 1_000_000;
 
@@ -499,6 +516,8 @@ struct Init {
     /// When each running daemon must have sent `ready`.
     deadline: [u64; MAX_SERVICES],
     restarts: [u8; MAX_SERVICES],
+    /// Whether each start is in the audit trail yet (#108).
+    recorded: [bool; MAX_SERVICES],
 }
 
 impl Init {
@@ -583,6 +602,58 @@ impl Init {
         }
         self.state[i] = State::Running(process);
         self.deadline[i] = uptime().saturating_add(READY_US);
+        self.recorded[i] = false;
+    }
+
+    /// Records every start not yet in the audit trail (#108): a `start`
+    /// event per service, with how many capabilities its entry lists.
+    /// Starts before the audit service was ready are recorded once it is;
+    /// a record that fails is not tried again.
+    fn record_starts(&mut self) {
+        let ready = self
+            .table
+            .iter()
+            .position(|s| s.path == b"bin/audit")
+            .is_some_and(|a| matches!(self.state[a], State::Ok(_)));
+        if !ready {
+            return;
+        }
+        for i in 0..self.table.len().min(MAX_SERVICES) {
+            let started = matches!(
+                self.state[i],
+                State::Running(_) | State::Ok(_) | State::Done
+            );
+            if !started || self.recorded[i] {
+                continue;
+            }
+            self.recorded[i] = true;
+            let service = &self.table[i];
+            let mut d = [0u8; 20];
+            let mut detail = [0u8; 40];
+            let count = decimal(service.caps.len() as u64, &mut d);
+            let k = count.len();
+            detail[..k].copy_from_slice(count);
+            detail[k..k + 13].copy_from_slice(b" capabilities");
+            let entry = audit::Entry {
+                kind: audit::Kind::Event,
+                refers: 0,
+                actor: service.name.as_bytes(),
+                task: 0,
+                attempt: 0,
+                action: audit::action::START,
+                permission: None,
+                service: b"init",
+                outcome: audit::outcome::OK,
+                detail: &detail[..k + 13],
+            };
+            let mut msg = [0u8; 256];
+            if let Some(n) = audit::encode(&audit::Request::Append(entry), &mut msg) {
+                // The request is sent from this buffer too.
+                let mut out = [0u8; 256];
+                // No badge: the audit service knows `init` by that.
+                let _ = call_timeout(self.audit, &msg[..n], self.reply, &mut out, AUDIT_US);
+            }
+        }
     }
 
     /// Tells the storage and inference services that service `i`'s
@@ -693,6 +764,7 @@ impl Init {
 
     /// Waits for one event (a `ready`, an end, or a deadline) and handles it.
     fn step(&mut self) {
+        self.record_starts();
         let wait = self.check_ready();
         let mut buf = [0u8; 16];
         match receive_timeout(self.events, &mut buf, wait) {
@@ -757,6 +829,7 @@ fn main(arg: u64) -> u64 {
         state: [State::Pending; MAX_SERVICES],
         deadline: [0; MAX_SERVICES],
         restarts: [0; MAX_SERVICES],
+        recorded: [false; MAX_SERVICES],
     };
     for (i, service) in table.iter().enumerate().take(MAX_SERVICES) {
         let met = service

@@ -12,8 +12,14 @@
 //! task asks for permissions (#106): the runner answers `yes` to model 2
 //! for 2 s, `no` to `data write`, and nothing to `data read` (refused after
 //! the test table's 5 s), then answers that one late (`no request #3`).
-//! A refused permission must not be asked for again (`approve #4`). Runs
-//! under UEFI (D-009).
+//! A refused permission must not be asked for again (`approve #4`). Then
+//! audit (#108): a `keeper-c` task writes, the kernel kills the audit
+//! service when it says so, and its writes and inference are refused with
+//! `NO_AUDIT`; a `keeper-d` task that waited for it starts with no grants
+//! (none could be recorded), and a new `SUBMIT` gets `NO_AUDIT`. Afterwards the runner reads the audit trail from the image
+//! and checks every grant, revocation, approval, refusal, expiry, and
+//! consequential action is there, each intent with its outcome. Runs under
+//! UEFI (D-009).
 
 #![no_std]
 #![no_main]
@@ -65,8 +71,17 @@ fn run(t: &mut TestRun) {
     };
     let (client, steps) = common::client(t, &services, 2);
     let mut passed: Vec<Vec<u8>> = Vec::new();
+    let mut killed = false;
     let start = time::uptime();
     while time::uptime() - start < Duration::from_secs(100) {
+        // `keeper-c` asks for it (#108).
+        if !killed
+            && process::debug_output()
+                .iter()
+                .any(|(id, l)| *id == runtime && l == b"agents: keeper: audit me")
+        {
+            killed = process::kill(services.audit_id, 13);
+        }
         match ipc::poll(&steps, Duration::from_millis(100)) {
             Some(m) if m.bytes() == b"done" => break,
             Some(m) => {
@@ -80,6 +95,9 @@ fn run(t: &mut TestRun) {
         "with its grants, an agent writes and reads its own file and generates from model 2",
         "revoked while it runs: refused at once, its session ended, and still after a restart",
         "asked: approved for 2 s then refused again, refused by the user, unanswered refused",
+        "with the audit trail gone, consequential actions are refused with NO_AUDIT",
+        "a task started then gets no grant, as none could be recorded",
+        "and a new task cannot be submitted (NO_AUDIT)",
     ] {
         let want = alloc::format!("ok {step}");
         t.check(step, passed.iter().any(|l| l == want.as_bytes()));
@@ -104,6 +122,7 @@ fn run(t: &mut TestRun) {
     for line in &said {
         kprintln!("  runtime: {}", core::str::from_utf8(line).unwrap_or("?"));
     }
+    t.check("the kernel killed the audit service", killed);
     t.check(
         "the runtime accepted asker's manifest",
         said.iter().any(|l| l == b"agents: asker manifest accepted"),

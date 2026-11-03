@@ -10,7 +10,11 @@
 //!
 //! The audit trail's anchor (#107): at start and on `audit`, `trust` shows
 //! the audit service's boot, record count, and chain head, so the user can
-//! compare them with what was shown before. It receives
+//! compare them with what was shown before.
+//!
+//! The user's commands are recorded there too (#108), as actor `user`:
+//! stops (after stopping: an emergency stop never waits for the trail),
+//! revocations, and answers. A record that fails is skipped. It receives
 //! process capabilities over [`pharos_proto::trust`]: the agent runtime's
 //! from `init`, each agent's from the runtime.
 //!
@@ -30,6 +34,7 @@
 #![no_main]
 
 use pharos_programs::virtio_console::{Console, RX_BUFFER};
+use pharos_proto::permission::Permission;
 use pharos_proto::trust::{
     self, Command, INIT, Line, Lines, MAX_NAME, Outcome, RUNTIME, Request, SLOTS, parse,
 };
@@ -131,6 +136,32 @@ impl Trust {
         false
     }
 
+    /// Records a user command (best effort, at most 1 s).
+    fn record(&self, act: u8, permission: Option<Permission>, detail: &[u8]) {
+        let entry = audit::Entry {
+            kind: audit::Kind::Event,
+            refers: 0,
+            actor: b"user",
+            task: 0,
+            attempt: 0,
+            action: act,
+            permission,
+            service: b"trust",
+            outcome: audit::outcome::OK,
+            detail,
+        };
+        let mut msg = [0u8; 256];
+        let (Some(reply), Some(n)) = (
+            self.reply,
+            audit::encode(&audit::Request::Append(entry), &mut msg),
+        ) else {
+            return;
+        };
+        // The request is sent from this buffer too, so it must hold it.
+        let mut out = [0u8; 256];
+        let _ = call_timeout(AUDIT, &msg[..n], reply, &mut out, AUDIT_US);
+    }
+
     /// The audit trail's anchor: boot, record count, chain head.
     fn audit(&mut self) {
         let mut out = [0u8; 256];
@@ -184,7 +215,9 @@ impl Trust {
                     self.stop(&a.name[..a.len], a.process);
                     found = true;
                 }
-                if !found {
+                if found {
+                    self.record(audit::action::STOP, None, name);
+                } else {
                     self.say(&[b"no agent ", name]);
                 }
             }
@@ -199,9 +232,12 @@ impl Trust {
                     self.stop(&a.name[..a.len], a.process);
                 }
                 self.say(&[b"stopped all"]);
+                self.record(audit::action::STOP, None, b"all");
             }
             Command::Revoke(name, permission) => {
-                if !self.tell_runtime(&agents::Request::Revoke { name, permission }) {
+                if self.tell_runtime(&agents::Request::Revoke { name, permission }) {
+                    self.record(audit::action::REVOKE, Some(permission), name);
+                } else {
                     self.say(&[b"revoke: the runtime is not answering; stop works"]);
                 }
             }
@@ -210,7 +246,18 @@ impl Trust {
                 let n = decimal(u64::from(number), &mut d);
                 if number == 0 || !self.open.contains(&number) {
                     self.say(&[b"no request #", n]);
-                } else if !self.tell_runtime(&agents::Request::Answer { number, yes }) {
+                } else if self.tell_runtime(&agents::Request::Answer { number, yes }) {
+                    let act = if yes {
+                        audit::action::APPROVE
+                    } else {
+                        audit::action::REFUSE
+                    };
+                    let mut detail = [0u8; 21];
+                    detail[0] = b'#';
+                    detail[1..1 + n.len()].copy_from_slice(n);
+                    let k = 1 + n.len();
+                    self.record(act, None, &detail[..k]);
+                } else {
                     self.say(&[b"answer: the runtime is not answering; stop works"]);
                 }
             }

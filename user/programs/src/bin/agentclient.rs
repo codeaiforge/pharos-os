@@ -374,6 +374,31 @@ fn permissions(mut c: Client) -> u64 {
             c.step(step, false);
         }
     }
+    // Audit (#108): `keeper-d` waits for `keeper-c`, during which the
+    // kernel kills the audit service.
+    let tasks = c
+        .submit(b"keeper", b"keeper-c")
+        .and_then(|t| c.submit_after(b"keeper", b"keeper-d", &[t]).map(|d| (t, d)));
+    let ended = |c: &Client, t: u32, want: &[u8]| {
+        c.wait(t, 60)
+            .is_some_and(|(s, r)| s.state == State::Done && r == want)
+    };
+    let (c_ok, d_ok) = match tasks {
+        Ok((t, d)) => (ended(&c, t, b"c ok"), ended(&c, d, b"d ok")),
+        Err(_) => (false, false),
+    };
+    c.step(
+        "with the audit trail gone, consequential actions are refused with NO_AUDIT",
+        c_ok,
+    );
+    c.step(
+        "a task started then gets no grant, as none could be recorded",
+        d_ok,
+    );
+    c.step(
+        "and a new task cannot be submitted (NO_AUDIT)",
+        c.submit(b"keeper", b"keeper-a") == Err(pharos_proto::agents::NO_AUDIT),
+    );
     let _ = send(REPORT, b"done", 0, 0, 0);
     c.failed
 }

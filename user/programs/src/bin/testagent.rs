@@ -36,6 +36,13 @@
 //!   generates, and is refused again once the 2 s are over; `data write`
 //!   is refused by the user and refused again without a new prompt; `data
 //!   read` is refused when nobody answers in time; completes with `ask ok`.
+//! - `keeper-c` (#108): writes its file, logs `audit me` (the kernel then
+//!   kills the audit service), and writes until refused with `NO_AUDIT`;
+//!   inference is refused the same way, reading still works; completes with
+//!   `c ok`;
+//! - `keeper-d` (#108): started after the audit service died, so its grants
+//!   could not be recorded and it has none: reading its file is refused;
+//!   completes with `d ok`.
 
 #![no_std]
 #![no_main]
@@ -45,7 +52,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use pharos_proto::agents::{
-    Asked, Assigned, Begun, CHECKPOINT_AT, Deps, KEY, MAX_BUFFER, NO_SESSION, Request, encode,
+    Asked, Assigned, Begun, CHECKPOINT_AT, Deps, KEY, MAX_BUFFER, NO_AUDIT, NO_SESSION, Request,
+    encode,
 };
 use pharos_proto::infer::{Started, Tokens};
 use pharos_proto::permission::Permission;
@@ -247,6 +255,35 @@ impl Agent {
             return self.fail(b"an unanswered request was not refused");
         }
         self.complete(b"ask ok")
+    }
+
+    fn keeper_c(&self) -> u64 {
+        let mut out = [0u8; 256];
+        if self.put(b"notes", b"c") != status::OK {
+            return self.fail(b"writing failed while the trail was up");
+        }
+        self.call(&Request::Log { text: b"audit me" }, &mut out);
+        let mut refused = false;
+        for _ in 0..100 {
+            match self.put(b"notes", b"c") {
+                status::OK => sleep(100_000),
+                NO_AUDIT => {
+                    refused = true;
+                    break;
+                }
+                _ => return self.fail(b"writing failed for another reason"),
+            }
+        }
+        if !refused {
+            return self.fail(b"writing was never refused for the trail");
+        }
+        if self.generate(4).0 != NO_AUDIT {
+            return self.fail(b"inference was not refused for the trail");
+        }
+        if self.get(b"notes") != (status::OK, Vec::from(&b"c"[..])) {
+            return self.fail(b"reading, which is not audited, failed");
+        }
+        self.complete(b"c ok")
     }
 
     fn keeper_a(&self) -> u64 {
@@ -549,6 +586,9 @@ fn main(_: u64) -> u64 {
         b"keeper-a" => a.keeper_a(),
         b"keeper-b" => a.keeper_b(&task),
         b"ask" => a.asker(),
+        b"keeper-c" => a.keeper_c(),
+        b"keeper-d" if a.get(b"notes").0 == status::NO_ACCESS => a.complete(b"d ok"),
+        b"keeper-d" => a.fail(b"a grant was given without its record"),
         b"wait" => loop {
             a.call(&Request::Info, &mut out);
             sleep(200_000);

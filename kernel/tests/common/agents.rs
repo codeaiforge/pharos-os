@@ -1,4 +1,5 @@
-//! What the `agents`, `agents_crash`, and `agents_store` test kernels share (#98, #99):
+//! What the `agents`, `agents_crash`, `agents_store`, and `permissions`
+//! test kernels share (#98, #99):
 //! starting `store`, `infer`, `trust`, and the agent runtime with the
 //! capabilities `init` gives them, replacing the runtime, and starting
 //! the control client.
@@ -27,6 +28,11 @@ use pharos_kernel::{fs, pci};
 const MODELS_READ_ONLY: u32 = 3 | 1 << 16;
 /// Namespace 5, `agents`, read-write (`pharos_proto::store`).
 const AGENTS_TASKS: u32 = 5;
+/// Namespace 6, `audit`, read-write, and the audit clients `init` gives
+/// `trust` and the runtime (#107, #108).
+const AUDIT_TRAIL: u32 = 6;
+const AUDIT_TRUST: u32 = 2;
+const AUDIT_RUNTIME: u32 = 3;
 /// `pharos_proto::trust`: `RUNTIME`, under `init`'s (no) badge, and the
 /// runtime's badge.
 const TRUST_RUNTIME: [u8; 2] = [1, 1];
@@ -52,6 +58,9 @@ pub struct Services {
     /// The storage service and its capabilities, to start it again.
     pub store_id: TaskId,
     store_caps: Vec<Arc<Capability>>,
+    /// The audit service (#108), for tests that kill it.
+    pub audit: Arc<Endpoint>,
+    pub audit_id: TaskId,
 }
 
 /// The capabilities of `id`.
@@ -91,8 +100,8 @@ fn start(
     id.filter(|_| ready)
 }
 
-/// Starts `store` (on the second virtio-blk disk), `infer`, and `trust`
-/// (on the virtio-console). The scheduler and processes must be set up.
+/// Starts `store` (on the second virtio-blk disk), `infer`, `audit` (#108),
+/// and `trust` (on the virtio-console), as `init` does. The scheduler and processes must be set up.
 pub fn setup(t: &mut TestRun) -> Option<Services> {
     pci::enumerate();
     let devices = pci::devices();
@@ -135,11 +144,21 @@ pub fn setup(t: &mut TestRun) -> Option<Services> {
         store_send.derive_badged(SEND, MODELS_READ_ONLY),
     ];
     start(t, &programs, b"bin/infer", 0, caps, &report, 1 << 18)?;
+    let audit = Endpoint::new();
+    let caps = vec![
+        Capability::new(Object::DebugConsole, WRITE),
+        Capability::new(Object::Endpoint(audit.clone()), RECEIVE),
+        Capability::new(Object::Endpoint(report.clone()), SEND),
+        store_send.derive_badged(SEND, AUDIT_TRAIL),
+    ];
+    let audit_id = start(t, &programs, b"bin/audit", 0, caps, &report, 0)?;
+    let audit_send = Capability::new(Object::Endpoint(audit.clone()), SEND);
     let trust_ep = Endpoint::new();
     let caps = vec![
         Capability::new(Object::Device(console), MAP | CONFIG | IRQ),
         Capability::new(Object::Endpoint(trust_ep.clone()), RECEIVE),
         Capability::new(Object::Endpoint(report.clone()), SEND),
+        audit_send.derive_badged(SEND, AUDIT_TRUST),
     ];
     let trust = start(t, &programs, b"bin/trust", 0, caps, &report, 0)?;
     Some(Services {
@@ -152,6 +171,8 @@ pub fn setup(t: &mut TestRun) -> Option<Services> {
         trust,
         store_id,
         store_caps,
+        audit,
+        audit_id,
     })
 }
 
@@ -186,6 +207,7 @@ pub fn start_runtime(t: &mut TestRun, s: &Services) -> Option<TaskId> {
         infer_send.derive_badged(SEND, INFER_CLIENT),
         trust_send.derive_badged(SEND, RUNTIME_BADGE),
         store_send.derive_badged(SEND, AGENTS_TASKS),
+        Capability::new(Object::Endpoint(s.audit.clone()), SEND).derive_badged(SEND, AUDIT_RUNTIME),
     ];
     let runtime = start(
         t,

@@ -150,9 +150,17 @@ impl Audit {
             Ok(req) => req,
             Err(refused) => return refusal(refused, audit::VERSION, out),
         };
-        let Some(client) = u8::try_from(badge).ok().filter(|c| *c != 0) else {
-            out[0] = status::NO_ACCESS;
-            return 1;
+        // No badge: `init`, the only holder of an unbadged capability
+        // (it cannot badge a copy of its own; #108).
+        let client = match badge {
+            0 => client::INIT,
+            b => match u8::try_from(b) {
+                Ok(c) if c != client::AUDIT && c != client::INIT => c,
+                _ => {
+                    out[0] = status::NO_ACCESS;
+                    return 1;
+                }
+            },
         };
         match req {
             Request::Append(entry) => match self.append(client, entry) {
