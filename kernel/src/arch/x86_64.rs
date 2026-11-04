@@ -283,6 +283,17 @@ pub fn disable_interrupts() {
     unsafe { asm!("cli", options(nomem, nostack)) };
 }
 
+/// Lets pending maskable interrupts in, then disables them again. `sti`
+/// takes effect only after the next instruction, so `sti` then `cli` lets
+/// none in (#120); the `nop` is that instruction.
+pub fn interrupt_window() {
+    // SAFETY: `sti; nop; cli` only sets and clears RFLAGS.IF, as
+    // `enable_interrupts` and `disable_interrupts` do; the caller holds no
+    // lock an interrupt handler takes. Not `nomem`: handlers may change
+    // memory the caller reads after.
+    unsafe { asm!("sti", "nop", "cli", options(nostack)) };
+}
+
 /// Runs `f` with maskable interrupts disabled, then restores the previous
 /// state: enabled stays enabled, disabled stays disabled (so calls nest).
 pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {

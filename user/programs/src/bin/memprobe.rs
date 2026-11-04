@@ -10,6 +10,8 @@
 //! - Argument 2: a child given no limit. Exits 0 if it cannot map a page.
 //! - Argument 3: a child given half the limit: maps it, holds it for
 //!   300 ms, and exits 0 (#115: meanwhile its parent cannot map that half).
+//! - Argument 4 (the `exhaustion` kernel, #120): maps 64 MiB in one call
+//!   and holds it until stopped; exits 1 if it could not.
 
 #![no_std]
 #![no_main]
@@ -85,6 +87,14 @@ fn main(arg: u64) -> u64 {
             return u64::from(!held);
         }
         2 => return u64::from(mem_map(4096) != Err(Error::NoMemory)),
+        4 => {
+            if mem_map(64 * MIB).is_err() {
+                return 1;
+            }
+            loop {
+                sleep(1_000_000);
+            }
+        }
         _ => {}
     }
     let mut f = 0;

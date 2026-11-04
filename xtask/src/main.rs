@@ -1365,6 +1365,22 @@ const BUDGETS_SCRIPT: &[console::Step] = &[
         "",
     ),
 ];
+/// Agents exhausting their limits at once (#120).
+const EXHAUSTION_TEST: &str = "exhaustion";
+/// `usage` under the full load, and `stop all` once the third spinner
+/// (`idler`) starts: steps 3 and 5 type, and the next step is the answer.
+const EXHAUSTION_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("registered runtime", ""),
+    ("registered glutton", ""),
+    ("registered ticker", "usage\n"),
+    ("usage: runtime cpu ", ""),
+    ("registered idler", "stop all\n"),
+    ("stopped all", ""),
+];
+/// Most the trusted console's answer to `usage` and `stop all` may take
+/// under the full load, measured by the runner from typing to the answer.
+const EXHAUSTION_BOUND: Duration = Duration::from_millis(200);
 const HOSTILE_SCRIPT: &[console::Step] = &[
     ("trust: ready", ""),
     ("registered runtime", ""),
@@ -1806,6 +1822,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         HOSTILE_TEST,
         BUDGETS_TEST,
         "fairness",
+        EXHAUSTION_TEST,
     ];
     if service_store.contains(&name.as_str()) {
         store_image::service(&out.join(STORE_IMAGE))?;
@@ -1827,6 +1844,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         AGENTS_NET_TEST => (AGENTS_NET_SCRIPT, AGENTS_NET_REFUSED),
         HOSTILE_TEST => (HOSTILE_SCRIPT, HOSTILE_REFUSED),
         BUDGETS_TEST => (BUDGETS_SCRIPT, &[]),
+        EXHAUSTION_TEST => (EXHAUSTION_SCRIPT, &[]),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
         _ => (&[], &[]),
     };
@@ -1862,6 +1880,19 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == HOSTILE_TEST {
                 hostile_audit(&out.join(STORE_IMAGE))?;
+            }
+            if name == EXHAUSTION_TEST {
+                for (step, what) in [(3, "usage"), (5, "stop all")] {
+                    let took = s.took(step).unwrap_or(Duration::MAX);
+                    println!("  {what} answered in {} ms under load", took.as_millis());
+                    if took > EXHAUSTION_BOUND {
+                        return Err(format!(
+                            "the trusted console took {} ms to answer {what}, over {} ms",
+                            took.as_millis(),
+                            EXHAUSTION_BOUND.as_millis()
+                        ));
+                    }
+                }
             }
             Ok(())
         })

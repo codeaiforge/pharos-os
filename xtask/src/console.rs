@@ -10,6 +10,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// The FIFOs' common name: QEMU's `pipe` character device opens
 /// `<path>.in` and `<path>.out`.
@@ -62,7 +63,8 @@ pub fn advance(steps: &[Step], mut done: usize, output: &str) -> (usize, Vec<&'s
 /// FIFOs are opened read-write, which on Linux never waits for QEMU; the
 /// thread ends with the runner's process.
 pub struct Script {
-    state: Arc<Mutex<(usize, String)>>,
+    /// Steps reached, the output so far, and when each step was reached.
+    state: Arc<Mutex<(usize, String, Vec<Instant>)>>,
     steps: &'static [Step],
 }
 
@@ -77,7 +79,7 @@ impl Script {
                 .map_err(|e| format!("cannot open {}: {e}", path.display()))
         };
         let (mut input, mut output) = (open("in")?, open("out")?);
-        let state = Arc::new(Mutex::new((0, String::new())));
+        let state = Arc::new(Mutex::new((0, String::new(), Vec::new())));
         let shared = Arc::clone(&state);
         std::thread::spawn(move || {
             let mut buf = [0u8; 512];
@@ -88,6 +90,8 @@ impl Script {
                 let Ok(mut s) = shared.lock() else { break };
                 s.1.push_str(&String::from_utf8_lossy(&buf[..n]));
                 let (done, typed) = advance(steps, s.0, &s.1);
+                let now = Instant::now();
+                s.2.resize(done, now);
                 s.0 = done;
                 drop(s);
                 for line in typed {
@@ -98,6 +102,13 @@ impl Script {
             }
         });
         Ok(Self { state, steps })
+    }
+
+    /// How long step `step + 1` took to be reached after step `step`, so
+    /// after what `step` typed (#120); `None` if either was not reached.
+    pub fn took(&self, step: usize) -> Option<Duration> {
+        let s = self.state.lock().ok()?;
+        Some(s.2.get(step + 1)?.duration_since(*s.2.get(step)?))
     }
 
     /// `Ok(output)` if every step was reached and nothing in `refused`

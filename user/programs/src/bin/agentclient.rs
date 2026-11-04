@@ -16,7 +16,8 @@
 //! to the host echo server, and a `listener` task (the same grant) that
 //! sends nothing. Argument 4: the `hostile` kernel (#110): a `hostile`
 //! task beside a `keeper` task. Argument 5: the `budgets` kernel (#116).
-//! Argument 6: the `fairness` kernel (#117).
+//! Argument 6: the `fairness` kernel (#117). Argument 7: the `exhaustion`
+//! kernel (#120).
 
 #![no_std]
 #![no_main]
@@ -179,6 +180,9 @@ fn main(arg: u64) -> u64 {
     }
     if arg == 6 {
         return fairness(c);
+    }
+    if arg == 7 {
+        return exhaustion(c);
     }
     let mut out = [0u8; 256];
 
@@ -586,6 +590,45 @@ fn fairness(mut c: Client) -> u64 {
         c.step(step, ok);
     }
     let _ = send(REPORT, b"done", 0, 0, 0);
+    c.failed
+}
+
+/// The `exhaustion` kernel (#120): two `spinner`s, `glutton`, and
+/// `ticker` at once, the most that run together; `ticker` must be served
+/// throughout and `glutton` held to every limit. Then a third spinner
+/// (`idler`) is the runner's cue for `stop all`.
+fn exhaustion(mut c: Client) -> u64 {
+    let spinners = [c.submit(b"spinner", b"spin"), c.submit(b"spinner", b"spin")];
+    let glutton = c.submit(b"glutton", b"glut");
+    let ticker = c.submit(b"ticker", b"tick");
+    let ended = |c: &Client, task: Result<u32, u8>, want: &[u8]| {
+        task.ok()
+            .and_then(|t| c.wait(t, 60))
+            .is_some_and(|(s, result)| {
+                if result != want {
+                    let mut line = Vec::from(&b"exhaustion kernel result: "[..]);
+                    line.extend_from_slice(&result[..result.len().min(200)]);
+                    let _ = debug_write(CONSOLE, &line);
+                }
+                s.state == State::Done && result == want
+            })
+    };
+    c.step(
+        "a well-behaved agent is served throughout",
+        ended(&c, ticker, b"tick ok"),
+    );
+    c.step(
+        "an agent is held to its pages, handles, rate, tokens, datagrams, bytes, and files",
+        ended(&c, glutton, b"spend ok"),
+    );
+    c.step(
+        "the spinning agents still run",
+        spinners
+            .iter()
+            .all(|t| t.is_ok_and(|t| c.status(t).is_some_and(|s| s.state == State::Running))),
+    );
+    let _ = send(REPORT, b"done", 0, 0, 0);
+    let _ = c.submit(b"idler", b"spin");
     c.failed
 }
 

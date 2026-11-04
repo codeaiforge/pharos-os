@@ -207,20 +207,19 @@ const BOOT: &[Entry] = &[];
 /// The `budgets` test kernel's agents (#116): `spender` within its own
 /// budget, `grouper` within its group's minute, `hog` over its CPU time,
 /// and `pair` and `big` held by their groups' attempts and pages.
+/// `spender`'s budget: 40 tokens, 2 datagrams of 64 bytes, 1 KiB of files.
+const SPEND: Budget = Budget {
+    cpu_ms: u32::MAX,
+    tokens: 40,
+    net_sends: 2,
+    net_bytes: 64,
+    data_kb: 1,
+    rate: u32::MAX,
+    group: b"spend",
+};
+
 const BUDGETS: &[Entry] = &[
-    budget_entry(
-        b"spender",
-        Budget {
-            cpu_ms: u32::MAX,
-            tokens: 40,
-            net_sends: 2,
-            net_bytes: 64,
-            data_kb: 1,
-            rate: u32::MAX,
-            group: b"spend",
-        },
-        64,
-    ),
+    budget_entry(b"spender", SPEND, 64),
     budget_entry(
         b"grouper",
         Budget {
@@ -265,7 +264,18 @@ const BUDGETS: &[Entry] = &[
             ..Budget::UNLIMITED
         },
         64,
+    ), // The `exhaustion` kernel's (#120): `glutton` within `spender`'s
+    // budget at 4 requests a second, beside `spinner`s with no limit.
+    budget_entry(
+        b"glutton",
+        Budget {
+            rate: 4,
+            group: b"spend",
+            ..SPEND
+        },
+        64,
     ),
+    budget_entry(b"spinner", Budget::UNLIMITED, 64),
 ];
 
 /// The `fairness` test kernel's agents (#117), in the same table:

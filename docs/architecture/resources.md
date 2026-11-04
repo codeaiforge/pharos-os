@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-04 (#113),** with CPU time counted by one `rdtsc` per switch and a plain load and store, measured within D-004's IPC budget before approval. To be built by: scheduling classes and CPU accounting (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), and exhaustion tests (#120). **Implemented:** scheduling classes and CPU time per process (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119).
+**Planned. Design approved by the maintainer on 2026-11-04 (#113),** with CPU time counted by one `rdtsc` per switch and a plain load and store, measured within D-004's IPC budget before approval. To be built by: scheduling classes and CPU accounting (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), and exhaustion tests (#120). **Implemented:** scheduling classes and CPU time per process (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), exhaustion tests (#120).
 
 ## 2. Context
 
@@ -94,6 +94,8 @@ What M3.5 builds on:
 
 An agent per resource that tries to use more than its limit, alone and then all together, beside a well-behaved agent that must complete: spinning (CPU and the emergency stop's latency), mapping (pages), spawning (processes, which agents cannot do anyway), holding capabilities (handles, in a test kernel process), filling its data (storage), flooding sends (network), long prompts and many tokens (inference), and flooding requests (rate). Under all of them at once, `trust`'s `stop` and a trusted service's answer must arrive within a stated bound (to be measured in #114, expected one slice).
 
+- *Implemented (#120):* each kind alone is tested by its issue's kernel (`classes`, `spawn`, `user_memory`, `budgets`, `fairness`, `inference`); the `exhaustion` kernel runs them together. At most 4 agents run at once (`MAX_RUNNING`), so it runs two `spinner`s, `glutton` (pages and handles until refused, 12 requests at 4 a second held and served, then `spender`'s tokens, datagrams, bytes, and files), and `ticker`, which must be served within 400 ms throughout; beside them `memprobe` (services class) maps 64 MiB in one call. **Bounds, stated and checked:** the kernel's own task (trusted class) wakes at most 40 ms after a 20 ms wait (measured 21–29 ms, of which 20 ms is the timeout's rounding to ticks); the trusted console answers `usage` and `stop all` within 200 ms of the runner typing them (measured 1 ms and 17–21 ms), and `stop all` ends the runtime and every agent. **Found and fixed:** `mem_map`'s window between batches (#115) was `sti` then `cli`, which lets no interrupt in (`sti` takes effect after the next instruction), and a woken task waited for the whole mapping anyway: loading the test model (a 26 ms `mem_map` in the inference service) held the kernel's task 33–41 ms. Now `sti; nop; cli`, so a tick or device interrupt between batches switches to the woken task. **Not covered:** `mem_share` and `mem_map_cap` still walk their pages with interrupts off (about 6 ms for the inference window under TCG), and freeing a large address space at exit or `mem_unmap` is not batched (a 64 MiB process ending held the kernel's task 60–74 ms under TCG, so `memprobe` is stopped only after the measurement; a stopped or restarted inference service frees far more); a manifest cannot narrow budgets.
+
 ## 4. Security
 
 - **Trusted for limits:** the kernel (classes, CPU time, pages, processes, handles), the runtime (per-agent and group budgets, rates), and the inference service (per-client admission).
@@ -126,4 +128,4 @@ An agent per resource that tries to use more than its limit, alone and then all 
 
 ## 7. Open questions
 
-- The bound on the emergency stop's latency under full load, to be measured in #114 and stated in the tests.
+- ~~The bound on the emergency stop's latency under full load.~~ Stated and checked in #120: 200 ms from typing `stop all` to its answer (measured 17–21 ms under TCG), and 40 ms for a trusted task's wake-up.

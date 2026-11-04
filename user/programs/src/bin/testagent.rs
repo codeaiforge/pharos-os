@@ -6,6 +6,7 @@
 //! - `complete`: logs `working`, completes with `done: <input>`;
 //! - `crash-once`: crashes on attempt 1, completes after;
 //! - `crash`: crashes (a page fault); `exit`: exits with 3; `hang`: spins;
+//!   `spin`: spins, asking `INFO` once a second;
 //! - `fail`: fails with `asked to fail`;
 //! - `infer`: model 1 (not in its manifest) must be refused, then generates
 //!   from model 2 and completes with the text;
@@ -62,6 +63,9 @@
 //!   reaching outside its own files, a log line that looks like an
 //!   approval prompt, a buffer revoked under the runtime, the approval
 //!   queue filled, and a flood of requests; completes with `hostile ok`.
+//! - `glut` (agent `glutton`, the `exhaustion` kernel, #120): takes pages
+//!   and handles until refused, floods requests past its rate, then does
+//!   what `spend` does; completes with `spend ok`.
 
 #![no_std]
 #![no_main]
@@ -81,8 +85,8 @@ use pharos_user::rights::SEND;
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
     Handle, Mapped, Received, call_timeout, config_read, debug_write, delete, dma_alloc,
-    endpoint_create, irq_create, mem_map, mem_map_buffer, mem_share, mmio_map, open, process_stop,
-    receive_timeout, revoke, send, sleep, spawn, try_send, uptime,
+    endpoint_create, irq_create, mem_map, mem_map_buffer, mem_share, mem_unmap, mmio_map, open,
+    process_stop, receive_timeout, revoke, send, sleep, spawn, try_send, uptime,
 };
 
 pharos_user::entry!(main);
@@ -351,6 +355,52 @@ impl Agent {
             }
         }
         self.complete(b"spend ok")
+    }
+
+    /// The `exhaustion` kernel's `glutton` (#120): takes pages and handles
+    /// until refused and gives them back, sends 12 requests at 4 a second
+    /// (held, then served, not refused), then does what `spender` does.
+    fn glut(&self) -> u64 {
+        let mut pages = Vec::with_capacity(65);
+        let mut refused = false;
+        while pages.len() < 65 {
+            match mem_map(4096) {
+                Ok(addr) => pages.push(addr),
+                Err(_) => {
+                    refused = true;
+                    break;
+                }
+            }
+        }
+        for addr in &pages {
+            let _ = mem_unmap(*addr, 4096);
+        }
+        if !refused {
+            return self.fail(b"more pages than its 64 were mapped");
+        }
+        let mut handles = [0; 16];
+        let mut n = 0;
+        while n < handles.len() {
+            match endpoint_create() {
+                Ok(h) => {
+                    handles[n] = h;
+                    n += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        for h in &handles[..n] {
+            let _ = delete(*h);
+        }
+        if n == handles.len() {
+            return self.fail(b"more handles than its 16 were taken");
+        }
+        let start = uptime();
+        let served = (0..12).all(|_| self.call(&Request::Info, &mut [0; 256]).0 == status::OK);
+        if !served || uptime() - start < 1_500_000 {
+            return self.fail(b"12 requests at 4 a second were not held and served");
+        }
+        self.spend()
     }
 
     /// `NEXT` until the session ends; false if a `NEXT` fails.
@@ -1103,6 +1153,15 @@ fn main(_: u64) -> u64 {
         b"hang" => loop {
             core::hint::spin_loop();
         },
+        // Spins, asking `INFO` once a second so it is not stopped for no
+        // progress (#120).
+        b"spin" => loop {
+            let until = uptime() + 1_000_000;
+            while uptime() < until {
+                core::hint::spin_loop();
+            }
+            a.call(&Request::Info, &mut out);
+        },
         b"fail" => a.fail(b"asked to fail"),
         b"infer" => a.infer(),
         b"probe" => a.probe(),
@@ -1126,6 +1185,7 @@ fn main(_: u64) -> u64 {
         b"net-talk" => a.net_talk(),
         b"hostile" => a.hostile(),
         b"spend" => a.spend(),
+        b"glut" => a.glut(),
         b"flood" => a.flood(),
         b"tick" => a.tick(),
         b"rate" => a.rate(),

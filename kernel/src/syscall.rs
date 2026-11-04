@@ -703,9 +703,6 @@ mod kernel {
 
     /// `mem_map`: the limit is checked before any frame is allocated; on
     /// failure nothing stays mapped.
-    // ponytail: maps page by page with interrupts disabled, so a 1 GiB
-    // mapping holds the CPU for its whole zeroing; map in batches with
-    // preemption points if latency matters.
     fn mem_map(process: &process::Process, pages: u64) -> Result<u64, Error> {
         use crate::arch::x86_64::paging::Flags;
         let start = process
@@ -754,8 +751,8 @@ mod kernel {
             }
             done += batch;
             if done < pages {
-                crate::arch::x86_64::enable_interrupts();
-                crate::arch::x86_64::disable_interrupts();
+                // A tick or device interrupt here switches to a woken task.
+                crate::arch::x86_64::interrupt_window();
                 if sched::stopping() {
                     unmap(done);
                     return Err(Error::NoMemory);
