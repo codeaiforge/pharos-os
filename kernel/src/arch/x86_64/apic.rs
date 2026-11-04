@@ -175,14 +175,15 @@ pub fn spurious_count() -> u64 {
 static TICK_HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Calls `handler` on every timer interrupt, after EOI, with interrupts
-/// disabled, on the interrupted code's stack. The scheduler uses it to
-/// preempt tasks (D-013); it may switch stacks and return much later.
-pub fn set_tick_handler(handler: fn()) {
+/// disabled, on the interrupted code's stack, telling it whether user mode
+/// was interrupted. The scheduler uses it to preempt tasks (D-013); it may
+/// switch stacks and return much later.
+pub fn set_tick_handler(handler: fn(bool)) {
     TICK_HANDLER.store(handler as *mut (), Ordering::Release);
 }
 
 /// Timer interrupt handler, called by the IDT dispatcher.
-pub(super) fn on_timer() {
+pub(super) fn on_timer(from_user: bool) {
     TICKS.fetch_add(1, Ordering::Relaxed);
     // EOI first: the handler may switch to another task, which must be able
     // to receive the next tick.
@@ -190,10 +191,10 @@ pub(super) fn on_timer() {
     let handler = TICK_HANDLER.load(Ordering::Acquire);
     if !handler.is_null() {
         // SAFETY: the only non-null values stored in `TICK_HANDLER` come
-        // from `set_tick_handler`, which stores a `fn()`. Function and data
-        // pointers have the same size on x86-64.
-        let handler = unsafe { core::mem::transmute::<*mut (), fn()>(handler) };
-        handler();
+        // from `set_tick_handler`, which stores a `fn(bool)`. Function and
+        // data pointers have the same size on x86-64.
+        let handler = unsafe { core::mem::transmute::<*mut (), fn(bool)>(handler) };
+        handler(from_user);
     }
 }
 

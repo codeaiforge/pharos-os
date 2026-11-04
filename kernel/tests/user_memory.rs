@@ -3,19 +3,21 @@
 //! is refused beyond it, has bad and partial unmaps refused, maps and
 //! unmaps far more than the machine has, uses the allocator's large and
 //! small blocks, and starts children with and without a limit. Every frame
-//! returns afterwards. Runs under UEFI (D-009).
+//! returns afterwards, also from a `memprobe` stopped while it maps 64 MiB. Runs under UEFI (D-009).
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 
 use pharos_kernel::arch::x86_64::{apic, gdt, idt};
-use pharos_kernel::cap::{Capability, GRANT, Object, READ, WRITE};
+use pharos_kernel::cap::{Capability, GRANT, Object, READ, SEND, WRITE};
+use pharos_kernel::ipc::Endpoint;
 use pharos_kernel::testing::{self, TestRun};
 use pharos_kernel::{fs, kprintln, mm, process, sched, storage, time};
 
@@ -130,4 +132,31 @@ fn run(t: &mut TestRun) {
     sched::sleep(Duration::from_millis(100));
     t.check("every process ended", process::count() == live);
     t.check("every frame returned", free_frames() == before);
+
+    // Stopped while it maps 64 MiB (#120): a tick in a pause between
+    // batches must not end it mid-call, or what the call holds (its
+    // process, and so its capabilities) is never dropped.
+    // It holds an endpoint: once it ends, the kernel's must be the last.
+    let held = Endpoint::new();
+    let caps = vec![Capability::new(Object::Endpoint(held.clone()), SEND)];
+    let mapper = process::spawn_elf_limited(&programs, b"bin/memprobe", 4, caps, 16_448);
+    t.check("memprobe started to map 64 MiB", mapper.is_ok());
+    let mapper = mapper.unwrap_or(u64::MAX);
+    sched::sleep(Duration::from_millis(30));
+    let mapping = process::by_id(mapper).is_some();
+    process::stop(mapper);
+    for _ in 0..100 {
+        if process::by_id(mapper).is_none() {
+            break;
+        }
+        sched::sleep(Duration::from_millis(10));
+    }
+    sched::sleep(Duration::from_millis(100));
+    t.check(
+        "stopped while mapping 64 MiB, it ended, dropped what it held, and every frame returned",
+        mapping
+            && process::count() == live
+            && free_frames() == before
+            && Arc::strong_count(&held) == 1,
+    );
 }

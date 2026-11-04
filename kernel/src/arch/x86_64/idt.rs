@@ -316,7 +316,7 @@ extern "C" fn dispatch(frame: &mut ExceptionFrame) {
         return;
     }
     if frame.vector == u64::from(super::apic::TIMER_VECTOR) {
-        super::apic::on_timer();
+        super::apic::on_timer(frame.cs & 3 == 3);
         return;
     }
     if frame.vector == u64::from(super::apic::SPURIOUS_VECTOR) {

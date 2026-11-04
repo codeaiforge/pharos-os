@@ -713,8 +713,7 @@ mod kernel {
         // In batches, with interrupts on between them, so a large mapping
         // does not hold the CPU while it zeroes its pages (D-022). No lock is
         // held between batches; the region is reserved, so nothing else
-        // maps there. A process told to stop meanwhile gives up, and may
-        // also end at a tick between batches (its pages go with its space).
+        // maps there. A process told to stop meanwhile gives up.
         let unmap = |done: u64| {
             sched::with_current_space(|space| {
                 let mut guard = crate::mm::frames();

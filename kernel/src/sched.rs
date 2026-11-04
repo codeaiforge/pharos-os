@@ -767,7 +767,7 @@ pub fn exit() -> ! {
 
 /// Timer tick (interrupt context, interrupts disabled): wakes due sleepers
 /// and ends the running task's time slice.
-fn on_tick() {
+fn on_tick(from_user: bool) {
     let switch = pick_next(Leave::Yield, |s| {
         s.ticks += 1;
         while let Some(task) = s.sleepers.pop_due(s.ticks) {
@@ -786,9 +786,12 @@ fn on_tick() {
     if let Some(switch) = switch {
         run_switch(switch);
     }
-    // A process thread runs again here, interrupted in user mode: if it
-    // was told to end, it ends now. Kernel tasks are never stopped.
-    if stopping() {
+    // A process thread interrupted in user mode runs again here: if it was
+    // told to end, it ends now. Not in a system call (`mem_map`'s pauses
+    // between batches): that would leave what the call holds, its process
+    // among it, never dropped; the call ends it on its way out. Kernel
+    // tasks are never stopped.
+    if from_user && stopping() {
         crate::process::end_stopped();
     }
 }
