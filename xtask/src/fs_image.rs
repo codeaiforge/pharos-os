@@ -211,9 +211,9 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// within their policy entries, `greedy` asking for more pages than its
 /// entry allows, `noentry`, which has no entry, and `keeper`, the
 /// `permissions` kernel's, which may write its own files (#105), and
-/// `asker`, which gets nothing and asks (#106), and the `budgets` kernel's
-/// five (#116).
-pub const TEST_MANIFESTS: [(&str, &str); 14] = [
+/// `asker`, which gets nothing and asks (#106), the `budgets` kernel's
+/// five (#116), and the `fairness` kernel's four (#117).
+pub const TEST_MANIFESTS: [(&str, &str); 18] = [
     (
         "agents/worker.manifest",
         "# The agents test kernel's worker.\nmanifest = 1\nname = worker\nprogram = bin/testagent\n\
@@ -283,6 +283,27 @@ pub const TEST_MANIFESTS: [(&str, &str); 14] = [
     (
         "agents/big.manifest",
         "manifest = 1\nname = big\nprogram = bin/testagent\npages = 256\nmodels = 2\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 30000\ndata = write\nnet = 10.0.2.2:47000\n",
+    ),
+    // The `fairness` kernel's (#117).
+    (
+        "agents/flooder.manifest",
+        "manifest = 1\nname = flooder\nprogram = bin/testagent\npages = 64\nmodels = 2\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 30000\ndata = write\nnet = 10.0.2.2:47000\n",
+    ),
+    (
+        "agents/ticker.manifest",
+        "manifest = 1\nname = ticker\nprogram = bin/testagent\npages = 64\nmodels = 2\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 30000\ndata = write\nnet = 10.0.2.2:47000\n",
+    ),
+    (
+        "agents/rater.manifest",
+        "manifest = 1\nname = rater\nprogram = bin/testagent\npages = 64\nmodels = 2\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 30000\ndata = write\nnet = 10.0.2.2:47000\n",
+    ),
+    (
+        "agents/queuer.manifest",
+        "manifest = 1\nname = queuer\nprogram = bin/testagent\npages = 64\nmodels = 2\n\
          attempts = 1\nprogress_ms = 10000\ntask_ms = 30000\ndata = write\nnet = 10.0.2.2:47000\n",
     ),
 ];

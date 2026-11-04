@@ -192,6 +192,10 @@ name = "budgets"
 harness = false
 
 [[test]]
+name = "fairness"
+harness = false
+
+[[test]]
 name = "audit"
 harness = false
 

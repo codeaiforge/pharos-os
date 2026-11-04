@@ -16,6 +16,7 @@
 //! to the host echo server, and a `listener` task (the same grant) that
 //! sends nothing. Argument 4: the `hostile` kernel (#110): a `hostile`
 //! task beside a `keeper` task. Argument 5: the `budgets` kernel (#116).
+//! Argument 6: the `fairness` kernel (#117).
 
 #![no_std]
 #![no_main]
@@ -175,6 +176,9 @@ fn main(arg: u64) -> u64 {
     }
     if arg == 5 {
         return budgets(c);
+    }
+    if arg == 6 {
+        return fairness(c);
     }
     let mut out = [0u8; 256];
 
@@ -530,6 +534,52 @@ fn budgets(mut c: Client) -> u64 {
                 && ended(&c, first, State::Done, b"napped")
                 && ended(&c, second, State::Done, b"napped"),
         );
+    }
+    let _ = send(REPORT, b"done", 0, 0, 0);
+    c.failed
+}
+
+/// The `fairness` kernel (#117): four tasks at once, each checking one way
+/// an agent could hold the runtime.
+fn fairness(mut c: Client) -> u64 {
+    let tasks = [
+        (
+            &b"flooder"[..],
+            &b"flood"[..],
+            "requests for a stalled service are BUSY at once",
+        ),
+        (
+            b"ticker",
+            b"tick",
+            "another agent is served while one floods a stalled service",
+        ),
+        (
+            b"rater",
+            b"rate",
+            "an agent past its rate is held, then served at the rate",
+        ),
+        (
+            b"queuer",
+            b"queue",
+            "an agent may have one approval request waiting",
+        ),
+    ];
+    let submitted = tasks.map(|(name, input, _)| c.submit(name, input));
+    for ((_, input, step), task) in tasks.iter().zip(submitted) {
+        let mut want = Vec::from(*input);
+        want.extend_from_slice(b" ok");
+        let ok = task
+            .ok()
+            .and_then(|t| c.wait(t, 60))
+            .is_some_and(|(s, result)| {
+                if result != want {
+                    let mut line = Vec::from(&b"fairness kernel result: "[..]);
+                    line.extend_from_slice(&result[..result.len().min(200)]);
+                    let _ = debug_write(CONSOLE, &line);
+                }
+                s.state == State::Done && result == want
+            });
+        c.step(step, ok);
     }
     let _ = send(REPORT, b"done", 0, 0, 0);
     c.failed

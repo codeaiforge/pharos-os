@@ -368,6 +368,86 @@ impl Agent {
         self.complete(b"group ok")
     }
 
+    /// The `fairness` kernel's `flooder` (#117): 30 datagrams to the
+    /// stalled network service. Only the first waits its timeout; the
+    /// rest are `BUSY` at once (a probe a second at most).
+    fn flood(&self) -> u64 {
+        let start = uptime();
+        let busy = (0..30)
+            .filter(|_| self.send_to([10, 0, 2, 2], 47_000, b"x") == status::BUSY)
+            .count();
+        if busy >= 25 && uptime() - start < 5_000_000 {
+            self.complete(b"flood ok")
+        } else {
+            self.fail(b"each datagram waited for the stalled service")
+        }
+    }
+
+    /// The `fairness` kernel's `ticker` (#117): 40 requests 50 ms apart
+    /// while `flooder` floods the stalled service; at most one may wait
+    /// (the first timeout).
+    fn tick(&self) -> u64 {
+        let mut slow = 0;
+        for _ in 0..40 {
+            let before = uptime();
+            self.call(&Request::Task, &mut [0; 256]);
+            if uptime() - before > 400_000 {
+                slow += 1;
+            }
+            sleep(50_000);
+        }
+        if slow <= 1 {
+            self.complete(b"tick ok")
+        } else {
+            self.fail(b"requests waited behind another agent's")
+        }
+    }
+
+    /// The `fairness` kernel's `rater` (#117), at 2 requests a second: the
+    /// third of a burst is held (its call times out), one more while it is
+    /// held is `BUSY`, and 2 s later about 2 a second are served.
+    fn rate(&self) -> u64 {
+        // Past `flooder`'s one timeout, and a full burst again.
+        sleep(2_000_000);
+        let mut out = [0u8; 256];
+        let burst = (0..2).all(|_| self.call(&Request::Task, &mut out).0 == status::OK);
+        let mut msg = [0u8; 16];
+        let held = endpoint_create().is_ok_and(|r| {
+            encode(&Request::Task, &mut msg).is_some_and(|n| {
+                call_timeout(RUNTIME, &msg[..n], r, &mut out, 100_000)
+                    == Err(pharos_user::Error::TimedOut)
+            })
+        });
+        let busy = self.call(&Request::Task, &mut out).0 == status::BUSY;
+        if !(burst && held && busy) {
+            return self.fail(b"past its rate a request was not held, or a second not BUSY");
+        }
+        sleep(1_100_000);
+        let start = uptime();
+        let mut served = 0;
+        while uptime() - start < 2_000_000 {
+            self.call(&Request::Task, &mut out);
+            served += 1;
+        }
+        if (3..=7).contains(&served) {
+            self.complete(b"rate ok")
+        } else {
+            self.fail(b"2 s did not serve about 2 requests a second")
+        }
+    }
+
+    /// The `fairness` kernel's `queuer` (#117): one approval request
+    /// waiting per agent; a second is refused without asking.
+    fn queue(&self) -> u64 {
+        if self.ask(Permission::Model(3), 0) != Some(Asked::Pending) {
+            return self.fail(b"asking for model 3 was not pending");
+        }
+        if self.ask(Permission::Model(4), 0) != Some(Asked::Refused) {
+            return self.fail(b"a second approval request was not refused");
+        }
+        self.complete(b"queue ok")
+    }
+
     fn net_quiet(&self) -> u64 {
         // 4 s, while `net-talk` exchanges its datagrams.
         for _ in 0..40 {
@@ -644,8 +724,8 @@ impl Agent {
             return self.fail(b"the runtime read more than zeros from a revoked buffer");
         }
 
-        // Its own request cannot be approved by itself; then the queue of
-        // four fills, and more is refused without a prompt.
+        // Its own request cannot be approved by itself; while it waits, more
+        // are refused without a prompt (one waiting per agent, #117).
         if self.ask(Permission::Model(3), 0) != Some(Asked::Pending) {
             return self.fail(b"asking for model 3 was not pending");
         }
@@ -658,13 +738,10 @@ impl Agent {
         {
             return self.fail(b"an agent answered its own request");
         }
-        for n in 4..=6 {
-            if self.ask(Permission::Model(n), 0) != Some(Asked::Pending) {
-                return self.fail(b"filling the approval queue failed");
+        for n in 4..=7 {
+            if self.ask(Permission::Model(n), 0) != Some(Asked::Refused) {
+                return self.fail(b"a second request waiting was not refused");
             }
-        }
-        if self.ask(Permission::Model(7), 0) != Some(Asked::Refused) {
-            return self.fail(b"a fifth request was not refused");
         }
         // A flood: refused requests (recorded once per kind), then plain
         // ones; the runtime keeps serving.
@@ -710,8 +787,14 @@ impl Agent {
         if !refused {
             return self.fail(b"writing was never refused for the trail");
         }
+        // The trail is stalled now (#117): refused at once, not after its
+        // 2 s timeout.
+        let asked = uptime();
         if self.generate(4).0 != NO_AUDIT {
             return self.fail(b"inference was not refused for the trail");
+        }
+        if uptime() - asked > 500_000 {
+            return self.fail(b"the stalled trail was waited for again");
         }
         if self.get(b"notes") != (status::OK, Vec::from(&b"c"[..])) {
             return self.fail(b"reading, which is not audited, failed");
@@ -1024,6 +1107,10 @@ fn main(_: u64) -> u64 {
         b"net-talk" => a.net_talk(),
         b"hostile" => a.hostile(),
         b"spend" => a.spend(),
+        b"flood" => a.flood(),
+        b"tick" => a.tick(),
+        b"rate" => a.rate(),
+        b"queue" => a.queue(),
         b"group-spend" => a.group_spend(),
         // Runs 600 ms, asking the runtime for its task now and then.
         b"nap" => {

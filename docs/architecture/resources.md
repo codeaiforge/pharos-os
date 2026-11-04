@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-04 (#113),** with CPU time counted by one `rdtsc` per switch and a plain load and store, measured within D-004's IPC budget before approval. To be built by: scheduling classes and CPU accounting (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), and exhaustion tests (#120). **Implemented:** scheduling classes and CPU time per process (#114), carved limits (#115), runtime budgets (#116).
+**Planned. Design approved by the maintainer on 2026-11-04 (#113),** with CPU time counted by one `rdtsc` per switch and a plain load and store, measured within D-004's IPC budget before approval. To be built by: scheduling classes and CPU accounting (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), and exhaustion tests (#120). **Implemented:** scheduling classes and CPU time per process (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117).
 
 ## 2. Context
 
@@ -63,7 +63,7 @@ What M3.5 builds on:
   - a request over `rate` is held (#117).
 - **Every limit reached is recorded** in the audit trail once per kind per attempt, as refusals are (#110): `limit` with the resource, the limit, and the use, and counted in the attempt's refusal total.
 - **The logic** (budgets, windows, groups) is a host-tested module beside `grants`.
-- *Implemented (#116):* `pharos_proto::manifest::{Budget, Group}` (the entry's `budget`, `Budget::UNLIMITED` for none), `pharos_programs::budgets`, `status::OVER_LIMIT`, and in the runtime a `Usage` per attempt and a `GroupUse` per group. Tokens are charged as the prompt's bytes plus the new tokens asked for, before the request goes out (refunded with the real count in #118); `data_kb` is checked against the agent's files listed and sized in the store on each `DATA_PUT`; the runtime reads CPU time at least every 100 ms while an agent with a `cpu_ms` runs. Each limit reached is a refusal record (`over tokens`, `over net sends`, `over net bytes`, `over data`, `over group tokens`, `over group net`, `over cpu`), counted in the attempt's total. The boot policy table has no groups and every entry `Budget::UNLIMITED`; the `budgets` test kernel has its own table. Differences from the draft above: a manifest cannot narrow a budget yet (no agent needs less than its entry), a record names the resource but not the limit and the use, a group's minute is a fixed window from its first use (up to twice the rate across a window's edge), and `rate` comes with #117.
+- *Implemented (#116):* `pharos_proto::manifest::{Budget, Group}` (the entry's `budget`, `Budget::UNLIMITED` for none), `pharos_programs::budgets`, `status::OVER_LIMIT`, and in the runtime a `Usage` per attempt and a `GroupUse` per group. Tokens are charged as the prompt's bytes plus the new tokens asked for, before the request goes out (refunded with the real count in #118); `data_kb` is checked against the agent's files listed and sized in the store on each `DATA_PUT`; the runtime reads CPU time at least every 100 ms while an agent with a `cpu_ms` runs. Each limit reached is a refusal record (`over tokens`, `over net sends`, `over net bytes`, `over data`, `over group tokens`, `over group net`, `over cpu`), counted in the attempt's total. The boot policy table has no groups and every entry `Budget::UNLIMITED`; the `budgets` test kernel has its own table. Differences from the draft above: a manifest cannot narrow a budget yet (no agent needs less than its entry), a record names the resource but not the limit and the use, a group's minute is a fixed window from its first use (up to twice the rate across a window's edge), and `rate` came with #117.
 
 ### Not holding the runtime (#117)
 
@@ -71,6 +71,8 @@ What M3.5 builds on:
 - **Long work stays bounded:** `GENERATE` reads the whole prompt before answering (6.3 s for the S1 prompt); it keeps its 60 s timeout, and admission (#118) bounds how long a prompt may be.
 - **Throttling holds the request:** the runtime keeps the request and its reply capability in the agent's slot (one at a time per agent; a second while one is held is refused with `BUSY`) and serves it when the agent's rate allows, from its main loop. The agent's call waits; the request counts as progress when it arrives.
 - **The approval queue is shared fairly:** an agent may have at most 1 request waiting, of the 4 places; another is refused without asking, and recorded (closing the M3.4 limit).
+
+- *Implemented (#117):* a `Health` per service (store, inference, audit, network) wraps every call: one that times out stalls the service, agent requests that need it answer `BUSY` (audit `NO_AUDIT`) before anything is recorded, and at most once a second the next call is preceded by an `INFO` with 50 ms, whose answer ends the stall. The policy entry's budget has `rate` (`Budget::UNLIMITED`: none); a request past it is kept with its reply capability in the agent's slot and served from the main loop when the bucket allows, and one more while it is held is `BUSY`. `ASK` is refused without asking while the agent has one request waiting. Not tested: a stall ending (the `fairness` kernel's network service stays stopped).
 
 ### Inference admission (#118)
 

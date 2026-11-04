@@ -64,7 +64,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use pharos_programs::budgets::{self, GroupUse, Over, Usage};
+use pharos_programs::budgets::{self, Bucket, GroupUse, Over, Usage};
 use pharos_programs::grants::Grants;
 use pharos_programs::tasks::{self, Begin, Files, StoreFailed, Tasks};
 use pharos_proto::agents::{
@@ -122,6 +122,64 @@ mod refusal {
 }
 /// How often the runtime reads a running agent's CPU time, at most.
 const CPU_CHECK_US: u64 = 100_000;
+/// A stalled service is asked again (`INFO`) at most this often, and
+/// given this long to answer (#117).
+const PROBE_EVERY_US: u64 = 1_000_000;
+const PROBE_US: u64 = 50_000;
+
+/// A service the runtime calls (#117, resources.md): after one call times
+/// out it is stalled, and requests that need it are answered at once
+/// instead of each waiting its timeout, so it holds the runtime for one
+/// timeout and then at most [`PROBE_US`] a second.
+#[derive(Default)]
+struct Health {
+    stalled: core::cell::Cell<bool>,
+    probe_at: core::cell::Cell<u64>,
+}
+
+impl Health {
+    /// `BUSY` while stalled and not yet due to be asked again.
+    fn ready(&self) -> Result<(), u8> {
+        if self.stalled.get() && uptime() < self.probe_at.get() {
+            Err(status::BUSY)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// `call_timeout` on `endpoint`, refused at once (`WOULD_BLOCK`) while
+    /// stalled, except for one `INFO` a second that ends the stall if
+    /// answered.
+    fn call(
+        &self,
+        endpoint: Handle,
+        msg: &[u8],
+        reply: Handle,
+        out: &mut [u8],
+        timeout: u64,
+    ) -> Result<Received, pharos_user::Error> {
+        if self.stalled.get() {
+            let now = uptime();
+            if now < self.probe_at.get() {
+                return Err(pharos_user::Error::WouldBlock);
+            }
+            self.probe_at.set(now + PROBE_EVERY_US);
+            // Any answer, even a refusal, shows the service is serving.
+            let info = [1, pharos_proto::op::INFO];
+            let mut answer = [0u8; 256];
+            if call_timeout(endpoint, &info, reply, &mut answer, PROBE_US).is_err() {
+                return Err(pharos_user::Error::WouldBlock);
+            }
+            self.stalled.set(false);
+        }
+        let r = call_timeout(endpoint, msg, reply, out, timeout);
+        if r == Err(pharos_user::Error::TimedOut) {
+            self.stalled.set(true);
+            self.probe_at.set(uptime() + PROBE_EVERY_US);
+        }
+        r
+    }
+}
 /// How long an audit record may take before the action is refused.
 const AUDIT_US: u64 = 2_000_000;
 /// The runtime's buffer at the storage service: the largest task file.
@@ -158,6 +216,7 @@ const BUDGETS: &[Entry] = &[
             net_sends: 2,
             net_bytes: 64,
             data_kb: 1,
+            rate: u32::MAX,
             group: b"spend",
         },
         64,
@@ -194,6 +253,30 @@ const BUDGETS: &[Entry] = &[
         },
         256,
     ),
+    FAIRNESS[0],
+    FAIRNESS[1],
+    FAIRNESS[2],
+    FAIRNESS[3],
+];
+
+/// The `fairness` test kernel's agents (#117), in the same table:
+/// `flooder` and `ticker` beside a stalled network service, `rater` at 2
+/// requests a second, and `queuer`, which may ask for models 3 and 4.
+const FAIRNESS: [Entry; 4] = [
+    budget_entry(b"flooder", Budget::UNLIMITED, 64),
+    budget_entry(b"ticker", Budget::UNLIMITED, 64),
+    budget_entry(
+        b"rater",
+        Budget {
+            rate: 2,
+            ..Budget::UNLIMITED
+        },
+        64,
+    ),
+    Entry {
+        ask_models: 1 << 3 | 1 << 4,
+        ..budget_entry(b"queuer", Budget::UNLIMITED, 64)
+    },
 ];
 
 const BUDGET_GROUPS: &[Group] = &[
@@ -412,6 +495,7 @@ struct Limits {
 struct Store {
     buffer: Mapped,
     reply: Handle,
+    health: Health,
 }
 
 impl Store {
@@ -462,7 +546,10 @@ impl Store {
     ) -> Result<StoreStatus, StoreFailed> {
         let mut msg = [0u8; 256];
         let n = store::encode(req, &mut msg).ok_or(StoreFailed)?;
-        match call_timeout(STORE, &msg[..n], self.reply, out, STORE_US) {
+        match self
+            .health
+            .call(STORE, &msg[..n], self.reply, out, STORE_US)
+        {
             Ok(Received::Message { len, .. }) if len >= 1 => Ok(StoreStatus::from_code(out[0])),
             _ => Err(StoreFailed),
         }
@@ -600,6 +687,10 @@ struct Slot {
     noted: u16,
     /// What this attempt has used (#116).
     usage: Usage,
+    /// Its requests over time, and the one held past its rate with its
+    /// reply capability (#117).
+    bucket: Bucket,
+    held: Option<(Vec<u8>, Handle)>,
 }
 
 struct Runtime {
@@ -623,6 +714,10 @@ struct Runtime {
     /// The policy table's groups, and what each has used this minute.
     groups: &'static [Group],
     group_use: Vec<GroupUse>,
+    /// The services it calls besides the store (#117).
+    infer_health: Health,
+    audit_health: Health,
+    net_health: Health,
 }
 
 struct Pending {
@@ -776,7 +871,10 @@ impl Runtime {
     fn infer(&self, req: &InferRequest, timeout: u64, out: &mut [u8; 256]) -> Option<usize> {
         let mut msg = [0u8; 64];
         let n = infer::encode(req, &mut msg)?;
-        match call_timeout(INFER, &msg[..n], self.reply, out, timeout) {
+        match self
+            .infer_health
+            .call(INFER, &msg[..n], self.reply, out, timeout)
+        {
             Ok(Received::Message { len, .. }) if len >= 1 => Some(len.min(256)),
             _ => None,
         }
@@ -918,6 +1016,8 @@ impl Runtime {
             refused: 0,
             noted: 0,
             usage: Usage::default(),
+            bucket: Bucket::full(limits.entry.budget.rate, now),
+            held: None,
         });
         // Every grant is recorded before it is given; none is given if a
         // record fails (#108).
@@ -1029,6 +1129,9 @@ impl Runtime {
             return;
         };
         let _ = delete(s.process);
+        if let Some((_, cap)) = s.held {
+            let _ = delete(cap);
+        }
         if let Some(b) = s.buffer {
             unmap(b);
         }
@@ -1281,6 +1384,7 @@ impl Runtime {
                 if !allowed {
                     return Err(status::NO_ACCESS);
                 }
+                self.infer_health.ready()?;
                 if prompt_len as usize > buffer_len {
                     return Err(status::NO_BUFFER);
                 }
@@ -1326,6 +1430,7 @@ impl Runtime {
             }
             Request::Next => {
                 let session = session.ok_or(NO_SESSION)?;
+                self.infer_health.ready()?;
                 let n = self
                     .infer(&InferRequest::Next { session }, INFER_US, out)
                     .ok_or(status::INTERNAL)?;
@@ -1352,6 +1457,7 @@ impl Runtime {
                 if !allowed {
                     return Err(status::NO_ACCESS);
                 }
+                self.store.health.ready()?;
                 if len > agents::MAX_DATA {
                     return Err(status::TOO_LARGE);
                 }
@@ -1388,6 +1494,7 @@ impl Runtime {
                 if !allowed {
                     return Err(status::NO_ACCESS);
                 }
+                self.store.health.ready()?;
                 let path = data_path(limits.entry.name, name);
                 let bytes = self
                     .store
@@ -1412,6 +1519,7 @@ impl Runtime {
                 if !allowed {
                     return Err(status::NO_ACCESS);
                 }
+                self.net_health.ready()?;
                 if len > agents::MAX_DATAGRAM {
                     return Err(status::TOO_LARGE);
                 }
@@ -1437,10 +1545,14 @@ impl Runtime {
                 let seq = self.intent(agent, id, action::NET_SEND, Some(p), net::NAME, b"")?;
                 // The request is sent from the reply buffer too.
                 let mut reply = [0u8; 256];
-                let code = match call_timeout(NET, &msg[..n], self.reply, &mut reply, NET_US) {
-                    Ok(Received::Message { len, .. }) if len >= 1 => reply[0],
-                    _ => status::INTERNAL,
-                };
+                let code =
+                    match self
+                        .net_health
+                        .call(NET, &msg[..n], self.reply, &mut reply, NET_US)
+                    {
+                        Ok(Received::Message { len, .. }) if len >= 1 => reply[0],
+                        _ => status::INTERNAL,
+                    };
                 self.outcome(seq, agent, id, action::NET_SEND, code == net::OK, b"");
                 if code != net::OK {
                     return Err(code);
@@ -1513,7 +1625,10 @@ impl Runtime {
                 return;
             };
             let mut out = [0u8; 256];
-            let len = match call_timeout(NET, &msg[..poll], self.reply, &mut out, NET_US) {
+            let len = match self
+                .net_health
+                .call(NET, &msg[..poll], self.reply, &mut out, NET_US)
+            {
                 Ok(Received::Message { len, .. }) => len.min(256),
                 _ => return,
             };
@@ -1536,7 +1651,10 @@ impl Runtime {
         let mut msg = [0u8; 256];
         let n = audit::encode(&audit::Request::Append(*e), &mut msg)?;
         let mut out = [0u8; 256];
-        match call_timeout(AUDIT, &msg[..n], self.reply, &mut out, AUDIT_US) {
+        match self
+            .audit_health
+            .call(AUDIT, &msg[..n], self.reply, &mut out, AUDIT_US)
+        {
             Ok(Received::Message { len: 9, .. }) if out[0] == status::OK => Some(u64_at(&out, 1)),
             _ => None,
         }
@@ -1777,7 +1895,8 @@ impl Runtime {
         {
             return Asked::Pending;
         }
-        if self.pending.len() >= MAX_PENDING {
+        // At most one waiting per agent, so no agent fills the queue (#117).
+        if self.pending.len() >= MAX_PENDING || self.pending.iter().any(|q| q.task == task) {
             return Asked::Refused;
         }
         self.next_request = self.next_request.wrapping_add(1).max(1);
@@ -1970,6 +2089,69 @@ impl Runtime {
         }
     }
 
+    /// Slot `i`'s requests a second ([`Budget::rate`]).
+    fn rate(&self, i: usize) -> Option<u32> {
+        let s = self.slots[i].as_ref()?;
+        let t = self.tasks.find(s.task)?;
+        Some(self.limits(&self.tasks.list[t].agent)?.entry.budget.rate)
+    }
+
+    /// The agent's rate (#117): true to serve `msg` now. Past its rate the
+    /// request is held with its reply capability `cap` and served later
+    /// ([`Runtime::serve_held`]); one more while one is held is `BUSY`.
+    fn admit(&mut self, badge: u32, msg: &[u8], cap: Handle) -> bool {
+        let Some(i) = agent_slot(badge) else {
+            return true;
+        };
+        let Some(rate) = self.rate(i) else {
+            return true;
+        };
+        let now = uptime();
+        let Some(s) = self.slots[i].as_mut() else {
+            return true;
+        };
+        if s.held.is_some() {
+            if cap != 0 {
+                let _ = try_send(cap, &[status::BUSY]);
+                let _ = delete(cap);
+            }
+            return false;
+        }
+        if s.bucket.take(rate, now).is_ok() || cap == 0 {
+            return true;
+        }
+        // It counts as progress when it arrives.
+        s.last = now;
+        s.held = Some((msg.to_vec(), cap));
+        false
+    }
+
+    /// Serves held requests the agents' rates now allow; returns how long
+    /// until the next one may be served.
+    fn serve_held(&mut self) -> u64 {
+        let mut wait = u64::MAX;
+        for i in 0..SLOTS {
+            let Some(rate) = self.rate(i) else { continue };
+            let now = uptime();
+            let Some(s) = self.slots[i].as_mut().filter(|s| s.held.is_some()) else {
+                continue;
+            };
+            match s.bucket.take(rate, now) {
+                Ok(()) => {
+                    let Some((msg, cap)) = s.held.take() else {
+                        continue;
+                    };
+                    let mut out = [0u8; 256];
+                    let n = self.handle(&msg, i as u32 + 1, &mut out);
+                    let _ = try_send(cap, &out[..n]);
+                    let _ = delete(cap);
+                }
+                Err(us) => wait = wait.min(us),
+            }
+        }
+        wait
+    }
+
     /// Handles one `call`; writes the reply (status first) into `out`.
     fn handle(&mut self, msg: &[u8], badge: u32, out: &mut [u8; 256]) -> usize {
         let req = match parse(msg) {
@@ -2080,7 +2262,11 @@ fn main(arg: u64) -> u64 {
     let Ok(buffer) = mem_map_buffer(STORE_BUFFER) else {
         return 5;
     };
-    let mut store = Store { buffer, reply };
+    let mut store = Store {
+        buffer,
+        reply,
+        health: Health::default(),
+    };
     if !store.attach() {
         return 6;
     }
@@ -2121,6 +2307,9 @@ fn main(arg: u64) -> u64 {
         refused: Vec::new(),
         groups,
         group_use: alloc::vec![GroupUse::default(); groups.len()],
+        infer_health: Health::default(),
+        audit_health: Health::default(),
+        net_health: Health::default(),
     };
     // `trust`'s way to send `REVOKE`, badged so only it is served as `trust`.
     let mut msg = [0u8; 8];
@@ -2137,7 +2326,10 @@ fn main(arg: u64) -> u64 {
         // A refused retry is tried again within a second.
         let stranded = r.retry_stranded();
         r.start_pending();
-        let wait = r.check_deadlines().min(r.expire_pending());
+        let wait = r
+            .check_deadlines()
+            .min(r.expire_pending())
+            .min(r.serve_held());
         let wait = if stranded { wait.min(1_000_000) } else { wait };
         match receive_timeout(SERVICE, &mut msg, wait) {
             Ok(Received::Notification(bits)) => {
@@ -2153,6 +2345,9 @@ fn main(arg: u64) -> u64 {
                     if cap != 0 {
                         r.attach(badge, cap, len);
                     }
+                    continue;
+                }
+                if !r.admit(badge, msg, cap) {
                     continue;
                 }
                 let mut out = [0u8; 256];

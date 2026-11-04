@@ -1357,13 +1357,13 @@ const HOSTILE_SCRIPT: &[console::Step] = &[
     ("trust: ready", ""),
     ("registered runtime", ""),
     (
-        "approve #4: hostile task 1 wants model 6 for this task? (yes 4 / no 4)",
+        "approve #1: hostile task 1 wants model 3 for this task? (yes 1 / no 1)",
         "",
     ),
 ];
-/// No fifth request reaches the user, and the prompt `hostile` logged goes
-/// to the serial console only.
-const HOSTILE_REFUSED: &[&str] = &["approve #5", "approve #9"];
+/// No second request of the agent reaches the user (#117), and the prompt
+/// `hostile` logged goes to the serial console only.
+const HOSTILE_REFUSED: &[&str] = &["approve #2", "approve #9"];
 /// The audit service (#107): a tiny fresh store, so it fills.
 const AUDIT_TEST: &str = "audit";
 const AUDIT_BLOCKS: u64 = 16;
@@ -1631,10 +1631,10 @@ fn hostile_audit(image: &Path) -> Result<()> {
         .and_then(|n| n.trim().parse::<u32>().ok())
         .ok_or("no record of the attempt's refused requests in all")?;
     let ended = refusals.iter().filter(|l| l.contains("task ended")).count();
-    // The four kinds, the total, and the four requests that ended with it.
-    if total < 450 || ended != 4 || refusals.len() != 9 {
+    // The four kinds, the total, and the one request that ended with it.
+    if total < 450 || ended != 1 || refusals.len() != 6 {
         return Err(format!(
-            "expected 9 refusal records (4 ended requests, at least 450 in all), got: {refusals:?}"
+            "expected 6 refusal records (1 ended request, at least 450 in all), got: {refusals:?}"
         ));
     }
     for want in [
@@ -1779,6 +1779,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         AGENTS_NET_TEST,
         HOSTILE_TEST,
         BUDGETS_TEST,
+        "fairness",
     ];
     if service_store.contains(&name.as_str()) {
         store_image::service(&out.join(STORE_IMAGE))?;

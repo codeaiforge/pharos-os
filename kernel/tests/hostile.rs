@@ -7,7 +7,7 @@
 //! endpoint. `hostile` then tries everything listed in testing.md and must
 //! be refused each time; `keeper-a` must complete as if alone. The runner
 //! checks the trusted console never showed the prompt `hostile` faked or a
-//! fifth approval request, and that the audit trail holds each kind of
+//! second approval request (one waits per agent, #117), and that the audit trail holds each kind of
 //! refusal once and the attempt's total. Runs under UEFI (D-009).
 
 #![no_std]

@@ -122,6 +122,50 @@ impl Usage {
     }
 }
 
+/// An attempt's requests over time: `rate` a second, with a burst of
+/// `rate` (D-022 item 4: one past it is held, not refused).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bucket {
+    /// Requests available, in millionths.
+    level: u64,
+    at_us: u64,
+}
+
+const ONE: u64 = 1_000_000;
+
+impl Bucket {
+    /// A full bucket at `now`.
+    pub fn full(rate: u32, now: u64) -> Self {
+        Self {
+            level: u64::from(rate).saturating_mul(ONE),
+            at_us: now,
+        }
+    }
+
+    /// Takes one request at `now`; else how many microseconds until one is
+    /// there. `u32::MAX` is no limit.
+    pub fn take(&mut self, rate: u32, now: u64) -> Result<(), u64> {
+        if rate == u32::MAX {
+            return Ok(());
+        }
+        let rate = u64::from(rate);
+        let gained = now.saturating_sub(self.at_us).saturating_mul(rate);
+        self.level = self
+            .level
+            .saturating_add(gained)
+            .min(rate.saturating_mul(ONE));
+        self.at_us = now;
+        if self.level >= ONE {
+            self.level -= ONE;
+            Ok(())
+        } else if rate == 0 {
+            Err(u64::MAX)
+        } else {
+            Err((ONE - self.level).div_ceil(rate))
+        }
+    }
+}
+
 /// Whether replacing a file of `old` bytes by `new` keeps the agent's
 /// files, now `stored` bytes in total, within its `data_kb`.
 pub fn data_fits(budget: &Budget, stored: u64, old: u64, new: u64) -> Result<(), Over> {
@@ -150,6 +194,7 @@ mod tests {
         net_sends: 2,
         net_bytes: 64,
         data_kb: 1,
+        rate: 2,
         group: b"g",
     };
     const GROUP: Group = Group {
@@ -204,6 +249,20 @@ mod tests {
         assert_eq!(data_fits(&LIMITED, 600, 600, 300), Ok(()));
         assert_eq!(data_fits(&LIMITED, 300, 0, 724), Ok(()), "exactly 1 KiB");
         assert_eq!(data_fits(&LIMITED, 300, 0, 725), Err(Over::Data));
+    }
+
+    #[test]
+    fn requests_come_at_the_rate_after_a_burst() {
+        let mut b = Bucket::full(2, 0);
+        assert_eq!(b.take(2, 0), Ok(()));
+        assert_eq!(b.take(2, 0), Ok(()), "a burst of 2");
+        assert_eq!(b.take(2, 0), Err(500_000), "the next in half a second");
+        assert_eq!(b.take(2, 499_999), Err(1));
+        assert_eq!(b.take(2, 500_000), Ok(()));
+        assert_eq!(b.take(2, 10_000_000), Ok(()), "refilled, at most 2");
+        assert_eq!(b.take(2, 10_000_000), Ok(()));
+        assert_eq!(b.take(2, 10_000_000), Err(500_000));
+        assert_eq!(Bucket::full(0, 0).take(u32::MAX, 0), Ok(()), "no limit");
     }
 
     #[test]

@@ -135,6 +135,9 @@ pub struct Budget {
     pub net_sends: u32,
     pub net_bytes: u32,
     pub data_kb: u32,
+    /// Requests per second, with a burst of as many; one past it is held
+    /// until the rate allows (#117).
+    pub rate: u32,
     /// The [`Group`] it belongs to; empty for none.
     pub group: &'static [u8],
 }
@@ -147,6 +150,7 @@ impl Budget {
         net_sends: u32::MAX,
         net_bytes: u32::MAX,
         data_kb: u32::MAX,
+        rate: u32::MAX,
         group: b"",
     };
 }

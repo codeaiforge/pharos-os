@@ -69,6 +69,7 @@ pub struct Services {
     /// The network service, if [`start_net`] started it: the runtime then
     /// gets handle 9 on it.
     pub net: Option<Arc<Endpoint>>,
+    pub net_id: TaskId,
 }
 
 /// The capabilities of `id`.
@@ -182,6 +183,7 @@ pub fn setup(t: &mut TestRun) -> Option<Services> {
         audit,
         audit_id,
         net: None,
+        net_id: 0,
     })
 }
 
@@ -204,9 +206,10 @@ pub fn start_net(t: &mut TestRun, s: &mut Services) -> bool {
         Capability::new(Object::Endpoint(net.clone()), RECEIVE),
         Capability::new(Object::Endpoint(s.report.clone()), SEND),
     ];
-    if start(t, &s.programs, b"bin/net", 0, caps, &s.report, 0).is_none() {
+    let Some(id) = start(t, &s.programs, b"bin/net", 0, caps, &s.report, 0) else {
         return false;
-    }
+    };
+    s.net_id = id;
     // `pharos_proto::net`'s `ALLOW`: version, op, port, count, then each
     // address and port.
     let mut data = [0u8; MAX_MESSAGE];
