@@ -5,8 +5,10 @@
 //! files; `grouper` past its group's tokens and bytes this minute; `hog`
 //! spins and is stopped over its 300 ms of CPU time; `pair` and `big`
 //! tasks run one at a time, held by their groups' attempts and pages.
-//! Afterwards the runner checks the audit trail holds each kind of limit
-//! once. Runs under UEFI (D-009).
+//! An `idler` task runs while the runner types `usage` on the trusted
+//! console (#119) and checks the runtime's, the agent's, and its group's
+//! lines. Afterwards the runner checks the audit trail holds each kind of
+//! limit once and `spender`'s usage. Runs under UEFI (D-009).
 
 #![no_std]
 #![no_main]
@@ -78,6 +80,7 @@ fn run(t: &mut TestRun) {
         "an agent over its CPU time is stopped, a failed attempt",
         "a group of one runs its agents' tasks one at a time",
         "a group's pages hold a second task until the first ends",
+        "an idle agent ran while usage was asked",
     ] {
         let want = alloc::format!("ok {step}");
         t.check(step, passed.iter().any(|l| l == want.as_bytes()));

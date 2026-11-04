@@ -71,7 +71,9 @@ pub mod action {
     pub const NET_SEND: u8 = 11;
     pub const SUBMIT: u8 = 12;
     pub const CANCEL: u8 = 13;
-    pub const LAST: u8 = CANCEL;
+    /// What an attempt used, when it ends (#119).
+    pub const USAGE: u8 = 14;
+    pub const LAST: u8 = USAGE;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -89,6 +91,7 @@ pub mod action {
             "net send",
             "submit",
             "cancel",
+            "usage",
         ]
         .get(usize::from(code))
         .copied()

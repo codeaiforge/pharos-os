@@ -257,6 +257,15 @@ const BUDGETS: &[Entry] = &[
     FAIRNESS[1],
     FAIRNESS[2],
     FAIRNESS[3],
+    // Runs while the runner types `usage` on the trusted console (#119).
+    budget_entry(
+        b"idler",
+        Budget {
+            group: b"heavy",
+            ..Budget::UNLIMITED
+        },
+        64,
+    ),
 ];
 
 /// The `fairness` test kernel's agents (#117), in the same table:
@@ -693,6 +702,8 @@ struct Slot {
     /// reply capability (#117).
     bucket: Bucket,
     held: Option<(Vec<u8>, Handle)>,
+    /// Requests served this attempt (#119).
+    requests: u32,
 }
 
 struct Runtime {
@@ -1056,6 +1067,7 @@ impl Runtime {
             usage: Usage::default(),
             bucket: Bucket::full(limits.entry.budget.rate, now),
             held: None,
+            requests: 0,
         });
         // Every grant is recorded before it is given; none is given if a
         // record fails (#108).
@@ -1166,6 +1178,8 @@ impl Runtime {
         let Some(s) = self.slots[i].take() else {
             return;
         };
+        // What the attempt used, recorded as it ends (#119).
+        let cpu_ms = process_usage(s.process, Use::CpuMicros).unwrap_or(0) / 1000;
         let _ = delete(s.process);
         if let Some((_, cap)) = s.held {
             let _ = delete(cap);
@@ -1174,6 +1188,31 @@ impl Runtime {
             unmap(b);
         }
         let id = s.task;
+        let mut detail = Vec::new();
+        for (word, v) in [
+            (&b"cpu "[..], cpu_ms),
+            (b" tok ", s.usage.tokens),
+            (b" net ", s.usage.net_sends),
+            (b"/", s.usage.net_bytes),
+            (b" req ", u64::from(s.requests)),
+        ] {
+            let mut d = [0u8; 20];
+            detail.extend_from_slice(word);
+            detail.extend_from_slice(decimal(v, &mut d));
+        }
+        let agent = self.agent_of(id);
+        self.audit(&Record {
+            kind: Kind::Event,
+            refers: 0,
+            actor: &agent,
+            task: id,
+            attempt: self.attempt(id),
+            action: action::USAGE,
+            permission: None,
+            service: b"",
+            outcome: outcome::OK,
+            detail: &detail,
+        });
         if s.refused > 0 {
             let mut d = [0u8; 20];
             let mut detail = Vec::from(decimal(u64::from(s.refused), &mut d));
@@ -1325,6 +1364,7 @@ impl Runtime {
             return Err(NO_SESSION);
         };
         s.last = now;
+        s.requests = s.requests.saturating_add(1);
         let (id, session) = (s.task, s.session);
         let t = self.tasks.find(id).ok_or(NO_SESSION)?;
         let limits = self
@@ -1658,7 +1698,9 @@ impl Runtime {
                 }
                 asked.encode(out).ok_or(status::INTERNAL)
             }
-            Request::Revoke { .. } | Request::Answer { .. } => Err(status::NO_ACCESS),
+            Request::Revoke { .. } | Request::Answer { .. } | Request::Usage => {
+                Err(status::NO_ACCESS)
+            }
             Request::Submit { .. }
             | Request::Status { .. }
             | Request::Cancel { .. }
@@ -2142,6 +2184,49 @@ impl Runtime {
         }
     }
 
+    /// `USAGE` from `trust` (#119): what each running attempt has used, and
+    /// each group, as numbers `trust` writes out.
+    fn report_usage(&self) {
+        let now = uptime();
+        let clip = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
+        for s in self.slots.iter().flatten() {
+            let used = trust::Used {
+                cpu_ms: clip(process_usage(s.process, Use::CpuMicros).unwrap_or(0) / 1000),
+                pages: clip(process_usage(s.process, Use::Pages).unwrap_or(0)),
+                tokens: clip(s.usage.tokens),
+                sends: clip(s.usage.net_sends),
+                bytes: clip(s.usage.net_bytes),
+                requests: s.requests,
+            };
+            let name = self.agent_of(s.task);
+            tell_trust(&trust::Request::Used {
+                name: &name,
+                task: s.task,
+                used,
+            });
+        }
+        for (g, u) in self.groups.iter().zip(&self.group_use) {
+            let (mut running, mut pages) = (0, 0);
+            for s in self.slots.iter().flatten() {
+                let l = self
+                    .tasks
+                    .find(s.task)
+                    .and_then(|t| self.limits(&self.tasks.list[t].agent));
+                if let Some(l) = l.filter(|l| l.entry.budget.group == g.name) {
+                    running += 1;
+                    pages += u64::from(l.pages);
+                }
+            }
+            tell_trust(&trust::Request::GroupUsed {
+                name: g.name,
+                running,
+                pages: clip(pages),
+                tokens: clip(u.tokens.used(now)),
+                bytes: clip(u.net.used(now)),
+            });
+        }
+    }
+
     /// Slot `i`'s requests a second ([`Budget::rate`]).
     fn rate(&self, i: usize) -> Option<u32> {
         let s = self.slots[i].as_ref()?;
@@ -2233,6 +2318,10 @@ impl Runtime {
             }
             None if badge >= CONTROL => self.control(badge, req, out),
             None if badge == agents::TRUST => match req {
+                Request::Usage => {
+                    self.report_usage();
+                    Ok(done(out))
+                }
                 Request::Revoke { name, permission } => {
                     self.revoke(name, permission);
                     Ok(done(out))

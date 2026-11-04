@@ -1353,6 +1353,18 @@ const AGENTS_NET_REFUSED: &[&str] = &["approve #2"];
 const HOSTILE_TEST: &str = "hostile";
 /// The `budgets` kernel (#116): its trail is checked for each limit.
 const BUDGETS_TEST: &str = "budgets";
+/// `usage` while `idler` (task 8) runs in group `heavy` (#119).
+const BUDGETS_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("registered runtime", ""),
+    ("registered idler", "usage\n"),
+    ("usage: runtime cpu ", ""),
+    ("usage: idler task 8: cpu ", ""),
+    (
+        "usage: group heavy: 1 running, 64 pages, 0 tokens and 0 bytes this minute",
+        "",
+    ),
+];
 const HOSTILE_SCRIPT: &[console::Step] = &[
     ("trust: ready", ""),
     ("registered runtime", ""),
@@ -1594,6 +1606,20 @@ fn budgets_audit(image: &Path) -> Result<()> {
             return Err(format!("{n} records of {agent} {detail:?}, expected 1"));
         }
     }
+    // 7 tokens kept of the first session, 5 of each cancelled one; 2
+    // datagrams of 40 and 10 bytes (#119).
+    let usage = lines
+        .iter()
+        .filter(|l| l.contains("client 3 Event usage spender task 1/1 "))
+        .collect::<Vec<_>>();
+    if usage.len() != 1
+        || !usage[0].contains(" tok 17 net 2/50 req ")
+        || usage[0].ends_with(" req 0")
+    {
+        return Err(format!(
+            "expected spender's usage, 17 tokens and 2 datagrams of 50 bytes: {usage:?}"
+        ));
+    }
     println!(
         "  audit trail: {} records, each limit reached once",
         lines.len()
@@ -1800,6 +1826,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         PERMISSIONS_TEST => (PERMISSIONS_SCRIPT, PERMISSIONS_REFUSED),
         AGENTS_NET_TEST => (AGENTS_NET_SCRIPT, AGENTS_NET_REFUSED),
         HOSTILE_TEST => (HOSTILE_SCRIPT, HOSTILE_REFUSED),
+        BUDGETS_TEST => (BUDGETS_SCRIPT, &[]),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
         _ => (&[], &[]),
     };

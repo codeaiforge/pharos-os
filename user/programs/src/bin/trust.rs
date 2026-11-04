@@ -40,8 +40,8 @@ use pharos_proto::trust::{
 };
 use pharos_proto::{agents, audit};
 use pharos_user::{
-    Handle, Received, Status, call_timeout, delete, endpoint_create, irq_create, irq_notify,
-    process_status, process_stop, receive, send, sleep, try_send,
+    Handle, Received, Status, Usage as Use, call_timeout, delete, endpoint_create, irq_create,
+    irq_notify, process_status, process_stop, process_usage, receive, send, sleep, try_send,
 };
 
 pharos_user::entry!(main);
@@ -54,7 +54,7 @@ const AUDIT: Handle = 4;
 const AUDIT_US: u64 = 1_000_000;
 const BASE: u64 = 0x1000_0000;
 const HELP: &[u8] = b"commands: list, stop <agent>, stop all, revoke <agent> <permission>, \
-yes <n>, no <n>, audit";
+yes <n>, no <n>, audit, usage";
 /// How long a stop may take before the answer says it is still running.
 const STOP_WAIT_US: u64 = 1_000_000;
 
@@ -262,6 +262,20 @@ impl Trust {
                 }
             }
             Command::Audit => self.audit(),
+            // The runtime's own from the kernel; each attempt's and group's
+            // from the runtime, which answers with numbers only (#119).
+            Command::Usage => {
+                if let Some(runtime) = self.runtime {
+                    let cpu = process_usage(runtime, Use::CpuMicros).unwrap_or(0) / 1000;
+                    let pages = process_usage(runtime, Use::Pages).unwrap_or(0);
+                    let (mut a, mut b) = ([0u8; 20], [0u8; 20]);
+                    let (cpu, pages) = (decimal(cpu, &mut a), decimal(pages, &mut b));
+                    self.say(&[b"usage: runtime cpu ", cpu, b" ms, ", pages, b" pages"]);
+                }
+                if !self.tell_runtime(&agents::Request::Usage) {
+                    self.say(&[b"usage: the runtime is not answering; stop works"]);
+                }
+            }
             Command::Help => self.say(&[HELP]),
         }
     }
@@ -352,6 +366,58 @@ impl Trust {
                     Outcome::NotHeld => self.say(&[name, b" does not hold ", p]),
                     Outcome::NoAgent => self.say(&[b"no agent ", name, b" runs"]),
                 }
+                if cap != 0 {
+                    let _ = delete(cap);
+                }
+            }
+            Ok(Request::Used { name, task, used }) if badge == RUNTIME => {
+                let mut d = [[0u8; 20]; 7];
+                let [t, c, p, k, s, b, r] = &mut d;
+                self.say(&[
+                    b"usage: ",
+                    name,
+                    b" task ",
+                    decimal(u64::from(task), t),
+                    b": cpu ",
+                    decimal(u64::from(used.cpu_ms), c),
+                    b" ms, ",
+                    decimal(u64::from(used.pages), p),
+                    b" pages, ",
+                    decimal(u64::from(used.tokens), k),
+                    b" tokens, ",
+                    decimal(u64::from(used.sends), s),
+                    b" datagrams of ",
+                    decimal(u64::from(used.bytes), b),
+                    b" bytes, ",
+                    decimal(u64::from(used.requests), r),
+                    b" requests",
+                ]);
+                if cap != 0 {
+                    let _ = delete(cap);
+                }
+            }
+            Ok(Request::GroupUsed {
+                name,
+                running,
+                pages,
+                tokens,
+                bytes,
+            }) if badge == RUNTIME => {
+                let mut d = [[0u8; 20]; 4];
+                let [a, p, k, b] = &mut d;
+                self.say(&[
+                    b"usage: group ",
+                    name,
+                    b": ",
+                    decimal(u64::from(running), a),
+                    b" running, ",
+                    decimal(u64::from(pages), p),
+                    b" pages, ",
+                    decimal(u64::from(tokens), k),
+                    b" tokens and ",
+                    decimal(u64::from(bytes), b),
+                    b" bytes this minute",
+                ]);
                 if cap != 0 {
                     let _ = delete(cap);
                 }

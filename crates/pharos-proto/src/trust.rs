@@ -38,6 +38,9 @@ pub mod op {
     pub const REVOKED: u8 = 4;
     pub const APPROVE: u8 = 5;
     pub const RESOLVED: u8 = 6;
+    /// What one running attempt uses, and one group (#119).
+    pub const USED: u8 = 7;
+    pub const GROUP_USED: u8 = 8;
 }
 
 /// How an approval request ended.
@@ -109,6 +112,31 @@ pub enum Request<'a> {
         name: &'a [u8],
         permission: Permission,
     },
+    /// What a running attempt has used (#119), from the runtime.
+    Used {
+        name: &'a [u8],
+        task: u32,
+        used: Used,
+    },
+    /// What a group's running attempts hold and used this minute.
+    GroupUsed {
+        name: &'a [u8],
+        running: u32,
+        pages: u32,
+        tokens: u32,
+        bytes: u32,
+    },
+}
+
+/// An attempt's usage, as numbers only: `trust` writes the text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Used {
+    pub cpu_ms: u32,
+    pub pages: u32,
+    pub tokens: u32,
+    pub sends: u32,
+    pub bytes: u32,
+    pub requests: u32,
 }
 
 pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
@@ -145,6 +173,31 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                 _ => return None,
             };
             Some(Request::Resolved { number, resolution })
+        })(),
+        op::USED => (|| {
+            let len = usize::from(r.u8()?);
+            let name = r.take(len).filter(|n| valid_name(n))?;
+            let task = r.u32()?;
+            let used = Used {
+                cpu_ms: r.u32()?,
+                pages: r.u32()?,
+                tokens: r.u32()?,
+                sends: r.u32()?,
+                bytes: r.u32()?,
+                requests: r.u32()?,
+            };
+            Some(Request::Used { name, task, used })
+        })(),
+        op::GROUP_USED => (|| {
+            let len = usize::from(r.u8()?);
+            let name = r.take(len).filter(|n| valid_name(n))?;
+            Some(Request::GroupUsed {
+                name,
+                running: r.u32()?,
+                pages: r.u32()?,
+                tokens: r.u32()?,
+                bytes: r.u32()?,
+            })
         })(),
         op::REVOKED => (|| {
             let outcome = match r.u8()? {
@@ -217,6 +270,40 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.bytes(name)?;
             permission.write(&mut w)?;
         }
+        Request::Used { name, task, used } => {
+            if !valid_name(name) {
+                return None;
+            }
+            w.bytes(&[VERSION, op::USED, name.len() as u8])?;
+            w.bytes(name)?;
+            w.u32(task)?;
+            for v in [
+                used.cpu_ms,
+                used.pages,
+                used.tokens,
+                used.sends,
+                used.bytes,
+                used.requests,
+            ] {
+                w.u32(v)?;
+            }
+        }
+        Request::GroupUsed {
+            name,
+            running,
+            pages,
+            tokens,
+            bytes,
+        } => {
+            if !valid_name(name) {
+                return None;
+            }
+            w.bytes(&[VERSION, op::GROUP_USED, name.len() as u8])?;
+            w.bytes(name)?;
+            for v in [running, pages, tokens, bytes] {
+                w.u32(v)?;
+            }
+        }
     }
     Some(w.len())
 }
@@ -236,6 +323,9 @@ pub enum Command<'a> {
     Answer(u16, bool),
     /// `audit`: the audit trail's boot, record count, and chain head (#107).
     Audit,
+    /// `usage`: what the runtime, each running agent, and each group use
+    /// (#119).
+    Usage,
     /// Anything else: the service answers with the commands it knows.
     Help,
 }
@@ -264,6 +354,7 @@ pub fn command(line: &[u8]) -> Command<'_> {
     match (words.next(), words.next(), words.next()) {
         (Some(b"list"), None, None) => Command::List,
         (Some(b"audit"), None, None) => Command::Audit,
+        (Some(b"usage"), None, None) => Command::Usage,
         (Some(b"stop"), Some(b"all"), None) => Command::StopAll,
         (Some(b"stop"), Some(name), None) if valid_name(name) => Command::Stop(name),
         (Some(word @ (b"yes" | b"no")), Some(n), None) => match request_number(n) {
@@ -368,6 +459,25 @@ mod tests {
                 name: &long,
             },
             Request::Channel,
+            Request::Used {
+                name: &long,
+                task: u32::MAX,
+                used: Used {
+                    cpu_ms: 1,
+                    pages: 2,
+                    tokens: 3,
+                    sends: 4,
+                    bytes: 5,
+                    requests: u32::MAX,
+                },
+            },
+            Request::GroupUsed {
+                name: b"pair",
+                running: 1,
+                pages: 64,
+                tokens: 0,
+                bytes: u32::MAX,
+            },
             Request::Approve {
                 number: 3,
                 name: b"asker",
@@ -445,6 +555,8 @@ mod tests {
         assert_eq!(command(b"stop\tworker-1"), Command::Stop(b"worker-1"));
         assert_eq!(command(b"yes 3"), Command::Answer(3, true));
         assert_eq!(command(b"audit"), Command::Audit);
+        assert_eq!(command(b" usage "), Command::Usage);
+        assert_eq!(command(b"usage all"), Command::Help);
         assert_eq!(command(b"audit x"), Command::Help);
         assert_eq!(command(b" no  65535"), Command::Answer(65_535, false));
         assert_eq!(

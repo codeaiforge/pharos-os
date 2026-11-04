@@ -49,6 +49,8 @@ pub mod op {
     pub const FORGET: u8 = 19;
     pub const REVOKE: u8 = 20;
     pub const ANSWER: u8 = 21;
+    /// `trust`: what each running agent and each group uses (#119).
+    pub const USAGE: u8 = 22;
 }
 
 /// The `ASK` reply's outcome, after `OK` (#106).
@@ -262,6 +264,8 @@ pub enum Request<'a> {
         number: u16,
         yes: bool,
     },
+    /// `trust`: send `trust` what each running attempt and group uses.
+    Usage,
     /// `trust`: takes `permission` from every running agent `name`.
     Revoke {
         name: &'a [u8],
@@ -370,6 +374,7 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                 len: r.u32()?,
             },
             op::RECEIVE_FROM => Request::ReceiveFrom,
+            op::USAGE => Request::Usage,
             op::ANSWER => Request::Answer {
                 number: r.u16()?,
                 yes: match r.u8()? {
@@ -484,6 +489,7 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.u32(len)?;
         }
         Request::ReceiveFrom => head(&mut w, op::RECEIVE_FROM)?,
+        Request::Usage => head(&mut w, op::USAGE)?,
         Request::Answer { number, yes } => {
             head(&mut w, op::ANSWER)?;
             w.u16(number)?;
@@ -738,6 +744,7 @@ mod tests {
                 len: MAX_DATAGRAM,
             },
             Request::ReceiveFrom,
+            Request::Usage,
             Request::Answer {
                 number: u16::MAX,
                 yes: false,

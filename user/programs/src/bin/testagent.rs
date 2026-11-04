@@ -637,6 +637,7 @@ impl Agent {
                 number: 1,
                 yes: true,
             },
+            Request::Usage,
         ];
         for req in &forged {
             if self.call(req, &mut out).0 != status::NO_ACCESS {

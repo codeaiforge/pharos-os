@@ -535,6 +535,10 @@ fn budgets(mut c: Client) -> u64 {
                 && ended(&c, second, State::Done, b"napped"),
         );
     }
+    // Runs while the runner types `usage` on the trusted console (#119).
+    let idler = c.submit(b"idler", b"wait");
+    sleep(3_000_000);
+    c.step("an idle agent ran while usage was asked", idler.is_ok());
     let _ = send(REPORT, b"done", 0, 0, 0);
     c.failed
 }

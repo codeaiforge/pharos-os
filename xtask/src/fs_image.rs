@@ -213,7 +213,7 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// `permissions` kernel's, which may write its own files (#105), and
 /// `asker`, which gets nothing and asks (#106), the `budgets` kernel's
 /// five (#116), and the `fairness` kernel's four (#117).
-pub const TEST_MANIFESTS: [(&str, &str); 18] = [
+pub const TEST_MANIFESTS: [(&str, &str); 19] = [
     (
         "agents/worker.manifest",
         "# The agents test kernel's worker.\nmanifest = 1\nname = worker\nprogram = bin/testagent\n\
@@ -304,6 +304,11 @@ pub const TEST_MANIFESTS: [(&str, &str); 18] = [
     (
         "agents/queuer.manifest",
         "manifest = 1\nname = queuer\nprogram = bin/testagent\npages = 64\nmodels = 2\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 30000\ndata = write\nnet = 10.0.2.2:47000\n",
+    ),
+    (
+        "agents/idler.manifest",
+        "manifest = 1\nname = idler\nprogram = bin/testagent\npages = 64\nmodels = 2\n\
          attempts = 1\nprogress_ms = 10000\ntask_ms = 30000\ndata = write\nnet = 10.0.2.2:47000\n",
     ),
 ];

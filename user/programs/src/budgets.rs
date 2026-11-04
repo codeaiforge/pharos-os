@@ -52,6 +52,15 @@ impl Window {
 }
 
 impl Window {
+    /// What this minute has used at `now`.
+    pub fn used(&self, now: u64) -> u64 {
+        if now.saturating_sub(self.start_us) >= MINUTE_US {
+            0
+        } else {
+            self.used
+        }
+    }
+
     /// Gives back `amount` charged in this minute (what a request did not
     /// use, #118); nothing once the minute has passed.
     pub fn refund(&mut self, amount: u64) {

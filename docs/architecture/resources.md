@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-04 (#113),** with CPU time counted by one `rdtsc` per switch and a plain load and store, measured within D-004's IPC budget before approval. To be built by: scheduling classes and CPU accounting (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), and exhaustion tests (#120). **Implemented:** scheduling classes and CPU time per process (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118).
+**Planned. Design approved by the maintainer on 2026-11-04 (#113),** with CPU time counted by one `rdtsc` per switch and a plain load and store, measured within D-004's IPC budget before approval. To be built by: scheduling classes and CPU accounting (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), and exhaustion tests (#120). **Implemented:** scheduling classes and CPU time per process (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119).
 
 ## 2. Context
 
@@ -87,6 +87,8 @@ What M3.5 builds on:
 - **Every unit is attributed:** CPU and pages to a process (kernel), and the runtime's own process's use split by agent in the runtime for tokens, network, storage, and requests; anything the runtime does for no agent is its own.
 - **`usage` on the trusted console** shows each running agent's attempt (CPU ms, pages, tokens, network sends and bytes, data KB, requests) against its limits, each group's totals, and the services' CPU time and pages, which `trust` asks the runtime and `init` for with non-blocking sends, as for `revoke`.
 - **At the end of each attempt** the runtime records its usage in the audit trail (`usage`, beside the refusal total).
+
+- *Implemented (#119):* `usage` on the trusted console, `agents` request `USAGE` (22, served only under `trust`'s badge), `trust` operations `USED` (7) and `GROUP_USED` (8) with numbers only, and audit action `usage` (14): each attempt's record as it ends reads `cpu <ms> tok <n> net <datagrams>/<bytes> req <n>`. Not shown: the other services' CPU time and pages, since `trust` holds no capability on them (it holds the runtime's and each agent's, from `init` and the runtime); `process_usage` attributes every process's CPU time and pages to it in the kernel.
 
 ### Exhaustion tests (#120)
 
