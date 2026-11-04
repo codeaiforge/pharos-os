@@ -4,7 +4,9 @@
 //! cannot be mapped writable, and writing its mapping is a page fault; the
 //! receiver's limit applies; revocation stops new mappings and turns
 //! existing ones into zeroed private pages with the same access (#104);
-//! the object lives while either side maps it, and every frame returns.
+//! the object lives while either side maps it, and every frame returns. A
+//! capability revoked while `mem_map_cap` maps it leaves no mapping of the
+//! object (#122).
 //! Runs under UEFI (D-009).
 
 #![no_std]
@@ -18,7 +20,7 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use pharos_kernel::arch::x86_64::{apic, gdt, idt};
-use pharos_kernel::cap::{Capability, Object, RECEIVE, SEND, WRITE};
+use pharos_kernel::cap::{Capability, Object, READ, RECEIVE, SEND, WRITE};
 use pharos_kernel::fs::Fs;
 use pharos_kernel::ipc::Endpoint;
 use pharos_kernel::sched::TaskId;
@@ -220,5 +222,51 @@ fn run(t: &mut TestRun) {
     t.check(
         "no shared frame was freed twice",
         process::shared_free_errors() == 0,
+    );
+
+    // Revoked during one of `mem_map_cap`'s pauses (#122): the mapping must
+    // be refused or swept, never left reading the object.
+    let probe = process::load_elf(&programs, b"bin/memprobe")
+        .and_then(|(space, entry)| {
+            let budget = process::Budget::kernel(32_900);
+            let entry = entry - process::USER_BASE;
+            process::start_class(space, entry, 5, Vec::new(), budget, sched::SERVICES)
+        })
+        .ok();
+    let p = probe.and_then(process::by_id);
+    let mut parent = None;
+    for _ in 0..200 {
+        parent = p.as_ref().and_then(|p| p.caps.lock().get(1, 0).ok());
+        if parent.is_some() {
+            break;
+        }
+        sched::sleep(Duration::from_millis(10));
+    }
+    let given = match (&p, &parent) {
+        (Some(p), Some(parent)) => p.caps.lock().insert(parent.derive(READ)) == Ok(2),
+        _ => false,
+    };
+    t.check(
+        "memprobe shared 64 MiB and was given a capability on it",
+        given,
+    );
+    // Revoked as soon as it has reserved the second mapping: inside the call.
+    let mut during = false;
+    for _ in 0..200 {
+        let used = p.as_ref().map_or(0, |p| p.memory.lock().used);
+        if used >= 2 * 16_384 {
+            during = parent.as_ref().is_some_and(|c| process::revoke(c) > 0);
+            break;
+        }
+        sched::sleep(Duration::from_millis(10));
+    }
+    drop(p);
+    if let Some(id) = probe {
+        wait_end(id);
+    }
+    t.check(
+        "a capability revoked while mem_map_cap maps it leaves no mapping of the object",
+        during
+            && probe.is_some_and(|id| process::exits().iter().any(|e| e.task == id && e.code == 0)),
     );
 }

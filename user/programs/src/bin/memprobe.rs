@@ -10,8 +10,12 @@
 //! - Argument 2: a child given no limit. Exits 0 if it cannot map a page.
 //! - Argument 3: a child given half the limit: maps it, holds it for
 //!   300 ms, and exits 0 (#115: meanwhile its parent cannot map that half).
-//! - Argument 4 (the `exhaustion` kernel, #120): maps 64 MiB in one call
-//!   and holds it until stopped; exits 1 if it could not.
+//! - Argument 5 (the `shared_memory` kernel, #122): see
+//!   [`revoked_while_mapping`].
+//! - Argument 4 (the `exhaustion` kernel, #120, #122): maps 64 MiB and
+//!   unmaps it, maps 128 MiB, shares it, and maps the share, then maps 64
+//!   MiB more, each in one call, and holds them until stopped; exits with
+//!   the failed step's number otherwise.
 
 #![no_std]
 #![no_main]
@@ -23,8 +27,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use pharos_user::rights::WRITE;
 use pharos_user::{
-    Error, Grant, Received, Status, debug_write, endpoint_create, mem_map, mem_unmap,
-    process_status, receive, sleep, spawn, spawn_limited,
+    Error, Grant, Received, Status, debug_write, endpoint_create, mem_map, mem_map_cap, mem_share,
+    mem_unmap, process_status, receive, sleep, spawn, spawn_limited,
 };
 
 pharos_user::entry!(main);
@@ -74,6 +78,36 @@ fn child(arg: u64, limit: Option<u32>) -> Option<u64> {
     }
 }
 
+/// Argument 5: shares 64 MiB holding a marker (its handle 1), then maps
+/// handle 2, which the kernel derives from it and revokes while the map
+/// runs. Exits 0 if the map is refused (`REVOKED`) or its pages read zeros
+/// once revoked, 9 if they still show the marker, other codes on errors.
+fn revoked_while_mapping() -> u64 {
+    let Ok(buffer) = pharos_user::mem_map_buffer(64 * MIB) else {
+        return 1;
+    };
+    buffer.write_bytes(0, &[0xab]);
+    if mem_share(buffer.addr(), 64 * MIB).is_err() {
+        return 2;
+    }
+    let mapped = loop {
+        match mem_map_cap(2, false, 64 * MIB) {
+            Err(Error::InvalidHandle) => sleep(1_000),
+            other => break other,
+        }
+    };
+    match mapped {
+        Err(Error::Revoked) => 0,
+        Ok(view) => {
+            sleep(300_000);
+            let mut byte = [0u8];
+            view.read_bytes(0, &mut byte);
+            if byte[0] == 0 { 0 } else { 9 }
+        }
+        Err(_) => 5,
+    }
+}
+
 fn main(arg: u64) -> u64 {
     let all = u64::from(LIMIT) * 4096;
     match arg {
@@ -87,9 +121,22 @@ fn main(arg: u64) -> u64 {
             return u64::from(!held);
         }
         2 => return u64::from(mem_map(4096) != Err(Error::NoMemory)),
+        5 => return revoked_while_mapping(),
         4 => {
+            let Ok(a) = mem_map(64 * MIB) else { return 1 };
+            if mem_unmap(a, 64 * MIB).is_err() {
+                return 2;
+            }
+            let Ok(b) = mem_map(128 * MIB) else { return 3 };
+            let Ok(memory) = mem_share(b, 128 * MIB) else {
+                return 4;
+            };
+            if mem_map_cap(memory, true, 128 * MIB).is_err() {
+                return 5;
+            }
+            // Its own, freed as it ends.
             if mem_map(64 * MIB).is_err() {
-                return 1;
+                return 6;
             }
             loop {
                 sleep(1_000_000);

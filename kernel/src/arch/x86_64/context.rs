@@ -137,8 +137,9 @@ pub struct Context {
     stack: Option<KernelStack>,
     /// Process address space, destroyed with the context (issue #38).
     space: Option<IrqMutex<AddressSpace>>,
-    /// Root table of `space`; 0 for the kernel address space.
-    root: u64,
+    /// Root table of `space`; 0 for the kernel address space, and once the
+    /// thread has left its space ([`Context::leave_space`]).
+    root: AtomicU64,
     /// x87/SSE/AVX registers while not running (D-016).
     vector: IrqMutex<fpu::Area>,
 }
@@ -255,7 +256,7 @@ impl Context {
             exited: AtomicBool::new(false),
             stack: None,
             space: None,
-            root: 0,
+            root: AtomicU64::new(0),
             vector: IrqMutex::new(fpu::Area::clean()),
         }))
     }
@@ -304,10 +305,22 @@ impl Context {
             running: AtomicBool::new(false),
             exited: AtomicBool::new(false),
             stack: Some(stack),
-            root: space.as_ref().map_or(0, AddressSpace::root),
+            root: AtomicU64::new(space.as_ref().map_or(0, AddressSpace::root)),
             space: space.map(IrqMutex::new),
             vector: IrqMutex::new(fpu::Area::clean()),
         })
+    }
+
+    /// Runs on the kernel root from now on, so its process address space
+    /// is no longer active anywhere and can be freed while the thread still
+    /// runs (an ending process, #122). The space stays in the context,
+    /// unused. Only for the running context, with interrupts disabled.
+    pub fn leave_space(&self) {
+        debug_assert!(self.is_running() && !super::interrupts_enabled());
+        self.root.store(0, Ordering::Relaxed);
+        if let Some(root) = paging::kernel_root() {
+            paging::load_root(root);
+        }
     }
 
     /// The process address space, locked; `None` for kernel threads.
@@ -367,7 +380,7 @@ fn do_switch(from: Arc<Context>, to: Arc<Context>) {
     let next = to.rsp.load(Ordering::Relaxed);
     // Kernel threads run on the kernel root; process threads on their own.
     // Both map the kernel half, so execution continues on `from`'s stack.
-    let root = match to.root {
+    let root = match to.root.load(Ordering::Relaxed) {
         0 => paging::kernel_root().unwrap_or(0),
         root => root,
     };

@@ -727,7 +727,7 @@ mod kernel {
         };
         let mut done = 0;
         while done < pages {
-            let batch = (pages - done).min(MAP_BATCH);
+            let batch = (pages - done).min(process::BATCH);
             let mapped = sched::with_current_space(|space| {
                 let mut guard = crate::mm::frames();
                 let frames = guard.as_mut()?;
@@ -761,9 +761,6 @@ mod kernel {
         Ok(start)
     }
 
-    /// Pages `mem_map` maps and zeroes between two chances for interrupts.
-    const MAP_BATCH: u64 = 64;
-
     /// `mem_share`: turns one whole `mem_map` mapping into a `Memory`
     /// object (or returns another capability on it, if already shared) and
     /// a capability with `READ`, `WRITE`, and `GRANT`. A mapping from
@@ -796,12 +793,21 @@ mod kernel {
                     return Err(Error::NoMemory);
                 }
                 // Every page of a recorded mapping is mapped and owned, so
-                // `disown` cannot fail part-way.
-                sched::with_current_space(|space| {
-                    (0..pages)
-                        .try_for_each(|i| space.disown(addr + i * 4096).map(|p| frames.push(p)))
-                })
-                .ok_or(Error::BadAddress)??;
+                // `disown` cannot fail part-way. In batches, as `mem_map`
+                // (#122): only this process uses the mapping meanwhile.
+                let mut done = 0;
+                while done < pages {
+                    let n = (pages - done).min(process::BATCH);
+                    sched::with_current_space(|space| {
+                        (done..done + n)
+                            .try_for_each(|i| space.disown(addr + i * 4096).map(|p| frames.push(p)))
+                    })
+                    .ok_or(Error::BadAddress)??;
+                    done += n;
+                    if done < pages {
+                        crate::arch::x86_64::interrupt_window();
+                    }
+                }
                 let memory = process::SharedMemory::new(frames);
                 process.shared.lock().push(process::SharedMapping {
                     start: addr,
@@ -848,23 +854,40 @@ mod kernel {
             uncached: false,
             user: true,
         };
-        let mapped = sched::with_current_space(|space| {
-            let mut guard = crate::mm::frames();
-            let frames = guard.as_mut()?;
-            for (i, &phys) in memory.frames().iter().enumerate() {
-                let virt = start + i as u64 * 4096;
-                if space.map_device(virt, phys, flags, frames).is_err() {
-                    for j in 0..i as u64 {
-                        let _ = space.unmap(start + j * 4096);
+        // In batches, as `mem_map` (#122); the region is reserved meanwhile.
+        let mut done = 0;
+        while done < pages {
+            let n = (pages - done).min(process::BATCH);
+            let mapped = sched::with_current_space(|space| {
+                let mut guard = crate::mm::frames();
+                let frames = guard.as_mut()?;
+                for i in done..done + n {
+                    let virt = start + i * 4096;
+                    let phys = memory.frames()[i as usize];
+                    if space.map_device(virt, phys, flags, frames).is_err() {
+                        return None;
                     }
-                    return None;
                 }
+                Some(())
+            });
+            if mapped.flatten().is_none() {
+                // What was mapped, the failed page's batch included.
+                process::unmap_batched(start, (done + n).min(pages), false);
+                process.memory.lock().release(start, pages);
+                return Err(Error::NoMemory);
             }
-            Some(())
-        });
-        if mapped.flatten().is_none() {
+            done += n;
+            if done < pages {
+                crate::arch::x86_64::interrupt_window();
+            }
+        }
+        // Revoked during a pause: its sweep could not see this mapping yet.
+        // Nothing switches from here to the push, so a later revocation
+        // finds it.
+        if via.is_revoked() {
+            process::unmap_batched(start, pages, false);
             process.memory.lock().release(start, pages);
-            return Err(Error::NoMemory);
+            return Err(Error::Revoked);
         }
         process.shared.lock().push(process::SharedMapping {
             start,
@@ -1247,21 +1270,12 @@ mod kernel {
                     let at = list.iter().position(|s| s.start == addr);
                     at.map(|at| list.remove(at))
                 };
-                sched::with_current_space(|space| {
-                    let mut guard = crate::mm::frames();
-                    if let Some(frames) = guard.as_mut() {
-                        for i in 0..pages {
-                            match shared {
-                                // The object owns the frames.
-                                Some(_) => drop(space.unmap(addr + i * 4096)),
-                                None => space.unmap_owned(addr + i * 4096, frames),
-                            }
-                        }
-                    }
-                });
+                // The object owns a shared mapping's frames.
+                process::unmap_batched(addr, pages, shared.is_none());
                 // Dropped here, after the frame allocator's lock: this may
-                // have been the last reference.
-                drop(shared);
+                // have been the last reference, whose frames are freed in
+                // batches (#122).
+                process::with_pauses(|| drop(shared));
                 Ok(0)
             }
             Call::MemShare { addr, pages } => mem_share(&process, addr, pages),

@@ -9,8 +9,9 @@
 //! starts, and checks each answer came within `EXHAUSTION_BOUND` (in
 //! xtask). The kernel's own task (trusted class) checks its 20 ms waits
 //! end within [`LATE_BOUND`] the whole time, while `memprobe` (services
-//! class) also maps 64 MiB in one call, and that `stop all` ends the
-//! runtime and every agent. Runs under UEFI (D-009).
+//! class) maps and unmaps 64 MiB, shares 128 MiB and maps the share, and
+//! maps 64 MiB more, each in one call, and is then stopped, and that `stop all` ends the runtime and
+//! every agent. Runs under UEFI (D-009).
 
 #![no_std]
 #![no_main]
@@ -69,16 +70,19 @@ fn run(t: &mut TestRun) {
         return;
     };
     let (client, steps) = common::client(t, &services, 7);
-    // A services-class process mapping 64 MiB in one call: its zeroing
-    // must not hold the kernel's task past the bound (#120).
+    // A services-class process mapping and unmapping 64 MiB, sharing 128
+    // MiB and mapping the share, and mapping 64 MiB more, each in one call, then stopped while the agents
+    // run: none of it may hold the kernel's task past the bound (#120,
+    // #122).
     let mapper = process::load_elf(&services.programs, b"bin/memprobe")
         .and_then(|(space, entry)| {
-            let budget = process::Budget::kernel(16_448);
+            let budget = process::Budget::kernel(82_100);
             let entry = entry - process::USER_BASE;
             process::start_class(space, entry, 4, Vec::new(), budget, sched::SERVICES)
         })
         .ok();
     t.check("memprobe started to map 64 MiB", mapper.is_some());
+    let mut mapped = false;
     let mut passed: Vec<Vec<u8>> = Vec::new();
     let mut late = Duration::ZERO;
     let wait = |late: &mut Duration| {
@@ -98,6 +102,13 @@ fn run(t: &mut TestRun) {
                 passed.push(m.bytes().to_vec());
             }
             None => {}
+        }
+        // Once it holds all three (320 MiB of mappings), it is stopped: its
+        // address space is freed under the same measurement.
+        let holds = |m| process::by_id(m).is_some_and(|p| p.memory.lock().used >= 5 * 16_384);
+        if !mapped && mapper.is_some_and(holds) {
+            mapped = true;
+            mapper.map(process::stop);
         }
     }
     for step in [
@@ -131,13 +142,9 @@ fn run(t: &mut TestRun) {
         late <= LATE_BOUND,
     );
     t.check(
-        "memprobe mapped its 64 MiB and holds it",
-        mapper.is_some_and(|m| process::by_id(m).is_some()),
+        "memprobe mapped, unmapped, shared, and mapped the share, and was stopped",
+        mapped && mapper.is_some_and(|m| process::by_id(m).is_none()),
     );
-    // Freeing 64 MiB is not batched: only after the measurement.
-    if let Some(m) = mapper {
-        process::stop(m);
-    }
     t.check(
         "the client exited with no failed step",
         process::exits()

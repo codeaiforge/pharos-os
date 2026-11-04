@@ -148,7 +148,7 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 19 | `mem_map` (M3.0) | length in bytes (> 0, rounded up to pages) | start address in the map region | none (the caller's page limit; [user-environment.md](user-environment.md#user-memory)) |
 | 20 | `mem_unmap` (M3.0) | start address, length (one whole earlier mapping) | 0 | none (the caller's own mapping) |
 | 22 | `mem_share` (M3.0) | start address, length (one whole `mem_map` mapping) | a new `Memory` handle (`READ`, `WRITE`, and `GRANT`); a mapping from `mem_map_cap` is refused (`BAD_ADDRESS`) | none (the caller's own mapping) |
-| 23 | `mem_map_cap` (M3.0) | `Memory` handle, writable (0 or 1), length (the object's size) | start address in the map region | memory, `READ`; `WRITE` when writable |
+| 23 | `mem_map_cap` (M3.0) | `Memory` handle, writable (0 or 1), length (the object's size) | start address in the map region; `REVOKED` if the capability is revoked while it maps (since #122 it maps in batches) | memory, `READ`; `WRITE` when writable |
 | 21 | `sleep` (M3.0) | microseconds (0 returns at once, `u64::MAX` sleeps forever) | 0 | none |
 | 24 | `uptime` (M3.2, D-021) | — | microseconds since boot | none |
 | 25 | `process_stop` (M3.3, D-018) | process handle | 0, at once (the process and every process it started end at their next return to user mode; `process_status` shows when; an ended process is not an error) | process, `STOP` (`1 << 9`) |

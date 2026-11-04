@@ -481,6 +481,27 @@ pub fn with_current_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R
     Some(f(&mut space))
 }
 
+/// Frees the running process thread's address space, a few page tables at
+/// a time with `pause` between them, after leaving it (#122): the
+/// scheduler would otherwise free it whole under its locks once the
+/// thread exits. Interrupts disabled, no lock held.
+pub fn free_current_space(pause: impl Fn()) {
+    let Some(task) = SCHEDULER.lock().as_ref().map(|s| s.queue.current().clone()) else {
+        return;
+    };
+    task.context.leave_space();
+    loop {
+        let done = task.context.space().is_none_or(|mut space| {
+            let mut guard = crate::mm::frames();
+            guard.as_mut().is_none_or(|f| space.free_user_part(f, 4))
+        });
+        if done {
+            break;
+        }
+        pause();
+    }
+}
+
 /// Runs `f` on task `id`'s process address space, locked; `None` for a
 /// kernel task or one that has exited. For changing another process's
 /// mappings (revocation): that task is not running, since system calls run

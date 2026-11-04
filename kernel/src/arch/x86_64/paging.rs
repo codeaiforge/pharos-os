@@ -389,6 +389,62 @@ impl AddressSpace {
         freed
     }
 
+    /// What [`destroy`](Self::destroy) does to the user half, at most
+    /// `tables` page tables (with the pages they map) per call, clearing
+    /// what it frees; the root stays. True once the user half is empty. For
+    /// freeing an ending process's space in batches (#122). Must not be
+    /// active.
+    pub fn free_user_part(&mut self, frames: &mut FrameAllocator<'_>, mut tables: usize) -> bool {
+        assert!(!self.is_active(), "freeing the active address space");
+        if !self.user {
+            return true;
+        }
+        let mut free = |phys: u64, count: usize| {
+            if let Some(frame) = Frame::from_addr(phys) {
+                let _ = frames.free_contiguous(frame, count);
+            }
+        };
+        for i4 in 0..KERNEL_HALF {
+            let pdpt = read_entry(self.root, i4);
+            if pdpt & PRESENT == 0 {
+                continue;
+            }
+            for i3 in 0..512 {
+                let pd = read_entry(pdpt & ADDRESS_MASK, i3);
+                if pd & PRESENT == 0 {
+                    continue;
+                }
+                for i2 in 0..512 {
+                    let pt = read_entry(pd & ADDRESS_MASK, i2);
+                    if pt & PRESENT == 0 {
+                        continue;
+                    }
+                    if tables == 0 {
+                        return false;
+                    }
+                    tables -= 1;
+                    if pt & HUGE != 0 {
+                        free(pt & ADDRESS_MASK, 512);
+                    } else {
+                        for i1 in 0..512 {
+                            let page = read_entry(pt & ADDRESS_MASK, i1);
+                            if page & PRESENT != 0 && page & DEVICE == 0 {
+                                free(page & ADDRESS_MASK, 1);
+                            }
+                        }
+                        free(pt & ADDRESS_MASK, 1);
+                    }
+                    write_entry(pd & ADDRESS_MASK, i2, 0);
+                }
+                free(pd & ADDRESS_MASK, 1);
+                write_entry(pdpt & ADDRESS_MASK, i3, 0);
+            }
+            free(pdpt & ADDRESS_MASK, 1);
+            write_entry(self.root, i4, 0);
+        }
+        true
+    }
+
     /// Physical address of the root table (the CR3 value).
     pub fn root(&self) -> u64 {
         self.root

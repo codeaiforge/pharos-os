@@ -1052,6 +1052,8 @@ fn test_qemu_args(name: &str) -> Vec<OsString> {
         "vector_state_avx" => vec!["-cpu".into(), "max".into()],
         // After `qemu_args`' 256M: QEMU takes the last `-m`.
         LARGE_FILE_TEST => vec!["-m".into(), "2G".into()],
+        // `memprobe` holds 192 MiB beside the services (#122).
+        EXHAUSTION_TEST => vec!["-m".into(), "1G".into()],
         _ => Vec::new(),
     }
 }
@@ -2113,6 +2115,7 @@ mod tests {
     fn test_kernels_get_their_machine() {
         assert_eq!(test_qemu_args("vector_state_avx"), ["-cpu", "max"]);
         assert_eq!(test_qemu_args("large_file"), ["-m", "2G"]);
+        assert_eq!(test_qemu_args("exhaustion"), ["-m", "1G"]);
         assert!(test_qemu_args("vector_state").is_empty());
         assert!(test_qemu_args("network").is_empty());
     }

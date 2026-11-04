@@ -77,21 +77,52 @@ impl SharedMemory {
 }
 
 impl Drop for SharedMemory {
-    /// Frees the frames. Never runs with the frame allocator locked: the
-    /// last reference is dropped by a capability table, a process, or the
-    /// system-call handler after its locks are released.
+    /// Frees the frames, [`BATCH`] at a time, pausing between batches
+    /// under `with_pauses`. Never runs with the frame allocator locked:
+    /// the last reference is dropped by a capability table, a process, or
+    /// the system-call handler after its locks are released.
     fn drop(&mut self) {
         SHARED_LIVE.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
         #[cfg(target_os = "none")]
-        if let Some(frames) = mm::frames().as_mut() {
-            for &phys in &self.frames {
-                let freed = crate::mm::frame::Frame::from_addr(phys)
-                    .is_some_and(|frame| frames.free(frame).is_ok());
-                if !freed {
-                    SHARED_FREE_ERRORS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        for batch in self.frames.chunks(BATCH as usize) {
+            if let Some(frames) = mm::frames().as_mut() {
+                for &phys in batch {
+                    let freed = crate::mm::frame::Frame::from_addr(phys)
+                        .is_some_and(|frame| frames.free(frame).is_ok());
+                    if !freed {
+                        SHARED_FREE_ERRORS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    }
                 }
             }
+            pause();
         }
+    }
+}
+
+/// The task whose drops may pause ([`with_pauses`]); `u64::MAX` for none.
+static PAUSING: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Runs `f`, letting interrupts in between the batches of frames that
+/// drops in it free (#122). Only where nothing relies on interrupts
+/// staying off; called with interrupts disabled and no lock held. Another
+/// task that runs meanwhile does not pause (the mark is the current
+/// task's), and may end this task's pauses early: that costs latency only.
+pub(crate) fn with_pauses(f: impl FnOnce()) {
+    use core::sync::atomic::Ordering;
+    let id = sched::current_id().unwrap_or(u64::MAX);
+    let before = PAUSING.swap(id, Ordering::Relaxed);
+    f();
+    PAUSING.store(before, Ordering::Relaxed);
+}
+
+/// Lets interrupts in if the current task is in [`with_pauses`], with
+/// interrupts disabled and no lock held.
+#[cfg(target_os = "none")]
+fn pause() {
+    let marked = sched::current_id()
+        .is_some_and(|id| id == PAUSING.load(core::sync::atomic::Ordering::Relaxed));
+    if marked && mm::raw::irq_locks_held() == 0 && !crate::arch::x86_64::interrupts_enabled() {
+        crate::arch::x86_64::interrupt_window();
     }
 }
 
@@ -216,6 +247,39 @@ impl UserMemory {
         self.maps.remove(i);
         self.used -= pages;
         true
+    }
+}
+
+/// Pages mapped, unmapped, or shared between two chances for interrupts
+/// (D-022, #120, #122), so a large mapping does not hold the CPU.
+pub const BATCH: u64 = 64;
+
+/// Unmaps `pages` at `start` from the current address space, freeing the
+/// frames if `owned`, `BATCH` at a time with interrupts let in between.
+/// Called with interrupts disabled and no lock held.
+#[cfg(target_os = "none")]
+pub(crate) fn unmap_batched(start: u64, pages: u64, owned: bool) {
+    debug_assert!(!crate::arch::x86_64::interrupts_enabled());
+    let mut done = 0;
+    while done < pages {
+        let n = (pages - done).min(BATCH);
+        sched::with_current_space(|space| {
+            let mut guard = crate::mm::frames();
+            if let Some(frames) = guard.as_mut() {
+                for i in done..done + n {
+                    let virt = start + i * FRAME_SIZE;
+                    if owned {
+                        space.unmap_owned(virt, frames);
+                    } else {
+                        drop(space.unmap(virt));
+                    }
+                }
+            }
+        });
+        done += n;
+        if done < pages {
+            crate::arch::x86_64::interrupt_window();
+        }
     }
 }
 
@@ -709,6 +773,12 @@ pub fn count() -> usize {
 /// Ends the calling process: forgets its state and ends its thread (the
 /// address space is freed when the thread is reaped).
 fn end_current(end: End) -> ! {
+    // Its address space first, in batches: the scheduler would free it
+    // whole under its locks (#122). Shared and device pages stay with
+    // their objects, as in `destroy`.
+    if current().is_some() {
+        sched::free_current_space(crate::arch::x86_64::interrupt_window);
+    }
     if let Some(id) = sched::current_id() {
         // Dropped after the table's lock is released: dropping a process may
         // drop device handles, which stop their devices and free memory.
@@ -742,7 +812,9 @@ fn end_current(end: End) -> ! {
                 .store(cpu, core::sync::atomic::Ordering::Relaxed);
             process.record.finish(end);
         }
-        drop(process);
+        // Shared objects it was the last to hold free their frames here,
+        // in batches (#122).
+        with_pauses(|| drop(process));
     }
     sched::exit()
 }
