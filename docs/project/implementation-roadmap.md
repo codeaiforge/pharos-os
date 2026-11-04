@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.4 — Permissions, sandboxing, auditability, and isolation.** Everything in Phases 3–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.5 — Resource accounting and limits.** Everything in Phases 3–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -41,7 +41,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
 | 2 | Core System | Done (v0.2.0) |
-| 3 | AI Agent Platform | **Current** (M3.4; M3.1, M3.0, M3.2, and M3.3 done) |
+| 3 | AI Agent Platform | **Current** (M3.5; M3.1, M3.0, M3.2, M3.3, and M3.4 done) |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
 
@@ -291,7 +291,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ## Phase 3 — AI Agent Platform
 
-**Status: Current** (M3.4; M3.1, M3.0, M3.2, and M3.3 done).
+**Status: Current** (M3.5; M3.1, M3.0, M3.2, M3.3, and M3.4 done).
 
 Ordering notes:
 
@@ -394,7 +394,7 @@ Ordering notes:
 
 ### M3.4 — Permissions, sandboxing, auditability, and isolation
 
-**Status: Current.** M3.3 gives it agents that start with one capability and can always be stopped from the trusted path. D-012 accepted (#102): permissions from the policy table, and beyond it only by approval on the trusted path for one task; revocation per permission and at once, memory unmapped by the kernel; expiry on runtime grants only; default-deny networking per destination. Design: [capabilities.md](../architecture/capabilities.md) (#103), approved 2026-11-03. Next: kernel revocation of mapped memory (#104).
+**Status: Done** — gate passed 2026-11-04: the CI jobs passed on `main` at `cef4ece` ([run 41708829549](https://github.com/codeaiforge/pharos-os/actions/runs/41708829549)) with 54 test kernels, among them `hostile` (an agent trying every way past its one capability, each refused and each kind recorded once while the agent beside it completes), `permissions` (grants from the policy table, approval on the trusted console, revocation, expiry, and `NO_AUDIT` with the audit service killed), `audit` (stamped badges, chains, and the anchor `trust` shows), `agents_net` (default-deny networking with per-destination grants, revoked with a late reply dropped), `network` (destination lists from `init`), and `shared_memory` and `device_caps` (revoked mappings become zeroed pages). Removing the runtime's `SEND_TO` grant check failed CI on a throwaway branch ([run 41708137358](https://github.com/codeaiforge/pharos-os/actions/runs/41708137358)) at `agents_net`. One CI run on `main` failed during M3.4 (`6798458`, [run 41652628559](https://github.com/codeaiforge/pharos-os/actions/runs/41652628559)): `trust` hung on a lost wakeup in kernel-side IPC, review finding F2, fixed. The IPC round trip was re-measured at a 1,963 ns median, within D-004's budget. The security review ([review-m3.4-permissions.md](../security/review-m3.4-permissions.md)) found and fixed two issues: `RECEIVE_FROM` needed no grant (F1) and the lost wakeup (F2). The maintainer approved it on 2026-11-04. D-012 and D-018 are final. Delivered: D-012 (#102), the design (#103), kernel revocation of mapped memory and devices (#104), runtime permissions (#105), approval on the trusted path (#106), the audit service (#107), auditing every grant and consequential action (#108), agent networking (#109), adversarial tests (#110), and the gate (#111). Carried: the limits in the [threat model](../security/threat-model.md#open-limits-carried-out-of-phase-2).
 
 - **Where it runs (D-020):** Pharos; audit-record format host-tested.
 - **Objective and scope:** Enforce explicit, least-privilege capabilities for agents, sandbox them, and record grants and sensitive actions in a protected audit trail.
@@ -413,7 +413,7 @@ Ordering notes:
 
 ### M3.5 — Resource accounting and limits
 
-**Status: Planned.**
+**Status: Current.** M3.4 gives it agents that hold only granted permissions, an audit trail of what they did, and the limits the M3.4 review carried here: a runtime that blocks on its services, a shared approval queue, and no rate limit on agent requests. First step: its design and issues.
 
 - **Where it runs (D-020):** Pharos; accounting logic host-tested.
 - **Objective and scope:** Per-agent and per-group limits on CPU, memory, storage, network, and inference usage, with resources reserved for essential system functions.
@@ -666,4 +666,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, and M3.3 (agent lifecycle) on 2026-11-03. The current milestone is **M3.4 — Permissions, sandboxing, auditability, and isolation**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, and M3.4 (permissions and audit) on 2026-11-04. The current milestone is **M3.5 — Resource accounting and limits**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

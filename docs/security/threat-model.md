@@ -1,6 +1,6 @@
 # Threat model
 
-**Status:** updated at the M2.10 gate, which closes Phase 2 (2026-10-29). It covers what exists today (the host workspace, and a kernel with isolated user processes, a read-only RAM-disk filesystem, user-space drivers, a service manager, and a user-space network service) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
+**Status:** updated at the M2.10 gate, which closes Phase 2 (2026-10-29), and at the M3.4 gate (2026-11-04). It covers what exists today (the host workspace, and a kernel with isolated user processes, a read-only RAM-disk filesystem, user-space drivers, a service manager, and a user-space network service) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
 
 ## Security principles
 
@@ -128,7 +128,7 @@ Design: [user-environment.md](../architecture/user-environment.md) and [storage.
 | Shared memory widens access | **Implemented (#80):** rights only narrow; a writable mapping needs `WRITE`; read-only mappings have no write bit (a write kills the process); mappings are never executable; only whole `mem_map` mappings the process made itself can be shared, so a receiver cannot mint a capability its sharer's `revoke` misses (M3.0 review, F1); frames live until the last mapping and capability, and are never freed twice (`shared_memory`, both end orders; mutation-checked). Revocation turns existing mappings into zeroed private pages (#104). **Limit:** a shared object's frame list costs 8 bytes of kernel heap per page |
 | A timeout loses or misdirects a message | **Implemented (#76):** expiry with interrupts off; a message delivered before the waiter runs again is returned, and a waiter leaves the queue only if still in it; an untaken `call` request is withdrawn; a late reply meets a revoked one-shot reply capability (`timeouts` race test: every reply the server delivered reached the client; mutation-checked) |
 | A corrupted or edited disk crashes or misleads the storage service | **Implemented (#77):** every superblock, index, extent, and record checked (CRC-32) before use; shared parser fuzzed; crash consistency tested by cutting every write sequence on the host (with lost and reordered unflushed writes) and by killing QEMU 20 times while it writes; mutation-checked |
-| Audit records are altered on disk | SHA-256 chain over stream records. **Limit:** the chain head is not anchored until M3.4, so someone holding the disk can rewrite the whole chain |
+| Audit records are altered on disk | SHA-256 chain over stream records. **Anchored (#107):** `trust` shows the chain head and count at start and on `audit`, for the user to compare. **Limit:** no secret-keyed anchor before M4.3, so someone holding the disk can rewrite the whole chain if the user does not compare |
 | A client reads or writes another's files | **Implemented (#77):** namespaces from badges, read-only bit, paths joined to the prefix and checked against escape; file data only in the client's own attached buffer (`store` test: read-only, foreign, unbadged, and unknown clients; mutation-checked) |
 | A client exhausts the storage service | **Implemented (M3.0 review, F2):** attached buffers are capped at 32 MiB, at most 16 clients hold one, within the service's 1 GiB limit (`store` test, mutation-checked). A client's buffer is freed when it ends: `init` sends the service `RELEASE` for the badge it gave it, accepted only without a badge (**implemented, #100**: the `supervision` test kernel checks a 4 MiB buffer is freed and a client's `RELEASE` refused; mutation-checked). **Limit:** a client that `init` did not start (a test kernel's) keeps its slot until its badge attaches another |
 
@@ -154,7 +154,7 @@ Design: [inference.md](../architecture/inference.md), from D-010, D-011, and D-0
 
 ### Open limits carried out of Phase 2
 
-Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-inference.md)), and M3.3 ([review](review-m3.3-agents.md)) close with these limits accepted. Each is carried to the milestone that addresses it; none blocks Phase 3, which runs only in QEMU.
+Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-inference.md)), and M3.3 ([review](review-m3.3-agents.md)), and M3.4 ([review](review-m3.4-permissions.md)) close with these limits accepted. Each is carried to the milestone that addresses it; none blocks Phase 3, which runs only in QEMU.
 
 | Limit | Since | Carried to |
 | --- | --- | --- |
@@ -169,8 +169,10 @@ Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-in
 | Shared-memory bookkeeping (8 bytes per page) on the fixed 4 MiB kernel heap, which panics when full: up to 1/512 of a process's page limit | M3.0 | M3.5 (resource accounting) |
 | Page limits not carved from the creator's; a large `mem_map` zeroes pages with interrupts disabled | M3.0 | M3.5 |
 | Revocation does not unmap shared memory already mapped. **Resolved (#104):** revoked mappings become zeroed private pages with the same access, in every process, before `revoke` returns | M3.0 | M3.4 |
-| Audit chains not anchored | M3.0 | M3.4 |
-| The agent runtime serves one request at a time: a dead storage service holds it 10 s per call, so agents can be counted hung and use up attempts; no rate limit on agent requests | M3.3 | M3.5 (budgets) |
+| Audit chains not anchored. **Partly resolved (#107):** the head is shown on the trusted console; no secret-keyed anchor | M3.0 | M4.3 (signed updates and keys) |
+| The agent runtime serves one request at a time: a stalled service holds it for the call's timeout (inference 60 s, store 10 s, audit 2 s, network 1 s), so agents can be counted hung and use up attempts; no rate limit on agent requests | M3.3 | M3.5 (budgets) |
+| One agent can keep all 4 places in the shared approval queue, 60 s each | M3.4 | M3.5 |
+| Agents granted the same destination that both sent to it both get its replies (one runtime port) | M3.4 | accepted; revisit if agents get their own ports |
 | Control clients can read, cancel, and forget every task; only `init` grants the badge, and only test tables do | M3.3 | M3.6 (who submits tasks) |
 | The inference service: a long prompt holds it (callers time out). **Resolved (#100):** a failed model read is not kept (the next `GENERATE` tries again with a new window), and client slots are freed when `init` reports the client ended | M3.2 | M3.5 (budgets) |
 

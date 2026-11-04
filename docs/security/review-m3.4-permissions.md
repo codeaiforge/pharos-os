@@ -11,7 +11,7 @@
   - every new `unsafe` block.
 - **Design under review:** [capabilities.md](../architecture/capabilities.md), D-012, D-017, D-018, [networking.md](../architecture/networking.md), [agents.md](../architecture/agents.md).
 - **Date:** 2026-11-03, issue #111. Reviewer: AI-assisted (Claude Code), with code reading and a test for each claim. Both findings were fixed in the same issue.
-- **Status:** **awaiting the maintainer's approval** (M3.4 gate, #111).
+- **Status:** **approved** by the maintainer on 2026-11-04 (M3.4 gate, #111).
 
 ## Method
 
@@ -27,7 +27,7 @@
 | ID | Severity | Finding | Status |
 | --- | --- | --- | --- |
 | F1 | Medium | `RECEIVE_FROM` needed no grant. Any agent, granted no destination, could make the runtime poll the network service; with that service stopped or hung, each poll blocks the runtime for up to 1 s, during which no other agent is answered and their progress limits run down. | **Fixed:** `RECEIVE_FROM` answers `NO_ACCESS` unless the agent holds a `net` grant, and polls the service only for an agent that has sent somewhere. `hostile` test: `RECEIVE_FROM` without a grant must be `NO_ACCESS` (fails without the fix: `NOT_FOUND`). An agent with a grant can still stall the runtime as long as the network service takes to answer, as with inference and storage (accepted limit below). |
-| F2 | Low | Lost wakeup in kernel-side IPC. `ipc::send`, `call`, and `receive` queue the running thread, then block it. A thread preempted between the two misses its waker's `wake` (which does nothing for a thread not blocked yet) and blocks forever. System calls are safe, since they run with interrupts off (SFMASK); kernel threads, which only the test kernels use, call them with interrupts on. This hung the `trust` test kernel once in CI (`main`, `6798458`, [run 41652628559](https://github.com/codeaiforge/pharos-os/actions/runs/41652628559)) after its console script had finished. | **Fixed:** the three functions turn interrupts off around the queue-then-block; system calls use the new `send_now`, `call_now`, and `receive_now`, which skip the flags read (it measurably cost the round trip, below). No test reproduces the race: its window is a few instructions wide against a 10 ms tick. The full suite passed twice locally and the CI runs below with the fix. |
+| F2 | Low | Lost wakeup in kernel-side IPC. `ipc::send`, `call`, and `receive` queue the running thread, then block it. A thread preempted between the two misses its waker's `wake` (which does nothing for a thread not blocked yet) and blocks forever. System calls are safe, since they run with interrupts off (SFMASK); kernel threads, which only the test kernels use, call them with interrupts on. This hung the `trust` test kernel once in CI (`main`, `6798458`, [run 41652628559](https://github.com/codeaiforge/pharos-os/actions/runs/41652628559)) after its console script had finished. | **Fixed:** the three functions turn interrupts off around the queue-then-block; system calls use the new `send_now`, `call_now`, and `receive_now`, which skip the flags read (it measurably cost the round trip, below). No test reproduces the race: its window is a few instructions wide against a 10 ms tick. The full suite passed twice locally, and CI on `main` at `cef4ece` ([run 41708829549](https://github.com/codeaiforge/pharos-os/actions/runs/41708829549)), with the fix. |
 
 ## Permissions, revocation, and approvals
 
