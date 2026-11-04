@@ -309,21 +309,26 @@ impl Agent {
     fn spend(&self) -> u64 {
         const ECHO: [u8; 4] = [10, 0, 2, 2];
         let over = status::OVER_LIMIT;
-        // "hello hello" is 11 bytes: a session of n new tokens costs 11 + n.
+        // "hello hello" is 11 bytes and 5 tokens: a session asking for n
+        // new tokens is charged 11 + n, then refunded 6 at once and what it
+        // did not generate when it ends (#118).
         if self.generate(30).0 != over {
             return self.fail(b"41 tokens of 40 were not refused");
         }
-        if !self.generate(8).1 {
-            return self.fail(b"19 tokens of 40 were refused");
+        if !self.generate(2).1 || !self.drain() {
+            return self.fail(b"a session of 13 tokens of 40 failed");
+        }
+        // 7 used: 33 more fit only if both refunds came back.
+        if !self.generate(22).1 {
+            return self.fail(b"tokens not used were not refunded");
         }
         self.call(&Request::CancelInfer, &mut [0; 256]);
-        if self.generate(11).0 != over
-            || !{
-                let started = self.generate(10).1;
-                self.call(&Request::CancelInfer, &mut [0; 256]);
-                started
-            }
-        {
+        // Cancelled at once: its 22 new tokens came back, 12 used.
+        if !self.generate(17).1 {
+            return self.fail(b"a cancelled session's tokens were not refunded");
+        }
+        self.call(&Request::CancelInfer, &mut [0; 256]);
+        if self.generate(29).0 != over {
             return self.fail(b"tokens were not counted across sessions");
         }
         let sends = [(40, status::OK), (40, over), (10, status::OK), (1, over)];
@@ -346,6 +351,19 @@ impl Agent {
             }
         }
         self.complete(b"spend ok")
+    }
+
+    /// `NEXT` until the session ends; false if a `NEXT` fails.
+    fn drain(&self) -> bool {
+        let mut out = [0u8; 256];
+        loop {
+            let (_, n) = self.call(&Request::Next, &mut out);
+            match Tokens::parse(&out[..n]) {
+                Some(t) if t.stop.is_none() => {}
+                Some(_) => return true,
+                None => return false,
+            }
+        }
     }
 
     /// The `budgets` kernel's `grouper` (#116): its own budget has no

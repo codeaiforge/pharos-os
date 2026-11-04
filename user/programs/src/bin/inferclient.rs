@@ -15,6 +15,11 @@
 //! - 3 (#90): scenario S1 with model 1. Loads it with a one-token request,
 //!   then generates [`S1_NEW`] tokens from `models/s1.prompt`, prints the
 //!   times, and compares the text with `models/s1.expected`.
+//! - 5 (#118): admission, as client 3, which the kernel (as `init`) has
+//!   limited to 30 tokens a minute and prompts of 8 tokens; handle 4 is
+//!   client 2, with no limit. Its own `LIMIT` is refused, a longer prompt
+//!   and a session past the minute's tokens are `OVER_LIMIT`, and client 2
+//!   is served.
 //! - 4 (#100): under `init` in the `supervision` test kernel, as client 2,
 //!   with handle 3 `models` read-write. The model file is missing at
 //!   first: `GENERATE` fails at the read step, and the failure is not
@@ -172,6 +177,72 @@ fn record(reply: Handle, session: u32) -> Option<Record> {
 /// The step a `MODEL_INVALID` reply names.
 fn invalid(r: &([u8; 256], usize)) -> Option<u8> {
     (r.1 == 2 && Status::from_code(r.0[0]) == Status::ModelInvalid).then_some(r.0[1])
+}
+
+fn admission(f: &mut u64) {
+    let Ok(reply) = endpoint_create() else {
+        report(f, "create a reply endpoint", false);
+        return;
+    };
+    let mut msg = [0u8; 32];
+    let n = encode(&Request::Attach { len: 4096 }, &mut msg).unwrap_or(0);
+    let (Some(mine), Some(other)) = (
+        attach(SERVICE, &msg[..n], 4096),
+        attach(OTHER, &msg[..n], 4096),
+    ) else {
+        report(f, "attach prompt buffers", false);
+        return;
+    };
+    let mine_generate = |buffer: &Mapped, to, prompt: &[u8], max_new| {
+        buffer.write_bytes(0, prompt);
+        let req = Request::Generate {
+            model: 2,
+            max_new,
+            prompt_len: prompt.len() as u32,
+        };
+        call_to(to, reply, req, GENERATE_US)
+    };
+    let own = Request::Limit {
+        client: 3,
+        tokens_per_min: u32::MAX,
+        prompt_tokens: u32::MAX,
+    };
+    report(
+        f,
+        "a client's own LIMIT: NO_ACCESS",
+        status(&call(reply, own, SHORT_US)) == Status::NoAccess,
+    );
+    report(
+        f,
+        "a prompt over 8 tokens: OVER_LIMIT",
+        status(&mine_generate(
+            &mine,
+            SERVICE,
+            b"hello hello hello hello",
+            1,
+        )) == Status::OverLimit,
+    );
+    let (r, n) = mine_generate(&mine, SERVICE, PROMPT, 20);
+    let started = Started::parse(&r[..n]);
+    if let Some(Started { session, .. }) = started {
+        let _ = call(reply, Request::Cancel { session }, SHORT_US);
+    }
+    report(
+        f,
+        "5 + 20 tokens of 30 a minute: a session",
+        started.is_some(),
+    );
+    report(
+        f,
+        "5 + 1 more this minute: OVER_LIMIT",
+        status(&mine_generate(&mine, SERVICE, PROMPT, 1)) == Status::OverLimit,
+    );
+    let (r, n) = mine_generate(&other, OTHER, PROMPT, 20);
+    let started = Started::parse(&r[..n]);
+    if let Some(Started { session, .. }) = started {
+        let _ = call_to(OTHER, reply, Request::Cancel { session }, SHORT_US);
+    }
+    report(f, "a client with no limit is served", started.is_some());
 }
 
 fn failures(f: &mut u64) {
@@ -708,6 +779,7 @@ fn main(arg: u64) -> u64 {
         2 => failures(&mut f),
         3 => s1(&mut f),
         4 => supervised(&mut f),
+        5 => admission(&mut f),
         _ => f = 0xbad,
     }
     f

@@ -73,7 +73,7 @@ use pharos_proto::agents::{
     VERSION, agent_slot, parse,
 };
 use pharos_proto::audit::{self, Entry as Record, Kind, action, outcome};
-use pharos_proto::infer::{self, Request as InferRequest, Started, Tokens};
+use pharos_proto::infer::{self, Record as InferRecord, Request as InferRequest, Started, Tokens};
 use pharos_proto::manifest::{self, Budget, Data, Dest, Entry, Group, Why};
 use pharos_proto::net::{self, Request as NetRequest};
 use pharos_proto::permission::Permission;
@@ -677,6 +677,8 @@ struct Slot {
     /// The open inference session and its model.
     session: Option<u32>,
     session_model: u8,
+    /// The new tokens it asked for, charged until the session ends (#118).
+    session_new: u16,
     ending: Option<Ending>,
     grants: Grants,
     /// Destinations it sent to, and datagrams from them kept for it.
@@ -883,6 +885,41 @@ impl Runtime {
     fn cancel_session(&mut self, slot: usize) {
         if let Some(session) = self.slots[slot].as_mut().and_then(|s| s.session.take()) {
             let _ = self.infer(&InferRequest::Cancel { session }, INFER_US, &mut [0; 256]);
+            self.session_ended(slot, session);
+        }
+    }
+
+    /// Gives slot `i`'s attempt and group back `n` tokens charged but not
+    /// used (#118).
+    fn refund(&mut self, i: usize, n: u64) {
+        let Some(budget) = self.slots[i]
+            .as_ref()
+            .and_then(|s| self.tasks.find(s.task))
+            .and_then(|t| self.limits(&self.tasks.list[t].agent))
+            .map(|l| l.entry.budget)
+        else {
+            return;
+        };
+        let g = self
+            .groups
+            .iter()
+            .position(|g| !budget.group.is_empty() && g.name == budget.group);
+        if let Some(s) = self.slots[i].as_mut() {
+            s.usage.refund_tokens(g.map(|g| &mut self.group_use[g]), n);
+        }
+    }
+
+    /// Slot `i`'s `session` ended: the new tokens it did not generate come
+    /// back, from the service's record.
+    fn session_ended(&mut self, i: usize, session: u32) {
+        let asked = self.slots[i].as_ref().map_or(0, |s| s.session_new);
+        let mut out = [0u8; 256];
+        let generated = self
+            .infer(&InferRequest::Result { session }, INFER_US, &mut out)
+            .and_then(|n| InferRecord::parse(&out[..n]))
+            .map(|r| r.generated);
+        if let Some(generated) = generated {
+            self.refund(i, u64::from(asked).saturating_sub(u64::from(generated)));
         }
     }
 
@@ -1009,6 +1046,7 @@ impl Runtime {
             last: now,
             session: None,
             session_model: 0,
+            session_new: 0,
             ending: None,
             grants: Grants::default(),
             peers: Vec::new(),
@@ -1414,17 +1452,31 @@ impl Runtime {
                 self.charge(i, &budget, infer_permission, |u, g| {
                     u.tokens(&budget, g, now, tokens)
                 })?;
-                let seq = self.intent(name, id, action::INFER, infer_permission, b"infer", b"")?;
+                let seq =
+                    match self.intent(name, id, action::INFER, infer_permission, b"infer", b"") {
+                        Ok(seq) => seq,
+                        Err(code) => {
+                            self.refund(i, tokens);
+                            return Err(code);
+                        }
+                    };
                 let mut n = self.infer(&req, GENERATE_US, out);
                 if n.is_some() && out[0] == status::NO_BUFFER && attach_prompt(&self.infer_buffer) {
                     n = self.infer(&req, GENERATE_US, out);
                 }
                 let started = n.and_then(|n| Started::parse(&out[..n]));
                 self.outcome(seq, name, id, action::INFER, started.is_some(), b"");
+                // The prompt's bytes were charged for its tokens (#118).
+                let unused = match started {
+                    Some(st) => u64::from(prompt_len).saturating_sub(u64::from(st.prompt_tokens)),
+                    None => tokens,
+                };
+                self.refund(i, unused);
                 let n = n.ok_or(status::INTERNAL)?;
                 if let (Some(started), Some(s)) = (started, &mut self.slots[i]) {
                     s.session = Some(started.session);
                     s.session_model = model;
+                    s.session_new = max_new;
                 }
                 Ok(n)
             }
@@ -1440,6 +1492,7 @@ impl Runtime {
                     if let Some(s) = &mut self.slots[i] {
                         s.session = None;
                     }
+                    self.session_ended(i, session);
                 }
                 Ok(n)
             }

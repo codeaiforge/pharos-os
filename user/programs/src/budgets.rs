@@ -29,7 +29,8 @@ pub struct Window {
 const MINUTE_US: u64 = 60_000_000;
 
 impl Window {
-    fn fits(&self, now: u64, limit: u32, amount: u64) -> bool {
+    /// Whether `amount` more fits `limit` in the minute at `now`.
+    pub fn fits(&self, now: u64, limit: u32, amount: u64) -> bool {
         let used = if now.saturating_sub(self.start_us) >= MINUTE_US {
             0
         } else {
@@ -38,7 +39,8 @@ impl Window {
         used.saturating_add(amount) <= u64::from(limit)
     }
 
-    fn charge(&mut self, now: u64, amount: u64) {
+    /// Counts `amount` in the minute at `now`.
+    pub fn charge(&mut self, now: u64, amount: u64) {
         if now.saturating_sub(self.start_us) >= MINUTE_US {
             *self = Self {
                 start_us: now,
@@ -46,6 +48,14 @@ impl Window {
             };
         }
         self.used = self.used.saturating_add(amount);
+    }
+}
+
+impl Window {
+    /// Gives back `amount` charged in this minute (what a request did not
+    /// use, #118); nothing once the minute has passed.
+    pub fn refund(&mut self, amount: u64) {
+        self.used = self.used.saturating_sub(amount);
     }
 }
 
@@ -166,6 +176,16 @@ impl Bucket {
     }
 }
 
+impl Usage {
+    /// Gives back `n` tokens charged but not used (#118).
+    pub fn refund_tokens(&mut self, group: Option<&mut GroupUse>, n: u64) {
+        self.tokens = self.tokens.saturating_sub(n);
+        if let Some(g) = group {
+            g.tokens.refund(n);
+        }
+    }
+}
+
 /// Whether replacing a file of `old` bytes by `new` keeps the agent's
 /// files, now `stored` bytes in total, within its `data_kb`.
 pub fn data_fits(budget: &Budget, stored: u64, old: u64, new: u64) -> Result<(), Over> {
@@ -240,6 +260,22 @@ mod tests {
             Err(Over::GroupTokens)
         );
         assert_eq!(a.tokens(&free, Some((&GROUP, &mut g)), 5, 30), Ok(()));
+    }
+
+    #[test]
+    fn unused_tokens_come_back() {
+        let mut g = GroupUse::default();
+        let mut u = Usage::default();
+        assert_eq!(u.tokens(&LIMITED, Some((&GROUP, &mut g)), 0, 30), Ok(()));
+        u.refund_tokens(Some(&mut g), 20);
+        assert_eq!(u.tokens, 10);
+        assert_eq!(
+            u.tokens(&LIMITED, Some((&GROUP, &mut g)), 0, 20),
+            Ok(()),
+            "the group's too"
+        );
+        u.refund_tokens(None, 100);
+        assert_eq!(u.tokens, 0, "never below zero");
     }
 
     #[test]

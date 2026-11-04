@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-04 (#113),** with CPU time counted by one `rdtsc` per switch and a plain load and store, measured within D-004's IPC budget before approval. To be built by: scheduling classes and CPU accounting (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), and exhaustion tests (#120). **Implemented:** scheduling classes and CPU time per process (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117).
+**Planned. Design approved by the maintainer on 2026-11-04 (#113),** with CPU time counted by one `rdtsc` per switch and a plain load and store, measured within D-004's IPC budget before approval. To be built by: scheduling classes and CPU accounting (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), and exhaustion tests (#120). **Implemented:** scheduling classes and CPU time per process (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118).
 
 ## 2. Context
 
@@ -79,6 +79,8 @@ What M3.5 builds on:
 - **A budget per client in the inference service:** tokens (prompt plus generated) per minute and the longest prompt in tokens, set by `init`'s table for direct clients and by the runtime for its own badge with a new operation, `LIMIT` (6), accepted only without a badge, as `RELEASE` is (the runtime's badge gets the sum of its policy groups' `tokens_per_min`).
 - **A `GENERATE` over the client's budget** answers `OVER_LIMIT` before any work, so a long prompt cannot hold the service past the client's own limit.
 - **Within the runtime**, each agent's `tokens` and its group's rate are charged before the request is sent: the prompt's length in tokens is not known before tokenizing, so the runtime charges its byte length (an upper bound, since every token is at least one byte), then the service's `RESULT` gives the real count and the difference is returned.
+
+- *Implemented (#118):* `LIMIT` (`pharos_proto::infer`, op 6) and `Status::OverLimit`; the service keeps limits by badge for up to 8 clients and charges prompt plus new tokens at `GENERATE` (it gives nothing back; the runtime's own budget does). `init`'s boot table sends none: its runtime's policy has no groups, so the runtime's badge has no limit. The runtime charges an agent the prompt's bytes plus the new tokens, then gives back the bytes beyond the prompt's tokens from the `GENERATE` reply, and the new tokens not generated from the session's `RESULT` when it ends (by `NEXT`, `CANCEL_INFER`, or the agent ending); everything when the request fails or the trail refuses it.
 
 ### Usage reporting (#119)
 

@@ -104,6 +104,7 @@ Every request starts with version 1 and an operation (D-019). Every reply starts
 | `NEXT` | session | Up to 16 new tokens' text (at most 240 bytes), and whether generation ended and why: end-of-text token, token limit, or context limit | 30 s |
 | `CANCEL` | session | — (the session ends) | 1 s |
 | `RELEASE` (5, #100) | client badge; only from `init`, with no badge | — (the client's slot, buffer, record, and any session are freed; `NO_ACCESS` from anyone else) | 1 s |
+| `LIMIT` (6, #118) | client badge, tokens a minute, longest prompt in tokens (`u32::MAX`: none); only from `init`, with no badge | — (kept for that badge, at most 8 clients, beyond which `TOO_LARGE`; `NO_ACCESS` from anyone else). A `GENERATE` whose prompt has more tokens, or whose prompt and new tokens do not fit this minute's, answers `OVER_LIMIT` after tokenizing and before the prompt is processed | 1 s |
 | `RESULT` | session (after it ended) | The record: model number and SHA-256, engine version, settings, prompt and generated token counts, stop reason, prompt and generation times | 1 s |
 
 *Implemented with these details:*
@@ -136,7 +137,7 @@ Every request starts with version 1 and an operation (D-019). Every reply starts
 - **The model file is untrusted until its SHA-256 matches the manifest,** and parsed by checked, fuzzed code even after that.
 - **Prompts and outputs are untrusted data** (AGENTS.md section 7): the service only tokenizes prompts and returns text; nothing it produces is executed or passed to a privileged interface.
 - **Least privilege:** the service reaches only `models`, read-only, and its own endpoints. A compromised service could return wrong text, but it cannot write storage, reach the network, or touch devices.
-- **Resource use:** bounded by its page limit, one session at a time, the context limit, and the idle timeout. Per-agent budgets (tokens, compute time) are M3.5. Until then any holder of an inference capability can keep the CPU busy for one `GENERATE` of up to 2,048 tokens.
+- **Resource use:** bounded by its page limit, one session at a time, the context limit, and the idle timeout. Per-client admission since #118: `LIMIT` bounds a client's prompt and its tokens a minute (the minute is a fixed window from its first use); a client with no `LIMIT` is bounded only by the context limit, and `init`'s boot table sets none, since the boot policy has no groups. The agent runtime budgets each agent's tokens (#116) and gives back what a session did not use, from the `GENERATE` reply's prompt tokens and the ended session's `RESULT`.
 - **Shared buffers:** prompts are copied out of the attached buffer before use, so a client changing it during a request cannot change what is tokenized.
 - **New trusted code:** none in the kernel. The service, the tokenizer, and `pharos-proto` are user-space, safe Rust.
 

@@ -42,6 +42,8 @@ const CLIENT_PAGES: u64 = 256;
 /// The clients' badges on the inference endpoint.
 const CLIENT: u32 = 1;
 const OTHER: u32 = 2;
+/// The client the kernel limits (#118).
+const LIMITED: u32 = 3;
 
 /// Set by `cargo xtask bench-infer`: run S1 instead of the checks.
 const S1: bool = option_env!("PHAROS_INFER_S1").is_some();
@@ -248,6 +250,46 @@ fn run(t: &mut TestRun) {
     );
     t.check(
         "the failure client exited with no failures",
+        code == Some(0),
+    );
+
+    // Admission (#118): the kernel, as `init`, limits client 3.
+    let mut data = [0u8; pharos_kernel::syscall::MAX_MESSAGE];
+    data[..2].copy_from_slice(&[1, 6]);
+    data[2..6].copy_from_slice(&LIMITED.to_le_bytes());
+    data[6..10].copy_from_slice(&30u32.to_le_bytes());
+    data[10..14].copy_from_slice(&8u32.to_le_bytes());
+    // The answer goes to an endpoint nobody reads: a kernel thread cannot
+    // take a non-blocking reply.
+    ipc::send(
+        &infer,
+        ipc::Message {
+            data,
+            len: 14,
+            cap: Some(Capability::new(Object::Endpoint(Endpoint::new()), SEND)),
+            badge: 0,
+        },
+    );
+    let caps = vec![
+        Capability::new(Object::DebugConsole, WRITE),
+        root.derive_badged(SEND, LIMITED),
+        store.derive_badged(SEND, MODELS_READ_ONLY | 1 << 17),
+        root.derive_badged(SEND, OTHER),
+    ];
+    let (code, out, _) = client(&programs, 5, caps, None);
+    steps(
+        t,
+        &out,
+        &[
+            "a client's own LIMIT: NO_ACCESS",
+            "a prompt over 8 tokens: OVER_LIMIT",
+            "5 + 20 tokens of 30 a minute: a session",
+            "5 + 1 more this minute: OVER_LIMIT",
+            "a client with no limit is served",
+        ],
+    );
+    t.check(
+        "the admission client exited with no failures",
         code == Some(0),
     );
 

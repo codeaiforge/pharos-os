@@ -21,6 +21,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use pharos_infer::session::{self, Engine, Session};
+use pharos_programs::budgets::Window;
 use pharos_programs::fp::Libm;
 use pharos_programs::models::{self, MANIFEST, Model as Entry, find};
 use pharos_proto::infer::{
@@ -88,6 +89,17 @@ struct Service {
     /// The window into the storage service, once attached.
     window: Option<Mapped>,
     store_reply: Handle,
+    /// Admission limits `init` set (#118), by client badge, and what each
+    /// client has used this minute; a client with none has no limit.
+    limits: [Option<Limit>; MAX_CLIENTS],
+}
+
+#[derive(Clone, Copy)]
+struct Limit {
+    badge: u32,
+    tokens_per_min: u32,
+    prompt_tokens: u32,
+    used: Window,
 }
 
 fn say(parts: &[&[u8]]) {
@@ -322,6 +334,17 @@ impl Service {
         if tokens.len() + usize::from(max_new) > entry.context as usize {
             return Err(Status::Context);
         }
+        // Admission (#118), before any prompt is processed: the longest
+        // prompt, and prompt and new tokens per minute.
+        let asked = tokens.len() as u64 + u64::from(max_new);
+        if let Some(l) = self.limits.iter_mut().flatten().find(|l| l.badge == badge) {
+            if tokens.len() as u64 > u64::from(l.prompt_tokens)
+                || !l.used.fits(start, l.tokens_per_min, asked)
+            {
+                return Err(Status::OverLimit);
+            }
+            l.used.charge(start, asked);
+        }
         let session = Session::new(engine, &tokens, usize::from(max_new), &Libm)
             .map_err(|_| Status::Internal)?;
         let number = self.next_number;
@@ -437,6 +460,33 @@ impl Service {
             out[0] = Status::Ok as u8;
             return 1;
         }
+        // Admission limits come from `init` too (#118).
+        if let Request::Limit {
+            client,
+            tokens_per_min,
+            prompt_tokens,
+        } = req
+        {
+            let slot = self
+                .limits
+                .iter()
+                .position(|l| l.is_some_and(|l| l.badge == client))
+                .or_else(|| self.limits.iter().position(Option::is_none));
+            out[0] = match slot {
+                _ if badge != 0 || client == 0 => Status::NoAccess,
+                Some(i) => {
+                    self.limits[i] = Some(Limit {
+                        badge: client,
+                        tokens_per_min,
+                        prompt_tokens,
+                        used: Window::default(),
+                    });
+                    Status::Ok
+                }
+                None => Status::TooLarge,
+            } as u8;
+            return 1;
+        }
         if badge == 0 {
             out[0] = Status::NoAccess as u8;
             return 1;
@@ -467,7 +517,9 @@ impl Service {
                 }
             }
             // A `call` with ATTACH carries no buffer.
-            Request::Attach { .. } | Request::Release { .. } => Err(Status::BadRequest),
+            Request::Attach { .. } | Request::Release { .. } | Request::Limit { .. } => {
+                Err(Status::BadRequest)
+            }
         };
         match result {
             Ok(n) => {
@@ -496,6 +548,7 @@ fn main(_: u64) -> u64 {
     let mut s = Service {
         models: [None; MANIFEST.len()],
         clients: Default::default(),
+        limits: [None; MAX_CLIENTS],
         active: None,
         next_number: 1,
         window: None,

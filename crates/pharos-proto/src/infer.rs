@@ -18,6 +18,8 @@ pub mod op {
     /// From `init` only (no badge): forget client `badge`, as its process
     /// ended: its buffer, record, and any session (#100).
     pub const RELEASE: u8 = 5;
+    /// A client's admission limits (#118), only without a badge.
+    pub const LIMIT: u8 = 6;
 }
 
 /// Most new tokens one `GENERATE` asks for.
@@ -54,6 +56,8 @@ pub enum Status {
     Context = status::OWN + 2,
     /// The session number is unknown, or not this client's.
     NoSession = status::OWN + 3,
+    /// Past the client's admission limits (#118).
+    OverLimit = status::OVER_LIMIT,
 }
 
 impl Status {
@@ -70,6 +74,7 @@ impl Status {
             Self::ModelInvalid,
             Self::Context,
             Self::NoSession,
+            Self::OverLimit,
         ]
         .into_iter()
         .find(|s| *s as u8 == code)
@@ -148,6 +153,13 @@ pub enum Request {
     Release {
         client: u32,
     },
+    /// `client`'s admission (#118): prompt and new tokens per minute, and
+    /// the longest prompt in tokens; `u32::MAX` for no limit.
+    Limit {
+        client: u32,
+        tokens_per_min: u32,
+        prompt_tokens: u32,
+    },
     /// The attached capability's size in bytes.
     Attach {
         len: u64,
@@ -171,6 +183,11 @@ pub fn parse(msg: &[u8]) -> Result<Request, Refused> {
             op::CANCEL => Request::Cancel { session: r.u32()? },
             op::RESULT => Request::Result { session: r.u32()? },
             op::RELEASE => Request::Release { client: r.u32()? },
+            op::LIMIT => Request::Limit {
+                client: r.u32()?,
+                tokens_per_min: r.u32()?,
+                prompt_tokens: r.u32()?,
+            },
             common::ATTACH => Request::Attach { len: r.u64()? },
             common::INFO => Request::Info,
             _ => return None,
@@ -210,6 +227,16 @@ pub fn encode(req: &Request, out: &mut [u8]) -> Option<usize> {
         Request::Release { client } => {
             w.bytes(&[VERSION, op::RELEASE])?;
             w.u32(client)?;
+        }
+        Request::Limit {
+            client,
+            tokens_per_min,
+            prompt_tokens,
+        } => {
+            w.bytes(&[VERSION, op::LIMIT])?;
+            w.u32(client)?;
+            w.u32(tokens_per_min)?;
+            w.u32(prompt_tokens)?;
         }
         Request::Attach { len } => {
             w.bytes(&[VERSION, common::ATTACH])?;
@@ -421,6 +448,11 @@ mod tests {
             Request::Cancel { session: u32::MAX },
             Request::Result { session: 1 },
             Request::Release { client: 7 },
+            Request::Limit {
+                client: 3,
+                tokens_per_min: 30,
+                prompt_tokens: u32::MAX,
+            },
             Request::Attach { len: 4096 },
             Request::Info,
         ];
