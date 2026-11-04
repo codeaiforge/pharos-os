@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+pub mod budgets;
 pub mod fp;
 pub mod grants;
 pub mod models;

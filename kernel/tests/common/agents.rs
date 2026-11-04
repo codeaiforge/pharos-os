@@ -252,6 +252,12 @@ pub fn restart_store(t: &mut TestRun, s: &Services) -> Option<TaskId> {
 
 /// Starts the runtime as `init` does and registers it with `trust`.
 pub fn start_runtime(t: &mut TestRun, s: &Services) -> Option<TaskId> {
+    start_runtime_table(t, s, 1)
+}
+
+/// [`start_runtime`] with the runtime's policy table `table` (1 the test
+/// table, 2 the `budgets` kernel's).
+pub fn start_runtime_table(t: &mut TestRun, s: &Services, table: u64) -> Option<TaskId> {
     let infer_send = Capability::new(Object::Endpoint(s.infer.clone()), SEND);
     let trust_send = Capability::new(Object::Endpoint(s.trust_ep.clone()), SEND);
     let store_send = Capability::new(Object::Endpoint(s.store.clone()), SEND);
@@ -278,7 +284,7 @@ pub fn start_runtime(t: &mut TestRun, s: &Services) -> Option<TaskId> {
         t,
         &s.programs,
         b"bin/agents",
-        1,
+        table,
         caps,
         &s.report,
         RUNTIME_PAGES,

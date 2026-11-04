@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-04 (#113),** with CPU time counted by one `rdtsc` per switch and a plain load and store, measured within D-004's IPC budget before approval. To be built by: scheduling classes and CPU accounting (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), and exhaustion tests (#120). **Implemented:** scheduling classes and CPU time per process (#114), carved limits (#115).
+**Planned. Design approved by the maintainer on 2026-11-04 (#113),** with CPU time counted by one `rdtsc` per switch and a plain load and store, measured within D-004's IPC budget before approval. To be built by: scheduling classes and CPU accounting (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), and exhaustion tests (#120). **Implemented:** scheduling classes and CPU time per process (#114), carved limits (#115), runtime budgets (#116).
 
 ## 2. Context
 
@@ -63,6 +63,7 @@ What M3.5 builds on:
   - a request over `rate` is held (#117).
 - **Every limit reached is recorded** in the audit trail once per kind per attempt, as refusals are (#110): `limit` with the resource, the limit, and the use, and counted in the attempt's refusal total.
 - **The logic** (budgets, windows, groups) is a host-tested module beside `grants`.
+- *Implemented (#116):* `pharos_proto::manifest::{Budget, Group}` (the entry's `budget`, `Budget::UNLIMITED` for none), `pharos_programs::budgets`, `status::OVER_LIMIT`, and in the runtime a `Usage` per attempt and a `GroupUse` per group. Tokens are charged as the prompt's bytes plus the new tokens asked for, before the request goes out (refunded with the real count in #118); `data_kb` is checked against the agent's files listed and sized in the store on each `DATA_PUT`; the runtime reads CPU time at least every 100 ms while an agent with a `cpu_ms` runs. Each limit reached is a refusal record (`over tokens`, `over net sends`, `over net bytes`, `over data`, `over group tokens`, `over group net`, `over cpu`), counted in the attempt's total. The boot policy table has no groups and every entry `Budget::UNLIMITED`; the `budgets` test kernel has its own table. Differences from the draft above: a manifest cannot narrow a budget yet (no agent needs less than its entry), a record names the resource but not the limit and the use, a group's minute is a fixed window from its first use (up to twice the rate across a window's edge), and `rate` comes with #117.
 
 ### Not holding the runtime (#117)
 

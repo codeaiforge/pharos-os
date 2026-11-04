@@ -1351,6 +1351,8 @@ const AGENTS_NET_REFUSED: &[&str] = &["approve #2"];
 /// The hostile agent (#110): its four approval requests fill the queue
 /// (nobody answers; they end with its task).
 const HOSTILE_TEST: &str = "hostile";
+/// The `budgets` kernel (#116): its trail is checked for each limit.
+const BUDGETS_TEST: &str = "budgets";
 const HOSTILE_SCRIPT: &[console::Step] = &[
     ("trust: ready", ""),
     ("registered runtime", ""),
@@ -1567,6 +1569,38 @@ fn agents_net_audit(image: &Path) -> Result<()> {
 /// total once it ended (454; at least 450, so a kind not counted shows);
 /// its approval requests ended with it;
 /// the agent beside it, task 2, has its grants and its write and inference.
+/// The `budgets` kernel's trail (#116): each limit an agent reached is
+/// recorded once for its attempt, and `hog`'s CPU time once.
+fn budgets_audit(image: &Path) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    for (agent, detail) in [
+        ("spender", "over tokens"),
+        ("spender", "over net bytes"),
+        ("spender", "over net sends"),
+        ("spender", "over data"),
+        ("grouper", "over group tokens"),
+        ("grouper", "over group net"),
+        ("hog", "over cpu"),
+    ] {
+        let n = lines
+            .iter()
+            .filter(|l| l.contains(&format!("client 3 Event refuse {agent} task ")))
+            .filter(|l| l.ends_with(detail))
+            .count();
+        if n != 1 {
+            return Err(format!("{n} records of {agent} {detail:?}, expected 1"));
+        }
+    }
+    println!(
+        "  audit trail: {} records, each limit reached once",
+        lines.len()
+    );
+    Ok(())
+}
+
 fn hostile_audit(image: &Path) -> Result<()> {
     let streams = store_image::audit(image)?;
     let [(_, lines)] = streams.as_slice() else {
@@ -1744,6 +1778,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         PERMISSIONS_TEST,
         AGENTS_NET_TEST,
         HOSTILE_TEST,
+        BUDGETS_TEST,
     ];
     if service_store.contains(&name.as_str()) {
         store_image::service(&out.join(STORE_IMAGE))?;
@@ -1802,6 +1837,13 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             Ok(())
         })
+    });
+    let typed = typed.and_then(|()| {
+        if name == BUDGETS_TEST && run.status == Some(33) {
+            budgets_audit(&out.join(STORE_IMAGE))
+        } else {
+            Ok(())
+        }
     });
     match evaluate_boot(&run, TESTS_MARKER, timeout).and(typed) {
         Ok(()) => {

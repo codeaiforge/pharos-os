@@ -64,6 +64,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use pharos_programs::budgets::{self, GroupUse, Over, Usage};
 use pharos_programs::grants::Grants;
 use pharos_programs::tasks::{self, Begin, Files, StoreFailed, Tasks};
 use pharos_proto::agents::{
@@ -73,7 +74,7 @@ use pharos_proto::agents::{
 };
 use pharos_proto::audit::{self, Entry as Record, Kind, action, outcome};
 use pharos_proto::infer::{self, Request as InferRequest, Started, Tokens};
-use pharos_proto::manifest::{self, Data, Dest, Entry, Why};
+use pharos_proto::manifest::{self, Budget, Data, Dest, Entry, Group, Why};
 use pharos_proto::net::{self, Request as NetRequest};
 use pharos_proto::permission::Permission;
 use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
@@ -81,9 +82,10 @@ use pharos_proto::{Info, refusal, status, trust};
 use pharos_user::Limits as SpawnLimits;
 use pharos_user::rights::{READ, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
-    Class, Grant, Handle, Mapped, Received, Status, call_timeout, debug_write, delete,
-    endpoint_create, mem_map_buffer, mem_map_cap, mem_share, mem_unmap, open, process_status,
-    process_stop, read, receive_timeout, send, spawn_with, try_send, uptime,
+    Class, Grant, Handle, Mapped, Received, Status, Usage as Use, call_timeout, debug_write,
+    delete, endpoint_create, mem_map_buffer, mem_map_cap, mem_share, mem_unmap, open,
+    process_status, process_stop, process_usage, read, receive_timeout, send, spawn_with, try_send,
+    uptime,
 };
 
 pharos_user::entry!(main);
@@ -106,11 +108,20 @@ const HOST_ECHO: Dest = ([10, 0, 2, 2], 47_000);
 
 /// Kinds of refused agent requests, recorded once each per attempt.
 mod refusal {
-    pub const MALFORMED: u8 = 1;
-    pub const NO_GRANT: u8 = 2;
-    pub const NOT_FOR_AGENTS: u8 = 4;
-    pub const NOT_ASKABLE: u8 = 8;
+    pub const MALFORMED: u16 = 1;
+    pub const NO_GRANT: u16 = 2;
+    pub const NOT_FOR_AGENTS: u16 = 4;
+    pub const NOT_ASKABLE: u16 = 8;
+    /// Over a budget (D-022, #116), one kind per resource.
+    pub const OVER_TOKENS: u16 = 16;
+    pub const OVER_NET_SENDS: u16 = 32;
+    pub const OVER_NET_BYTES: u16 = 64;
+    pub const OVER_DATA: u16 = 128;
+    pub const OVER_GROUP_TOKENS: u16 = 256;
+    pub const OVER_GROUP_NET: u16 = 512;
 }
+/// How often the runtime reads a running agent's CPU time, at most.
+const CPU_CHECK_US: u64 = 100_000;
 /// How long an audit record may take before the action is refused.
 const AUDIT_US: u64 = 2_000_000;
 /// The runtime's buffer at the storage service: the largest task file.
@@ -135,6 +146,107 @@ const MAX_CONTROLS: usize = 4;
 
 const BOOT: &[Entry] = &[];
 
+/// The `budgets` test kernel's agents (#116): `spender` within its own
+/// budget, `grouper` within its group's minute, `hog` over its CPU time,
+/// and `pair` and `big` held by their groups' attempts and pages.
+const BUDGETS: &[Entry] = &[
+    budget_entry(
+        b"spender",
+        Budget {
+            cpu_ms: u32::MAX,
+            tokens: 40,
+            net_sends: 2,
+            net_bytes: 64,
+            data_kb: 1,
+            group: b"spend",
+        },
+        64,
+    ),
+    budget_entry(
+        b"grouper",
+        Budget {
+            group: b"tight",
+            ..Budget::UNLIMITED
+        },
+        64,
+    ),
+    budget_entry(
+        b"hog",
+        Budget {
+            cpu_ms: 300,
+            ..Budget::UNLIMITED
+        },
+        64,
+    ),
+    budget_entry(
+        b"pair",
+        Budget {
+            group: b"pair",
+            ..Budget::UNLIMITED
+        },
+        64,
+    ),
+    budget_entry(
+        b"big",
+        Budget {
+            group: b"heavy",
+            ..Budget::UNLIMITED
+        },
+        256,
+    ),
+];
+
+const BUDGET_GROUPS: &[Group] = &[
+    Group {
+        name: b"spend",
+        agents: 4,
+        pages: 1 << 12,
+        tokens_per_min: 1000,
+        net_bytes_per_min: 1000,
+    },
+    Group {
+        name: b"tight",
+        agents: 4,
+        pages: 1 << 12,
+        tokens_per_min: 30,
+        net_bytes_per_min: 48,
+    },
+    Group {
+        name: b"pair",
+        agents: 1,
+        pages: 1 << 12,
+        tokens_per_min: u32::MAX,
+        net_bytes_per_min: u32::MAX,
+    },
+    Group {
+        name: b"heavy",
+        agents: 4,
+        pages: 300,
+        tokens_per_min: u32::MAX,
+        net_bytes_per_min: u32::MAX,
+    },
+];
+
+/// A `budgets` test entry: `bin/testagent` with model 2, its own files,
+/// and the host echo server, one attempt.
+const fn budget_entry(name: &'static [u8], budget: Budget, pages: u32) -> Entry {
+    Entry {
+        name,
+        program: b"bin/testagent",
+        pages,
+        models: 1 << 2,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 30_000,
+        data: Data::Write,
+        ask_models: 0,
+        ask_data: Data::None,
+        net: &[HOST_ECHO],
+        ask_net: &[],
+        budget,
+    }
+}
+
 /// The test kernels' agents, all `bin/testagent`. `greedy`'s manifest
 /// asks for more pages than its entry allows; `absent` has no manifest;
 /// `counter` is the `agents_crash` kernel's.
@@ -152,6 +264,7 @@ const TEST: &[Entry] = &[
         ask_data: Data::None,
         net: &[],
         ask_net: &[],
+        budget: Budget::UNLIMITED,
     },
     Entry {
         name: b"greedy",
@@ -166,6 +279,7 @@ const TEST: &[Entry] = &[
         ask_data: Data::None,
         net: &[],
         ask_net: &[],
+        budget: Budget::UNLIMITED,
     },
     Entry {
         name: b"absent",
@@ -180,6 +294,7 @@ const TEST: &[Entry] = &[
         ask_data: Data::None,
         net: &[],
         ask_net: &[],
+        budget: Budget::UNLIMITED,
     },
     Entry {
         name: b"counter",
@@ -194,6 +309,7 @@ const TEST: &[Entry] = &[
         ask_data: Data::None,
         net: &[],
         ask_net: &[],
+        budget: Budget::UNLIMITED,
     },
     // The `permissions` kernel's (#105).
     Entry {
@@ -209,6 +325,7 @@ const TEST: &[Entry] = &[
         ask_data: Data::None,
         net: &[],
         ask_net: &[],
+        budget: Budget::UNLIMITED,
     },
     // Gets nothing; may ask for model 2 and data access (#106).
     Entry {
@@ -224,6 +341,7 @@ const TEST: &[Entry] = &[
         ask_data: Data::Write,
         net: &[],
         ask_net: &[],
+        budget: Budget::UNLIMITED,
     },
     // The `agents_net` kernel's (#109): gets the host echo server, may
     // ask for the port after it.
@@ -240,6 +358,7 @@ const TEST: &[Entry] = &[
         ask_data: Data::None,
         net: &[HOST_ECHO],
         ask_net: &[(HOST_ECHO.0, HOST_ECHO.1 + 1)],
+        budget: Budget::UNLIMITED,
     },
     // The same grant as `netter`, which the user's `revoke netter` leaves.
     Entry {
@@ -255,6 +374,7 @@ const TEST: &[Entry] = &[
         ask_data: Data::None,
         net: &[HOST_ECHO],
         ask_net: &[],
+        budget: Budget::UNLIMITED,
     },
     // The `hostile` kernel's (#110): its own files, and five models to ask
     // for, one more than the approval queue holds.
@@ -271,6 +391,7 @@ const TEST: &[Entry] = &[
         ask_data: Data::Write,
         net: &[],
         ask_net: &[],
+        budget: Budget::UNLIMITED,
     },
 ];
 
@@ -294,6 +415,16 @@ struct Store {
 }
 
 impl Store {
+    /// The size of file `path` in bytes; 0 if there is none.
+    fn size(&self, path: &[u8]) -> Result<u64, StoreFailed> {
+        let mut out = [0u8; 256];
+        match self.call(&StoreRequest::Stat { path }, &mut out)? {
+            StoreStatus::NotFound => Ok(0),
+            StoreStatus::Ok => Ok(u64_at(&out, 2)),
+            _ => Err(StoreFailed),
+        }
+    }
+
     /// Attaches the buffer at the storage service: at start, and again
     /// after the service restarted and lost it (#100).
     fn attach(&self) -> bool {
@@ -444,6 +575,8 @@ enum Ending {
     Finished,
     Hung,
     Cancelled,
+    /// Over its attempt's `cpu_ms` (D-022): a failed attempt.
+    OverCpu,
 }
 
 /// A running agent process.
@@ -464,7 +597,9 @@ struct Slot {
     inbox: Vec<(Dest, Vec<u8>)>,
     /// Refused requests this attempt, and the kinds already recorded.
     refused: u32,
-    noted: u8,
+    noted: u16,
+    /// What this attempt has used (#116).
+    usage: Usage,
 }
 
 struct Runtime {
@@ -485,6 +620,9 @@ struct Runtime {
     approved: Vec<(u32, Permission, Option<u64>)>,
     /// Refused, or not answered, for a task: not asked again.
     refused: Vec<(u32, Permission)>,
+    /// The policy table's groups, and what each has used this minute.
+    groups: &'static [Group],
+    group_use: Vec<GroupUse>,
 }
 
 struct Pending {
@@ -681,8 +819,39 @@ impl Runtime {
             let Some(slot) = self.slots.iter().position(Option::is_none) else {
                 return;
             };
-            let agents = &self.agents;
-            let runnable = |t: &tasks::Task| agents.iter().any(|l| l.entry.name == t.agent);
+            // Each group's running attempts and their pages (D-022).
+            let mut in_group = alloc::vec![(0u32, 0u64); self.groups.len()];
+            for s in self.slots.iter().flatten() {
+                let Some(l) = self
+                    .tasks
+                    .find(s.task)
+                    .and_then(|t| self.limits(&self.tasks.list[t].agent))
+                else {
+                    continue;
+                };
+                if let Some(g) = self
+                    .groups
+                    .iter()
+                    .position(|g| g.name == l.entry.budget.group)
+                {
+                    in_group[g].0 += 1;
+                    in_group[g].1 += u64::from(l.pages);
+                }
+            }
+            let (agents, groups) = (&self.agents, self.groups);
+            let runnable = |t: &tasks::Task| {
+                agents
+                    .iter()
+                    .find(|l| l.entry.name == t.agent)
+                    .is_some_and(|l| {
+                        match groups.iter().position(|g| g.name == l.entry.budget.group) {
+                            Some(g) => {
+                                budgets::room(&groups[g], in_group[g].0, in_group[g].1, l.pages)
+                            }
+                            None => true,
+                        }
+                    })
+            };
             let Some(i) = self.tasks.next(&mut self.store, runnable) else {
                 return;
             };
@@ -748,6 +917,7 @@ impl Runtime {
             inbox: Vec::new(),
             refused: 0,
             noted: 0,
+            usage: Usage::default(),
         });
         // Every grant is recorded before it is given; none is given if a
         // record fails (#108).
@@ -819,11 +989,27 @@ impl Runtime {
                 continue;
             };
             let deadline = (last + l.progress_us).min(started + l.task_us);
+            let cpu_ms = l.entry.budget.cpu_ms;
+            let cpu = (cpu_ms != u32::MAX)
+                .then(|| {
+                    self.slots[i]
+                        .as_ref()
+                        .map(|s| process_usage(s.process, Use::CpuMicros))
+                })
+                .flatten();
             if now >= deadline {
                 self.end(i, Ending::Hung);
                 self.event(id, b"hung", None);
+            } else if cpu.is_some_and(|c| c.is_ok_and(|us| us > u64::from(cpu_ms) * 1000)) {
+                self.end(i, Ending::OverCpu);
+                self.event(id, b"over cpu", None);
+                let agent = self.agent_of(id);
+                self.refusal_event(&agent, id, None, b"over cpu");
             } else {
                 wait = wait.min(deadline - now);
+                if cpu.is_some() {
+                    wait = wait.min(CPU_CHECK_US);
+                }
             }
         }
         wait
@@ -866,7 +1052,7 @@ impl Runtime {
         }
         match (s.ending, status) {
             (Some(Ending::Finished | Ending::Cancelled), _) => {}
-            (Some(Ending::Hung), _) => self.retry(id),
+            (Some(Ending::Hung | Ending::OverCpu), _) => self.retry(id),
             // Stopped, but not by the runtime: the user, on the trusted path.
             (None, Ok(Status::Stopped)) => {
                 self.finish(id, State::Cancelled, b"stopped");
@@ -1117,6 +1303,13 @@ impl Runtime {
                 };
                 let name = limits.entry.name;
                 let infer_permission = Some(Permission::Model(model));
+                // The prompt's bytes bound its tokens; refunded when the
+                // service reports the real count (#118).
+                let tokens = u64::from(prompt_len) + u64::from(max_new);
+                let budget = limits.entry.budget;
+                self.charge(i, &budget, infer_permission, |u, g| {
+                    u.tokens(&budget, g, now, tokens)
+                })?;
                 let seq = self.intent(name, id, action::INFER, infer_permission, b"infer", b"")?;
                 let mut n = self.infer(&req, GENERATE_US, out);
                 if n.is_some() && out[0] == status::NO_BUFFER && attach_prompt(&self.infer_buffer) {
@@ -1172,6 +1365,14 @@ impl Runtime {
                 let agent = limits.entry.name;
                 let path = data_path(agent, name);
                 let write = Some(Permission::DataWrite);
+                let budget = limits.entry.budget;
+                if budget.data_kb != u32::MAX {
+                    let (stored, old) = self.data_stored(agent, name)?;
+                    let new = u64::from(len);
+                    self.charge(i, &budget, write, |_, _| {
+                        budgets::data_fits(&budget, stored, old, new)
+                    })?;
+                }
                 let seq = self.intent(agent, id, action::DATA_WRITE, write, b"store", name)?;
                 let written = self.store.write(&path, &bytes).is_ok();
                 self.outcome(seq, agent, id, action::DATA_WRITE, written, name);
@@ -1229,6 +1430,10 @@ impl Runtime {
                 let mut msg = [0u8; 256];
                 let n = net::encode(&req, &mut msg).ok_or(status::INTERNAL)?;
                 let agent = limits.entry.name;
+                let budget = limits.entry.budget;
+                self.charge(i, &budget, Some(p), |u, g| {
+                    u.send(&budget, g, now, u64::from(len))
+                })?;
                 let seq = self.intent(agent, id, action::NET_SEND, Some(p), net::NAME, b"")?;
                 // The request is sent from the reply buffer too.
                 let mut reply = [0u8; 256];
@@ -1413,7 +1618,7 @@ impl Runtime {
 
     /// Counts a refused request from slot `i`; the first of its `kind` this
     /// attempt is recorded (best effort, as other refusals).
-    fn note(&mut self, i: usize, kind: u8, p: Option<Permission>) {
+    fn note(&mut self, i: usize, kind: u16, p: Option<Permission>) {
         let Some(s) = self.slots[i].as_mut() else {
             return;
         };
@@ -1427,10 +1632,64 @@ impl Runtime {
             refusal::MALFORMED => b"malformed",
             refusal::NO_GRANT => b"no grant",
             refusal::NOT_FOR_AGENTS => b"not for agents",
-            _ => b"not askable",
+            refusal::NOT_ASKABLE => b"not askable",
+            refusal::OVER_TOKENS => b"over tokens",
+            refusal::OVER_NET_SENDS => b"over net sends",
+            refusal::OVER_NET_BYTES => b"over net bytes",
+            refusal::OVER_DATA => b"over data",
+            refusal::OVER_GROUP_TOKENS => b"over group tokens",
+            _ => b"over group net",
         };
         let agent = self.agent_of(task);
         self.refusal_event(&agent, task, p, why);
+    }
+
+    /// Charges slot `i`'s attempt and its group with `f` (D-022, #116); over
+    /// a budget, the request is refused with `OVER_LIMIT` and noted.
+    fn charge(
+        &mut self,
+        i: usize,
+        budget: &Budget,
+        p: Option<Permission>,
+        f: impl FnOnce(&mut Usage, Option<(&Group, &mut GroupUse)>) -> Result<(), Over>,
+    ) -> Result<(), u8> {
+        let g = self
+            .groups
+            .iter()
+            .position(|g| !budget.group.is_empty() && g.name == budget.group);
+        let groups = self.groups;
+        let Some(s) = self.slots[i].as_mut() else {
+            return Err(NO_SESSION);
+        };
+        let group = g.map(|g| (&groups[g], &mut self.group_use[g]));
+        let Err(over) = f(&mut s.usage, group) else {
+            return Ok(());
+        };
+        let kind = match over {
+            Over::Tokens => refusal::OVER_TOKENS,
+            Over::NetSends => refusal::OVER_NET_SENDS,
+            Over::NetBytes => refusal::OVER_NET_BYTES,
+            Over::Data => refusal::OVER_DATA,
+            Over::GroupTokens => refusal::OVER_GROUP_TOKENS,
+            Over::GroupNet => refusal::OVER_GROUP_NET,
+        };
+        self.note(i, kind, p);
+        Err(status::OVER_LIMIT)
+    }
+
+    /// The bytes in agent `agent`'s files, and in `file` among them.
+    fn data_stored(&mut self, agent: &[u8], file: &[u8]) -> Result<(u64, u64), u8> {
+        let prefix = data_path(agent, b"");
+        let names = self.store.list(&prefix).map_err(|_| status::INTERNAL)?;
+        let (mut total, mut old) = (0, 0);
+        for name in names {
+            let size = self.store.size(&name).map_err(|_| status::INTERNAL)?;
+            total += size;
+            if name.strip_prefix(prefix.as_slice()) == Some(file) {
+                old = size;
+            }
+        }
+        Ok((total, old))
     }
 
     fn refusal_event(&self, actor: &[u8], task: u32, p: Option<Permission>, detail: &[u8]) {
@@ -1791,10 +2050,11 @@ fn attach_prompt(buffer: &Mapped) -> bool {
 }
 
 fn main(arg: u64) -> u64 {
-    let table: &'static [Entry] = match arg {
-        0 => BOOT,
-        1 => TEST,
-        _ => &[],
+    let (table, groups): (&'static [Entry], &'static [Group]) = match arg {
+        0 => (BOOT, &[]),
+        1 => (TEST, &[]),
+        2 => (BUDGETS, BUDGET_GROUPS),
+        _ => (&[], &[]),
     };
     let Ok(reply) = endpoint_create() else {
         return 1;
@@ -1859,6 +2119,8 @@ fn main(arg: u64) -> u64 {
         approve_us: APPROVE_US[usize::from(arg == 1)],
         approved: Vec::new(),
         refused: Vec::new(),
+        groups,
+        group_use: alloc::vec![GroupUse::default(); groups.len()],
     };
     // `trust`'s way to send `REVOKE`, badged so only it is served as `trust`.
     let mut msg = [0u8; 8];

@@ -38,6 +38,9 @@ pub mod status {
     pub const NOT_FOUND: u8 = 7;
     pub const CANCELLED: u8 = 8;
     pub const INTERNAL: u8 = 9;
+    /// Over a resource limit (D-022): the request is refused; the caller
+    /// may carry on without it.
+    pub const OVER_LIMIT: u8 = 10;
     /// First code an interface may define.
     pub const OWN: u8 = 32;
 }

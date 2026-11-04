@@ -120,6 +120,48 @@ pub struct Entry {
     /// runtime reach only the union of every entry's `net` and `ask_net`.
     pub net: &'static [Dest],
     pub ask_net: &'static [Dest],
+    /// What each attempt may use, and its group (D-022, #116).
+    pub budget: Budget,
+}
+
+/// What one attempt of an agent may use (D-022, resources.md). Each limit
+/// is per attempt except `data_kb`, the agent's stored files in total.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Budget {
+    /// CPU time; over it, the attempt is stopped.
+    pub cpu_ms: u32,
+    /// Inference tokens, prompt and generated.
+    pub tokens: u32,
+    pub net_sends: u32,
+    pub net_bytes: u32,
+    pub data_kb: u32,
+    /// The [`Group`] it belongs to; empty for none.
+    pub group: &'static [u8],
+}
+
+impl Budget {
+    /// No limit on anything, no group.
+    pub const UNLIMITED: Self = Self {
+        cpu_ms: u32::MAX,
+        tokens: u32::MAX,
+        net_sends: u32::MAX,
+        net_bytes: u32::MAX,
+        data_kb: u32::MAX,
+        group: b"",
+    };
+}
+
+/// Totals shared by the agents of one group (D-022 item 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Group {
+    pub name: &'static [u8],
+    /// Attempts running at once; another waits to start.
+    pub agents: u32,
+    /// Their page limits together; an attempt that would exceed it waits.
+    pub pages: u32,
+    /// Inference tokens and network payload bytes, per minute.
+    pub tokens_per_min: u32,
+    pub net_bytes_per_min: u32,
 }
 
 /// Why a manifest was refused.
@@ -407,6 +449,7 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
         ask_data: Data::None,
         net: &[([10, 0, 2, 2], 47_000), ([10, 0, 2, 3], 53)],
         ask_net: &[],
+        budget: Budget::UNLIMITED,
     }];
 
     fn with(key: &str, value: &str) -> std::string::String {

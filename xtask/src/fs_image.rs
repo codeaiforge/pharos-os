@@ -211,8 +211,9 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// within their policy entries, `greedy` asking for more pages than its
 /// entry allows, `noentry`, which has no entry, and `keeper`, the
 /// `permissions` kernel's, which may write its own files (#105), and
-/// `asker`, which gets nothing and asks (#106).
-pub const TEST_MANIFESTS: [(&str, &str); 9] = [
+/// `asker`, which gets nothing and asks (#106), and the `budgets` kernel's
+/// five (#116).
+pub const TEST_MANIFESTS: [(&str, &str); 14] = [
     (
         "agents/worker.manifest",
         "# The agents test kernel's worker.\nmanifest = 1\nname = worker\nprogram = bin/testagent\n\
@@ -257,6 +258,32 @@ pub const TEST_MANIFESTS: [(&str, &str); 9] = [
         "agents/hostile.manifest",
         "manifest = 1\nname = hostile\nprogram = bin/testagent\npages = 256\nmodels =\n\
          attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = write\nnet =\n",
+    ),
+    // The `budgets` kernel's (#116), each its policy entry's whole.
+    (
+        "agents/spender.manifest",
+        "manifest = 1\nname = spender\nprogram = bin/testagent\npages = 64\nmodels = 2\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 30000\ndata = write\nnet = 10.0.2.2:47000\n",
+    ),
+    (
+        "agents/grouper.manifest",
+        "manifest = 1\nname = grouper\nprogram = bin/testagent\npages = 64\nmodels = 2\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 30000\ndata = write\nnet = 10.0.2.2:47000\n",
+    ),
+    (
+        "agents/hog.manifest",
+        "manifest = 1\nname = hog\nprogram = bin/testagent\npages = 64\nmodels = 2\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 30000\ndata = write\nnet = 10.0.2.2:47000\n",
+    ),
+    (
+        "agents/pair.manifest",
+        "manifest = 1\nname = pair\nprogram = bin/testagent\npages = 64\nmodels = 2\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 30000\ndata = write\nnet = 10.0.2.2:47000\n",
+    ),
+    (
+        "agents/big.manifest",
+        "manifest = 1\nname = big\nprogram = bin/testagent\npages = 256\nmodels = 2\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 30000\ndata = write\nnet = 10.0.2.2:47000\n",
     ),
 ];
 

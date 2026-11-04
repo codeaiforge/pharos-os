@@ -192,7 +192,8 @@ impl Agent {
         self.call(&Request::DataPut { name, len }, &mut [0; 256]).0
     }
 
-    /// Starts a session on model 2; true if it started.
+    /// Starts a session on model 2, waiting while another agent's session
+    /// holds the service; true if it started.
     fn generate(&self, max_new: u16) -> (u8, bool) {
         let prompt = b"hello hello";
         self.buffer.write_bytes(0, prompt);
@@ -202,8 +203,15 @@ impl Agent {
             max_new,
             prompt_len: prompt.len() as u32,
         };
-        let (code, n) = self.call(&req, &mut out);
-        (code, Started::parse(&out[..n]).is_some())
+        // Another agent's session holds the service: try again (#116).
+        for _ in 0..100 {
+            let (code, n) = self.call(&req, &mut out);
+            if code != status::BUSY {
+                return (code, Started::parse(&out[..n]).is_some());
+            }
+            sleep(50_000);
+        }
+        (status::BUSY, false)
     }
 
     fn ask(&self, permission: Permission, for_ms: u32) -> Option<Asked> {
@@ -293,6 +301,71 @@ impl Agent {
         let mut bytes = alloc::vec![0u8; d.len as usize];
         self.buffer.read_bytes(0, &mut bytes);
         Ok((d, bytes))
+    }
+
+    /// The `budgets` kernel's `spender` (#116): 40 tokens, 2 datagrams of
+    /// 64 bytes, and 1 KiB of files. Each request past them is refused
+    /// with `OVER_LIMIT`, and a refused one costs nothing.
+    fn spend(&self) -> u64 {
+        const ECHO: [u8; 4] = [10, 0, 2, 2];
+        let over = status::OVER_LIMIT;
+        // "hello hello" is 11 bytes: a session of n new tokens costs 11 + n.
+        if self.generate(30).0 != over {
+            return self.fail(b"41 tokens of 40 were not refused");
+        }
+        if !self.generate(8).1 {
+            return self.fail(b"19 tokens of 40 were refused");
+        }
+        self.call(&Request::CancelInfer, &mut [0; 256]);
+        if self.generate(11).0 != over
+            || !{
+                let started = self.generate(10).1;
+                self.call(&Request::CancelInfer, &mut [0; 256]);
+                started
+            }
+        {
+            return self.fail(b"tokens were not counted across sessions");
+        }
+        let sends = [(40, status::OK), (40, over), (10, status::OK), (1, over)];
+        for (len, want) in sends {
+            if self.send_to(ECHO, 47_000, &[7; 40][..len]) != want {
+                return self.fail(b"datagrams past 2 or 64 bytes were not refused");
+            }
+        }
+        // Replacing `a` counts its new size only: 500 + 500, then 100 over.
+        let puts = [
+            (&b"a"[..], 600, status::OK),
+            (b"b", 600, over),
+            (b"a", 500, status::OK),
+            (b"b", 500, status::OK),
+            (b"c", 100, over),
+        ];
+        for (name, len, want) in puts {
+            if self.put(name, &[1; 600][..len]) != want {
+                return self.fail(b"files past 1 KiB were not refused");
+            }
+        }
+        self.complete(b"spend ok")
+    }
+
+    /// The `budgets` kernel's `grouper` (#116): its own budget has no
+    /// limit, its group's minute has 30 tokens and 48 bytes.
+    fn group_spend(&self) -> u64 {
+        const ECHO: [u8; 4] = [10, 0, 2, 2];
+        let over = status::OVER_LIMIT;
+        if self.generate(20).0 != over {
+            return self.fail(b"31 of the group's 30 tokens were not refused");
+        }
+        if !self.generate(19).1 {
+            return self.fail(b"the group's 30 tokens were refused");
+        }
+        self.call(&Request::CancelInfer, &mut [0; 256]);
+        if self.send_to(ECHO, 47_000, &[7; 40]) != status::OK
+            || self.send_to(ECHO, 47_000, &[7; 10]) != over
+        {
+            return self.fail(b"50 of the group's 48 bytes were not refused");
+        }
+        self.complete(b"group ok")
     }
 
     fn net_quiet(&self) -> u64 {
@@ -950,6 +1023,16 @@ fn main(_: u64) -> u64 {
         b"net-quiet" => a.net_quiet(),
         b"net-talk" => a.net_talk(),
         b"hostile" => a.hostile(),
+        b"spend" => a.spend(),
+        b"group-spend" => a.group_spend(),
+        // Runs 600 ms, asking the runtime for its task now and then.
+        b"nap" => {
+            for _ in 0..6 {
+                a.call(&Request::Task, &mut out);
+                sleep(100_000);
+            }
+            a.complete(b"napped")
+        }
         b"keeper-d" if a.get(b"notes").0 == status::NO_ACCESS => a.complete(b"d ok"),
         b"keeper-d" => a.fail(b"a grant was given without its record"),
         b"wait" => loop {

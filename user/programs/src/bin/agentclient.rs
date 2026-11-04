@@ -15,7 +15,7 @@
 //! Argument 3: the `agents_net` kernel (#109): a `netter` task that talks
 //! to the host echo server, and a `listener` task (the same grant) that
 //! sends nothing. Argument 4: the `hostile` kernel (#110): a `hostile`
-//! task beside a `keeper` task.
+//! task beside a `keeper` task. Argument 5: the `budgets` kernel (#116).
 
 #![no_std]
 #![no_main]
@@ -172,6 +172,9 @@ fn main(arg: u64) -> u64 {
     }
     if arg == 4 {
         return hostile(c);
+    }
+    if arg == 5 {
+        return budgets(c);
     }
     let mut out = [0u8; 256];
 
@@ -470,6 +473,64 @@ fn hostile(mut c: Client) -> u64 {
         "the runtime still serves control requests",
         c.call(&Request::Info, &mut out).0 == status::OK,
     );
+    let _ = send(REPORT, b"done", 0, 0, 0);
+    c.failed
+}
+
+/// The `budgets` kernel (#116): each agent within its budget or its
+/// group's, `hog` stopped over its CPU time, and `pair` and `big` tasks
+/// started one at a time by their groups.
+fn budgets(mut c: Client) -> u64 {
+    let ended = |c: &Client, task: Result<u32, u8>, state: State, want: &[u8]| {
+        let Some((s, result)) = task.ok().and_then(|t| c.wait(t, 60)) else {
+            return false;
+        };
+        if result != want {
+            let mut line = Vec::from(&b"budgets kernel result: "[..]);
+            line.extend_from_slice(&result[..result.len().min(200)]);
+            let _ = debug_write(CONSOLE, &line);
+        }
+        s.state == state && (want.is_empty() || result == want) && s.attempts == 1
+    };
+    let spender = c.submit(b"spender", b"spend");
+    let grouper = c.submit(b"grouper", b"group-spend");
+    let hog = c.submit(b"hog", b"hang");
+    c.step(
+        "an agent is refused past its tokens, datagrams, bytes, and files",
+        ended(&c, spender, State::Done, b"spend ok"),
+    );
+    c.step(
+        "an agent is refused past its group's tokens and bytes this minute",
+        ended(&c, grouper, State::Done, b"group ok"),
+    );
+    c.step(
+        "an agent over its CPU time is stopped, a failed attempt",
+        ended(&c, hog, State::Failed, b""),
+    );
+    // One at a time: `pair`'s group runs one attempt, `big`'s has pages
+    // for one.
+    for (name, step) in [
+        (
+            &b"pair"[..],
+            "a group of one runs its agents' tasks one at a time",
+        ),
+        (
+            b"big",
+            "a group's pages hold a second task until the first ends",
+        ),
+    ] {
+        let first = c.submit(name, b"nap");
+        let second = c.submit(name, b"nap");
+        sleep(300_000);
+        let states = [first, second].map(|t| t.ok().and_then(|t| c.status(t)).map(|s| s.state));
+        let one_waits = states == [Some(State::Running), Some(State::Pending)];
+        c.step(
+            step,
+            one_waits
+                && ended(&c, first, State::Done, b"napped")
+                && ended(&c, second, State::Done, b"napped"),
+        );
+    }
     let _ = send(REPORT, b"done", 0, 0, 0);
     c.failed
 }
