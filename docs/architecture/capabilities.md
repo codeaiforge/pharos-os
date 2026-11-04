@@ -83,7 +83,7 @@ What an agent process can do on Pharos, each a check in the adversarial tests (#
 - every request is checked against its own slot's grants, so another slot's badge, task, session, or buffer is unreachable;
 - it cannot reach the trusted console, the audit service, or the store, except through runtime requests that are checked and audited.
 
-CPU time is not limited per agent yet (M3.5).
+CPU time is not limited per agent yet (M3.5, [resources.md](resources.md)).
 
 - *Implemented (#110):* the `hostile` test kernel checks each of these with an agent that tries them (listed in [testing.md](../development/testing.md)), beside an agent that must be unaffected. The runtime records an agent's refused requests once per kind per attempt (malformed or out of bounds, no grant, not a request for agents, not askable), each with its first example, and the attempt's total when it ends, so a flood cannot fill the trail (the maintainer's choice, 2026-11-03). Limit: the approval queue (4) is shared, so one agent can keep it full and others' requests are refused until its requests end (each at most 60 s, or with its task).
 
