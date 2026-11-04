@@ -120,6 +120,10 @@ name = "preemption"
 harness = false
 
 [[test]]
+name = "classes"
+harness = false
+
+[[test]]
 name = "address_spaces"
 harness = false
 

@@ -403,13 +403,26 @@ pub fn start(
     start_limited(space, entry, arg, caps, 0)
 }
 
-/// [`start`] with a `mem_map` limit of `limit` pages.
+/// [`start`] with a `mem_map` limit of `limit` pages, in the trusted
+/// class (processes the kernel starts).
 pub fn start_limited(
     space: AddressSpace,
     entry: u64,
     arg: u64,
     caps: Vec<Arc<Capability>>,
     limit: u64,
+) -> Result<TaskId, ProcessError> {
+    start_class(space, entry, arg, caps, limit, sched::TRUSTED)
+}
+
+/// [`start_limited`] in scheduling class `class` (D-022).
+pub fn start_class(
+    space: AddressSpace,
+    entry: u64,
+    arg: u64,
+    caps: Vec<Arc<Capability>>,
+    limit: u64,
+    class: sched::Class,
 ) -> Result<TaskId, ProcessError> {
     if space.translate(USER_BASE.saturating_add(entry)).is_none() {
         return Err(ProcessError::BadEntry);
@@ -424,7 +437,7 @@ pub fn start_limited(
     let parent = current().map(|p| p.record.id);
     // Register the process before its thread can run (no preemption here).
     without_interrupts(|| {
-        let id = sched::spawn_in(space, move || {
+        let id = sched::spawn_in(space, class, move || {
             context::enter_user(USER_BASE + entry, STACK_TOP, arg)
         })
         .map_err(ProcessError::Sched)?;
@@ -441,6 +454,7 @@ pub fn start_limited(
                 id,
                 end: IrqMutex::new(None),
                 notify: IrqMutex::new(None),
+                cpu: core::sync::atomic::AtomicU64::new(0),
             }),
         });
         PROCESSES.lock().insert(id, process);
@@ -499,9 +513,20 @@ pub struct ProcessRecord {
     pub id: TaskId,
     end: IrqMutex<Option<End>>,
     notify: IrqMutex<Option<(Arc<crate::ipc::Endpoint>, u32)>>,
+    /// TSC cycles it ran, set when it ends.
+    cpu: core::sync::atomic::AtomicU64,
 }
 
 impl ProcessRecord {
+    /// TSC cycles the process has run: so far while it runs, all of them
+    /// once it has ended.
+    pub fn cpu_cycles(&self) -> u64 {
+        match sched::cpu_cycles(self.id) {
+            Some(cycles) if self.end().is_none() => cycles,
+            _ => self.cpu.load(core::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
     /// How the process ended, or `None` while it runs.
     pub fn end(&self) -> Option<End> {
         *self.end.lock()
@@ -573,11 +598,35 @@ fn end_current(end: End) -> ! {
             sched::stop(child);
         }
         if let Some(process) = &process {
+            let cpu = sched::cpu_cycles(id).unwrap_or(0);
+            process
+                .record
+                .cpu
+                .store(cpu, core::sync::atomic::Ordering::Relaxed);
             process.record.finish(end);
         }
         drop(process);
     }
     sched::exit()
+}
+
+/// Live processes started by process `id`, by those, and so on.
+pub fn descendants(id: TaskId) -> usize {
+    let table = PROCESSES.lock();
+    table
+        .values()
+        .filter(|p| {
+            // ponytail: walks parents per process; at most 32 processes.
+            let mut parent = p.parent;
+            while let Some(pid) = parent {
+                if pid == id {
+                    return true;
+                }
+                parent = table.get(&pid).and_then(|q| q.parent);
+            }
+            false
+        })
+        .count()
 }
 
 /// Tells process `id` to end ([`End::Stopped`]); it does at its next

@@ -1,7 +1,10 @@
-//! Kernel task scheduler (D-013): preemptive round-robin on one CPU with a
-//! one-tick time slice (10 ms at 100 Hz). Tasks switch on `yield_now`,
-//! `sleep`, exit, and, once [`enable_preemption`] has run, on every timer
-//! tick. An idle task runs only when nothing else is ready.
+//! Kernel task scheduler (D-013, amended by D-022): preemptive round-robin
+//! on one CPU with a one-tick time slice (10 ms at 100 Hz), in three fixed
+//! classes ([`Class`]): a ready task of a higher class always runs first.
+//! Tasks switch on `yield_now`, `sleep`, exit, once [`enable_preemption`]
+//! has run on every timer tick, and on [`preempt`] after a wake-up of a
+//! higher class. An idle task runs only when nothing else is ready. Each
+//! task's CPU time is counted in TSC cycles at every switch.
 //!
 //! Rules (D-013): switches happen with interrupts disabled and no
 //! `IrqMutex` held (checked); the scheduler lock is released before the
@@ -20,13 +23,14 @@ use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
 
 use crate::arch::x86_64::context::{self, Context, KernelStack, StackError};
 use crate::arch::x86_64::paging::AddressSpace;
 use crate::arch::x86_64::{
-    apic, disable_interrupts, enable_and_wait_for_interrupt, enable_interrupts, without_interrupts,
+    apic, disable_interrupts, enable_and_wait_for_interrupt, enable_interrupts, rdtsc,
+    without_interrupts,
 };
 use crate::kprintln;
 use crate::mm::raw::{IrqMutex, irq_locks_held};
@@ -34,6 +38,16 @@ use crate::time;
 
 /// Task identifier; the boot thread is 0.
 pub type TaskId = u64;
+
+/// Scheduling class (D-022 item 1): a lower number runs first.
+pub type Class = u8;
+/// Kernel tasks, `init`, and `trust`.
+pub const TRUSTED: Class = 0;
+/// The other services.
+pub const SERVICES: Class = 1;
+/// Agents.
+pub const AGENTS: Class = 2;
+const CLASSES: usize = 3;
 
 /// How the running thread leaves the CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,22 +58,25 @@ pub enum Leave {
     Block,
 }
 
-/// Round-robin order: the running thread, a first-in first-out ready
-/// queue, and an optional idle thread that runs only when nothing else is
+/// Round-robin order within each [`Class`]: the running thread, a
+/// first-in first-out ready queue per class, the highest non-empty class
+/// first, and an optional idle thread that runs only when nothing else is
 /// ready and is never queued.
 pub struct RunQueue<T> {
     current: T,
-    ready: VecDeque<T>,
+    current_class: Class,
+    ready: [VecDeque<T>; CLASSES],
     idle: Option<T>,
     idle_running: bool,
 }
 
 impl<T: Clone> RunQueue<T> {
-    /// A queue whose running thread is `current`.
-    pub fn new(current: T) -> Self {
+    /// A queue whose running thread is `current`, of class `class`.
+    pub fn new(current: T, class: Class) -> Self {
         Self {
             current,
-            ready: VecDeque::new(),
+            current_class: class,
+            ready: [VecDeque::new(), VecDeque::new(), VecDeque::new()],
             idle: None,
             idle_running: false,
         }
@@ -70,14 +87,25 @@ impl<T: Clone> RunQueue<T> {
         &self.current
     }
 
-    /// Adds a ready thread at the back.
-    pub fn push(&mut self, thread: T) {
-        self.ready.push_back(thread);
+    /// Adds a ready thread of class `class` (at most [`AGENTS`]) at the
+    /// back of its class's queue.
+    pub fn push(&mut self, thread: T, class: Class) {
+        self.ready[usize::from(class).min(CLASSES - 1)].push_back(thread);
     }
 
     /// Threads waiting to run (not counting the idle thread).
     pub fn ready_len(&self) -> usize {
-        self.ready.len()
+        self.ready.iter().map(VecDeque::len).sum()
+    }
+
+    /// The running thread's class; [`AGENTS`] while the idle thread runs,
+    /// so any wake-up outranks it.
+    pub fn current_class(&self) -> Class {
+        if self.idle_running {
+            AGENTS
+        } else {
+            self.current_class
+        }
     }
 
     /// Sets the idle thread.
@@ -95,22 +123,30 @@ impl<T: Clone> RunQueue<T> {
         self.idle_running
     }
 
-    /// Makes the first ready thread current, or the idle thread if nothing
-    /// is ready and the current thread blocks. A yielding thread goes to
-    /// the back of the queue (the idle thread never does). Returns
-    /// `(previous, next)`, or `None` if the current thread keeps running
-    /// (nothing ready on a yield, or a block with no idle thread).
+    /// Makes the first ready thread of the highest class current, or the
+    /// idle thread if nothing is ready and the current thread blocks. A
+    /// yielding thread goes to the back of its class's queue (the idle
+    /// thread never does), and keeps running if only lower classes are
+    /// ready. Returns `(previous, next)`, or `None` if the current thread
+    /// keeps running (nothing ready on a yield, or a block with no idle
+    /// thread).
     pub fn rotate(&mut self, leave: Leave) -> Option<(T, T)> {
-        let (next, next_is_idle) = match self.ready.pop_front() {
-            Some(next) => (next, false),
-            None if leave == Leave::Block && !self.idle_running => (self.idle.clone()?, true),
+        let class = self.ready.iter().position(|q| !q.is_empty());
+        let yields = leave == Leave::Yield && !self.idle_running;
+        let (next, next_class) = match class {
+            Some(c) if yields && c > usize::from(self.current_class) => return None,
+            Some(c) => (self.ready[c].pop_front()?, Some(c as Class)),
+            None if leave == Leave::Block && !self.idle_running => (self.idle.clone()?, None),
             None => return None,
         };
         let previous = core::mem::replace(&mut self.current, next.clone());
-        if leave == Leave::Yield && !self.idle_running {
-            self.ready.push_back(previous.clone());
+        if yields {
+            self.ready[usize::from(self.current_class)].push_back(previous.clone());
         }
-        self.idle_running = next_is_idle;
+        self.idle_running = next_class.is_none();
+        if let Some(c) = next_class {
+            self.current_class = c;
+        }
         Some((previous, next))
     }
 }
@@ -228,6 +264,11 @@ struct Task {
     entry: IrqMutex<Option<Entry>>,
     /// Set when its last [`block_until`] ended at the deadline.
     timed_out: AtomicBool,
+    class: Class,
+    /// TSC cycles it ran, up to its last switch away.
+    cpu: AtomicU64,
+    /// TSC when it was last switched to.
+    since: AtomicU64,
 }
 
 struct Scheduler {
@@ -267,15 +308,18 @@ pub fn init() -> Result<(), SchedError> {
         context,
         entry: IrqMutex::new(None),
         timed_out: AtomicBool::new(false),
+        class: TRUSTED,
+        cpu: AtomicU64::new(0),
+        since: AtomicU64::new(rdtsc()),
     });
     *scheduler = Some(Scheduler {
-        queue: RunQueue::new(boot),
+        queue: RunQueue::new(boot.clone(), TRUSTED),
         sleepers: SleepQueue::new(),
         blocked: BTreeMap::new(),
         timeouts: SleepQueue::new(),
         exited: None,
         stopping: BTreeSet::new(),
-        tasks: BTreeMap::new(),
+        tasks: BTreeMap::from([(0, Arc::downgrade(&boot))]),
         next_id: 1,
         live: 1,
         ticks: 0,
@@ -283,9 +327,13 @@ pub fn init() -> Result<(), SchedError> {
     Ok(())
 }
 
-/// A new task with its own stack, not yet queued; it runs in `space` if
-/// given, else in the kernel address space.
-fn new_task(entry: Entry, space: Option<AddressSpace>) -> Result<Arc<Task>, SchedError> {
+/// A new task of class `class` with its own stack, not yet queued; it runs
+/// in `space` if given, else in the kernel address space.
+fn new_task(
+    entry: Entry,
+    space: Option<AddressSpace>,
+    class: Class,
+) -> Result<Arc<Task>, SchedError> {
     if SCHEDULER.lock().is_none() {
         return Err(SchedError::NotInitialized);
     }
@@ -303,23 +351,35 @@ fn new_task(entry: Entry, space: Option<AddressSpace>) -> Result<Arc<Task>, Sche
         context,
         entry: IrqMutex::new(Some(entry)),
         timed_out: AtomicBool::new(false),
+        class,
+        cpu: AtomicU64::new(0),
+        since: AtomicU64::new(0),
     }))
 }
 
-/// Creates a task that runs `entry` on its own 32 KiB stack, and queues it
-/// behind the ready tasks. It exits when `entry` returns.
+/// Creates a [`TRUSTED`] task that runs `entry` on its own 32 KiB stack,
+/// and queues it behind the ready tasks. It exits when `entry` returns.
 pub fn spawn(entry: impl FnOnce() + Send + 'static) -> Result<TaskId, SchedError> {
-    queue(new_task(Box::new(entry), None)?)
+    spawn_class(TRUSTED, entry)
 }
 
-/// Like [`spawn`], but the task runs in the process address space `space`
-/// (CR3 switches with it). The task owns `space`; it is destroyed, with all
-/// its user pages, when the task is reaped.
-pub fn spawn_in(
-    space: AddressSpace,
+/// [`spawn`] in class `class`.
+pub fn spawn_class(
+    class: Class,
     entry: impl FnOnce() + Send + 'static,
 ) -> Result<TaskId, SchedError> {
-    queue(new_task(Box::new(entry), Some(space))?)
+    queue(new_task(Box::new(entry), None, class)?)
+}
+
+/// Like [`spawn_class`], but the task runs in the process address space
+/// `space` (CR3 switches with it). The task owns `space`; it is destroyed,
+/// with all its user pages, when the task is reaped.
+pub fn spawn_in(
+    space: AddressSpace,
+    class: Class,
+    entry: impl FnOnce() + Send + 'static,
+) -> Result<TaskId, SchedError> {
+    queue(new_task(Box::new(entry), Some(space), class)?)
 }
 
 fn queue(task: Arc<Task>) -> Result<TaskId, SchedError> {
@@ -328,7 +388,8 @@ fn queue(task: Arc<Task>) -> Result<TaskId, SchedError> {
     let scheduler = scheduler.as_mut().ok_or(SchedError::NotInitialized)?;
     scheduler.live += 1;
     scheduler.tasks.insert(id, Arc::downgrade(&task));
-    scheduler.queue.push(task);
+    let class = task.class;
+    scheduler.queue.push(task, class);
     Ok(id)
 }
 
@@ -356,6 +417,7 @@ pub fn enable_preemption() -> Result<(), SchedError> {
             }
         }),
         None,
+        AGENTS,
     )?;
     SCHEDULER
         .lock()
@@ -374,6 +436,38 @@ pub fn enable_preemption() -> Result<(), SchedError> {
 /// ID of the running task (`None` before [`init`]).
 pub fn current_id() -> Option<TaskId> {
     SCHEDULER.lock().as_ref().map(|s| s.queue.current().id)
+}
+
+/// The running task's class ([`TRUSTED`] before [`init`]).
+pub fn current_class() -> Class {
+    SCHEDULER
+        .lock()
+        .as_ref()
+        .map_or(TRUSTED, |s| s.queue.current().class)
+}
+
+/// Task `id`'s class; `None` if it has exited.
+pub fn class_of(id: TaskId) -> Option<Class> {
+    let s = SCHEDULER.lock();
+    let task = s.as_ref()?.tasks.get(&id)?.upgrade()?;
+    Some(task.class)
+}
+
+/// TSC cycles task `id` has run, including its current turn if it is
+/// running; `None` if it has exited.
+pub fn cpu_cycles(id: TaskId) -> Option<u64> {
+    let (task, running) = {
+        let s = SCHEDULER.lock();
+        let s = s.as_ref()?;
+        let task = s.tasks.get(&id).and_then(Weak::upgrade)?;
+        let running = Arc::ptr_eq(&task, s.queue.current()) && !s.queue.idle_running();
+        (task, running)
+    };
+    let mut cycles = task.cpu.load(Ordering::Relaxed);
+    if running {
+        cycles += rdtsc().wrapping_sub(task.since.load(Ordering::Relaxed));
+    }
+    Some(cycles)
 }
 
 /// Runs `f` on the running task's process address space, locked; `None`
@@ -438,6 +532,19 @@ fn pick_next(leave: Leave, before: impl FnOnce(&mut Scheduler)) -> Option<Switch
     reaped = scheduler.exited.take();
     before(scheduler);
     let (previous, next) = scheduler.queue.rotate(leave)?;
+    // This switch picks the highest class; an earlier wake-up needs no
+    // further `preempt`.
+    PREEMPT.store(false, Ordering::Relaxed);
+    // CPU time (D-022 item 2): one TSC read per switch. A plain load and
+    // store, not a locked add: interrupts are off on one CPU, and the
+    // locked form cost the IPC round trip several times more (resources.md).
+    let now = rdtsc();
+    let ran = now.wrapping_sub(previous.since.load(Ordering::Relaxed));
+    previous.cpu.store(
+        previous.cpu.load(Ordering::Relaxed) + ran,
+        Ordering::Relaxed,
+    );
+    next.since.store(now, Ordering::Relaxed);
     let switch = Switch {
         from: previous.context.clone(),
         to: next.context.clone(),
@@ -537,11 +644,38 @@ pub fn wake(id: TaskId) -> bool {
     match scheduler.blocked.remove(&id) {
         Some(task) => {
             scheduler.timeouts.remove(&id);
-            scheduler.queue.push(task);
+            let class = task.class;
+            if class < scheduler.queue.current_class() {
+                PREEMPT.store(true, Ordering::Relaxed);
+            }
+            scheduler.queue.push(task, class);
             true
         }
         None => false,
     }
+}
+
+/// Set by [`wake`] when it readies a task of a higher class than the
+/// running one; [`preempt`] acts on it.
+static PREEMPT: AtomicBool = AtomicBool::new(false);
+
+/// Switches to a task of a higher class that [`wake`] made ready since the
+/// last call, if any (D-022: the emergency stop runs at once, not at the
+/// next tick). Called at the end of every system call and device
+/// interrupt, with interrupts disabled and no lock held; one load when
+/// nothing was woken.
+pub fn preempt() {
+    // A plain load: `swap` is a locked instruction on every system call.
+    if !PREEMPT.load(Ordering::Relaxed) {
+        return;
+    }
+    without_interrupts(|| {
+        PREEMPT.store(false, Ordering::Relaxed);
+        check_no_locks();
+        if let Some(switch) = pick_next(Leave::Yield, |_| {}) {
+            run_switch(switch);
+        }
+    });
 }
 
 /// Tells task `id` to end: it is marked, and if it waits it is made ready
@@ -557,9 +691,11 @@ pub fn stop(id: TaskId) -> bool {
     if let Some(task) = s.blocked.remove(&id) {
         s.timeouts.remove(&id);
         task.timed_out.store(true, Ordering::Relaxed);
-        s.queue.push(task);
+        let class = task.class;
+        s.queue.push(task, class);
     } else if let Some(task) = s.sleepers.take(|t| t.id == id) {
-        s.queue.push(task);
+        let class = task.class;
+        s.queue.push(task, class);
     }
     true
 }
@@ -635,13 +771,15 @@ fn on_tick() {
     let switch = pick_next(Leave::Yield, |s| {
         s.ticks += 1;
         while let Some(task) = s.sleepers.pop_due(s.ticks) {
-            s.queue.push(task);
+            let class = task.class;
+            s.queue.push(task, class);
         }
         // Waits that reached their deadline: ready again, marked timed out.
         while let Some(id) = s.timeouts.pop_due(s.ticks) {
             if let Some(task) = s.blocked.remove(&id) {
                 task.timed_out.store(true, Ordering::Relaxed);
-                s.queue.push(task);
+                let class = task.class;
+                s.queue.push(task, class);
             }
         }
     });
@@ -668,7 +806,7 @@ extern "C" fn task_start() -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{Leave, RunQueue, SleepQueue, deadline_at};
+    use super::{AGENTS, Leave, RunQueue, SERVICES, SleepQueue, TRUSTED, deadline_at};
 
     #[test]
     fn deadlines_round_up_and_never_end_early() {
@@ -697,9 +835,9 @@ mod tests {
 
     #[test]
     fn yields_rotate_in_order() {
-        let mut q = RunQueue::new('m');
+        let mut q = RunQueue::new('m', TRUSTED);
         for t in ['a', 'b', 'c'] {
-            q.push(t);
+            q.push(t, TRUSTED);
         }
         let mut order = Vec::new();
         for _ in 0..8 {
@@ -713,9 +851,9 @@ mod tests {
 
     #[test]
     fn blocking_leaves_the_queue() {
-        let mut q = RunQueue::new('m');
-        q.push('a');
-        q.push('b');
+        let mut q = RunQueue::new('m', TRUSTED);
+        q.push('a', TRUSTED);
+        q.push('b', TRUSTED);
         assert_eq!(q.rotate(Leave::Yield), Some(('m', 'a')));
         assert_eq!(q.rotate(Leave::Block), Some(('a', 'b')), "a blocks");
         assert_eq!(q.rotate(Leave::Yield), Some(('b', 'm')));
@@ -725,7 +863,7 @@ mod tests {
 
     #[test]
     fn alone_keeps_running_without_idle() {
-        let mut q = RunQueue::new('m');
+        let mut q = RunQueue::new('m', TRUSTED);
         assert_eq!(q.rotate(Leave::Yield), None);
         assert_eq!(q.rotate(Leave::Block), None);
         assert_eq!(*q.current(), 'm');
@@ -733,17 +871,57 @@ mod tests {
 
     #[test]
     fn idle_runs_only_when_nothing_is_ready() {
-        let mut q = RunQueue::new('m');
+        let mut q = RunQueue::new('m', TRUSTED);
         q.set_idle('i');
         assert_eq!(q.rotate(Leave::Yield), None, "a yield never picks idle");
         assert_eq!(q.rotate(Leave::Block), Some(('m', 'i')), "m sleeps");
         assert!(q.idle_running());
         assert_eq!(q.rotate(Leave::Yield), None, "idle keeps running");
         assert_eq!(q.rotate(Leave::Block), None, "idle never blocks");
-        q.push('m'); // m wakes
+        q.push('m', TRUSTED); // m wakes
         assert_eq!(q.rotate(Leave::Yield), Some(('i', 'm')));
         assert!(!q.idle_running());
         assert_eq!(q.ready_len(), 0, "idle is never queued");
+    }
+
+    #[test]
+    fn higher_classes_run_first_and_round_robin_within() {
+        let mut q = RunQueue::new('s', SERVICES);
+        q.set_idle('i');
+        q.push('a', AGENTS);
+        q.push('b', AGENTS);
+        assert_eq!(q.rotate(Leave::Yield), None, "a service outranks agents");
+        q.push('t', TRUSTED);
+        assert_eq!(q.rotate(Leave::Yield), Some(('s', 't')), "trusted first");
+        assert_eq!(q.current_class(), TRUSTED);
+        assert_eq!(
+            q.rotate(Leave::Yield),
+            None,
+            "t alone in its class keeps running"
+        );
+        assert_eq!(q.rotate(Leave::Block), Some(('t', 's')), "then the service");
+        assert_eq!(
+            q.rotate(Leave::Block),
+            Some(('s', 'a')),
+            "agents only when it blocks"
+        );
+        assert_eq!(
+            q.rotate(Leave::Yield),
+            Some(('a', 'b')),
+            "round robin among agents"
+        );
+        assert_eq!(q.rotate(Leave::Yield), Some(('b', 'a')));
+        q.push('s', SERVICES);
+        assert_eq!(
+            q.rotate(Leave::Yield),
+            Some(('a', 's')),
+            "a woken service preempts"
+        );
+        assert_eq!(q.rotate(Leave::Block), Some(('s', 'b')), "b kept its place");
+        assert_eq!(q.rotate(Leave::Block), Some(('b', 'a')));
+        assert_eq!(q.rotate(Leave::Block), Some(('a', 'i')));
+        assert_eq!(q.current_class(), AGENTS, "idle is outranked by everything");
+        assert_eq!(q.ready_len(), 0);
     }
 
     #[test]

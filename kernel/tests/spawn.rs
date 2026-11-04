@@ -28,7 +28,7 @@ fn free_frames() -> usize {
 }
 
 /// Steps `spawner` must report as passed.
-const STEPS: [&str; 16] = [
+const STEPS: [&str; 19] = [
     "endpoint_create and open bin/child",
     "spawn a child with two capabilities",
     "the child's message carries badge 7",
@@ -43,6 +43,9 @@ const STEPS: [&str; 16] = [
     "send with a 25-bit badge: TOO_LARGE",
     "9 capabilities: TOO_LARGE",
     "malformed programs: BAD_PROGRAM",
+    "a child in the agents class: a higher class is TOO_LARGE",
+    "process_usage: CPU time and pages while running, CPU time kept once stopped",
+    "process_usage: a child whose child started a child has two descendants",
     "the process limit: NO_MEMORY",
     "released the waiting children",
 ];
@@ -103,7 +106,8 @@ fn run(t: &mut TestRun) {
         ),
         Capability::new(Object::Endpoint(Endpoint::new()), SEND),
     ];
-    let id = process::spawn_elf(&programs, b"bin/spawner", 0, caps);
+    // 256 pages for its child that maps 1 MiB (#114).
+    let id = process::spawn_elf_limited(&programs, b"bin/spawner", 0, caps, 256);
     t.check("spawner started", id.is_ok());
     let id = id.unwrap_or(u64::MAX);
     for _ in 0..60 {

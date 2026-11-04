@@ -4,6 +4,7 @@
 
 - **Design:** Accepted with [D-013](../project/decision-log.md#d-013-scheduling-model) (2026-10-27); the timer is the 100 Hz tick from [D-006](../project/decision-log.md#d-006-interrupt-controller-and-timer-design).
 - **Implementation:** kernel tasks on their own guarded stacks, the context switch, round-robin switching (`yield_now`, exit; #33), and preemption by the timer tick, the idle task, and sleeping (#34) are **implemented** (M2.6). The main kernel does not start tasks yet; test kernels do. SMP and user threads are out of scope for M2.6.
+- **Classes and CPU time (D-022, M3.5, #114):** **implemented**: three scheduling classes, a woken higher class running at once, and CPU time counted per task ([below](#classes-d-022-114)).
 
 ## 2. Context
 
@@ -31,6 +32,13 @@ M2.6 asks for several kernel tasks running interleaved, a preemptive scheduler, 
 - `sched::set_trace(true)` prints each switch over serial ([debugging guide](../development/debugging.md#trace-task-switches)).
 - The scheduler state is a singleton behind an `IrqMutex` (one CPU; allowed by D-004 constraint 6).
 
+### Classes (D-022, #114)
+
+- **Three classes, each its own first-in first-out ready queue:** trusted (`sched::TRUSTED`, 0), services (1), and agents (2). `RunQueue::rotate` takes the first task of the highest non-empty class. A yield or a used-up slice puts the task at the back of its own class's queue, and it keeps running if only lower classes are ready, so a lower class runs only while every higher one is blocked or asleep (D-022: by design). The idle task is outside the classes.
+- **Who is in which class:** kernel tasks (`sched::spawn`; `spawn_class` for another class) and processes the kernel starts are trusted, `init` among them. `spawn` sets a child's class (bits 32–33 of its last argument: the class plus one, 0 for the caller's own) and refuses a higher class than the caller's with `TOO_LARGE`. `init` starts `trust` in its own class and every other service in the services class; the agent runtime starts agents in the agents class (`pharos_user::spawn_with`, `Class`).
+- **A wake-up of a higher class runs at once.** `wake` sets a flag when the woken task's class is higher than the running one's (the idle task counts as lowest), and `sched::preempt`, called at the end of every system call and device interrupt, switches then, instead of at the next tick. So `trust` runs as soon as its console interrupt arrives, whatever agents do. Every switch clears the flag, so a call that blocks right after waking costs one load.
+- **CPU time:** each task counts the TSC cycles it ran. Every switch, in `pick_next`, reads the TSC once, adds the cycles since the leaving task's start to its count, and sets the arriving task's start, as a plain load and store: interrupts are off on one CPU, and the locked form measured several times slower ([resources.md](resources.md)). `sched::cpu_cycles(id)` includes the running task's current turn; a process's total is kept in its record when it ends; `process_usage` (call 26) reports it in microseconds. Interrupt and system-call time is charged to the task that was running.
+
 ### Stacks and contexts (`arch::x86_64::context`)
 
 - Each task stack is 32 KiB of fresh frames in a 64 KiB slot of the stack window at `0xffffc80000000000`; the lower 32 KiB of each slot stays unmapped as a guard area. (16 KiB until M2.10: debug builds of the `call` path overflowed it, #63.) A stack overflow faults on the guard and is reported as a double fault (IST1). At most 64 stacks for now.
@@ -57,8 +65,9 @@ An exited task cannot unmap the stack it is running on. Its last switch marks it
 
 ## 5. Testing
 
-- Host unit tests: round-robin order, blocking leaving the queue, a single task keeps running, the idle thread runs only when nothing is ready and is never queued, sleepers wake in deadline order, removed sleepers never wake, and timeout deadlines round as above.
+- Host unit tests: classes (a higher class first, round robin within, a yield kept when only lower classes wait, a woken higher class taken on the next yield, idle outranked by everything), round-robin order, blocking leaving the queue, a single task keeps running, the idle thread runs only when nothing is ready and is never queued, sleepers wake in deadline order, removed sleepers never wake, and timeout deadlines round as above.
 - Test kernels: `tasks` (three tasks interleave as `abcabcabc`, own stacks in the stack window, interrupts enabled in tasks, IDs, callee-saved registers survive switches, exited tasks return their stack frames, closures run with captured values, yielding while holding a lock panics) `task_overflow` (a task's stack overflow is a double fault with RSP at the bottom of its stack), and `preemption` (sleepers wake in deadline order and never early; with a task that spins forever and two workers that never yield, task 0 still wakes from a 300 ms sleep within 2 s, every busy task keeps making progress, and workers see at most 10 ticks between turns, in practice 3–4). Each was checked to fail with a register lost in the switch, a mapped guard area, no reaping, unsorted sleepers, or no time slice (task 0 then never wakes and the run times out).
+- Test kernel `classes` (#114): with 20 agent-class tasks spinning, task 0's 20 ms sleeps end at most 40 ms late (about 10 ms in practice; with one queue for all, up to 20 slices); a spinning services-class task holds every agent off the CPU and is charged its time, while the agents' CPU time stays still; an agent-class task waking a blocked trusted task with interrupts off sees it run before its own next instruction; a sleeping task's CPU time does not grow, and the running task's grows during its own turn. Fourteen mutations caught (#114): classes ignored on a yield, the lowest class picked first, no preemption on a wake-up, no CPU time added, the running turn not counted (`classes`); a spawn above the caller's class allowed, its class bits ignored, no CPU time kept in the process record, pages not reported, only direct children counted as descendants (`spawn`); agents started in the runtime's class (`agents`); services started in `init`'s class (`services`). `init` keeping `trust` in the trusted class is in its boot table only, which no test kernel runs; it is checked by review.
 
 ## 6. Alternatives
 

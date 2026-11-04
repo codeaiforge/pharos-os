@@ -10,10 +10,11 @@
 #![no_std]
 #![no_main]
 
-use pharos_user::rights::{RECEIVE, SEND, WRITE};
+use pharos_user::rights::{GRANT, READ, RECEIVE, SEND, WRITE};
 use pharos_user::{
-    Error, Grant, Received, Status, call_reply, debug_write, endpoint_create, open, process_status,
-    receive, send, spawn,
+    Class, Error, Grant, Received, Status, Usage, call_reply, debug_write, endpoint_create, open,
+    process_status, process_stop, process_usage, receive, send, sleep, spawn, spawn_limited,
+    spawn_with,
 };
 
 pharos_user::entry!(main);
@@ -150,6 +151,65 @@ fn main(_: u64) -> u64 {
         bad &= open(FS, path).and_then(|file| spawn(file, 1, &[], None)) == Err(Error::BadProgram);
     }
     report(&mut f, "malformed programs: BAD_PROGRAM", bad);
+
+    // A child in the agents class cannot start one above it (D-022).
+    let file = [Grant {
+        handle: child,
+        rights: READ | GRANT,
+        badge: 0,
+    }];
+    let low = spawn_with(child, 16, &file, None, 0, Class::Agents);
+    let mut status = Ok(Status::Running);
+    for _ in 0..200 {
+        status = low.and_then(process_status);
+        if status != Ok(Status::Running) {
+            break;
+        }
+        sleep(10_000);
+    }
+    report(
+        &mut f,
+        "a child in the agents class: a higher class is TOO_LARGE",
+        status == Ok(Status::Exited(0)),
+    );
+
+    // process_usage (#114): a looping child that maps 1 MiB is charged CPU
+    // time and its pages; once stopped, its CPU time is kept and its pages
+    // are 0. A child whose child starts a looping child has two
+    // descendants.
+    let mapper = spawn_limited(child, 9, &[], None, 256);
+    sleep(100_000);
+    let cpu = mapper.and_then(|p| process_usage(p, Usage::CpuMicros));
+    let pages = mapper.and_then(|p| process_usage(p, Usage::Pages));
+    let _ = mapper.and_then(process_stop);
+    let mut ended = false;
+    for _ in 0..100 {
+        ended = mapper.and_then(process_status) == Ok(Status::Stopped);
+        if ended {
+            break;
+        }
+        sleep(10_000);
+    }
+    let kept = mapper.and_then(|p| process_usage(p, Usage::CpuMicros));
+    let after = mapper.and_then(|p| process_usage(p, Usage::Pages));
+    report(
+        &mut f,
+        "process_usage: CPU time and pages while running, CPU time kept once stopped",
+        cpu.is_ok_and(|c| c >= 20_000)
+            && pages == Ok(256)
+            && ended
+            && kept.is_ok_and(|k| k >= cpu.unwrap_or(u64::MAX))
+            && after == Ok(0),
+    );
+    let parent = spawn(child, 17, &file, None);
+    sleep(100_000);
+    let descendants = parent.and_then(|p| process_usage(p, Usage::Descendants));
+    let _ = parent.and_then(process_stop);
+    report(
+        &mut f,
+        "process_usage: a child whose child started a child has two descendants",
+        descendants == Ok(2),
+    );
 
     // Start waiting children until the process limit.
     let Ok(gate) = endpoint_create() else {

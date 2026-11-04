@@ -141,7 +141,7 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 12 | `irq_create` (M2.9) | device, MSI-X entry (< table size) | new interrupt handle | device, `IRQ` |
 | 13 | `irq_wait` (M2.9) | interrupt handle, a timeout in microseconds (`u64::MAX` forever, 0 do not block; M3.0) | interrupts since the last wait (≥ 1) | interrupt, `WAIT` |
 | 14 | `endpoint_create` (M2.10) | — | new endpoint handle (`SEND`, `RECEIVE`, `GRANT`) | none |
-| 15 | `spawn` (M2.10) | file, argument, capability array, count (bits 0–31, ≤ 8; bits 32–63: the child's `mem_map` limit in pages, at most the caller's, since M3.0), endpoint (0 = none), bit | new process handle (`WAIT`, `GRANT`; `STOP` since M3.3) | file, `READ`; each passed capability, `GRANT`; endpoint, `RECEIVE` |
+| 15 | `spawn` (M2.10) | file, argument, capability array, count (bits 0–31, ≤ 8; bits 32–63: the child's `mem_map` limit in pages, at most the caller's, since M3.0), endpoint (0 = none), bit (bits 0–31; since M3.5 bits 32–33: the child's scheduling class plus one, 0 for the caller's own, a higher class than the caller's `TOO_LARGE`; [scheduling.md](scheduling.md#classes-d-022-114)) | new process handle (`WAIT`, `GRANT`; `STOP` since M3.3) | file, `READ`; each passed capability, `GRANT`; endpoint, `RECEIVE` |
 | 16 | `process_status` (M2.10) | process handle | 0 while running; else bit 63, plus bit 62 if killed, and the code or vector; bits 63 and 62 with 256 if stopped (M3.3) | process, `WAIT` |
 | 18 | `call` (M2.10) | endpoint, buffer, request length (≤ 256), reply endpoint, reply maximum (≤ 256), a timeout in microseconds (`u64::MAX` forever, 0 do not block; M3.0); a request not taken by then is withdrawn | as `receive` | endpoint, `SEND`; reply, `SEND` and `RECEIVE` |
 | 17 | `irq_notify` (M2.10) | interrupt handle, endpoint, bit (0–31) | 0 (after this, `irq_wait` returns `IN_USE`) | interrupt, `WAIT`; endpoint, `RECEIVE` |
@@ -152,6 +152,7 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 21 | `sleep` (M3.0) | microseconds (0 returns at once, `u64::MAX` sleeps forever) | 0 | none |
 | 24 | `uptime` (M3.2, D-021) | — | microseconds since boot | none |
 | 25 | `process_stop` (M3.3, D-018) | process handle | 0, at once (the process and every process it started end at their next return to user mode; `process_status` shows when; an ended process is not an error) | process, `STOP` (`1 << 9`) |
+| 26 | `process_usage` (M3.5, D-022) | process handle, what: 0 CPU time, 1 pages mapped, 2 live descendants | CPU time in microseconds (so far, or all of it once ended); pages mapped with `mem_map` and `mem_map_cap` (0 once ended); processes it started, they started, and so on, still running; other `what` is `TOO_LARGE` | process, `WAIT` |
 
 Error codes (`rax`):
 

@@ -168,7 +168,7 @@ fn run(t: &mut TestRun) {
         exit.is_some_and(|e| e.code == 0),
     );
     t.check(
-        "each running agent held only its runtime endpoint and its own endpoints",
+        "each running agent held only its runtime endpoint and its own endpoints, in the agents class",
         checked == Some(true),
     );
 
@@ -223,7 +223,8 @@ fn run(t: &mut TestRun) {
 
 /// Every process the runtime started holds `SEND` on the runtime with an
 /// agent badge (1 to 16), and otherwise only endpoints it made itself
-/// (none of `services`), and nothing but endpoints.
+/// (none of `services`), and nothing but endpoints; each runs in the
+/// agents class (D-022).
 fn check_agents(runtime: TaskId, runtime_ep: &Arc<Endpoint>, services: &[&Arc<Endpoint>]) -> bool {
     let agents: Vec<TaskId> = (runtime + 1..runtime + 200)
         .filter(|&id| process::by_id(id).is_some_and(|p| p.parent == Some(runtime)))
@@ -241,6 +242,7 @@ fn check_agents(runtime: TaskId, runtime_ep: &Arc<Endpoint>, services: &[&Arc<En
                 None => false,
             });
             to_runtime.len() == 1
+                && sched::class_of(id) == Some(sched::AGENTS)
                 && to_runtime[0].rights() == SEND
                 && (1..=16).contains(&to_runtime[0].badge())
                 && only_own

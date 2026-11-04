@@ -80,9 +80,9 @@ use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::{Info, refusal, status, trust};
 use pharos_user::rights::{READ, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
-    Grant, Handle, Mapped, Received, Status, call_timeout, debug_write, delete, endpoint_create,
-    mem_map_buffer, mem_map_cap, mem_share, mem_unmap, open, process_status, process_stop, read,
-    receive_timeout, send, spawn_limited, try_send, uptime,
+    Class, Grant, Handle, Mapped, Received, Status, call_timeout, debug_write, delete,
+    endpoint_create, mem_map_buffer, mem_map_cap, mem_share, mem_unmap, open, process_status,
+    process_stop, read, receive_timeout, send, spawn_with, try_send, uptime,
 };
 
 pharos_user::entry!(main);
@@ -705,7 +705,7 @@ impl Runtime {
                 badge: slot as u32 + 1,
             };
             let notify = Some((SERVICE, slot as u32));
-            let p = spawn_limited(file, 0, &[grant], notify, limits.pages);
+            let p = spawn_with(file, 0, &[grant], notify, limits.pages, Class::Agents);
             let _ = delete(file);
             p
         });

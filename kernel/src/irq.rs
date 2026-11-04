@@ -230,6 +230,8 @@ pub fn on_vector(index: usize) {
         Fired::Notify(bits) => kernel::notify(index, bits),
         _ => {}
     }
+    // A waiter of a higher class runs now, not at the next tick (D-022).
+    crate::sched::preempt();
 }
 
 #[cfg(target_os = "none")]

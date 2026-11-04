@@ -38,6 +38,7 @@ pub mod number {
     pub const MEM_MAP_CAP: u64 = 23;
     pub const UPTIME: u64 = 24;
     pub const PROCESS_STOP: u64 = 25;
+    pub const PROCESS_USAGE: u64 = 26;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -321,6 +322,30 @@ pub fn spawn_limited(
     notify: Option<(Handle, u32)>,
     limit: u32,
 ) -> Result<Handle, Error> {
+    spawn_with(file, arg, caps, notify, limit, Class::Same)
+}
+
+/// A scheduling class (D-022): a ready process of a higher class always
+/// runs before one of a lower class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    /// The creator's own.
+    Same = 0,
+    Trusted = 1,
+    Services = 2,
+    Agents = 3,
+}
+
+/// [`spawn_limited`] in scheduling class `class`; a class above this
+/// process's own is [`Error::TooLarge`].
+pub fn spawn_with(
+    file: Handle,
+    arg: u64,
+    caps: &[Grant],
+    notify: Option<(Handle, u32)>,
+    limit: u32,
+    class: Class,
+) -> Result<Handle, Error> {
     // Room for one more than the kernel accepts, so passing too many
     // reaches the kernel's check instead of being cut here.
     let mut entries = [0u8; 16 * (MAX_SPAWN_CAPS + 1)];
@@ -339,7 +364,7 @@ pub fn spawn_limited(
         entries.as_ptr() as u64,
         caps.len() as u64 | u64::from(limit) << 32,
         endpoint,
-        bit.into(),
+        u64::from(bit) | (class as u64) << 32,
     ];
     call(number::SPAWN, args)
 }
@@ -369,6 +394,22 @@ pub fn process_status(process: Handle) -> Result<Status, Error> {
 
 /// The kernel's value for a stopped process (exception vectors are below 32).
 const STOPPED: u64 = 256;
+
+/// What [`process_usage`] reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Usage {
+    /// CPU time in microseconds, so far or in all once it has ended.
+    CpuMicros = 0,
+    /// Pages it has mapped (0 once it has ended).
+    Pages = 1,
+    /// Live processes it started, and they started, and so on.
+    Descendants = 2,
+}
+
+/// How much the process behind `process` uses (needs `WAIT`).
+pub fn process_usage(process: Handle, what: Usage) -> Result<u64, Error> {
+    call(number::PROCESS_USAGE, [process, what as u64, 0, 0, 0, 0])
+}
 
 /// Ends the process behind `process` (needs `STOP`) and every process it
 /// started. Returns at once; [`process_status`] shows when it has ended.

@@ -91,6 +91,15 @@ fn run(t: &mut TestRun) {
         "the daemon still runs, and so does init",
         process::by_id(id).is_some() && process::count() == 2,
     );
+    let daemons: Vec<u64> = (id + 1..id + 64)
+        .filter(|&d| process::by_id(d).is_some_and(|p| p.parent == Some(id)))
+        .collect();
+    t.check(
+        "init is trusted and starts its services in the services class (D-022)",
+        sched::class_of(id) == Some(sched::TRUSTED)
+            && daemons.len() == 1
+            && sched::class_of(daemons[0]) == Some(sched::SERVICES),
+    );
     let killed = process::kills();
     t.check(
         "only the crasher was killed",

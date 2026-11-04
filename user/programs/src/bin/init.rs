@@ -27,8 +27,8 @@ use pharos_proto::net::{self, Allowed, Dest, Request as NetRequest};
 use pharos_proto::store::{self, Request as StoreRequest};
 use pharos_user::rights::{CONFIG, GRANT, IRQ, MAP, READ, RECEIVE, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
-    Error, Grant, Handle, Received, Status, call_timeout, config_read, debug_write,
-    endpoint_create, open, process_status, receive_timeout, send, spawn_limited, uptime,
+    Class, Error, Grant, Handle, Received, Status, call_timeout, config_read, debug_write,
+    endpoint_create, open, process_status, receive_timeout, send, spawn_with, uptime,
 };
 
 pharos_user::entry!(main);
@@ -602,7 +602,15 @@ impl Init {
         }
         let caps = &grants[..service.caps.len().min(8)];
         let notify = Some((self.events, i as u32));
-        let spawned = spawn_limited(file, service.arg, caps, notify, service.limit);
+        // D-022: `trust` keeps `init`'s class, so the emergency stop runs
+        // ahead of everything else; every other service is below it.
+        // ponytail: chosen by name; a table field if a second one is trusted.
+        let class = if service.name == "trust" {
+            Class::Same
+        } else {
+            Class::Services
+        };
+        let spawned = spawn_with(file, service.arg, caps, notify, service.limit, class);
         let _ = pharos_user::delete(file);
         let process = match spawned {
             Ok(process) => process,

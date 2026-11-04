@@ -178,8 +178,8 @@ fn run(t: &mut TestRun) {
     );
 
     let (root_a, root_b) = (a.root(), b.root());
-    let spawned = sched::spawn_in(a, move || visitor(0xa1, root_a, &A_OK)).is_ok()
-        && sched::spawn_in(b, move || visitor(0xb2, root_b, &B_OK)).is_ok();
+    let spawned = sched::spawn_in(a, sched::TRUSTED, move || visitor(0xa1, root_a, &A_OK)).is_ok()
+        && sched::spawn_in(b, sched::TRUSTED, move || visitor(0xb2, root_b, &B_OK)).is_ok();
     t.check("a task spawned in each address space", spawned);
     let mut yields = 0;
     while sched::live_tasks() > 1 && yields < 100 {
@@ -265,7 +265,7 @@ fn run(t: &mut TestRun) {
         .as_mut()
         .and_then(|frames| AddressSpace::new_user(frames).ok());
     let remap_ok = space.is_some_and(|space| {
-        sched::spawn_in(space, || {
+        sched::spawn_in(space, sched::TRUSTED, || {
             REMAP_OK.store(remap_kernel_test_page(), Ordering::Relaxed);
         })
         .is_ok()

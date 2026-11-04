@@ -39,6 +39,17 @@ pub mod number {
     pub const MEM_MAP_CAP: u64 = 23;
     pub const UPTIME: u64 = 24;
     pub const PROCESS_STOP: u64 = 25;
+    pub const PROCESS_USAGE: u64 = 26;
+}
+
+/// What `process_usage` reports (its second argument).
+pub mod usage {
+    /// CPU time in microseconds.
+    pub const CPU_US: u64 = 0;
+    /// Pages mapped with `mem_map` and `mem_map_cap` (0 once it has ended).
+    pub const PAGES: u64 = 1;
+    /// Live processes it started, and they started, and so on.
+    pub const DESCENDANTS: u64 = 2;
 }
 
 /// `process_status`'s value for a stopped process, beside the killed bit.
@@ -191,9 +202,15 @@ pub enum Call {
         bit: u32,
         /// The child's `mem_map` limit in pages.
         limit: u64,
+        /// The child's scheduling class plus one; 0 is the creator's.
+        class: u8,
     },
     ProcessStatus {
         handle: Handle,
+    },
+    ProcessUsage {
+        handle: Handle,
+        what: u64,
     },
     ProcessStop {
         handle: Handle,
@@ -368,9 +385,12 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
         number::UPTIME => Ok(Call::Uptime),
         number::ENDPOINT_CREATE => Ok(Call::EndpointCreate),
         number::SPAWN => {
-            // Capabilities in bits 0-31, the child's page limit in 32-63.
-            let (count, limit, bit) = (args[3] & 0xffff_ffff, args[3] >> 32, args[5]);
-            if count > MAX_SPAWN_CAPS as u64 || bit >= 32 {
+            // Capabilities in bits 0-31, the child's page limit in 32-63;
+            // the notification bit in bits 0-31 of the last argument, the
+            // class (plus one; 0: the creator's) in bits 32-33, the rest 0.
+            let (count, limit, bit) = (args[3] & 0xffff_ffff, args[3] >> 32, args[5] & 0xffff_ffff);
+            let class = args[5] >> 32;
+            if count > MAX_SPAWN_CAPS as u64 || bit >= 32 || class > 3 {
                 return Err(Error::TooLarge);
             }
             Ok(Call::Spawn {
@@ -391,9 +411,17 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
                 endpoint: args[4],
                 bit: bit as u32,
                 limit,
+                class: class as u8,
             })
         }
         number::PROCESS_STATUS => Ok(Call::ProcessStatus { handle: args[0] }),
+        number::PROCESS_USAGE => match args[1] {
+            what @ 0..=2 => Ok(Call::ProcessUsage {
+                handle: args[0],
+                what,
+            }),
+            _ => Err(Error::TooLarge),
+        },
         number::PROCESS_STOP => Ok(Call::ProcessStop { handle: args[0] }),
         number::CALL => Ok(Call::Call {
             handle: args[0],
@@ -445,7 +473,10 @@ pub fn needed_rights(call: &Call) -> cap::Rights {
         Call::ConfigRead { .. } => cap::CONFIG,
         Call::MmioMap { .. } | Call::DmaAlloc { .. } => cap::MAP,
         Call::IrqCreate { .. } => cap::IRQ,
-        Call::IrqWait { .. } | Call::ProcessStatus { .. } | Call::IrqNotify { .. } => cap::WAIT,
+        Call::IrqWait { .. }
+        | Call::ProcessStatus { .. }
+        | Call::ProcessUsage { .. }
+        | Call::IrqNotify { .. } => cap::WAIT,
         Call::ProcessStop { .. } => cap::STOP,
         Call::Spawn { .. } => cap::READ,
         _ => 0,
@@ -813,7 +844,16 @@ mod kernel {
         endpoint: Handle,
         bit: u32,
         limit: u64,
+        class: u8,
     ) -> Result<u64, Error> {
+        // Never above the creator's class (D-022 item 1).
+        let class = match class {
+            0 => sched::current_class(),
+            c => c - 1,
+        };
+        if class < sched::current_class() {
+            return Err(Error::TooLarge);
+        }
         let file = process.caps.lock().get(handle, cap::READ)?;
         let Object::File { fs, file } = file.object() else {
             return Err(Error::MissingRight);
@@ -854,7 +894,7 @@ mod kernel {
             }
             _ => Error::BadProgram,
         })?;
-        let id = process::start_limited(space, entry - process::USER_BASE, arg, caps, limit)
+        let id = process::start_class(space, entry - process::USER_BASE, arg, caps, limit, class)
             .map_err(|_| Error::NoMemory)?;
         let record = process::by_id(id).ok_or(Error::NoMemory)?.record.clone();
         if let Some(endpoint) = notify {
@@ -875,6 +915,8 @@ mod kernel {
         };
         frame.rax = status;
         frame.rdx = value;
+        // A task of a higher class woken by this call runs now (D-022).
+        sched::preempt();
         // Told to end (by another process, itself, or its parent ending):
         // it ends here instead of returning to user mode.
         if sched::stopping() {
@@ -1119,7 +1161,10 @@ mod kernel {
                 endpoint,
                 bit,
                 limit,
-            } => spawn(&process, handle, arg, addr, count, endpoint, bit, limit),
+                class,
+            } => spawn(
+                &process, handle, arg, addr, count, endpoint, bit, limit, class,
+            ),
             Call::MemMap { pages } => mem_map(&process, pages),
             Call::MemUnmap { addr, pages } => {
                 if !process.memory.lock().release(addr, pages) {
@@ -1180,6 +1225,19 @@ mod kernel {
                     Some(process::End::Stopped) => 1 << 63 | 1 << 62 | STOPPED,
                 })
             }
+            Call::ProcessUsage { handle, what } => {
+                let cap = process.caps.lock().get(handle, cap::WAIT)?;
+                let Object::Process(record) = cap.object() else {
+                    return Err(Error::MissingRight);
+                };
+                let record = record.clone();
+                drop((cap, process));
+                Ok(match what {
+                    usage::CPU_US => crate::time::cycles_to_micros(record.cpu_cycles()),
+                    usage::PAGES => process::by_id(record.id).map_or(0, |p| p.memory.lock().used),
+                    _ => process::descendants(record.id) as u64,
+                })
+            }
             // Ends the process and the processes it started (agents.md).
             // Returns at once; `process_status` shows when it has ended.
             Call::ProcessStop { handle } => {
@@ -1223,7 +1281,7 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(26, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(27, [0; 6]), Err(Error::UnknownCall));
         let region = crate::process::MAP_REGION;
         assert_eq!(
             decode(22, [region.start, 8192, 9, 9, 9, 9]),
@@ -1305,7 +1363,8 @@ mod tests {
                 count: 8,
                 endpoint: 4,
                 bit: 31,
-                limit: 0
+                limit: 0,
+                class: 0
             })
         );
         assert!(
@@ -1326,6 +1385,23 @@ mod tests {
             "9 capabilities"
         );
         assert_eq!(spawn(0x40_0000, 1, 32), Err(Error::TooLarge), "bit 32");
+        assert!(
+            matches!(
+                spawn(0, 0, 5 | 3 << 32),
+                Ok(Call::Spawn {
+                    bit: 5,
+                    class: 3,
+                    ..
+                })
+            ),
+            "the class rides in bits 32-33 of the last argument"
+        );
+        assert_eq!(spawn(0, 0, 4 << 32), Err(Error::TooLarge), "bits above 33");
+        assert_eq!(
+            decode(26, [3, 2, 0, 0, 0, 0]),
+            Ok(Call::ProcessUsage { handle: 3, what: 2 })
+        );
+        assert_eq!(decode(26, [3, 3, 0, 0, 0, 0]), Err(Error::TooLarge));
         assert_eq!(spawn(0, 1, 0), Err(Error::BadAddress), "null page");
 
         assert_eq!(
@@ -1539,9 +1615,13 @@ mod tests {
                 }
                 Ok(Call::IrqCreate { entry, .. }) => assert!(entry < 2048),
                 Ok(Call::Spawn {
-                    addr, count, bit, ..
+                    addr,
+                    count,
+                    bit,
+                    class,
+                    ..
                 }) => {
-                    assert!(count <= MAX_SPAWN_CAPS && bit < 32);
+                    assert!(count <= MAX_SPAWN_CAPS && bit < 32 && class <= 3);
                     assert!(count == 0 || user_range_ok(addr, (count * SPAWN_ENTRY) as u64));
                 }
                 Ok(Call::IrqNotify { bit, .. }) => assert!(bit < 32),

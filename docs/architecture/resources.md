@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-04 (#113),** with CPU time counted by one `rdtsc` per switch and a plain load and store, measured within D-004's IPC budget before approval. To be built by: scheduling classes and CPU accounting (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), and exhaustion tests (#120). Nothing here is implemented yet.
+**Planned. Design approved by the maintainer on 2026-11-04 (#113),** with CPU time counted by one `rdtsc` per switch and a plain load and store, measured within D-004's IPC budget before approval. To be built by: scheduling classes and CPU accounting (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), and exhaustion tests (#120). **Implemented:** scheduling classes and CPU time per process (#114).
 
 ## 2. Context
 
@@ -34,7 +34,7 @@ What M3.5 builds on:
 
 - **The kernel counts each process's CPU time in TSC cycles,** with one `rdtsc` per switch, in `pick_next`, which every switch goes through: the cycles since the leaving task's start time are added to its count, and the arriving task's start time is set. Both fields sit in the task, and the addition is a plain load and store, not an atomic read-modify-write: the scheduler runs with interrupts off on one CPU, and the locked form measured several times slower (below). Cycles are converted to microseconds only when read. Interrupt and system-call time is charged to the process that was running, as the kernel does not split them.
 - **A new system call, `process_usage` (26),** returns a process's CPU time in microseconds, its pages in use, and its live descendants, for any holder of its process capability with `WAIT`. The runtime reads it for its agents; `init` for its services.
-- **Cost, measured for this design (2026-11-04, `cargo xtask bench-ipc`, KVM, 9 runs each, builds alternated):** without counting, medians 1,921 and 1,915 ns; with it, 1,926 and 1,936 ns, within D-004's 2,000 ns budget. A first version with an atomic `fetch_add` measured 1,961 and 2,046 ns against 1,929 and 1,920 ns, over the budget once; hence the plain load and store. #114 measures again with the real code.
+- **Cost, measured for this design (2026-11-04, `cargo xtask bench-ipc`, KVM, 9 runs each, builds alternated):** without counting, medians 1,921 and 1,915 ns; with it, 1,926 and 1,936 ns, within D-004's 2,000 ns budget. A first version with an atomic `fetch_add` measured 1,961 and 2,046 ns against 1,929 and 1,920 ns, over the budget once; hence the plain load and store. Measured again with #114's code (9 runs each): medians 1,915 and 1,959 ns. Its first version read and cleared the preemption flag with an atomic `swap` on every system call, which measured 1,994 and 1,962 ns; a plain load in the common case replaced it.
 
 ### Carved limits (#115)
 

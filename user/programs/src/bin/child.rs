@@ -29,15 +29,22 @@
 //! badged as the runtime). Starts a looping agent (5) with no
 //! capabilities, registers it with the trusted service as `worker`, and
 //! loops forever.
+//!
+//! For the `spawn` test kernel's classes (#114): 16, started in the agents
+//! class, handle 1 `bin/child`. Exits 0 if a child in a higher class
+//! (services or trusted) is `TOO_LARGE` and one in its own class starts.
+//! 17: handle 1 `bin/child`: starts a 10 (which starts a 5), then loops,
+//! for `process_usage`'s descendants.
 
 #![no_std]
 #![no_main]
 
 use pharos_proto::trust::{self, Request};
-use pharos_user::rights::{STOP, WAIT};
+use pharos_user::rights::{READ, STOP, WAIT};
 use pharos_user::{
-    Error, Received, Status, call_timeout, debug_write, endpoint_create, mem_map_buffer,
-    process_status, process_stop, receive, send, sleep, spawn, try_send, yield_now,
+    Class, Error, Grant, Received, Status, call_timeout, debug_write, endpoint_create,
+    mem_map_buffer, process_status, process_stop, receive, send, sleep, spawn, spawn_with,
+    try_send, yield_now,
 };
 
 pharos_user::entry!(main);
@@ -152,6 +159,26 @@ fn main(arg: u64) -> u64 {
                 }
             }
             spin()
+        }
+        17 => {
+            let file = [Grant {
+                handle: 1,
+                rights: READ,
+                badge: 0,
+            }];
+            match spawn(1, 10, &file, None) {
+                Ok(_) => spin(),
+                Err(_) => 1,
+            }
+        }
+        16 => {
+            let above = |class| spawn_with(1, 1, &[], None, 0, class) == Err(Error::TooLarge);
+            let own = spawn_with(1, 1, &[], None, 0, Class::Agents).is_ok();
+            if above(Class::Services) && above(Class::Trusted) && own {
+                0
+            } else {
+                1
+            }
         }
         _ => 99,
     }

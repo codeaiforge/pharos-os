@@ -102,6 +102,15 @@ fn cycles_to_ns(cycles: u64, tsc_per_ms: u64) -> u64 {
     (u128::from(cycles) * 1_000_000 / u128::from(tsc_per_ms)) as u64
 }
 
+/// Converts TSC cycles to microseconds at the calibrated rate (0 before
+/// [`init`]).
+pub fn cycles_to_micros(cycles: u64) -> u64 {
+    match TSC_PER_MS.load(Ordering::Relaxed) {
+        0 => 0,
+        tsc_per_ms => cycles_to_ns(cycles, tsc_per_ms) / 1_000,
+    }
+}
+
 /// TSC cycles per ms; 0 until [`init`].
 static TSC_PER_MS: AtomicU64 = AtomicU64::new(0);
 /// TSC value at [`init`].
