@@ -163,11 +163,11 @@ Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-in
 | One CPU: locking, TLB flushes, and MSI-X routing assume it | from the start | Phase 4; SMP needs a decision record and a re-review of those paths |
 | Revocation does not unmap device registers or DMA buffers; ending the process is the full revocation. **Resolved (#104):** revoking a device capability stops the device and turns the driver's register and DMA mappings into zeroed private pages | M2.9 | M3.4 (revocable agent permissions) |
 | No timeouts on pings or service start (`receive`, `call`, `irq_wait`, and `sleep` have them since #76). **Resolved (#100):** `init` stops a daemon that sends no `ready` within 10 s, restarts a crashed daemon at most 3 times, and never restarts a stopped one | M2.7 | M3.3 (supervision) |
-| No per-process quotas on processes, handles, or network use | M2.10 | M3.5 (resource accounting and limits) |
+| No per-process quotas on processes, handles, or network use. D-022 (#112): carved from the creator's | M2.10 | M3.5 (resource accounting and limits) |
 | No network destination policy. **Resolved (#109):** per-client destination lists from `init`, checked by the network service | M2.10 | M3.4 (D-012) |
 | `rdtsc` in user mode (timing side channels) | M2.7 | M4.2 |
 | Shared-memory bookkeeping (8 bytes per page) on the fixed 4 MiB kernel heap, which panics when full: up to 1/512 of a process's page limit | M3.0 | M3.5 (resource accounting) |
-| Page limits not carved from the creator's; a large `mem_map` zeroes pages with interrupts disabled | M3.0 | M3.5 |
+| Page limits not carved from the creator's (D-022, #112: carved); a large `mem_map` zeroes pages with interrupts disabled | M3.0 | M3.5 |
 | Revocation does not unmap shared memory already mapped. **Resolved (#104):** revoked mappings become zeroed private pages with the same access, in every process, before `revoke` returns | M3.0 | M3.4 |
 | Audit chains not anchored. **Partly resolved (#107):** the head is shown on the trusted console; no secret-keyed anchor | M3.0 | M4.3 (signed updates and keys) |
 | The agent runtime serves one request at a time: a stalled service holds it for the call's timeout (inference 60 s, store 10 s, audit 2 s, network 1 s), so agents can be counted hung and use up attempts; no rate limit on agent requests | M3.3 | M3.5 (budgets) |

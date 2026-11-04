@@ -262,7 +262,7 @@ Timer prototype on 2026-10-27 (not committed), same QEMU, under UEFI and BIOS wi
 
 **Decision.**
 
-1. **Preemptive round-robin, one CPU, fixed time slice of one tick** (10 ms at 100 Hz). One ready queue, first in first out. No priorities until a need appears.
+1. **Preemptive round-robin, one CPU, fixed time slice of one tick** (10 ms at 100 Hz). One ready queue, first in first out. No priorities until a need appears. *(Amended 2026-11-04 by [D-022](#d-022-resource-accounting-and-limits), #112: three fixed classes, trusted, services, and agents, each its own round robin, a higher class always first.)*
 2. **Task = kernel thread:** an ID, a state (ready, running, sleeping, exited), a saved stack pointer, and its own kernel stack. Stacks are 16 KiB *(32 KiB since 2026-10-28, #63: amended with maintainer approval after debug builds of the M2.10 `call` path overflowed 16 KiB; the guard area grew with them)* in a dedicated virtual window (`0xffff_c800_0000_0000`), each with an unmapped guard page below, built from frame-allocator frames and returned on reap. The scheduler sees only the saved kernel context. A user thread (M2.7) will also run on its own kernel stack when it enters the kernel, so it fits without scheduler changes; address-space switching joins then.
 3. **Context switch:** a `global_asm!` routine in `arch::x86_64` pushes the callee-saved registers (`rbx`, `rbp`, `r12`–`r15`), stores the stack pointer, loads the next one, pops, and returns. The kernel is soft-float, so there is no FPU or SSE state. A new task starts in a small trampoline that enables interrupts, calls its entry function, and exits when it returns.
 4. **Preemption:** the timer handler sends EOI and then, when the slice is used up, switches tasks from inside the handler. The interrupted task's interrupt frame stays on its own stack until it is switched back in and returns with `iretq`. `yield_now`, `sleep`, and exit switch the same way with interrupts disabled.
@@ -721,6 +721,37 @@ Two system calls per direction plus two task switches and two address-space swit
 **Decision.** System call 24 `uptime`: no arguments, returns microseconds since boot from the kernel's calibrated clock (`time::uptime`). It needs no capability. It adds no authority: timeouts already let any program measure time to the 10 ms tick, and a finer clock does not reach anything a program could not reach before. Wall-clock time (a date) is not part of it; there is no real-time clock driver yet.
 
 **Consequences.** `pharos_user::uptime`. A finer clock makes timing side channels easier to measure; Pharos runs one CPU and does not claim protection from them (threat model). Revisit if it does.
+
+## Accepted decisions (M3.5)
+
+### D-022: Resource accounting and limits
+
+- **Status:** Accepted
+- **Needed by:** M3.5
+- **Date accepted:** 2026-11-04 (issue #112)
+
+**Context.** M3.5 asks for per-agent and per-group limits on CPU, memory, storage, network, and inference, with resources reserved so that under full load the emergency stop and trusted services still respond, and every unit of usage attributed. The M3.3 and M3.4 reviews carried the runtime blocking on its services, the shared approval queue, and the missing rate limit here.
+
+**Evidence (2026-11-04, issue #112):**
+- **CPU is shared equally.** One ready queue, round robin, 10 ms slices, no priorities "until a need appears" (D-013); no CPU time is counted. With the 32 processes the kernel allows (`MAX_PROCESSES`) all spinning, `trust` waits up to about 310 ms for each slice, and a spinning agent takes as much CPU as `trust` or `init`.
+- **Memory limits do not nest.** A page limit is set at `spawn` and checked against the creator's own limit, but not taken out of it (D-016), so a runtime with a 1 GiB limit can start agents that together hold more. Processes are limited only system-wide (32), and handles at 64 per process; shared-memory bookkeeping sits on the fixed 4 MiB kernel heap.
+- **The runtime already sees every agent request.** Every service an agent uses goes through the runtime (D-018, M3.4), which already checks each request against the agent's grants and records it, so storage, network, inference, and request counts can be charged there without kernel changes. It holds each agent's `STOP` right.
+- **One inference session at a time.** A `GENERATE` of up to 2,048 tokens holds the service; callers time out.
+
+**Options.** CPU: fixed scheduling classes, kernel CPU budgets per period that throttle, or both. Memory and kernel objects: limits carved from the creator's, or flat per-process limits plus a system reserve. Groups: named in the policy table, one per policy entry, or all agents together. Over a limit: refuse, throttle, or stop, fixed per resource or chosen per policy entry.
+
+**Evaluation criteria.** The emergency stop and trusted services respond under any agent load; least new kernel code and `unsafe`; every unit attributed; host-testable accounting; a well-behaved agent can recover from a refused request.
+
+**Decision (the maintainer chose each recommendation):**
+
+1. **Three fixed scheduling classes in the kernel: trusted, services, agents.** A ready task of a higher class always runs before one of a lower class; round robin with a 10 ms slice within a class, as before. Kernel tasks and `init` are trusted; a process is created in its creator's class or a lower one, never higher. `init` puts `trust` in the trusted class and the other services in the services class; the agent runtime starts agents in the agents class. This amends D-013 item 1. Rejected: kernel CPU budgets that throttle (more kernel code and a second clock in the scheduler, for a throttle the runtime does not need, item 4); budgets without classes (the stop's latency would still grow with the number of runnable processes).
+2. **The kernel counts CPU time per process** and reports it to whoever holds the process's capability; the agent runtime charges it to the agent and its group.
+3. **Memory and kernel objects are carved from the creator's.** A child's page limit, its share of processes, and its handles are taken out of its creator's when it is started and returned when it ends, so the runtime's own limit bounds all its agents together. Shared-memory bookkeeping is charged to the process that maps it. Rejected: flat limits plus a reserve (a runtime's agents together could still exceed its limit, the limit carried from M2.10 and M3.0).
+4. **Over a limit, fixed per resource.** Memory, processes, handles, storage, network, and inference requests over a limit are refused with a new status the agent can recover from. Requests over an agent's rate are delayed (throttled). An attempt over its CPU budget is stopped and counted as a failed attempt. Every limit reached is recorded in the audit trail. Rejected: a choice per policy entry (more policy fields and tests for no current need); stopping on any limit (a refused request is recoverable; a stop loses the agent's work).
+5. **Groups are named in the policy table** with their own totals; each policy entry belongs to one group, and its agents share the group's budget as well as their own. Rejected: one group per policy entry (cannot group different agents); one group for all agents (no isolation between sets of agents).
+6. **Who enforces what:** the kernel enforces the classes, pages, processes, and handles; the agent runtime enforces CPU per attempt, storage, network, inference, requests, and groups, from the policy table, which a manifest may only narrow; the inference service admits requests within the budget the runtime or `init` sets for each client.
+
+**Consequences.** A spinning trusted or service process starves every lower class: those processes are trusted and reviewed, and spend their time waiting on IPC; the inference service computing a `GENERATE` holds agents off the CPU, which wait on it anyway. CPU budgets are enforced only by stopping, at the runtime's next check, so an agent overruns by up to that interval. The details (units, check intervals, the new status, the policy fields) are in the design (#113).
 
 ## Open and proposed decisions
 

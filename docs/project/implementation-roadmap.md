@@ -413,7 +413,7 @@ Ordering notes:
 
 ### M3.5 — Resource accounting and limits
 
-**Status: Current.** M3.4 gives it agents that hold only granted permissions, an audit trail of what they did, and the limits the M3.4 review carried here: a runtime that blocks on its services, a shared approval queue, and no rate limit on agent requests. First step: its design and issues.
+**Status: Current.** M3.4 gives it agents that hold only granted permissions, an audit trail of what they did, and the limits the M3.4 review carried here: a runtime that blocks on its services, a shared approval queue, and no rate limit on agent requests. D-022 accepted (#112): three fixed scheduling classes, a higher class always first; CPU time counted per process; pages, processes, and handles carved from the creator's; over a limit refused, an attempt over its CPU budget stopped; groups named in the policy table. Next: the design, `docs/architecture/resources.md` (#113).
 
 - **Where it runs (D-020):** Pharos; accounting logic host-tested.
 - **Objective and scope:** Per-agent and per-group limits on CPU, memory, storage, network, and inference usage, with resources reserved for essential system functions.
@@ -639,7 +639,7 @@ Ordering notes:
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part and D-018 on 2026-11-01; D-012 (final, with D-018) on 2026-11-03; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part and D-018 on 2026-11-01; D-012 (final, with D-018) on 2026-11-03; D-022 on 2026-11-04; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -662,7 +662,8 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-018 | Authority model: capabilities, identity, human control | M3.3 | **Accepted** (final with D-012, #102): authority only from capabilities; identity for attribution and audit; delegation narrows; a trusted path for emergency stop and revocation that needs no agent or model, on a virtio-console device owned by a trusted service; a `STOP` right that also stops a process's children, held by the agent runtime and by the trusted service; M3.3 grants only from a reviewed table |
 | D-019 | Service interfaces and versioning | M3.2, M3.3 | **Accepted:** hand-written codecs in a shared `no_std` crate `pharos-proto` (no interface language); every message starts with interface version and operation, `VERSION` refused with the supported range; common status codes and the common operations `INFO` (discovery) and `ATTACH` (bulk data through shared memory); capabilities handed out by `init`, no registry; per-operation timeouts, long results pulled with `NEXT`/`CANCEL`; network and storage move to it in M3.2 (#92) |
 | D-020 | Where Phase 3 runs first | M3.1 | **Accepted:** one codebase of `no_std` crates tested on the host and run on Pharos; measurements on the host; enforcement shown only on Pharos; M3.0 on the critical path from M3.2 |
-| D-013 | Scheduling model | M2.6 | **Accepted:** preemptive round-robin on one CPU, 10 ms slice, kernel threads on guarded stacks, no lock held across a switch |
+| D-013 | Scheduling model | M2.6 | **Accepted:** preemptive round-robin on one CPU, 10 ms slice, kernel threads on guarded stacks, no lock held across a switch; amended by D-022 with three scheduling classes |
+| D-022 | Resource accounting and limits | M3.5 | **Accepted** (#112): three fixed scheduling classes (trusted, services, agents), a higher class always first; CPU time counted per process by the kernel; pages, processes, and handles carved from the creator's; over a limit refused, requests over the rate throttled, an attempt over its CPU budget stopped; groups named in the policy table; the runtime enforces CPU per attempt, storage, network, inference, and requests |
 
 ## Next milestone
 
