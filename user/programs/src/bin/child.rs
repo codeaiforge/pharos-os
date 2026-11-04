@@ -35,6 +35,12 @@
 //! (services or trusted) is `TOO_LARGE` and one in its own class starts.
 //! 17: handle 1 `bin/child`: starts a 10 (which starts a 5), then loops,
 //! for `process_usage`'s descendants.
+//!
+//! For the `spawn` test kernel's budgets (#115): 18, handle 1 `bin/child`:
+//! starts sleeping children (8) until refused; exits with 10 times how
+//! many started, plus 1 if the refusal was `TOO_LARGE`. 19, with no
+//! handles: creates endpoints until refused; exits with 10 times how many,
+//! plus 1 if the refusal was `NO_MEMORY`.
 
 #![no_std]
 #![no_main]
@@ -42,7 +48,7 @@
 use pharos_proto::trust::{self, Request};
 use pharos_user::rights::{READ, STOP, WAIT};
 use pharos_user::{
-    Class, Error, Grant, Received, Status, call_timeout, debug_write, endpoint_create,
+    Class, Error, Grant, Limits, Received, Status, call_timeout, debug_write, endpoint_create,
     mem_map_buffer, process_status, process_stop, receive, send, sleep, spawn, spawn_with,
     try_send, yield_now,
 };
@@ -110,7 +116,7 @@ fn main(arg: u64) -> u64 {
             }
             Err(_) => 1,
         },
-        10 => match spawn(1, 5, &[], None) {
+        10 => match spawn_with(1, 5, &[], None, SMALL) {
             Ok(_) => spin(),
             Err(_) => 1,
         },
@@ -131,7 +137,7 @@ fn main(arg: u64) -> u64 {
                 _ => 1,
             }
         }
-        13 => match spawn(1, 5, &[], None) {
+        13 => match spawn_with(1, 5, &[], None, SMALL) {
             Ok(_) => 0,
             Err(_) => 1,
         },
@@ -166,14 +172,40 @@ fn main(arg: u64) -> u64 {
                 rights: READ,
                 badge: 0,
             }];
-            match spawn(1, 10, &file, None) {
+            let one = Limits {
+                processes: 1,
+                handles: 8,
+                ..Limits::NONE
+            };
+            match spawn_with(1, 10, &file, None, one) {
                 Ok(_) => spin(),
                 Err(_) => 1,
             }
         }
+        18 => {
+            let mut started = 0;
+            let refusal = loop {
+                match spawn_with(1, 8, &[], None, SMALL) {
+                    Ok(_) if started < 8 => started += 1,
+                    other => break other.err(),
+                }
+            };
+            started * 10 + u64::from(refusal == Some(Error::TooLarge))
+        }
+        19 => {
+            let mut made = 0;
+            let refusal = loop {
+                match endpoint_create() {
+                    Ok(_) if made < 64 => made += 1,
+                    other => break other.err(),
+                }
+            };
+            made * 10 + u64::from(refusal == Some(Error::NoMemory))
+        }
         16 => {
-            let above = |class| spawn_with(1, 1, &[], None, 0, class) == Err(Error::TooLarge);
-            let own = spawn_with(1, 1, &[], None, 0, Class::Agents).is_ok();
+            let in_class = |class| spawn_with(1, 1, &[], None, Limits { class, ..SMALL });
+            let above = |class| in_class(class) == Err(Error::TooLarge);
+            let own = in_class(Class::Agents).is_ok();
             if above(Class::Services) && above(Class::Trusted) && own {
                 0
             } else {
@@ -183,6 +215,13 @@ fn main(arg: u64) -> u64 {
         _ => 99,
     }
 }
+
+/// What these children give theirs: 4 handles, since a child's default
+/// budget is one full table (D-022, #115) and must keep room for its own.
+const SMALL: Limits = Limits {
+    handles: 4,
+    ..Limits::NONE
+};
 
 fn spin() -> u64 {
     loop {

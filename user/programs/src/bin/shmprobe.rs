@@ -6,7 +6,8 @@
 //! - Run 2, B ends first: A is argument 3, B argument 4.
 //!
 //! A's handles: 1 the console, 2 an endpoint to B (`SEND`), 3 one from B
-//! (`RECEIVE`); limit 2 pages. B's: 1 the console, 2 the endpoint from A
+//! (`RECEIVE`); limit 3 pages (2 for the buffer, 1 charged for the kernel's
+//! bookkeeping of sharing it, #115). B's: 1 the console, 2 the endpoint from A
 //! (`RECEIVE`), 3 the one to A (`SEND`); limit 4 pages. Each step prints
 //! `ok <step>` or `FAIL <step>`; the exit code is the number of failures.
 //! In run 1, A revokes both grants while B maps them: B's mappings turn
@@ -18,7 +19,7 @@
 
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
-    Error, Mapped, Received, debug_write, delete, mem_map_buffer, mem_map_cap, mem_share,
+    Error, Mapped, Received, debug_write, delete, mem_map, mem_map_buffer, mem_map_cap, mem_share,
     mem_unmap, receive, revoke, send, sleep,
 };
 
@@ -69,6 +70,11 @@ fn sharer(b_ends_first: bool) -> u64 {
     buf.write_bytes(0, b"from A");
     let shared = mem_share(buf.addr(), LEN);
     report(&mut f, "A: share the buffer", shared.is_ok());
+    report(
+        &mut f,
+        "A: sharing took its last page for bookkeeping",
+        mem_map(4096) == Err(Error::NoMemory),
+    );
     let h = shared.unwrap_or(0);
     report(
         &mut f,

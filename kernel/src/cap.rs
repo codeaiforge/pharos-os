@@ -221,24 +221,54 @@ pub enum CapError {
     Revoked,
     /// The capability lacks a needed right.
     MissingRight,
-    /// The table holds [`MAX_HANDLES`] capabilities already.
+    /// The table holds as many capabilities as its limit allows (at most
+    /// [`MAX_HANDLES`]).
     TableFull,
 }
 
 /// A process's capability table.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CapTable {
     slots: Vec<Option<Arc<Capability>>>,
+    /// Handles in use (kept, not counted: `insert` runs on every `call`).
+    used: usize,
+    /// Most handles in use at once: [`MAX_HANDLES`], or less when the
+    /// process's handle budget is smaller or partly given to its children
+    /// (D-022).
+    limit: usize,
+}
+
+impl Default for CapTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CapTable {
     /// An empty table.
     pub const fn new() -> Self {
-        Self { slots: Vec::new() }
+        Self {
+            slots: Vec::new(),
+            used: 0,
+            limit: MAX_HANDLES,
+        }
+    }
+
+    /// Sets the most handles in use at once (at most [`MAX_HANDLES`]).
+    pub fn set_limit(&mut self, limit: usize) {
+        self.limit = limit.min(MAX_HANDLES);
+    }
+
+    /// True if no further capability fits.
+    pub fn full(&self) -> bool {
+        self.len() >= self.limit
     }
 
     /// Stores `cap` under the lowest free handle and returns the handle.
     pub fn insert(&mut self, cap: Arc<Capability>) -> Result<Handle, CapError> {
+        if self.full() {
+            return Err(CapError::TableFull);
+        }
         let index = match self.slots.iter().position(Option::is_none) {
             Some(index) => index,
             None if self.slots.len() < MAX_HANDLES => {
@@ -248,6 +278,7 @@ impl CapTable {
             None => return Err(CapError::TableFull),
         };
         self.slots[index] = Some(cap);
+        self.used += 1;
         Ok(index as Handle + 1)
     }
 
@@ -270,15 +301,14 @@ impl CapTable {
 
     /// Removes `handle` from the table.
     pub fn delete(&mut self, handle: Handle) -> Result<(), CapError> {
-        self.slot(handle)?
-            .take()
-            .map(drop)
-            .ok_or(CapError::InvalidHandle)
+        self.slot(handle)?.take().ok_or(CapError::InvalidHandle)?;
+        self.used -= 1;
+        Ok(())
     }
 
     /// Handles in use.
     pub fn len(&self) -> usize {
-        self.slots.iter().filter(|s| s.is_some()).count()
+        self.used
     }
 
     /// True if no handle is in use.
@@ -337,6 +367,33 @@ mod tests {
             t.insert(console(0)).unwrap();
         }
         assert_eq!(t.insert(console(0)), Err(CapError::TableFull));
+    }
+
+    #[test]
+    fn a_lower_limit_holds_even_with_free_slots() {
+        let mut t = CapTable::new();
+        for _ in 0..4 {
+            t.insert(console(0)).unwrap();
+        }
+        t.delete(2).unwrap();
+        t.set_limit(3);
+        assert!(t.full());
+        assert_eq!(
+            t.insert(console(0)),
+            Err(CapError::TableFull),
+            "slot 2 free, limit 3"
+        );
+        t.set_limit(4);
+        assert_eq!(t.insert(console(0)), Ok(2));
+        t.set_limit(1000);
+        for _ in 4..MAX_HANDLES {
+            t.insert(console(0)).unwrap();
+        }
+        assert_eq!(
+            t.insert(console(0)),
+            Err(CapError::TableFull),
+            "never past MAX_HANDLES"
+        );
     }
 
     #[test]

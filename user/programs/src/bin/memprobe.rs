@@ -5,9 +5,11 @@
 //!   debug console (`WRITE | GRANT`), 2 the file `bin/memprobe` (`READ`).
 //!   Each step prints `ok <step>` or `FAIL <step>`; the exit code is the
 //!   number of failures.
-//! - Argument 1: a child given the same limit: maps all of it, then one
+//! - Argument 1: a child given half the limit: maps all of it, then one
 //!   page more. Exits 0 if the first works and the second fails.
 //! - Argument 2: a child given no limit. Exits 0 if it cannot map a page.
+//! - Argument 3: a child given half the limit: maps it, holds it for
+//!   300 ms, and exits 0 (#115: meanwhile its parent cannot map that half).
 
 #![no_std]
 #![no_main]
@@ -20,7 +22,7 @@ use alloc::vec::Vec;
 use pharos_user::rights::WRITE;
 use pharos_user::{
     Error, Grant, Received, Status, debug_write, endpoint_create, mem_map, mem_unmap,
-    process_status, receive, spawn, spawn_limited,
+    process_status, receive, sleep, spawn, spawn_limited,
 };
 
 pharos_user::entry!(main);
@@ -29,6 +31,8 @@ const CONSOLE: u64 = 1;
 const SELF: u64 = 2;
 /// The page limit the test kernel starts this program with: 32 MiB.
 pub const LIMIT: u32 = 8192;
+/// Half of it, for children (#115).
+const HALF: u32 = LIMIT / 2;
 const MIB: u64 = 1024 * 1024;
 const REGION: u64 = 0x0000_1000_0000_0000;
 
@@ -71,7 +75,15 @@ fn child(arg: u64, limit: Option<u32>) -> Option<u64> {
 fn main(arg: u64) -> u64 {
     let all = u64::from(LIMIT) * 4096;
     match arg {
-        1 => return u64::from(mem_map(all).is_err() || mem_map(4096) != Err(Error::NoMemory)),
+        1 => {
+            let half = u64::from(HALF) * 4096;
+            return u64::from(mem_map(half).is_err() || mem_map(4096) != Err(Error::NoMemory));
+        }
+        3 => {
+            let held = mem_map(u64::from(HALF) * 4096).is_ok();
+            sleep(300_000);
+            return u64::from(!held);
+        }
         2 => return u64::from(mem_map(4096) != Err(Error::NoMemory)),
         _ => {}
     }
@@ -143,10 +155,39 @@ fn main(arg: u64) -> u64 {
         "spawn with a limit above its own: TOO_LARGE",
         spawn_limited(SELF, 1, &[], None, LIMIT + 1) == Err(Error::TooLarge),
     );
+    // Carved (D-022, #115): a child's pages come out of this process's.
+    let held = mem_map(4096);
     report(
         &mut f,
-        "a child with its own limit maps it all, and no more",
-        child(1, Some(LIMIT)) == Some(0),
+        "a child may not get more pages than are left: TOO_LARGE",
+        held.is_ok() && spawn_limited(SELF, 1, &[], None, LIMIT) == Err(Error::TooLarge),
+    );
+    let _ = held.and_then(|h| mem_unmap(h, 4096));
+    report(
+        &mut f,
+        "a child given half the limit maps it all, and no more",
+        child(1, Some(HALF)) == Some(0),
+    );
+    report(
+        &mut f,
+        "the half returns when it ends: a second child gets it too",
+        child(1, Some(HALF)) == Some(0),
+    );
+    let holder = spawn_limited(SELF, 3, &[], None, HALF);
+    sleep(100_000);
+    let blocked = mem_map(u64::from(HALF) * 4096) == Err(Error::NoMemory);
+    let mut done = false;
+    for _ in 0..100 {
+        done = holder.and_then(process_status) == Ok(Status::Exited(0));
+        if done {
+            break;
+        }
+        sleep(10_000);
+    }
+    report(
+        &mut f,
+        "while a child holds half, this process cannot map it",
+        holder.is_ok() && blocked && done,
     );
     report(
         &mut f,

@@ -11,8 +11,8 @@
 
 use pharos_user::rights::{GRANT, READ, RECEIVE, SEND, WAIT};
 use pharos_user::{
-    Error, Grant, Handle, Received, Status, debug_write, endpoint_create, open, process_status,
-    process_stop, receive_timeout, sleep, spawn, spawn_limited, try_send,
+    Error, Grant, Handle, Limits, Received, Status, debug_write, endpoint_create, open,
+    process_status, process_stop, receive_timeout, sleep, spawn, spawn_with, try_send,
 };
 
 pharos_user::entry!(main);
@@ -51,7 +51,13 @@ fn ended(process: Result<Handle, Error>) -> Status {
 /// Starts `child` in `mode`, lets it reach its wait, stops it, and returns
 /// how it ended.
 fn stopped(child: Handle, mode: u64, caps: &[Grant], limit: u32) -> Status {
-    let Ok(process) = spawn_limited(child, mode, caps, None, limit) else {
+    // One descendant, for the modes that start a child.
+    let limits = Limits {
+        pages: limit,
+        processes: 1,
+        ..Limits::NONE
+    };
+    let Ok(process) = spawn_with(child, mode, caps, None, limits) else {
         return Status::Exited(u64::MAX);
     };
     sleep(50_000);
@@ -60,6 +66,12 @@ fn stopped(child: Handle, mode: u64, caps: &[Grant], limit: u32) -> Status {
     }
     ended(Ok(process))
 }
+
+/// No pages, one descendant (D-022).
+const ONE_CHILD: Limits = Limits {
+    processes: 1,
+    ..Limits::NONE
+};
 
 fn main(_: u64) -> u64 {
     let mut f = 0;
@@ -168,7 +180,7 @@ fn main(_: u64) -> u64 {
     report(
         &mut f,
         "a process that starts a child and exits: exited",
-        ended(spawn(child, 13, &[file], None)) == Status::Exited(0),
+        ended(spawn_with(child, 13, &[file], None, ONE_CHILD)) == Status::Exited(0),
     );
 
     let target = spawn(child, 5, &[], None);

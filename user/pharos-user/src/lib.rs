@@ -322,7 +322,35 @@ pub fn spawn_limited(
     notify: Option<(Handle, u32)>,
     limit: u32,
 ) -> Result<Handle, Error> {
-    spawn_with(file, arg, caps, notify, limit, Class::Same)
+    let limits = Limits {
+        pages: limit,
+        ..Limits::NONE
+    };
+    spawn_with(file, arg, caps, notify, limits)
+}
+
+/// What a child gets at [`spawn_with`], each carved from this process's
+/// own and returned when the child ends (D-022).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// Pages it (with its children) may map.
+    pub pages: u32,
+    pub class: Class,
+    /// Live descendants it may have.
+    pub processes: u8,
+    /// Handles held by it and its descendants, at most 4,095; 0 means 64,
+    /// one full table.
+    pub handles: u16,
+}
+
+impl Limits {
+    /// No pages, this process's class, no descendants, a full table.
+    pub const NONE: Self = Self {
+        pages: 0,
+        class: Class::Same,
+        processes: 0,
+        handles: 0,
+    };
 }
 
 /// A scheduling class (D-022): a ready process of a higher class always
@@ -336,16 +364,25 @@ pub enum Class {
     Agents = 3,
 }
 
-/// [`spawn_limited`] in scheduling class `class`; a class above this
-/// process's own is [`Error::TooLarge`].
+/// [`spawn`] with `limits`: [`Error::TooLarge`] if a class above this
+/// process's own, or more pages, descendants, or handles than it has left
+/// (keeping room in its own table for the new process handle).
 pub fn spawn_with(
     file: Handle,
     arg: u64,
     caps: &[Grant],
     notify: Option<(Handle, u32)>,
-    limit: u32,
-    class: Class,
+    limits: Limits,
 ) -> Result<Handle, Error> {
+    let Limits {
+        pages: limit,
+        class,
+        processes,
+        handles,
+    } = limits;
+    if handles >= 1 << 12 {
+        return Err(Error::TooLarge);
+    }
     // Room for one more than the kernel accepts, so passing too many
     // reaches the kernel's check instead of being cut here.
     let mut entries = [0u8; 16 * (MAX_SPAWN_CAPS + 1)];
@@ -364,7 +401,10 @@ pub fn spawn_with(
         entries.as_ptr() as u64,
         caps.len() as u64 | u64::from(limit) << 32,
         endpoint,
-        u64::from(bit) | (class as u64) << 32,
+        u64::from(bit)
+            | (class as u64) << 32
+            | u64::from(processes) << 40
+            | u64::from(handles) << 48,
     ];
     call(number::SPAWN, args)
 }

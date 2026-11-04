@@ -42,8 +42,11 @@ pub const MAX_PROGRAM: u64 = 4 * 1024 * 1024;
 pub const MAP_REGION: core::ops::Range<u64> = 0x0000_1000_0000_0000..0x0000_2000_0000_0000;
 /// Most `mem_map` mappings one process has at once.
 pub const MAX_MAPPINGS: usize = 1024;
-/// The page limit the kernel starts `init` with: 1.5 GiB.
-pub const INIT_MEMORY_LIMIT: u64 = 1536 * 1024 * 1024 / FRAME_SIZE;
+/// The page limit the kernel starts `init` with: 3 GiB. Its services'
+/// limits are carved from it (D-022): storage and inference 1 GiB each and
+/// the agent runtime 64 MiB, with room. A limit is a bound, not a promise:
+/// frames are allocated only when mapped.
+pub const INIT_MEMORY_LIMIT: u64 = 3 * 1024 * 1024 * 1024 / FRAME_SIZE;
 
 /// Frames shared through `Memory` capabilities (user-environment.md): each
 /// mapping and each capability holds a reference, and the frames are freed
@@ -131,10 +134,15 @@ pub struct DeviceMapping {
 /// Only the bookkeeping: the system call maps and frees the pages.
 #[derive(Debug, Default)]
 pub struct UserMemory {
-    /// Most pages mapped at once.
+    /// Most pages mapped at once, given away included.
     pub limit: u64,
     /// Pages mapped now.
     pub used: u64,
+    /// Pages given to its live children as their limits (D-022).
+    pub given: u64,
+    /// Pages charged for the kernel's bookkeeping of memory it shared
+    /// (one per 512 shared pages), until it ends.
+    pub charged: u64,
     /// Mappings as (start, pages), sorted by start.
     maps: Vec<(u64, u64)>,
 }
@@ -152,7 +160,7 @@ impl UserMemory {
     /// or the region does not allow it.
     pub fn reserve(&mut self, pages: u64) -> Option<u64> {
         let used = self.used.checked_add(pages)?;
-        if pages == 0 || used > self.limit || self.maps.len() >= MAX_MAPPINGS {
+        if pages == 0 || pages > self.available() || self.maps.len() >= MAX_MAPPINGS {
             return None;
         }
         let len = pages.checked_mul(FRAME_SIZE)?;
@@ -170,6 +178,28 @@ impl UserMemory {
         self.maps.insert(index, (at, pages));
         self.used = used;
         Some(at)
+    }
+
+    /// Pages it may still map, charge, or give away.
+    pub fn available(&self) -> u64 {
+        self.limit
+            .saturating_sub(self.used)
+            .saturating_sub(self.given)
+            .saturating_sub(self.charged)
+    }
+
+    /// Takes `pages` for a child's limit, or for bookkeeping when
+    /// `charge`; false (nothing taken) if fewer are available.
+    pub fn take(&mut self, pages: u64, charge: bool) -> bool {
+        if pages > self.available() {
+            return false;
+        }
+        if charge {
+            self.charged += pages;
+        } else {
+            self.given += pages;
+        }
+        true
     }
 
     /// True if there is a mapping of exactly `pages` at `start`.
@@ -356,6 +386,46 @@ pub fn spawn_elf_limited(
     start_limited(space, entry - USER_BASE, arg, caps, limit)
 }
 
+/// What a process was given at start, carved from its creator's (D-022):
+/// pages it may map (with its children's), live descendants, and handles
+/// held by itself and its descendants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Budget {
+    pub pages: u64,
+    pub processes: u64,
+    pub handles: u64,
+}
+
+impl Budget {
+    /// A process the kernel starts gets the whole system: every other
+    /// process slot and a full table for each.
+    pub const fn kernel(pages: u64) -> Self {
+        Self {
+            pages,
+            processes: MAX_DESCENDANTS,
+            handles: KERNEL_HANDLES,
+        }
+    }
+}
+
+/// Live descendants a process started by the kernel may have (the 32
+/// process slots less its own).
+pub const MAX_DESCENDANTS: u64 = 31;
+/// Handles for a process started by the kernel and all its descendants:
+/// a full table for each of 32 processes.
+pub const KERNEL_HANDLES: u64 = 32 * crate::cap::MAX_HANDLES as u64;
+/// Handles a child gets when its creator asks for 0: a full table.
+pub const DEFAULT_HANDLES: u64 = crate::cap::MAX_HANDLES as u64;
+
+/// What a process has given its live children, from its [`Budget`].
+#[derive(Debug, Default)]
+pub struct Given {
+    /// Each child counts once for itself and once per descendant it may
+    /// have.
+    pub processes: u64,
+    pub handles: u64,
+}
+
 /// Kernel-side state of a process (its thread and address space belong to
 /// the scheduler task).
 pub struct Process {
@@ -385,6 +455,53 @@ pub struct Process {
     /// The process that started it (`None`: the kernel did). When a
     /// process ends, the processes it started are stopped (agents.md).
     pub parent: Option<TaskId>,
+    /// What it was given; returned to its parent when it ends.
+    pub budget: Budget,
+    /// What it has given its live children.
+    pub given: IrqMutex<Given>,
+}
+
+impl Process {
+    /// Its table's limit: its handle budget less what its children hold,
+    /// at most a full table.
+    fn handle_limit(&self, given: &Given) -> usize {
+        usize::try_from(self.budget.handles.saturating_sub(given.handles)).unwrap_or(usize::MAX)
+    }
+
+    /// Takes `child` out of its budget (D-022); false, with nothing taken,
+    /// if it does not fit: pages beyond those available, more processes
+    /// than are left, or handles that would leave its own table less room
+    /// than it uses plus one (for the child's process handle).
+    pub fn give(&self, child: &Budget) -> bool {
+        let mut given = self.given.lock();
+        let processes = given
+            .processes
+            .saturating_add(1)
+            .saturating_add(child.processes);
+        let handles = given.handles.saturating_add(child.handles);
+        let mut caps = self.caps.lock();
+        let room = self.budget.handles.saturating_sub(handles);
+        if processes > self.budget.processes || room < caps.len() as u64 + 1 {
+            return false;
+        }
+        if !self.memory.lock().take(child.pages, false) {
+            return false;
+        }
+        given.processes = processes;
+        given.handles = handles;
+        caps.set_limit(self.handle_limit(&given));
+        true
+    }
+
+    /// Takes back what [`Process::give`] took for `child`, which ended.
+    pub(crate) fn take_back(&self, child: &Budget) {
+        let mut given = self.given.lock();
+        given.processes = given.processes.saturating_sub(1 + child.processes);
+        given.handles = given.handles.saturating_sub(child.handles);
+        self.caps.lock().set_limit(self.handle_limit(&given));
+        let mut memory = self.memory.lock();
+        memory.given = memory.given.saturating_sub(child.pages);
+    }
 }
 
 /// Live processes by task ID (one thread each).
@@ -404,7 +521,7 @@ pub fn start(
 }
 
 /// [`start`] with a `mem_map` limit of `limit` pages, in the trusted
-/// class (processes the kernel starts).
+/// class with the kernel's [`Budget`] (processes the kernel starts).
 pub fn start_limited(
     space: AddressSpace,
     entry: u64,
@@ -412,22 +529,33 @@ pub fn start_limited(
     caps: Vec<Arc<Capability>>,
     limit: u64,
 ) -> Result<TaskId, ProcessError> {
-    start_class(space, entry, arg, caps, limit, sched::TRUSTED)
+    start_class(
+        space,
+        entry,
+        arg,
+        caps,
+        Budget::kernel(limit),
+        sched::TRUSTED,
+    )
 }
 
-/// [`start_limited`] in scheduling class `class` (D-022).
+/// [`start_limited`] with `budget` (its `pages` the `mem_map` limit), in
+/// scheduling class `class` (D-022). The caller has taken `budget` from
+/// the creator's ([`Process::give`]).
 pub fn start_class(
     space: AddressSpace,
     entry: u64,
     arg: u64,
     caps: Vec<Arc<Capability>>,
-    limit: u64,
+    budget: Budget,
     class: sched::Class,
 ) -> Result<TaskId, ProcessError> {
+    let limit = budget.pages;
     if space.translate(USER_BASE.saturating_add(entry)).is_none() {
         return Err(ProcessError::BadEntry);
     }
     let mut table = CapTable::new();
+    table.set_limit(usize::try_from(budget.handles).unwrap_or(usize::MAX));
     for cap in caps {
         table
             .insert(cap)
@@ -450,6 +578,8 @@ pub fn start_class(
             shared: IrqMutex::new(Vec::new()),
             devices: IrqMutex::new(Vec::new()),
             parent,
+            budget,
+            given: IrqMutex::new(Given::default()),
             record: Arc::new(ProcessRecord {
                 id,
                 end: IrqMutex::new(None),
@@ -596,6 +726,13 @@ fn end_current(end: End) -> ! {
         // ends, stops its own children in turn.
         for child in children {
             sched::stop(child);
+        }
+        // Its budget returns to its parent, if that still runs.
+        let parent = process
+            .as_ref()
+            .and_then(|p| p.parent.and_then(by_id).zip(Some(p.budget)));
+        if let Some((parent, budget)) = parent {
+            parent.take_back(&budget);
         }
         if let Some(process) = &process {
             let cpu = sched::cpu_cycles(id).unwrap_or(0);
@@ -902,5 +1039,20 @@ mod tests {
         assert_eq!(m.reserve(1), None, "region full");
         assert_eq!(UserMemory::new(5).reserve(u64::MAX), None, "no overflow");
         assert_eq!(UserMemory::new(0).reserve(1), None, "limit 0");
+    }
+
+    #[test]
+    fn given_and_charged_pages_are_not_available() {
+        let mut m = UserMemory::new(10);
+        assert!(m.reserve(3).is_some());
+        assert!(m.take(4, false), "4 given to a child");
+        assert!(m.take(1, true), "1 charged");
+        assert_eq!(m.available(), 2);
+        assert!(!m.take(3, false), "3 more do not fit");
+        assert_eq!(m.reserve(3), None);
+        assert!(m.reserve(2).is_some());
+        assert_eq!((m.used, m.given, m.charged), (5, 4, 1));
+        m.given -= 4; // the child ended
+        assert_eq!(m.available(), 4);
     }
 }

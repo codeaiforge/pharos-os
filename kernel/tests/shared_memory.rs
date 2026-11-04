@@ -53,7 +53,7 @@ fn start(programs: &Fs, a_arg: u64) -> Option<(TaskId, TaskId)> {
     let console = || Capability::new(Object::DebugConsole, WRITE);
     let a = vec![console(), cap(&to_b, SEND), cap(&to_a, RECEIVE)];
     let b = vec![console(), cap(&to_b, RECEIVE), cap(&to_a, SEND)];
-    let a = process::spawn_elf_limited(programs, b"bin/shmprobe", a_arg, a, 2).ok()?;
+    let a = process::spawn_elf_limited(programs, b"bin/shmprobe", a_arg, a, 3).ok()?;
     let b = process::spawn_elf_limited(programs, b"bin/shmprobe", a_arg + 1, b, 4).ok()?;
     Some((a, b))
 }
@@ -157,6 +157,7 @@ fn run(t: &mut TestRun) {
         &lines(a),
         &[
             "A: share the buffer",
+            "A: sharing took its last page for bookkeeping",
             "A: send a writable and a read-only grant",
             "A: B is done",
             "A: sees B's write",

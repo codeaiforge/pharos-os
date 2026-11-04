@@ -204,6 +204,10 @@ pub enum Call {
         limit: u64,
         /// The child's scheduling class plus one; 0 is the creator's.
         class: u8,
+        /// Live descendants the child may have.
+        processes: u64,
+        /// Handles for the child and its descendants (0: a full table).
+        handles: u64,
     },
     ProcessStatus {
         handle: Handle,
@@ -386,11 +390,13 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
         number::ENDPOINT_CREATE => Ok(Call::EndpointCreate),
         number::SPAWN => {
             // Capabilities in bits 0-31, the child's page limit in 32-63;
-            // the notification bit in bits 0-31 of the last argument, the
-            // class (plus one; 0: the creator's) in bits 32-33, the rest 0.
+            // in the last argument the notification bit in bits 0-31, the
+            // class (plus one; 0: the creator's) in 32-33, the child's
+            // descendants in 40-47 and handles in 48-59 (D-022), the rest 0.
             let (count, limit, bit) = (args[3] & 0xffff_ffff, args[3] >> 32, args[5] & 0xffff_ffff);
-            let class = args[5] >> 32;
-            if count > MAX_SPAWN_CAPS as u64 || bit >= 32 || class > 3 {
+            let (class, processes, handles) =
+                (args[5] >> 32 & 0xff, args[5] >> 40 & 0xff, args[5] >> 48);
+            if count > MAX_SPAWN_CAPS as u64 || bit >= 32 || class > 3 || handles >= 1 << 12 {
                 return Err(Error::TooLarge);
             }
             Ok(Call::Spawn {
@@ -412,6 +418,11 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
                 bit: bit as u32,
                 limit,
                 class: class as u8,
+                processes,
+                handles: match handles {
+                    0 => crate::process::DEFAULT_HANDLES,
+                    n => n,
+                },
             })
         }
         number::PROCESS_STATUS => Ok(Call::ProcessStatus { handle: args[0] }),
@@ -490,7 +501,7 @@ pub use kernel::handle;
 mod kernel {
     use super::*;
     use crate::arch::x86_64::syscall::SyscallFrame;
-    use crate::cap::{MAX_HANDLES, Object};
+    use crate::cap::Object;
     use crate::ipc::{self, Message};
     use crate::{process, sched};
 
@@ -643,7 +654,7 @@ mod kernel {
         // Check everything before sending, so no reply is lost.
         sched::with_current_space(|space| space.check_user(addr, max, true))
             .ok_or(Error::BadAddress)??;
-        if process.caps.lock().len() >= MAX_HANDLES {
+        if process.caps.lock().full() {
             return Err(Error::NoMemory);
         }
         if !reply_endpoint.is_idle() {
@@ -702,28 +713,60 @@ mod kernel {
             .lock()
             .reserve(pages)
             .ok_or(Error::NoMemory)?;
-        let mapped = sched::with_current_space(|space| {
-            let mut guard = crate::mm::frames();
-            let frames = guard.as_mut()?;
-            for i in 0..pages {
-                if space
-                    .map_new_page(start + i * 4096, Flags::USER_DATA, &[], frames)
-                    .is_err()
-                {
-                    for j in 0..i {
+        // In batches, with interrupts on between them, so a large mapping
+        // does not hold the CPU while it zeroes its pages (D-022). No lock is
+        // held between batches; the region is reserved, so nothing else
+        // maps there. A process told to stop meanwhile gives up, and may
+        // also end at a tick between batches (its pages go with its space).
+        let unmap = |done: u64| {
+            sched::with_current_space(|space| {
+                let mut guard = crate::mm::frames();
+                if let Some(frames) = guard.as_mut() {
+                    for j in 0..done {
                         space.unmap_owned(start + j * 4096, frames);
                     }
-                    return None;
+                }
+            });
+            process.memory.lock().release(start, pages);
+        };
+        let mut done = 0;
+        while done < pages {
+            let batch = (pages - done).min(MAP_BATCH);
+            let mapped = sched::with_current_space(|space| {
+                let mut guard = crate::mm::frames();
+                let frames = guard.as_mut()?;
+                for i in done..done + batch {
+                    if space
+                        .map_new_page(start + i * 4096, Flags::USER_DATA, &[], frames)
+                        .is_err()
+                    {
+                        for j in done..i {
+                            space.unmap_owned(start + j * 4096, frames);
+                        }
+                        return None;
+                    }
+                }
+                Some(())
+            });
+            if mapped.flatten().is_none() {
+                unmap(done);
+                return Err(Error::NoMemory);
+            }
+            done += batch;
+            if done < pages {
+                crate::arch::x86_64::enable_interrupts();
+                crate::arch::x86_64::disable_interrupts();
+                if sched::stopping() {
+                    unmap(done);
+                    return Err(Error::NoMemory);
                 }
             }
-            Some(())
-        });
-        if mapped.flatten().is_none() {
-            process.memory.lock().release(start, pages);
-            return Err(Error::NoMemory);
         }
         Ok(start)
     }
+
+    /// Pages `mem_map` maps and zeroes between two chances for interrupts.
+    const MAP_BATCH: u64 = 64;
 
     /// `mem_share`: turns one whole `mem_map` mapping into a `Memory`
     /// object (or returns another capability on it, if already shared) and
@@ -734,7 +777,7 @@ mod kernel {
         if !process.memory.lock().contains(addr, pages) {
             return Err(Error::BadAddress);
         }
-        if process.caps.lock().len() >= MAX_HANDLES {
+        if process.caps.lock().full() {
             return Err(Error::NoMemory);
         }
         let existing = process
@@ -751,6 +794,11 @@ mod kernel {
                 frames
                     .try_reserve_exact(pages as usize)
                     .map_err(|_| Error::NoMemory)?;
+                // The kernel's frame list (8 bytes a page) is charged to the
+                // sharer, one page per 512, until it ends (D-022).
+                if !process.memory.lock().take(pages.div_ceil(512), true) {
+                    return Err(Error::NoMemory);
+                }
                 // Every page of a recorded mapping is mapped and owned, so
                 // `disown` cannot fail part-way.
                 sched::with_current_space(|space| {
@@ -845,6 +893,8 @@ mod kernel {
         bit: u32,
         limit: u64,
         class: u8,
+        processes: u64,
+        handles: u64,
     ) -> Result<u64, Error> {
         // Never above the creator's class (D-022 item 1).
         let class = match class {
@@ -881,21 +931,25 @@ mod kernel {
             0 => None,
             handle => Some(self::endpoint(process, handle, cap::RECEIVE)?),
         };
-        // Not carved out of the creator's limit: per-agent quotas are M3.5.
-        if limit > process.memory.lock().limit {
-            return Err(Error::TooLarge);
-        }
-        if process.caps.lock().len() >= MAX_HANDLES || process::count() >= MAX_PROCESSES {
+        if process.caps.lock().full() || process::count() >= MAX_PROCESSES {
             return Err(Error::NoMemory);
         }
-        let (space, entry) = process::load_elf_file(fs, *file).map_err(|e| match e {
-            process::ProcessError::Map(_) | process::ProcessError::NoFrameAllocator => {
-                Error::NoMemory
+        // Carved from the creator's (D-022): returned when the child ends.
+        let budget = process::Budget {
+            pages: limit,
+            processes,
+            handles,
+        };
+        if caps.len() as u64 > handles || !process.give(&budget) {
+            return Err(Error::TooLarge);
+        }
+        let id = match start_child(fs, *file, arg, caps, budget, class) {
+            Ok(id) => id,
+            Err(e) => {
+                process.take_back(&budget);
+                return Err(e);
             }
-            _ => Error::BadProgram,
-        })?;
-        let id = process::start_class(space, entry - process::USER_BASE, arg, caps, limit, class)
-            .map_err(|_| Error::NoMemory)?;
+        };
         let record = process::by_id(id).ok_or(Error::NoMemory)?.record.clone();
         if let Some(endpoint) = notify {
             record.notify_on_end(endpoint, 1 << bit);
@@ -903,6 +957,26 @@ mod kernel {
         let child =
             cap::Capability::new(Object::Process(record), cap::WAIT | cap::GRANT | cap::STOP);
         Ok(process.caps.lock().insert(child)?)
+    }
+
+    /// Loads and starts a child with `budget`, already taken from its
+    /// creator's.
+    fn start_child(
+        fs: &crate::fs::Fs,
+        file: pharos_fs::FileId,
+        arg: u64,
+        caps: alloc::vec::Vec<alloc::sync::Arc<cap::Capability>>,
+        budget: process::Budget,
+        class: sched::Class,
+    ) -> Result<u64, Error> {
+        let (space, entry) = process::load_elf_file(fs, file).map_err(|e| match e {
+            process::ProcessError::Map(_) | process::ProcessError::NoFrameAllocator => {
+                Error::NoMemory
+            }
+            _ => Error::BadProgram,
+        })?;
+        process::start_class(space, entry - process::USER_BASE, arg, caps, budget, class)
+            .map_err(|_| Error::NoMemory)
     }
 
     /// The system-call handler (installed by `process::init`). Runs on the
@@ -978,7 +1052,7 @@ mod kernel {
                 // Check everything before taking a message, so none is lost.
                 sched::with_current_space(|space| space.check_user(addr, max_len, true))
                     .ok_or(Error::BadAddress)??;
-                if process.caps.lock().len() >= MAX_HANDLES {
+                if process.caps.lock().full() {
                     return Err(Error::NoMemory);
                 }
                 let received = ipc::receive_now(&endpoint, sched::deadline(timeout))
@@ -1116,7 +1190,7 @@ mod kernel {
                 let Object::Device(device) = parent.object() else {
                     return Err(Error::MissingRight);
                 };
-                if process.caps.lock().len() >= MAX_HANDLES {
+                if process.caps.lock().full() {
                     return Err(Error::NoMemory);
                 }
                 let irq = crate::irq::Irq::create(device.clone(), entry)?;
@@ -1162,8 +1236,10 @@ mod kernel {
                 bit,
                 limit,
                 class,
+                processes,
+                handles,
             } => spawn(
-                &process, handle, arg, addr, count, endpoint, bit, limit, class,
+                &process, handle, arg, addr, count, endpoint, bit, limit, class, processes, handles,
             ),
             Call::MemMap { pages } => mem_map(&process, pages),
             Call::MemUnmap { addr, pages } => {
@@ -1364,7 +1440,9 @@ mod tests {
                 endpoint: 4,
                 bit: 31,
                 limit: 0,
-                class: 0
+                class: 0,
+                processes: 0,
+                handles: 64
             })
         );
         assert!(
@@ -1396,7 +1474,19 @@ mod tests {
             ),
             "the class rides in bits 32-33 of the last argument"
         );
-        assert_eq!(spawn(0, 0, 4 << 32), Err(Error::TooLarge), "bits above 33");
+        assert_eq!(spawn(0, 0, 4 << 32), Err(Error::TooLarge), "class above 3");
+        assert!(
+            matches!(
+                spawn(0, 0, 2 << 40 | 8 << 48),
+                Ok(Call::Spawn {
+                    processes: 2,
+                    handles: 8,
+                    ..
+                })
+            ),
+            "descendants in bits 40-47, handles in 48-59"
+        );
+        assert_eq!(spawn(0, 0, 1 << 60), Err(Error::TooLarge), "bits above 59");
         assert_eq!(
             decode(26, [3, 2, 0, 0, 0, 0]),
             Ok(Call::ProcessUsage { handle: 3, what: 2 })

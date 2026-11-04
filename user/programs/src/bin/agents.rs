@@ -78,6 +78,7 @@ use pharos_proto::net::{self, Request as NetRequest};
 use pharos_proto::permission::Permission;
 use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::{Info, refusal, status, trust};
+use pharos_user::Limits as SpawnLimits;
 use pharos_user::rights::{READ, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
     Class, Grant, Handle, Mapped, Received, Status, call_timeout, debug_write, delete,
@@ -123,6 +124,10 @@ const INFER_US: u64 = 10_000_000;
 /// How long the user has to answer an approval request: boot table, test
 /// table.
 const APPROVE_US: [u64; 2] = [60_000_000, 5_000_000];
+/// Handles each agent may hold (D-022): its runtime endpoint, endpoints and
+/// buffers of its own. The runtime's own budget from `init` has room for
+/// [`SLOTS`] of these.
+pub const AGENT_HANDLES: u16 = 16;
 /// Most approval requests waiting at once.
 const MAX_PENDING: usize = 4;
 /// Control clients with an attached buffer.
@@ -705,7 +710,13 @@ impl Runtime {
                 badge: slot as u32 + 1,
             };
             let notify = Some((SERVICE, slot as u32));
-            let p = spawn_with(file, 0, &[grant], notify, limits.pages, Class::Agents);
+            let agent = SpawnLimits {
+                pages: limits.pages,
+                class: Class::Agents,
+                processes: 0,
+                handles: AGENT_HANDLES,
+            };
+            let p = spawn_with(file, 0, &[grant], notify, agent);
             let _ = delete(file);
             p
         });

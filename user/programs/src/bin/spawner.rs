@@ -12,8 +12,8 @@
 
 use pharos_user::rights::{GRANT, READ, RECEIVE, SEND, WRITE};
 use pharos_user::{
-    Class, Error, Grant, Received, Status, Usage, call_reply, debug_write, endpoint_create, open,
-    process_status, process_stop, process_usage, receive, send, sleep, spawn, spawn_limited,
+    Class, Error, Grant, Limits, Received, Status, Usage, call_reply, debug_write, endpoint_create,
+    open, process_status, process_stop, process_usage, receive, send, sleep, spawn, spawn_limited,
     spawn_with,
 };
 
@@ -158,7 +158,17 @@ fn main(_: u64) -> u64 {
         rights: READ | GRANT,
         badge: 0,
     }];
-    let low = spawn_with(child, 16, &file, None, 0, Class::Agents);
+    let low = spawn_with(
+        child,
+        16,
+        &file,
+        None,
+        Limits {
+            class: Class::Agents,
+            processes: 1,
+            ..Limits::NONE
+        },
+    );
     let mut status = Ok(Status::Running);
     for _ in 0..200 {
         status = low.and_then(process_status);
@@ -201,7 +211,11 @@ fn main(_: u64) -> u64 {
             && kept.is_ok_and(|k| k >= cpu.unwrap_or(u64::MAX))
             && after == Ok(0),
     );
-    let parent = spawn(child, 17, &file, None);
+    let two = Limits {
+        processes: 2,
+        ..Limits::NONE
+    };
+    let parent = spawn_with(child, 17, &file, None, two);
     sleep(100_000);
     let descendants = parent.and_then(|p| process_usage(p, Usage::Descendants));
     let _ = parent.and_then(process_stop);
@@ -211,7 +225,46 @@ fn main(_: u64) -> u64 {
         descendants == Ok(2),
     );
 
-    // Start waiting children until the process limit.
+    // Budgets carved from this process's (D-022, #115).
+    let budget = |processes, handles| Limits {
+        processes,
+        handles,
+        ..Limits::NONE
+    };
+    let exit_code = |p: Result<u64, Error>| {
+        for _ in 0..200 {
+            match p.and_then(process_status) {
+                Ok(Status::Running) => sleep(10_000),
+                Ok(Status::Exited(code)) => return Some(code),
+                _ => return None,
+            }
+        }
+        None
+    };
+    report(
+        &mut f,
+        "a child given 2 descendants starts 2, then TOO_LARGE",
+        exit_code(spawn_with(child, 18, &file, None, budget(2, 0))) == Some(21),
+    );
+    report(
+        &mut f,
+        "a child given 8 handles holds 8, then NO_MEMORY",
+        exit_code(spawn_with(child, 19, &[], None, budget(0, 8))) == Some(81),
+    );
+    report(
+        &mut f,
+        "more descendants or handles than this process has: TOO_LARGE",
+        spawn_with(child, 1, &[], None, budget(255, 0)) == Err(Error::TooLarge)
+            && spawn_with(child, 1, &[], None, budget(0, 4095)) == Err(Error::TooLarge),
+    );
+    report(
+        &mut f,
+        "a child given fewer handles than its capabilities: TOO_LARGE",
+        spawn_with(child, 1, &caps, None, budget(0, 1)) == Err(Error::TooLarge),
+    );
+
+    // Start waiting children until the process limit (which needs every
+    // budget above returned).
     let Ok(gate) = endpoint_create() else {
         report(&mut f, "endpoint for waiting children", false);
         return f;

@@ -29,7 +29,7 @@ fn free_frames() -> usize {
 }
 
 /// Steps `memprobe` must report as passed.
-const STEPS: [&str; 14] = [
+const STEPS: [&str; 17] = [
     "mem_map up to the limit",
     "one page past the limit: NO_MEMORY",
     "mappings are placed in the map region",
@@ -42,7 +42,10 @@ const STEPS: [&str; 14] = [
     "allocator: 16 large vectors of 8 MiB",
     "allocator: small blocks are reused",
     "spawn with a limit above its own: TOO_LARGE",
-    "a child with its own limit maps it all, and no more",
+    "a child may not get more pages than are left: TOO_LARGE",
+    "a child given half the limit maps it all, and no more",
+    "the half returns when it ends: a second child gets it too",
+    "while a child holds half, this process cannot map it",
     "a child without a limit cannot map",
 ];
 

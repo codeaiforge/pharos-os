@@ -27,7 +27,7 @@ use pharos_proto::net::{self, Allowed, Dest, Request as NetRequest};
 use pharos_proto::store::{self, Request as StoreRequest};
 use pharos_user::rights::{CONFIG, GRANT, IRQ, MAP, READ, RECEIVE, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
-    Class, Error, Grant, Handle, Received, Status, call_timeout, config_read, debug_write,
+    Class, Error, Grant, Handle, Limits, Received, Status, call_timeout, config_read, debug_write,
     endpoint_create, open, process_status, receive_timeout, send, spawn_with, uptime,
 };
 
@@ -118,6 +118,10 @@ const NET: Service = Service {
     after: &[],
     limit: 0,
 };
+
+/// The agent runtime's handles: a full table for itself, and 16 for each
+/// of its 16 agents.
+const RUNTIME_HANDLES: u16 = 64 + 16 * 16;
 
 /// 1 GiB: up to 16 clients' buffers of at most 32 MiB each, and the heap.
 const STORE_LIMIT: u32 = 1 << 18;
@@ -610,7 +614,20 @@ impl Init {
         } else {
             Class::Services
         };
-        let spawned = spawn_with(file, service.arg, caps, notify, service.limit, class);
+        // The runtime starts up to 16 agents of 16 handles each (D-022);
+        // every other service gets a full table and no descendants.
+        let (processes, handles) = if service.path == RUNTIME_PATH {
+            (16, RUNTIME_HANDLES)
+        } else {
+            (0, 0)
+        };
+        let limits = Limits {
+            pages: service.limit,
+            class,
+            processes,
+            handles,
+        };
+        let spawned = spawn_with(file, service.arg, caps, notify, limits);
         let _ = pharos_user::delete(file);
         let process = match spawned {
             Ok(process) => process,
