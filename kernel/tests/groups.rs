@@ -1,8 +1,10 @@
 //! Test kernel: agent groups and subtasks (#134, coordination.md). The
 //! kernel starts `store`, `infer`, `audit`, `trust`, and the runtime as the
 //! `permissions` kernel does, and `agentclient` mode 11: a `boss` task,
-//! which gives subtasks to `helper` and `aide` in group `crew`. Afterwards
-//! the runner checks the audit trail. Runs under UEFI (D-009).
+//! which gives subtasks to `helper` and `aide` in group `crew` and
+//! delegates model 2 to `aide` (#135); the console script revokes it from
+//! `boss`. Afterwards the runner checks the audit trail. Runs under UEFI
+//! (D-009).
 
 #![no_std]
 #![no_main]

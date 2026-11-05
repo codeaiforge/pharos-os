@@ -1392,7 +1392,18 @@ const TOOLS_REFUSED: &[&str] = &["approve #2", "confirm #6", "hello", "other"];
 /// Agent groups and subtasks (#134): the console is only watched, so the
 /// trail is checked afterwards.
 const GROUPS_TEST: &str = "groups";
-const GROUPS_SCRIPT: &[console::Step] = &[("trust: ready", ""), ("registered runtime", "")];
+/// `aide` (task 12) holds model 2 from `boss` and asks for model 3; the
+/// user refuses, then revokes boss's model 2, which takes aide's (#135).
+const GROUPS_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("registered runtime", ""),
+    (
+        "approve #1: aide task 12 wants model 3 for this task? (yes 1 / no 1)",
+        "no 1\n",
+    ),
+    ("approve #1: refused", "revoke boss model 2\n"),
+    ("revoked model 2 from boss", ""),
+];
 /// Message channels (#133): `talker` (task 2) asks for model 3; the user
 /// refuses, then revokes its channel to `hearer`.
 const CHANNELS_TEST: &str = "channels";
@@ -1973,7 +1984,7 @@ fn groups_audit(image: &Path) -> Result<()> {
         ),
         (
             "client 3 Intent submit boss task 1/1  agents outcome 0 aide",
-            1,
+            2,
         ),
         (
             "client 3 Event refuse boss task 1/1   outcome 2 not in group",
@@ -1981,6 +1992,19 @@ fn groups_audit(image: &Path) -> Result<()> {
         ),
         ("outcome 2 not in group", 2),
         ("refuse helper task 2/1 model 2  outcome 2 no grant", 1),
+        // Delegation (#135): the wider one refused, the narrower one given
+        // and revoked with its source, and nothing delegated after.
+        ("refuse boss task 1/1 model 3  outcome 2 no grant", 1),
+        (
+            "Event grant aide task 12/1 model 2  outcome 1 from boss task 1",
+            1,
+        ),
+        ("Event revoke boss task 1/1 model 2  outcome 1 user", 1),
+        (
+            "Event revoke aide task 12/1 model 2  outcome 1 from boss task 1",
+            1,
+        ),
+        ("from boss task 1", 2),
     ] {
         if count(want) != n {
             return Err(format!(

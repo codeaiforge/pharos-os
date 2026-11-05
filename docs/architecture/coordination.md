@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#132),** with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. **Implemented:** channels (#133), groups and subtasks (#134). To be built by: delegation (#135), failure and stop handling (#136), the verifier (#137), and the isolation and confused-deputy tests (#138).
+**Planned. Design approved by the maintainer on 2026-11-05 (#132),** with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. **Implemented:** channels (#133), groups and subtasks (#134), delegation (#135). To be built by: failure and stop handling (#136), the verifier (#137), and the isolation and confused-deputy tests (#138).
 
 ## 2. Context
 
@@ -52,6 +52,7 @@ What M3.7 builds on:
 - **Revoked with its source:** revoking a supervisor's permission (from the trusted console, or by expiry) revokes it from every subtask it delegated it to, at once, and recorded.
 - **Ends with the subtask:** a delegated grant exists only in that subtask's attempts.
 - **Not passed on:** a worker cannot delegate (it cannot submit subtasks).
+- *Implemented (#135):* `Grants::until` (the latest deadline of a grant that allows a permission), and `pharos_programs::groups::delegable` (at `SUBTASK`: all of them held, or none submitted) and `given` (at each attempt's start: those its supervisor's running attempt still holds, with their deadlines; one no longer held is left out, and none if the supervisor does not run). A wider delegation is recorded as `no grant` with the first permission not held. Revoking from a supervisor revokes from every running subtask whose record names an overlapping delegated permission, recorded as `revoke … from <supervisor> task <id>`. **Carried:** that revocation also takes an overlapping permission the worker's own entry gives it, for the rest of that task (fail-safe: it never widens); a delegated grant ends when its deadline or the supervisor's revocation does, and a supervisor's attempt ending without either is handled with #136 (its goal's end cancels its subtasks).
 
 ### Failure and stop (#136)
 

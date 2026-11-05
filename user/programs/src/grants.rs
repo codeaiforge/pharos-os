@@ -59,6 +59,16 @@ impl Grants {
             .any(|g| g.permission.covers(wanted) && g.until.is_none_or(|u| now < u))
     }
 
+    /// The deadline of a grant held at `now` that allows `wanted`, the
+    /// latest if several do (`Some(None)`: one without a deadline).
+    pub fn until(&self, wanted: &Permission, now: u64) -> Option<Option<u64>> {
+        self.list
+            .iter()
+            .filter(|g| g.permission.covers(wanted) && g.until.is_none_or(|u| now < u))
+            .map(|g| g.until)
+            .max_by_key(|u| u.unwrap_or(u64::MAX))
+    }
+
     /// Takes away `permission` and every grant that overlaps it (revoking
     /// `data read` or `data write` takes all data access). Returns true if
     /// any was held.
@@ -173,6 +183,22 @@ mod tests {
         let mut g = Grants::new(0, Data::Read, &[], &[], &[]);
         assert!(g.revoke(&Permission::DataWrite), "write takes read too");
         assert!(!g.allows(&Permission::DataRead, 0));
+    }
+
+    #[test]
+    fn the_latest_deadline_that_allows() {
+        let mut g = Grants::new(0, Data::None, &[], &[], &[]);
+        assert_eq!(g.until(&NET, 0), None);
+        g.add(NET, Some(100));
+        g.add(NET, Some(200));
+        assert_eq!(g.until(&NET, 0), Some(Some(200)));
+        assert_eq!(g.until(&NET, 200), None, "past both");
+        g.add(Permission::DataWrite, None);
+        assert_eq!(
+            g.until(&Permission::DataRead, 0),
+            Some(None),
+            "write covers read"
+        );
     }
 
     #[test]

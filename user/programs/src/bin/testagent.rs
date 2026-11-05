@@ -752,8 +752,8 @@ impl Agent {
                 return self.fail(b"a subtask outside the group was not refused");
             }
         }
-        if self.subtask(b"helper", b"help", &[Permission::Model(2)]) != Err(status::NO_ACCESS) {
-            return self.fail(b"a delegated permission was not refused");
+        if self.subtask(b"helper", b"help", &[Permission::Model(3)]) != Err(status::NO_ACCESS) {
+            return self.fail(b"a permission boss does not hold was delegated");
         }
         for task in [me, 9_999] {
             if self.subtask_result(task) != Err(NO_SESSION) {
@@ -782,7 +782,43 @@ impl Agent {
         {
             return self.fail(b"a nap subtask did not complete");
         }
+        // Model 2 delegated to `aide` (task 12); the user revokes it from
+        // boss, which takes it from aide too (#135).
+        let Ok(d) = self.subtask(b"aide", b"deputy", &[Permission::Model(2)]) else {
+            return self.fail(b"a delegation boss holds was refused");
+        };
+        if !done(self.subtask_result(d), b"deputy ok") {
+            return self.fail(b"the deputy subtask did not complete");
+        }
+        if self.generate(4).0 != status::NO_ACCESS {
+            return self.fail(b"boss kept model 2 after its revocation");
+        }
+        if self.subtask(b"aide", b"aid", &[Permission::Model(2)]) != Err(status::NO_ACCESS) {
+            return self.fail(b"a revoked permission was delegated");
+        }
         self.complete(b"boss ok")
+    }
+
+    /// `aide` with model 2 from boss: uses it, signals the user by asking
+    /// for model 3, then waits for boss's model 2 to be revoked.
+    fn deputy(&self) -> u64 {
+        if !self.generate(4).1 || !self.drain() {
+            return self.fail(b"the delegated model was refused");
+        }
+        let three = Permission::Model(3);
+        if self.ask(three, 0) != Some(Asked::Pending)
+            || self.wait_ask(three, 0, 30) != Some(Asked::Refused)
+        {
+            return self.fail(b"the user's no did not refuse model 3");
+        }
+        for _ in 0..300 {
+            if self.generate(4).0 == status::NO_ACCESS {
+                return self.complete(b"deputy ok");
+            }
+            self.drain();
+            sleep(100_000);
+        }
+        self.fail(b"the delegated model outlived its source's revocation")
     }
 
     fn help(&self) -> u64 {
@@ -1769,6 +1805,7 @@ fn main(_: u64) -> u64 {
         b"lead" => a.lead(task.task),
         b"help" => a.help(),
         b"aid" => a.complete(b"aided"),
+        b"deputy" => a.deputy(),
         b"listen" => a.listen(),
         b"outside" => a.outside(),
         b"spam" => a.spam(),

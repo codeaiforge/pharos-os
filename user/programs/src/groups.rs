@@ -2,8 +2,12 @@
 //! coordination.md, D-024 item 2). A group coordinates only if it names a
 //! supervisor and a verifier, and the supervisor and every worker have a
 //! policy entry naming the group; anything else is a budget-only group.
+//! A supervisor delegates only what it holds (#135, D-024 item 3).
 
+use crate::grants::Grants;
+use alloc::vec::Vec;
 use pharos_proto::manifest::{Entry, Group, Verifier};
+use pharos_proto::permission::Permission;
 
 /// True if `g` coordinates: a supervisor, a verifier, and every member's
 /// entry (found with `entry`) in the group.
@@ -26,6 +30,38 @@ pub fn assigning<'g, 'e>(
     groups.iter().find(|g| {
         g.supervisor == supervisor && g.workers.contains(&worker) && coordinated(g, entry)
     })
+}
+
+/// Each of `wanted` with the deadline it gets: the latest of a grant in
+/// `held` (the supervisor's, at `now`) that allows it. The first one not
+/// held refuses them all.
+pub fn delegable(
+    held: &Grants,
+    wanted: impl IntoIterator<Item = Permission>,
+    now: u64,
+) -> Result<Vec<(Permission, Option<u64>)>, Permission> {
+    wanted
+        .into_iter()
+        .map(|p| held.until(&p, now).map(|u| (p, u)).ok_or(p))
+        .collect()
+}
+
+/// What a subtask's attempt gets when it starts: each of `delegated` its
+/// supervisor's running attempt (`held`, `None` if it does not run) still
+/// holds at `now`, with that grant's deadline. One no longer held is
+/// left out; the rest are given.
+pub fn given(
+    held: Option<&Grants>,
+    delegated: impl IntoIterator<Item = Permission>,
+    now: u64,
+) -> Vec<(Permission, Option<u64>)> {
+    let Some(held) = held else {
+        return Vec::new();
+    };
+    delegated
+        .into_iter()
+        .filter_map(|p| held.until(&p, now).map(|u| (p, u)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -140,6 +176,76 @@ mod tests {
             assigning(&broken, find, b"boss", b"helper"),
             None,
             "not coordinated"
+        );
+    }
+
+    #[test]
+    fn only_what_the_supervisor_holds_and_no_longer() {
+        let report = Permission::file(b"report.txt").unwrap();
+        let mut held = Grants::new(1 << 2, Data::Write, &[], &[b"report.txt"], &[]);
+        held.add(Permission::Model(3), Some(500));
+        assert_eq!(delegable(&held, [], 0), Ok(Vec::new()), "nothing");
+        assert_eq!(
+            delegable(
+                &held,
+                [Permission::Model(2), report, Permission::DataRead],
+                0
+            ),
+            Ok(alloc::vec![
+                (Permission::Model(2), None),
+                (report, None),
+                (Permission::DataRead, None)
+            ]),
+            "a subset, and data read under data write"
+        );
+        assert_eq!(
+            delegable(&held, [Permission::Model(3)], 0),
+            Ok(alloc::vec![(Permission::Model(3), Some(500))]),
+            "its source's deadline"
+        );
+        assert_eq!(
+            delegable(&held, [Permission::Model(3)], 500),
+            Err(Permission::Model(3)),
+            "not past it"
+        );
+        let other = Permission::file(b"secrets.txt").unwrap();
+        assert_eq!(
+            delegable(&held, [Permission::Model(2), other], 0),
+            Err(other),
+            "one wider refuses all"
+        );
+        let held = Grants::new(0, Data::Read, &[], &[], &[]);
+        assert_eq!(
+            delegable(&held, [Permission::DataWrite], 0),
+            Err(Permission::DataWrite),
+            "no write from read"
+        );
+        assert!(held.allows(&Permission::DataRead, 0));
+    }
+
+    #[test]
+    fn given_at_start_only_while_still_held() {
+        let mut held = Grants::new(1 << 2, Data::None, &[], &[], &[]);
+        held.add(Permission::Model(3), Some(500));
+        let both = [Permission::Model(2), Permission::Model(3)];
+        assert_eq!(
+            given(Some(&held), both, 0),
+            alloc::vec![
+                (Permission::Model(2), None),
+                (Permission::Model(3), Some(500))
+            ]
+        );
+        assert_eq!(
+            given(Some(&held), both, 500),
+            alloc::vec![(Permission::Model(2), None)],
+            "the expired one left out"
+        );
+        held.revoke(&Permission::Model(2));
+        assert_eq!(given(Some(&held), both, 500), [], "nor a revoked one");
+        assert_eq!(
+            given(None, both, 0),
+            [],
+            "nothing without a running supervisor"
         );
     }
 }

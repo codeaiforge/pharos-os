@@ -725,7 +725,8 @@ const TEST: &[Entry] = &[
         channels: &[b"outsider"],
     },
     // The `groups` kernel's (#134): `boss` supervises `helper` and `aide`
-    // in group `crew` (`TEST_GROUPS`); only `boss` holds model 2.
+    // in group `crew` (`TEST_GROUPS`); only `boss` holds model 2, and `aide`
+    // may ask for model 3 (#135).
     Entry {
         name: b"boss",
         program: b"bin/testagent",
@@ -779,7 +780,7 @@ const TEST: &[Entry] = &[
         progress_ms: 10_000,
         task_ms: 60_000,
         data: Data::None,
-        ask_models: 0,
+        ask_models: 1 << 3,
         ask_data: Data::None,
         net: &[],
         ask_net: &[],
@@ -1470,6 +1471,8 @@ impl Runtime {
         for (_, p) in self.revoked.iter().filter(|(t, _)| *t == id) {
             g.revoke(p);
         }
+        let delegated = self.delegated(id, now);
+        let from = self.source(id);
         let recorded = g.list().iter().all(|grant| {
             self.permission_event(
                 limits.entry.name,
@@ -1479,8 +1482,13 @@ impl Runtime {
                 outcome::OK,
                 b"",
             )
+        }) && delegated.iter().all(|&(p, _)| {
+            self.permission_event(limits.entry.name, id, action::GRANT, p, outcome::OK, &from)
         });
         if recorded {
+            for (p, until) in delegated {
+                g.add(p, until);
+            }
             if let Some(s) = self.slots[slot].as_mut() {
                 s.grants = g;
             }
@@ -2113,20 +2121,30 @@ impl Runtime {
                         .map(|l| l.entry)
                 };
                 if groups::assigning(self.groups, entry, agent, worker).is_none() {
+                    self.note(i, refusal::NOT_IN_GROUP, None);
                     return Err(status::NO_ACCESS);
                 }
                 if self.limits(worker).is_none() {
                     return Err(status::NOT_FOUND);
                 }
-                // ponytail: delegation is #135; until then a subtask gets
-                // only its worker's own entry.
-                if delegate.iter().next().is_some() {
-                    return Err(status::NO_ACCESS);
-                }
+                // Only what the supervisor holds now (#135); its deadline
+                // is checked again when each attempt starts.
+                let Some(held) = self.slots[i].as_ref().map(|s| &s.grants) else {
+                    return Err(status::INTERNAL);
+                };
+                let delegated: Vec<Permission> = match groups::delegable(held, delegate.iter(), now)
+                {
+                    Ok(d) => d.into_iter().map(|(p, _)| p).collect(),
+                    Err(p) => {
+                        self.note(i, refusal::NO_GRANT, Some(p));
+                        return Err(status::NO_ACCESS);
+                    }
+                };
                 if self.tasks.open_children(id) >= MAX_SUBTASKS {
                     return Err(status::BUSY);
                 }
                 if input_len as usize > buffer_len {
+                    self.note(i, refusal::MALFORMED, None);
                     return Err(status::NO_BUFFER);
                 }
                 let mut input = alloc::vec![0u8; input_len as usize];
@@ -2134,9 +2152,9 @@ impl Runtime {
                     b.read_bytes(0, &mut input);
                 }
                 let seq = self.intent(agent, id, action::SUBMIT, None, NAME, worker)?;
-                let submitted = self
-                    .tasks
-                    .submit_child(&mut self.store, worker, id, &input, &[]);
+                let submitted =
+                    self.tasks
+                        .submit_child(&mut self.store, worker, id, &input, &delegated);
                 let mut d = [0u8; 20];
                 let detail = match &submitted {
                     Ok(t) => [worker, b" ", decimal(u64::from(*t), &mut d)].concat(),
@@ -2579,6 +2597,36 @@ impl Runtime {
     }
 
     /// The agent name of task `id`.
+    /// What subtask `id` gets from its supervisor (#135): each delegated
+    /// permission its parent's running attempt still holds at `now`, with
+    /// that grant's deadline, and not revoked from `id`.
+    fn delegated(&self, id: u32, now: u64) -> Vec<(Permission, Option<u64>)> {
+        let Some(t) = self.tasks.find(id).map(|t| &self.tasks.list[t]) else {
+            return Vec::new();
+        };
+        let held = self
+            .slots
+            .iter()
+            .flatten()
+            .find(|s| t.parent != 0 && s.task == t.parent);
+        let revoked = |p: &Permission| {
+            self.revoked
+                .iter()
+                .any(|(r, q)| *r == id && (q.covers(p) || p.covers(q)))
+        };
+        let wanted = t.delegated.iter().copied().filter(|p| !revoked(p));
+        groups::given(held.map(|s| &s.grants), wanted, now)
+    }
+
+    /// `from <supervisor> task <id>`: the detail of a grant or revocation
+    /// that subtask `id` has from its supervisor.
+    fn source(&self, id: u32) -> Vec<u8> {
+        let parent = self.tasks.find(id).map_or(0, |t| self.tasks.list[t].parent);
+        let mut d = [0u8; 20];
+        let n = decimal(u64::from(parent), &mut d);
+        [&b"from "[..], &self.agent_of(parent), b" task ", n].concat()
+    }
+
     fn agent_of(&self, id: u32) -> Vec<u8> {
         self.tasks
             .find(id)
@@ -2603,33 +2651,26 @@ impl Runtime {
             if outcome == trust::Outcome::NoAgent {
                 outcome = trust::Outcome::NotHeld;
             }
-            if s.grants.revoke(&permission) {
+            let task = s.task;
+            if self.take(i, permission, b"user") {
                 outcome = trust::Outcome::Revoked;
-                let (task, model) = (s.task, s.session_model);
-                self.revoked.push((task, permission));
-                if permission == Permission::Model(model) {
-                    self.cancel_session(i);
-                }
-                // Always taken away; recorded when the trail can be.
-                self.permission_event(
-                    name,
-                    task,
-                    action::REVOKE,
-                    permission,
-                    audit::outcome::OK,
-                    b"user",
-                );
-                // A call to it waiting for the user ends at once, as a
-                // session does (D-012 item 8; M3.6 review F1).
-                let waiting = self.slots[i]
-                    .as_mut()
-                    .and_then(|s| {
-                        s.confirm
-                            .take_if(|c| c.answer.is_none() && permission.covers(&c.permission))
-                    })
-                    .map(|c| c.number);
-                if let Some(number) = waiting {
-                    self.resolve(number, trust::Resolution::Refused);
+                // With its source (#135): from every running subtask it
+                // was delegated to.
+                for j in 0..SLOTS {
+                    let Some(child) = self.slots[j].as_ref().map(|c| c.task) else {
+                        continue;
+                    };
+                    let passed = self.tasks.find(child).is_some_and(|t| {
+                        let t = &self.tasks.list[t];
+                        t.parent == task
+                            && t.delegated
+                                .iter()
+                                .any(|p| p.covers(&permission) || permission.covers(p))
+                    });
+                    if passed {
+                        let from = self.source(child);
+                        self.take(j, permission, &from);
+                    }
                 }
             }
         }
@@ -2638,6 +2679,46 @@ impl Runtime {
             name,
             permission,
         });
+    }
+
+    /// Takes `permission` from the attempt in slot `i` and keeps it taken
+    /// for its restarts; ends a session or a waiting call that used it.
+    /// Records it with `detail`. Returns true if it was held.
+    fn take(&mut self, i: usize, permission: Permission, detail: &[u8]) -> bool {
+        let Some(s) = self.slots[i].as_mut() else {
+            return false;
+        };
+        if !s.grants.revoke(&permission) {
+            return false;
+        }
+        let (task, model) = (s.task, s.session_model);
+        self.revoked.push((task, permission));
+        if permission == Permission::Model(model) {
+            self.cancel_session(i);
+        }
+        // Always taken away; recorded when the trail can be.
+        let agent = self.agent_of(task);
+        self.permission_event(
+            &agent,
+            task,
+            action::REVOKE,
+            permission,
+            audit::outcome::OK,
+            detail,
+        );
+        // A call to it waiting for the user ends at once, as a session
+        // does (D-012 item 8; M3.6 review F1).
+        let waiting = self.slots[i]
+            .as_mut()
+            .and_then(|s| {
+                s.confirm
+                    .take_if(|c| c.answer.is_none() && permission.covers(&c.permission))
+            })
+            .map(|c| c.number);
+        if let Some(number) = waiting {
+            self.resolve(number, trust::Resolution::Refused);
+        }
+        true
     }
 
     /// `ASK` from the agent in slot `i`, running task `task` of `entry`.
@@ -3096,15 +3177,13 @@ impl Runtime {
         let result = match agent_slot(badge) {
             Some(i) => {
                 let result = self.agent(i, req, out);
-                // `TOOL` records its own refusals, by kind (#126).
-                let tool = matches!(req, Request::Tool { .. });
+                // `TOOL` and `SUBTASK` record their own refusals, by kind
+                // (#126, #135).
+                let tool = matches!(req, Request::Tool { .. } | Request::Subtask { .. });
                 match result {
                     _ if tool => {}
                     Err(status::NO_ACCESS) => match needed(&req) {
                         Some(p) => self.note(i, refusal::NO_GRANT, Some(p)),
-                        None if matches!(req, Request::Subtask { .. }) => {
-                            self.note(i, refusal::NOT_IN_GROUP, None);
-                        }
                         None => self.note(i, refusal::NOT_FOR_AGENTS, None),
                     },
                     Err(status::BAD_REQUEST | status::TOO_LARGE | status::NO_BUFFER) => {
