@@ -8,7 +8,9 @@
 //! service (`SEND`, badged), 6 `trust` (`SEND`, badged as the runtime), 7
 //! the storage service, badged for namespace `agents` (read-write), 8 the
 //! audit service (`SEND`, client 3; #108), 9 the network service (`SEND`,
-//! badged with the runtime's UDP port; #109). The
+//! badged with the runtime's UDP port; #109), 10 the storage service,
+//! badged for namespace `files`, read-only (the files the user gives
+//! agents, #127; optional: without it `read_file` finds nothing). The
 //! argument selects the policy table (0: boot, empty; 1: the `agents` and
 //! `agents_crash` test kernels).
 //!
@@ -56,6 +58,14 @@
 //! for agents, a permission not askable), each with its first example, and
 //! the attempt's total when it ends, so a flooding agent cannot fill the
 //! trail.
+//!
+//! Tools (#126, #127, tools.md): `TOOL` copies a call's text out of the
+//! agent's buffer, parses and validates it ([`pharos_programs::tools`]),
+//! checks the tool is one the attempt may use and the permission the call
+//! needs, then the budget, and audits before running it. `read_file` reads
+//! one granted file of the `files` namespace into the agent's buffer.
+//! `send` is sensitive and needs the user's confirmation, which comes with
+//! #128: until then it is refused.
 
 #![no_std]
 #![no_main]
@@ -67,6 +77,7 @@ use alloc::vec::Vec;
 use pharos_programs::budgets::{self, Bucket, GroupUse, Over, Usage};
 use pharos_programs::grants::Grants;
 use pharos_programs::tasks::{self, Begin, Files, StoreFailed, Tasks};
+use pharos_programs::tools;
 use pharos_proto::agents::{
     self, Asked, Assigned, Begun, CHECKPOINT_AT, CONTROL, MAX_BUFFER, MAX_CHECKPOINT, MAX_INPUT,
     MAX_RESULT, MAX_RUNNING, NAME, NO_AUDIT, NO_SESSION, Request, SLOTS, State, TaskStatus,
@@ -78,7 +89,7 @@ use pharos_proto::manifest::{self, Budget, Data, Dest, Entry, Group, Why};
 use pharos_proto::net::{self, Request as NetRequest};
 use pharos_proto::permission::Permission;
 use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
-use pharos_proto::{Info, refusal, status, trust};
+use pharos_proto::{Info, refusal, status, tool, trust};
 use pharos_user::Limits as SpawnLimits;
 use pharos_user::rights::{READ, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
@@ -99,6 +110,10 @@ const TRUST: Handle = 6;
 const STORE: Handle = 7;
 const AUDIT: Handle = 8;
 const NET: Handle = 9;
+const FILES: Handle = 10;
+/// The runtime's buffer at the storage service for granted files: the
+/// largest file `read_file` reads.
+const FILES_BUFFER: u64 = agents::MAX_DATA as u64;
 /// How long the network service may take to answer.
 const NET_US: u64 = 1_000_000;
 /// Datagrams kept for one agent; the oldest goes first.
@@ -119,6 +134,13 @@ mod refusal {
     pub const OVER_DATA: u16 = 128;
     pub const OVER_GROUP_TOKENS: u16 = 256;
     pub const OVER_GROUP_NET: u16 = 512;
+    /// Tool calls (#126): not a call or fitting no tool, a tool the attempt
+    /// may not use, granted files over `file_kb`, and a sensitive tool
+    /// without the user's confirmation.
+    pub const TOOL_MALFORMED: u16 = 1024;
+    pub const TOOL_NOT_LISTED: u16 = 2048;
+    pub const OVER_FILES: u16 = 4096;
+    pub const TOOL_UNCONFIRMED: u16 = 8192;
 }
 /// How often the runtime reads a running agent's CPU time, at most.
 const CPU_CHECK_US: u64 = 100_000;
@@ -214,6 +236,7 @@ const SPEND: Budget = Budget {
     net_sends: 2,
     net_bytes: 64,
     data_kb: 1,
+    file_kb: u32::MAX,
     rate: u32::MAX,
     group: b"spend",
 };
@@ -346,6 +369,9 @@ const fn budget_entry(name: &'static [u8], budget: Budget, pages: u32) -> Entry 
         net: &[HOST_ECHO],
         ask_net: &[],
         budget,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
     }
 }
 
@@ -367,6 +393,9 @@ const TEST: &[Entry] = &[
         net: &[],
         ask_net: &[],
         budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
     },
     Entry {
         name: b"greedy",
@@ -382,6 +411,9 @@ const TEST: &[Entry] = &[
         net: &[],
         ask_net: &[],
         budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
     },
     Entry {
         name: b"absent",
@@ -397,6 +429,9 @@ const TEST: &[Entry] = &[
         net: &[],
         ask_net: &[],
         budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
     },
     Entry {
         name: b"counter",
@@ -412,6 +447,9 @@ const TEST: &[Entry] = &[
         net: &[],
         ask_net: &[],
         budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
     },
     // The `permissions` kernel's (#105).
     Entry {
@@ -428,6 +466,9 @@ const TEST: &[Entry] = &[
         net: &[],
         ask_net: &[],
         budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
     },
     // Gets nothing; may ask for model 2 and data access (#106).
     Entry {
@@ -444,6 +485,9 @@ const TEST: &[Entry] = &[
         net: &[],
         ask_net: &[],
         budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
     },
     // The `agents_net` kernel's (#109): gets the host echo server, may
     // ask for the port after it.
@@ -461,6 +505,9 @@ const TEST: &[Entry] = &[
         net: &[HOST_ECHO],
         ask_net: &[(HOST_ECHO.0, HOST_ECHO.1 + 1)],
         budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
     },
     // The same grant as `netter`, which the user's `revoke netter` leaves.
     Entry {
@@ -477,6 +524,9 @@ const TEST: &[Entry] = &[
         net: &[HOST_ECHO],
         ask_net: &[],
         budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
     },
     // The `hostile` kernel's (#110): its own files, and five models to ask
     // for, one more than the approval queue holds.
@@ -494,6 +544,52 @@ const TEST: &[Entry] = &[
         net: &[],
         ask_net: &[],
         budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
+    },
+    // The `tools` kernel's (#126, #127): both tools, `report.txt` and
+    // `big.txt` (more than its 4 KiB of `file_kb`), `notes.txt` to ask for,
+    // and the host echo server for `send`. `plain` has the same files and
+    // no tools.
+    Entry {
+        name: b"reader",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 0,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::Write,
+        ask_models: 0,
+        ask_data: Data::None,
+        net: &[HOST_ECHO],
+        ask_net: &[],
+        budget: Budget {
+            file_kb: 4,
+            ..Budget::UNLIMITED
+        },
+        tools: 1 << tool::number::READ_FILE | 1 << tool::number::SEND,
+        files: &[b"report.txt", b"big.txt"],
+        ask_files: &[b"notes.txt"],
+    },
+    Entry {
+        name: b"plain",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 0,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
+        budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[b"report.txt"],
+        ask_files: &[],
     },
 ];
 
@@ -508,10 +604,17 @@ struct Limits {
     task_us: u64,
     data: Data,
     net: manifest::Net,
+    /// The tools it may call and the files it gets (#126, #127), as the
+    /// entry's names.
+    tools: u32,
+    files: [&'static [u8]; manifest::MAX_FILES],
+    file_count: usize,
 }
 
-/// The storage service as [`Files`], through the runtime's buffer there.
+/// The storage service as [`Files`], through the runtime's buffer there:
+/// on handle [`STORE`] for its tasks, [`FILES`] for granted files.
 struct Store {
+    handle: Handle,
     buffer: Mapped,
     reply: Handle,
     health: Health,
@@ -520,10 +623,15 @@ struct Store {
 impl Store {
     /// The size of file `path` in bytes; 0 if there is none.
     fn size(&self, path: &[u8]) -> Result<u64, StoreFailed> {
+        Ok(self.stat(path)?.unwrap_or(0))
+    }
+
+    /// The size of file `path`, if there is one.
+    fn stat(&self, path: &[u8]) -> Result<Option<u64>, StoreFailed> {
         let mut out = [0u8; 256];
         match self.call(&StoreRequest::Stat { path }, &mut out)? {
-            StoreStatus::NotFound => Ok(0),
-            StoreStatus::Ok => Ok(u64_at(&out, 2)),
+            StoreStatus::NotFound => Ok(None),
+            StoreStatus::Ok => Ok(Some(u64_at(&out, 2))),
             _ => Err(StoreFailed),
         }
     }
@@ -535,7 +643,7 @@ impl Store {
         let attached = mem_share(self.buffer.addr(), len).is_ok_and(|memory| {
             let mut msg = [0u8; 16];
             let sent = store::encode(&StoreRequest::Attach { len }, &mut msg)
-                .is_some_and(|n| send(STORE, &msg[..n], memory, READ | WRITE, 0).is_ok());
+                .is_some_and(|n| send(self.handle, &msg[..n], memory, READ | WRITE, 0).is_ok());
             let _ = delete(memory);
             sent
         });
@@ -567,7 +675,7 @@ impl Store {
         let n = store::encode(req, &mut msg).ok_or(StoreFailed)?;
         match self
             .health
-            .call(STORE, &msg[..n], self.reply, out, STORE_US)
+            .call(self.handle, &msg[..n], self.reply, out, STORE_US)
         {
             Ok(Received::Message { len, .. }) if len >= 1 => Ok(StoreStatus::from_code(out[0])),
             _ => Err(StoreFailed),
@@ -720,6 +828,8 @@ struct Runtime {
     agents: Vec<Limits>,
     tasks: Tasks,
     store: Store,
+    /// Granted files (#127), if `init` gave the runtime handle 10.
+    files: Option<Store>,
     slots: [Option<Slot>; SLOTS],
     controls: [Option<(u32, Mapped)>; MAX_CONTROLS],
     infer_buffer: Mapped,
@@ -758,6 +868,7 @@ fn askable(entry: &Entry, p: &Permission) -> bool {
         Permission::DataRead => entry.ask_data >= Data::Read,
         Permission::DataWrite => entry.ask_data == Data::Write,
         Permission::Net { addr, port } => entry.ask_net.contains(&(addr, port)),
+        Permission::File { .. } => p.file_name().is_some_and(|f| entry.ask_files.contains(&f)),
     }
 }
 
@@ -852,8 +963,20 @@ fn load(e: &'static Entry, table: &'static [Entry]) -> Result<Limits, &'static [
     if !core::ptr::eq(entry, e) {
         return Err(why(Why::NoEntry));
     }
+    // The entry's own names: the manifest's borrow this buffer.
+    let mut files = [&b""[..]; manifest::MAX_FILES];
+    let mut file_count = 0;
+    for f in m.files.as_slice() {
+        if let Some(name) = e.files.iter().find(|n| *n == f) {
+            files[file_count] = name;
+            file_count += 1;
+        }
+    }
     Ok(Limits {
         entry: e,
+        tools: m.tools,
+        files,
+        file_count,
         pages: m.pages,
         models: m.models,
         attempts: m.attempts,
@@ -1081,7 +1204,8 @@ impl Runtime {
         });
         // Every grant is recorded before it is given; none is given if a
         // record fails (#108).
-        let mut g = Grants::new(limits.models, limits.data, limits.net.as_slice());
+        let files = &limits.files[..limits.file_count];
+        let mut g = Grants::new(limits.models, limits.data, limits.net.as_slice(), files);
         for (_, p, until) in self.approved.iter().filter(|(t, ..)| *t == id) {
             g.add(*p, *until);
         }
@@ -1700,6 +1824,49 @@ impl Runtime {
                 }
                 Err(status::NOT_FOUND)
             }
+            Request::Tool {
+                call_at,
+                call_len,
+                result_at,
+            } => {
+                let (at, n) = (call_at as usize, usize::from(call_len));
+                if at.checked_add(n).is_none_or(|end| end > buffer_len) {
+                    self.note(i, refusal::MALFORMED, None);
+                    return Err(status::NO_BUFFER);
+                }
+                // Copied out first: the agent may change its buffer meanwhile.
+                let mut text = [0u8; tool::MAX_CALL];
+                if let Some(b) = buffer {
+                    b.read_bytes(at, &mut text[..n]);
+                }
+                let mut scratch = [0u8; tool::MAX_CALL];
+                let planned = match tools::plan(&text[..n], limits.tools, &mut scratch) {
+                    Ok(p) => p,
+                    Err(tools::Refused::NotListed) => {
+                        self.note(i, refusal::TOOL_NOT_LISTED, None);
+                        return Err(status::NO_ACCESS);
+                    }
+                    Err(_) => {
+                        self.note(i, refusal::TOOL_MALFORMED, None);
+                        return Err(status::BAD_REQUEST);
+                    }
+                };
+                let p = planned.permission;
+                let granted = self.slots[i]
+                    .as_ref()
+                    .is_some_and(|s| s.grants.allows(&p, now));
+                if !granted {
+                    self.note(i, refusal::NO_GRANT, Some(p));
+                    return Err(status::NO_ACCESS);
+                }
+                if tools::sensitive(planned.tool) {
+                    // ponytail: confirmation on the trusted console is #128;
+                    // until then no sensitive tool runs.
+                    self.note(i, refusal::TOOL_UNCONFIRMED, Some(p));
+                    return Err(status::NO_ACCESS);
+                }
+                self.read_file(i, id, &limits, p, result_at, out)
+            }
             Request::Info => self.info(out).ok_or(status::INTERNAL),
             Request::Ask { permission, for_ms } => {
                 let asked = self.ask(i, id, limits.entry, permission, for_ms);
@@ -1717,6 +1884,57 @@ impl Runtime {
             | Request::Forget { .. } => Err(status::NO_ACCESS),
             Request::Attach { .. } => Err(status::BAD_REQUEST),
         }
+    }
+
+    /// `read_file` (#127) for slot `i` on task `id`, its `file` permission
+    /// `p` already checked: the file into the agent's buffer at
+    /// `result_at`, charged to `file_kb` and audited first.
+    fn read_file(
+        &mut self,
+        i: usize,
+        id: u32,
+        limits: &Limits,
+        p: Permission,
+        result_at: u32,
+        out: &mut [u8; 256],
+    ) -> Result<usize, u8> {
+        let name = p.file_name().ok_or(status::INTERNAL)?;
+        let files = self.files.as_ref().ok_or(status::NOT_FOUND)?;
+        files.health.ready()?;
+        let size = files
+            .stat(name)
+            .map_err(|_| status::INTERNAL)?
+            .ok_or(status::NOT_FOUND)?;
+        if size > FILES_BUFFER {
+            return Err(status::TOO_LARGE);
+        }
+        let buffer_len = self.slots[i]
+            .as_ref()
+            .and_then(|s| s.buffer.as_ref())
+            .map_or(0, Mapped::len);
+        if (result_at as u64).saturating_add(size) > buffer_len as u64 {
+            return Err(status::NO_BUFFER);
+        }
+        let budget = limits.entry.budget;
+        self.charge(i, &budget, Some(p), |u, _| u.read_file(&budget, size))?;
+        let agent = limits.entry.name;
+        let seq = self.intent(agent, id, action::TOOL, Some(p), b"files", b"read_file")?;
+        let bytes = self
+            .files
+            .as_mut()
+            .and_then(|f| f.read(name).ok().flatten());
+        self.outcome(seq, agent, id, action::TOOL, bytes.is_some(), b"read_file");
+        let bytes = bytes.ok_or(status::INTERNAL)?;
+        if let Some(b) = self.slots[i].as_ref().and_then(|s| s.buffer.as_ref()) {
+            // The size was checked; a file replaced since would not fit.
+            if result_at as usize + bytes.len() > b.len() {
+                return Err(status::INTERNAL);
+            }
+            b.write_bytes(result_at as usize, &bytes);
+        }
+        out[0] = status::OK;
+        out[1..5].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        Ok(5)
     }
 
     /// Takes the datagrams waiting at the network service and keeps each
@@ -1861,7 +2079,11 @@ impl Runtime {
             refusal::OVER_NET_BYTES => b"over net bytes",
             refusal::OVER_DATA => b"over data",
             refusal::OVER_GROUP_TOKENS => b"over group tokens",
-            _ => b"over group net",
+            refusal::OVER_GROUP_NET => b"over group net",
+            refusal::TOOL_MALFORMED => b"tool malformed",
+            refusal::TOOL_NOT_LISTED => b"tool not listed",
+            refusal::OVER_FILES => b"over files",
+            _ => b"tool unconfirmed",
         };
         let agent = self.agent_of(task);
         self.refusal_event(&agent, task, p, why);
@@ -1895,6 +2117,7 @@ impl Runtime {
             Over::Data => refusal::OVER_DATA,
             Over::GroupTokens => refusal::OVER_GROUP_TOKENS,
             Over::GroupNet => refusal::OVER_GROUP_NET,
+            Over::Files => refusal::OVER_FILES,
         };
         self.note(i, kind, p);
         Err(status::OVER_LIMIT)
@@ -2314,7 +2537,10 @@ impl Runtime {
         let result = match agent_slot(badge) {
             Some(i) => {
                 let result = self.agent(i, req, out);
+                // `TOOL` records its own refusals, by kind (#126).
+                let tool = matches!(req, Request::Tool { .. });
                 match result {
+                    _ if tool => {}
                     Err(status::NO_ACCESS) => match needed(&req) {
                         Some(p) => self.note(i, refusal::NO_GRANT, Some(p)),
                         None => self.note(i, refusal::NOT_FOR_AGENTS, None),
@@ -2415,6 +2641,7 @@ fn main(arg: u64) -> u64 {
         return 5;
     };
     let mut store = Store {
+        handle: STORE,
         buffer,
         reply,
         health: Health::default(),
@@ -2422,6 +2649,16 @@ fn main(arg: u64) -> u64 {
     if !store.attach() {
         return 6;
     }
+    // Granted files (#127): optional, as handle 10 is.
+    let files = mem_map_buffer(FILES_BUFFER).ok().and_then(|buffer| {
+        let files = Store {
+            handle: FILES,
+            buffer,
+            reply,
+            health: Health::default(),
+        };
+        files.attach().then_some(files)
+    });
     let attempts = |name: &[u8]| {
         agents
             .iter()
@@ -2447,6 +2684,7 @@ fn main(arg: u64) -> u64 {
         agents,
         tasks,
         store,
+        files,
         slots: Default::default(),
         controls: Default::default(),
         infer_buffer,

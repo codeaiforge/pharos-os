@@ -20,6 +20,11 @@
 //! datagram waiting for the agent into its buffer ([`Datagram`]), or
 //! answers `NOT_FOUND` at once. Only replies from a granted destination
 //! the agent sent to last are kept for it.
+//!
+//! Tools (#126, tools.md): `TOOL` names a tool call's text in the agent's
+//! buffer (`call_at`, `call_len`, at most [`crate::tool::MAX_CALL`]) and
+//! where its result goes (`result_at`); the reply is `[OK, length u32]`,
+//! the result's bytes at `result_at`.
 
 use crate::{Reader, Refused, Writer, op as common, split, status};
 
@@ -51,6 +56,8 @@ pub mod op {
     pub const ANSWER: u8 = 21;
     /// `trust`: what each running agent and each group uses (#119).
     pub const USAGE: u8 = 22;
+    /// A tool call (#126, tools.md).
+    pub const TOOL: u8 = 23;
 }
 
 /// The `ASK` reply's outcome, after `OK` (#106).
@@ -259,6 +266,13 @@ pub enum Request<'a> {
     },
     /// Agent: the oldest datagram waiting for it, into its buffer.
     ReceiveFrom,
+    /// Agent: the tool call in its buffer at `call_at`, `call_len` bytes;
+    /// the result goes to `result_at` (#126).
+    Tool {
+        call_at: u32,
+        call_len: u16,
+        result_at: u32,
+    },
     /// `trust`: the user's answer to approval request `number`.
     Answer {
         number: u16,
@@ -375,6 +389,13 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             },
             op::RECEIVE_FROM => Request::ReceiveFrom,
             op::USAGE => Request::Usage,
+            op::TOOL => Request::Tool {
+                call_at: r.u32()?,
+                call_len: r
+                    .u16()
+                    .filter(|n| usize::from(*n) <= crate::tool::MAX_CALL)?,
+                result_at: r.u32()?,
+            },
             op::ANSWER => Request::Answer {
                 number: r.u16()?,
                 yes: match r.u8()? {
@@ -490,6 +511,19 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
         }
         Request::ReceiveFrom => head(&mut w, op::RECEIVE_FROM)?,
         Request::Usage => head(&mut w, op::USAGE)?,
+        Request::Tool {
+            call_at,
+            call_len,
+            result_at,
+        } => {
+            if usize::from(call_len) > crate::tool::MAX_CALL {
+                return None;
+            }
+            head(&mut w, op::TOOL)?;
+            w.u32(call_at)?;
+            w.u16(call_len)?;
+            w.u32(result_at)?;
+        }
         Request::Answer { number, yes } => {
             head(&mut w, op::ANSWER)?;
             w.u16(number)?;
@@ -745,6 +779,19 @@ mod tests {
             },
             Request::ReceiveFrom,
             Request::Usage,
+            Request::Tool {
+                call_at: 4096,
+                call_len: crate::tool::MAX_CALL as u16,
+                result_at: u32::MAX,
+            },
+            Request::Revoke {
+                name: b"w",
+                permission: crate::permission::Permission::file(&[b'f'; 32]).unwrap(),
+            },
+            Request::Ask {
+                permission: crate::permission::Permission::file(b"report.txt").unwrap(),
+                for_ms: 1,
+            },
             Request::Answer {
                 number: u16::MAX,
                 yes: false,
@@ -803,6 +850,10 @@ mod tests {
         );
         assert_eq!(parse(&[VERSION, op::STATUS, 1, 2, 3]), Err(Refused::Bad));
         assert_eq!(parse(&[VERSION, 99]), Err(Refused::Bad), "unknown op");
+        let mut long = [0u8; 12];
+        long[..2].copy_from_slice(&[VERSION, op::TOOL]);
+        long[6..8].copy_from_slice(&(crate::tool::MAX_CALL as u16 + 1).to_le_bytes());
+        assert_eq!(parse(&long), Err(Refused::Bad), "a call over 1 KiB");
         assert_eq!(
             parse(&[VERSION, op::TASK, 0]),
             Err(Refused::Bad),

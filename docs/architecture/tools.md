@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#124),** with each call of a sensitive tool confirmed (a refusal holds for that call only), the user shown a `send`'s destination and size but not its payload, and flat file names in one read-only namespace. **Implemented:** the tool-call parser and validator (#125). To be built by: the tool interface in the agent runtime (#126), `read_file` and the `file` permission (#127), confirmation for sensitive tools (#128), and the prompt-injection and malformed-call tests (#129).
+**Planned. Design approved by the maintainer on 2026-11-05 (#124),** with each call of a sensitive tool confirmed (a refusal holds for that call only), the user shown a `send`'s destination and size but not its payload, and flat file names in one read-only namespace. **Implemented:** the tool-call parser and validator (#125), the tool interface in the agent runtime (#126), and `read_file` with the `file` permission (#127). To be built by: confirmation for sensitive tools (#128), and the prompt-injection and malformed-call tests (#129).
 
 ## 2. Context
 
@@ -62,17 +62,18 @@ A reviewed table in the runtime, `TOOLS`:
 
 ### Granted files (#127)
 
-- **A new store namespace, 6 `files`,** for files the user gives agents. The host tool fills it (`files/` in the directory given to `cargo xtask store build`); nothing on Pharos writes it in M3.6. `init` gives the runtime `SEND` on the storage service badged for namespace 6, read-only (bit 16).
+- **A new store namespace, 7 `files`,** for files the user gives agents (6 is the audit trail). The host tool fills it (`files/` in the directory given to `cargo xtask store build`); nothing on Pharos writes it in M3.6. The runtime gets `SEND` on the storage service badged for namespace 7, read-only (bit 16), as its handle 10.
 - **A new permission, `file <name>`:** reading one file of `files`, by name (1 to 32 letters, digits, `-`, `_`, and `.`, not starting with `.`; no `/`, so no path can leave the namespace). The permission's wire form grows from 7 bytes to at most 34: a kind, a length, and up to 32 bytes of value; the existing kinds keep their fields. On the trusted console: `revoke <agent> file <name>`.
 - **The policy entry** gets `files` (given) and `ask_files` (askable), lists of names; the manifest key `files` asks for some of the entry's `files`.
 - **Read-only for M3.6:** no permission writes `files`.
+- *Implemented (#127):* `Permission::File` and `permission::valid_file` (`pharos_proto`), the manifest key `files` (at most 4 names, each in the entry's `files`), the entry's `files` and `ask_files`, grants built with each file (`Grants::new`), `ASK` for a file in `ask_files`, and `revoke <agent> file <name>` on the trusted console. The budget field `file_kb` (`OVER_LIMIT`, recorded as `over files`) counts the bytes `read_file` gives the attempt. The longest audit record, with a 32-byte file name, is 199 bytes, within the store's 200-byte inline limit. **Not at boot:** `init` passes a service at most 8 capabilities (`spawn`'s limit), so the boot runtime gets neither handle 9 (the network) nor 10; its boot policy table runs no agent, and the limit must be raised before it does. The test kernels give the runtime both. A typed line on the trusted console is at most 64 bytes, so `revoke <agent> file <name>` with a long agent and file name does not fit.
 
 ### The `TOOL` operation (#126)
 
 `TOOL` (23) in interface `agents` version 1, from an agent: `call_at` and `call_len` (the call's text in the agent's buffer, at most 1 KiB) and `result_at` (where a result goes). The runtime:
 
 1. copies the call out of the agent's buffer into its own memory (the agent may change its buffer meanwhile);
-2. parses and validates it (#125); a failure answers `BAD_REQUEST` with the fault's kind and offset;
+2. parses and validates it (#125); a failure answers `BAD_REQUEST`;
 3. checks the tool is in the attempt's `tools`, then the permission the arguments need: `NO_ACCESS` otherwise;
 4. checks the budgets: `OVER_LIMIT`;
 5. for a sensitive tool, asks the user (below): `PENDING` until answered, `REFUSED` on no;
@@ -80,7 +81,8 @@ A reviewed table in the runtime, `TOOLS`:
 7. runs the tool and records the `OUTCOME`;
 8. answers `OK` with the result's length (`read_file`: the bytes copied at `result_at`; `send`: none).
 
-- **Refusals** at steps 2 to 5 are recorded once per kind per attempt, as other refusals (#110), with their first example: `tool malformed`, `tool not listed`, `tool no grant`, `tool over limit`, `tool refused by user`.
+- **Refusals** at steps 2 to 5 are recorded once per kind per attempt, as other refusals (#110), with their first example: `tool malformed`, `tool not listed`, `no grant`, `over files` (and the other budgets'), `tool unconfirmed`.
+- *Implemented (#126):* `Request::Tool` (`pharos_proto::agents`, the reply `[OK, length]`), `pharos_programs::tools::plan` (parse, validate, the tool list, and the permission a call needs: `file <name>` or `net <to>`, where an argument that is not a file name or `a.b.c.d:port` is `BAD_REQUEST`), the policy entry's `tools` and the manifest key `tools` (tool names; both optional keys, absent meaning none), and the audit action `tool` (15): `Intent tool <agent> … file <name> files … read_file`, then its outcome. A call past the agent's buffer is `NO_BUFFER`, recorded as `malformed`. Differences from the text above: a `BAD_REQUEST` says nothing of the fault (the agent can parse its own text; the offset would only help a model probe the parser); a refused call is recorded only by its own kind, never also as a request not for agents. **Until #128,** `send` is refused with `NO_ACCESS` after its grant is checked, recorded as `tool unconfirmed`: no sensitive tool runs without the user.
 - **The result is data.** The runtime never reads a file's contents or acts on them; an injected instruction in a file reaches the agent and its model as text, and anything it causes the model to write is one more call through the same checks.
 - **`SEND_TO` and `DATA_GET` stay.** An agent with the permission can still use them; a tool adds no authority, and the checks are the same either way.
 

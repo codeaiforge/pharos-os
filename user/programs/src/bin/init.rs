@@ -243,6 +243,10 @@ const BOOT: &[Service] = &[
             Cap::Storage(AGENTS_TASKS),
             Cap::Audit(AUDIT_RUNTIME),
             // The union of its policy table's destinations: none.
+            // ponytail: the 9th capability, past `spawn`'s 8, so the boot
+            // runtime does not get it (nor handle 10, `files` read-only,
+            // #127); harmless while its boot table is empty. Raise
+            // `MAX_SPAWN_CAPS` before the boot runtime runs agents.
             Cap::Network(RUNTIME_PORT, &[]),
         ],
         after: &[2, 3, 5],

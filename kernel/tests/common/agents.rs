@@ -33,6 +33,9 @@ const AGENTS_TASKS: u32 = 5;
 const AUDIT_TRAIL: u32 = 6;
 const AUDIT_TRUST: u32 = 2;
 const AUDIT_RUNTIME: u32 = 3;
+/// Namespace 7, `files`, read-only (#127): the runtime's handle 10, given
+/// after the network service's handle 9.
+const FILES_READ_ONLY: u32 = 7 | 1 << 16;
 /// `pharos_proto::trust`: `RUNTIME`, under `init`'s (no) badge, and the
 /// runtime's badge.
 const TRUST_RUNTIME: [u8; 2] = [1, 1];
@@ -282,6 +285,7 @@ pub fn start_runtime_table(t: &mut TestRun, s: &Services, table: u64) -> Option<
         caps.push(
             Capability::new(Object::Endpoint(net.clone()), SEND).derive_badged(SEND, RUNTIME_PORT),
         );
+        caps.push(store_send.derive_badged(SEND, FILES_READ_ONLY));
     }
     let runtime = start(
         t,

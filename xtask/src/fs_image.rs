@@ -212,8 +212,9 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// entry allows, `noentry`, which has no entry, and `keeper`, the
 /// `permissions` kernel's, which may write its own files (#105), and
 /// `asker`, which gets nothing and asks (#106), the `budgets` kernel's
-/// five (#116), and the `fairness` kernel's four (#117).
-pub const TEST_MANIFESTS: [(&str, &str); 21] = [
+/// five (#116), the `fairness` kernel's four (#117), and the `tools`
+/// kernel's two (#126, #127).
+pub const TEST_MANIFESTS: [(&str, &str); 23] = [
     (
         "agents/worker.manifest",
         "# The agents test kernel's worker.\nmanifest = 1\nname = worker\nprogram = bin/testagent\n\
@@ -253,6 +254,20 @@ pub const TEST_MANIFESTS: [(&str, &str); 21] = [
         "agents/listener.manifest",
         "manifest = 1\nname = listener\nprogram = bin/testagent\npages = 256\nmodels =\n\
          attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet = 10.0.2.2:47000\n",
+    ),
+    // The `tools` kernel's (#126, #127): `reader` with both tools and its
+    // two files, `plain` with the file and no tool.
+    (
+        "agents/reader.manifest",
+        "manifest = 1\nname = reader\nprogram = bin/testagent\npages = 256\nmodels =\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = write\nnet = 10.0.2.2:47000\n\
+         tools = read_file, send\nfiles = report.txt, big.txt\n",
+    ),
+    (
+        "agents/plain.manifest",
+        "manifest = 1\nname = plain\nprogram = bin/testagent\npages = 256\nmodels =\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet =\n\
+         files = report.txt\n",
     ),
     (
         "agents/hostile.manifest",

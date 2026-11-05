@@ -17,7 +17,8 @@
 //! sends nothing. Argument 4: the `hostile` kernel (#110): a `hostile`
 //! task beside a `keeper` task. Argument 5: the `budgets` kernel (#116).
 //! Argument 6: the `fairness` kernel (#117). Argument 7: the `exhaustion`
-//! kernel (#120).
+//! kernel (#120). Argument 8: the `tools` kernel (#126, #127): a `reader`
+//! task, then a `plain` task.
 
 #![no_std]
 #![no_main]
@@ -184,13 +185,16 @@ fn main(arg: u64) -> u64 {
     if arg == 7 {
         return exhaustion(c);
     }
+    if arg == 8 {
+        return tools(c);
+    }
     let mut out = [0u8; 256];
 
     let (_, n) = c.call(&Request::Info, &mut out);
     let info = Info::parse(&out[..n]);
     c.step(
-        "INFO: interface agents, seven agents accepted, none running",
-        info.is_some_and(|i| i.name == NAME && i.details == [7, 0]),
+        "INFO: interface agents, nine agents accepted, none running",
+        info.is_some_and(|i| i.name == NAME && i.details == [9, 0]),
     );
     let refused = [&b"greedy"[..], b"absent", b"noentry"]
         .iter()
@@ -284,7 +288,7 @@ fn main(arg: u64) -> u64 {
         .iter()
         .all(|&t| c.status(t).is_some_and(|s| s.state == State::Cancelled));
     let (_, n) = c.call(&Request::Info, &mut out);
-    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [7, 0]);
+    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [9, 0]);
     c.step(
         "cancelling running and pending tasks stops their agents",
         cancelled && all && idle,
@@ -480,6 +484,34 @@ fn hostile(mut c: Client) -> u64 {
     c.step(
         "the runtime still serves control requests",
         c.call(&Request::Info, &mut out).0 == status::OK,
+    );
+    let _ = send(REPORT, b"done", 0, 0, 0);
+    c.failed
+}
+
+/// The `tools` kernel (#126, #127): `reader` uses `read_file` within its
+/// grants, then `plain`, which may use no tool.
+fn tools(mut c: Client) -> u64 {
+    let ended = |c: &Client, task: Result<u32, u8>, want: &[u8]| {
+        let Some((s, result)) = task.ok().and_then(|t| c.wait(t, 60)) else {
+            return false;
+        };
+        if result != want {
+            let mut line = Vec::from(&b"tools kernel result: "[..]);
+            line.extend_from_slice(&result[..result.len().min(200)]);
+            let _ = debug_write(CONSOLE, &line);
+        }
+        s.state == State::Done && result == want && s.attempts == 1
+    };
+    let reader = c.submit(b"reader", b"tools");
+    c.step(
+        "read_file reads a granted file; every other call is refused",
+        ended(&c, reader, b"tools ok"),
+    );
+    let plain = c.submit(b"plain", b"tools-plain");
+    c.step(
+        "an agent that may use no tool is refused one",
+        ended(&c, plain, b"plain ok"),
     );
     let _ = send(REPORT, b"done", 0, 0, 0);
     c.failed

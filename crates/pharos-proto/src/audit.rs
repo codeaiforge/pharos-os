@@ -73,7 +73,9 @@ pub mod action {
     pub const CANCEL: u8 = 13;
     /// What an attempt used, when it ends (#119).
     pub const USAGE: u8 = 14;
-    pub const LAST: u8 = USAGE;
+    /// A tool call (#126), with the tool's name as detail.
+    pub const TOOL: u8 = 15;
+    pub const LAST: u8 = TOOL;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -92,6 +94,7 @@ pub mod action {
             "submit",
             "cancel",
             "usage",
+            "tool",
         ]
         .get(usize::from(code))
         .copied()
@@ -242,7 +245,8 @@ impl<'a> Record<'a> {
 }
 
 /// Largest stored record (within the store's inline append).
-pub const MAX_RECORD: usize = 17 + 1 + 8 + 33 + 4 + 2 + 8 + 33 + 2 + MAX_DETAIL;
+pub const MAX_RECORD: usize =
+    17 + 1 + 8 + 33 + 4 + 2 + 1 + crate::permission::WIRE + 33 + 2 + MAX_DETAIL;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request<'a> {
@@ -345,6 +349,18 @@ mod tests {
                 detail: &detail,
                 ..entry()
             },
+            // The longest record: a 32-byte file name (#127).
+            Entry {
+                kind: Kind::Outcome,
+                refers: u64::MAX,
+                actor: &long,
+                action: action::TOOL,
+                permission: Permission::file(&long),
+                service: &long,
+                outcome: outcome::FAILED,
+                detail: &detail,
+                ..entry()
+            },
             Entry {
                 kind: Kind::Event,
                 actor: b"",
@@ -364,6 +380,9 @@ mod tests {
             let mut buf = [0u8; 256];
             let n = rec.encode(&mut buf).unwrap();
             assert!(n <= MAX_RECORD, "{n}");
+            if e.permission.is_some_and(|p| p.file_name() == Some(&long)) {
+                assert_eq!(n, MAX_RECORD, "the bound is exact");
+            }
             assert_eq!(Record::parse(&buf[..n]), Some(rec));
             assert_eq!(Record::parse(&buf[..n - 1]), None, "truncated");
             let mut longer = buf;

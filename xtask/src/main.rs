@@ -1350,6 +1350,21 @@ const AGENTS_NET_SCRIPT: &[console::Step] = &[
 ];
 /// `10.0.2.2:47002` is not askable: never a prompt.
 const AGENTS_NET_REFUSED: &[&str] = &["approve #2"];
+/// Tool calls (#126, #127): `reader` (task 1) asks for `notes.txt`; once
+/// approved, the user revokes `report.txt`.
+const TOOLS_TEST: &str = "tools";
+const TOOLS_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("registered runtime", ""),
+    (
+        "approve #1: reader task 1 wants file notes.txt for this task? (yes 1 / no 1)",
+        "yes 1\n",
+    ),
+    ("approve #1: granted", "revoke reader file report.txt\n"),
+    ("revoked file report.txt from reader", ""),
+];
+/// Nothing else is asked: `secrets.txt` is not askable.
+const TOOLS_REFUSED: &[&str] = &["approve #2"];
 /// The hostile agent (#110): its four approval requests fill the queue
 /// (nobody answers; they end with its task).
 const HOSTILE_TEST: &str = "hostile";
@@ -1645,6 +1660,69 @@ fn budgets_audit(image: &Path) -> Result<()> {
     Ok(())
 }
 
+/// After the `tools` test kernel (#126, #127): each `read_file` that ran is
+/// an intent and an outcome, each kind of refused call is recorded once
+/// with its first example, and the approval and the revocation are there.
+fn tools_audit(image: &Path) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    let count = |want: &str| lines.iter().filter(|l| l.contains(want)).count();
+    for (want, n) in [
+        // Polled again until the user revokes it, which may come first.
+        (
+            "client 3 Intent tool reader task 1/1 file report.txt files",
+            1,
+        ),
+        (
+            "client 3 Intent tool reader task 1/1 file notes.txt files",
+            1,
+        ),
+    ] {
+        if count(want) < n {
+            return Err(format!("fewer than {n} records like {want:?}"));
+        }
+    }
+    for want in [
+        "client 3 Event refuse reader task 1/1 file secrets.txt  outcome 2 no grant",
+        "client 3 Event refuse reader task 1/1   outcome 2 tool malformed",
+        "client 3 Event refuse reader task 1/1   outcome 2 malformed",
+        "client 3 Event refuse reader task 1/1 net 10.0.2.2:47000  outcome 2 tool unconfirmed",
+        "client 3 Event refuse reader task 1/1 file big.txt  outcome 2 over files",
+        "client 3 Event refuse plain task 2/1   outcome 2 tool not listed",
+        "client 3 Event approve reader task 1/1 file notes.txt",
+        "client 3 Event revoke reader task 1/1 file report.txt",
+    ] {
+        if count(want) != 1 {
+            return Err(format!("{} records like {want:?}, expected 1", count(want)));
+        }
+    }
+    let outcomes = lines
+        .iter()
+        .filter(|l| l.contains("client 3 Outcome of #") && l.contains(" tool reader task 1/1 "))
+        .count();
+    if outcomes < 2 {
+        return Err(format!(
+            "{outcomes} outcomes of reader's tool calls, expected at least 2"
+        ));
+    }
+    // A refused call is recorded once, by its own kind: never also as a
+    // request not for agents.
+    if count("refuse reader task 1/1   outcome 2 not for agents") != 0 {
+        return Err("a refused tool call was also recorded as not for agents".into());
+    }
+    // The file the injected text names was never read.
+    if count("Intent tool reader task 1/1 file secrets.txt") != 0 {
+        return Err("secrets.txt was read".into());
+    }
+    println!(
+        "  audit trail: {} records, every tool call accounted for",
+        lines.len()
+    );
+    Ok(())
+}
+
 fn hostile_audit(image: &Path) -> Result<()> {
     let streams = store_image::audit(image)?;
     let [(_, lines)] = streams.as_slice() else {
@@ -1832,6 +1910,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     if name == AUDIT_TEST {
         store_image::fresh(&out.join(STORE_IMAGE), AUDIT_BLOCKS)?;
     }
+    if name == TOOLS_TEST {
+        store_image::tools(&out.join(STORE_IMAGE))?;
+    }
     if name == SUPERVISION_TEST {
         store_image::supervision(&out.join(STORE_IMAGE))?;
     }
@@ -1845,6 +1926,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         PERMISSIONS_TEST => (PERMISSIONS_SCRIPT, PERMISSIONS_REFUSED),
         AGENTS_NET_TEST => (AGENTS_NET_SCRIPT, AGENTS_NET_REFUSED),
         HOSTILE_TEST => (HOSTILE_SCRIPT, HOSTILE_REFUSED),
+        TOOLS_TEST => (TOOLS_SCRIPT, TOOLS_REFUSED),
         BUDGETS_TEST => (BUDGETS_SCRIPT, &[]),
         EXHAUSTION_TEST => (EXHAUSTION_SCRIPT, &[]),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
@@ -1882,6 +1964,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == HOSTILE_TEST {
                 hostile_audit(&out.join(STORE_IMAGE))?;
+            }
+            if name == TOOLS_TEST {
+                tools_audit(&out.join(STORE_IMAGE))?;
             }
             if name == EXHAUSTION_TEST {
                 for (step, what) in [(3, "usage"), (5, "stop all")] {

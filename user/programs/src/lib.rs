@@ -10,6 +10,7 @@ pub mod grants;
 pub mod models;
 pub mod net;
 pub mod tasks;
+pub mod tools;
 pub mod virtio;
 pub mod virtio_console;
 pub mod virtio_net;

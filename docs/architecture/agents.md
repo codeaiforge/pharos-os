@@ -24,7 +24,7 @@ What M3.3 builds on:
 | Process | Holds | Does not hold |
 | --- | --- | --- |
 | `trust` (trusted service) | the virtio-console device (PCI `1af4:1043`); its own endpoint; `init`'s report endpoint; `SEND` on the audit service, badged as client 2 (#107); `STOP` on `agents` (sent by `init`); `STOP` on each running agent (sent by `agents`); `SEND` on `agents`, badged as `trust` (sent by `agents`, #105) | storage, inference, network, the serial console |
-| `agents` (the agent runtime) | the serial console; its own endpoint; `init`'s report endpoint; the read-only filesystem (agent programs and manifests); storage namespace `agents`, read-write; `SEND` on inference; `SEND` on `trust` (badged); `STOP`, `WAIT`, and `GRANT` on each agent it starts | any device; `trust`'s console |
+| `agents` (the agent runtime) | the serial console; its own endpoint; `init`'s report endpoint; the read-only filesystem (agent programs and manifests); storage namespace `agents`, read-write; storage namespace `files`, read-only (handle 10, #127; not yet at boot, tools.md); `SEND` on inference; `SEND` on `trust` (badged); `STOP`, `WAIT`, and `GRANT` on each agent it starts | any device; `trust`'s console |
 | an agent | **one capability for its whole life:** `SEND` on `agents`' endpoint, badged with its slot (and what it makes itself: a reply endpoint and a buffer, which reach no other process) | everything else |
 
 - **An agent's only capability is its runtime endpoint.** Every service an agent uses (its task, checkpoints, inference, log lines) goes through the runtime. So the runtime can check, time out, and cancel every request, and stopping an agent cannot leave work running elsewhere. Agents cannot reach each other, the store, or the inference service.
@@ -74,6 +74,7 @@ net =
 
 - `data` (#105): `none`, `read`, or `write` (which includes reading), the agent's own files kept by the runtime ([capabilities.md](capabilities.md)).
 - `net` (#109): UDP destinations, `address:port`, comma-separated, at most 4, each only once, or empty for none; each must be in the policy entry's `net` ([capabilities.md](capabilities.md)).
+- `tools` and `files` (#126, #127), the only optional keys: tool names and granted file names, comma-separated, at most 4 files, each in the policy entry's ([tools.md](tools.md)); absent or empty for none.
 - `pages`: the agent's page limit. `models`: inference models it may use. `attempts`: tries per task, at most 10. `progress_ms`: how long it may go without a request while it has a task. `task_ms`: how long a task may run.
 - **Manifests are untrusted input:** a `no_std` parser in `pharos-proto` with checked bounds. Unknown keys, repeated keys, missing keys, and values out of range are refused. Host tests and 100,000 fuzzed inputs.
 - *Implemented (#97):* `pharos_proto::manifest`. Spaces around keys and values are ignored. `models` lists model numbers (1 to 31), comma-separated, or is empty for none. Limits: `pages` 1 to 262,144 (1 GiB), `attempts` 1 to 10, `progress_ms` 1 to one hour and at most `task_ms`, `task_ms` 1 to one day; numbers have no sign or leading zero. `program` is a relative path of at most 64 bytes with no empty, `.`, or `..` part. A refusal names its line. `Manifest::within` is the policy check: no entry for the name, another program, or anything over the entry is refused.
@@ -115,6 +116,7 @@ Clients are told apart by badge: agent slots, and control clients that `init`'s 
 | `ASK` | agent | asks the user, through `trust`, for a permission its policy entry lists as askable, for some milliseconds or the rest of the task: `GRANTED`, `REFUSED`, or `PENDING` (ask again); see [capabilities.md](capabilities.md) (#106) | 1 s |
 | `SEND_TO` | agent | one UDP datagram of up to 248 bytes from its buffer to a destination it holds `net` for, through the runtime's port (#109) | 1 s |
 | `RECEIVE_FROM` | agent | the oldest datagram kept for it (only from a destination it sent to and still holds), into its buffer, with its source; `NOT_FOUND` at once if none (#109) | 1 s |
+| `TOOL` | agent | a tool call: its text in the agent's buffer (at most 1 KiB) is copied out, parsed, and checked against the agent's tools, grants, and budgets, then audited and run; `read_file` puts a granted file in the buffer; see [tools.md](tools.md) (#126, #127) | 10 s |
 | `ANSWER` | `trust` | the user's `yes` or `no` to an approval request (#106) | none (a plain `send`) |
 | `REVOKE` | `trust` | takes a permission from every running task of an agent, for the rest of the task; answered with `trust`'s `REVOKED` (#105) | none (a plain `send`) |
 | `SUBMIT` | control | a new task: agent name, up to 4 task IDs it depends on, input from the client's buffer; returns the task ID | 10 s |

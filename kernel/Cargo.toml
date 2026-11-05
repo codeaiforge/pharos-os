@@ -188,6 +188,10 @@ name = "hostile"
 harness = false
 
 [[test]]
+name = "tools"
+harness = false
+
+[[test]]
 name = "budgets"
 harness = false
 

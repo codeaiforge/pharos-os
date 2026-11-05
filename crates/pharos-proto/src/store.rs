@@ -84,6 +84,9 @@ pub const NAMESPACES: &[(u16, &[u8])] = &[
     (5, b"agents"),
     // The audit trail (#107), held only by the audit service.
     (6, b"audit"),
+    // Files the user gives agents (#127, tools.md), filled by the host
+    // tool; the runtime holds it read-only.
+    (7, b"files"),
 ];
 
 /// The namespace prefix for `badge` and whether it is read-only; `None`

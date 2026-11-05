@@ -13,6 +13,8 @@ pub enum Over {
     NetSends,
     NetBytes,
     Data,
+    /// Granted files read with `read_file` (#127).
+    Files,
     GroupTokens,
     GroupNet,
 }
@@ -81,6 +83,8 @@ pub struct Usage {
     pub tokens: u64,
     pub net_sends: u64,
     pub net_bytes: u64,
+    /// Bytes of granted files read (#127).
+    pub file_bytes: u64,
 }
 
 fn within(used: u64, amount: u64, limit: u32) -> bool {
@@ -109,6 +113,16 @@ impl Usage {
         if let Some((_, u)) = group {
             u.tokens.charge(now, n);
         }
+        Ok(())
+    }
+
+    /// Charges reading `bytes` of a granted file, or refuses (#127).
+    pub fn read_file(&mut self, budget: &Budget, bytes: u64) -> Result<(), Over> {
+        let limit = u64::from(budget.file_kb).saturating_mul(1024);
+        if self.file_bytes.saturating_add(bytes) > limit {
+            return Err(Over::Files);
+        }
+        self.file_bytes += bytes;
         Ok(())
     }
 
@@ -223,6 +237,7 @@ mod tests {
         net_sends: 2,
         net_bytes: 64,
         data_kb: 1,
+        file_kb: 2,
         rate: 2,
         group: b"g",
     };
@@ -245,6 +260,20 @@ mod tests {
         assert_eq!(u.send(&LIMITED, None, 0, 10), Ok(()));
         assert_eq!(u.send(&LIMITED, None, 0, 1), Err(Over::NetSends));
         assert_eq!((u.net_sends, u.net_bytes), (2, 50), "refusals cost nothing");
+    }
+
+    #[test]
+    fn granted_files_read_within_the_budget() {
+        let mut u = Usage::default();
+        assert_eq!(u.read_file(&LIMITED, 2049), Err(Over::Files));
+        assert_eq!(u.file_bytes, 0, "a refused read costs nothing");
+        assert_eq!(u.read_file(&LIMITED, 2000), Ok(()));
+        assert_eq!(u.read_file(&LIMITED, 48), Ok(()));
+        assert_eq!(u.read_file(&LIMITED, 1), Err(Over::Files));
+        assert_eq!(
+            Usage::default().read_file(&Budget::UNLIMITED, u64::from(u32::MAX)),
+            Ok(())
+        );
     }
 
     #[test]

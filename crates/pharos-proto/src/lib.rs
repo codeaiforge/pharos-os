@@ -153,6 +153,10 @@ impl<'a> Reader<'a> {
     pub fn u8(&mut self) -> Option<u8> {
         Some(self.take(1)?[0])
     }
+    /// The next byte, without taking it.
+    pub fn peek(&self) -> Option<u8> {
+        self.0.first().copied()
+    }
     pub fn u16(&mut self) -> Option<u16> {
         Some(u16::from_le_bytes(self.take(2)?.try_into().ok()?))
     }

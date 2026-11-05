@@ -303,7 +303,7 @@ impl Trust {
                 let (mut a, mut b, mut c) = ([0u8; 20], [0u8; 20], [0u8; 20]);
                 let n = decimal(u64::from(number), &mut a);
                 let id = decimal(u64::from(task), &mut b);
-                let mut t = [0u8; 32];
+                let mut t = [0u8; pharos_proto::permission::TEXT];
                 let p = permission.text(&mut t);
                 let mut how = [0u8; 40];
                 let how: &[u8] = if for_ms == 0 {
@@ -359,7 +359,7 @@ impl Trust {
                 name,
                 permission,
             }) if badge == RUNTIME => {
-                let mut t = [0u8; 32];
+                let mut t = [0u8; pharos_proto::permission::TEXT];
                 let p = permission.text(&mut t);
                 match outcome {
                     Outcome::Revoked => self.say(&[b"revoked ", p, b" from ", name]),
