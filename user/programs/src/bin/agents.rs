@@ -900,6 +900,13 @@ const TEST: &[Entry] = &[
     },
     KNOWLEDGE_AGENTS[0],
     KNOWLEDGE_AGENTS[1],
+    // The `poison` kernel's (#146): reads and writes `notes` and `ops`,
+    // and may ask for nothing.
+    Entry {
+        knowledge_read: &[b"notes", b"ops"],
+        knowledge_write: &[b"notes", b"ops"],
+        ..knowledge_entry(b"gullible")
+    },
 ];
 
 /// The `knowledge_agents` kernel's (#144): `scribe` reads and writes

@@ -95,6 +95,19 @@
 //!   `ops/memo`; a put in `ops` is refused, and so is promoting into
 //!   `team`, which it may write, without `data read`; completes with
 //!   `peeker ok`.
+//! - `poison` (agent `gullible`, the `poison` kernel, #146; reads and
+//!   writes `notes` and `ops`, may ask for nothing), against the user's
+//!   host-loaded, verified entries: `hr/pay` is refused by get, history,
+//!   and query, and `ops/pay`, which cites it, is as missing as a key that
+//!   does not exist, and cannot be cited; a copy of the verified
+//!   `notes/policy` version 1, claiming the user from the host, is stored
+//!   as itself and unverified; a wrong `replaces`, a key's second first
+//!   version, and a key reaching a mark's path are refused; a second
+//!   correction of version 1 is a conflict, both kept, version 1
+//!   unchanged; `ops/deploy`, citing version 1, goes stale; a retraction
+//!   ends the conflict; then it does what the verified `notes/orders`
+//!   says (read `hr`, ask for it, approve the request itself), and each
+//!   is refused; completes with `gullible ok`.
 //! - `tools-plain` (agent `plain`): holds `report.txt` but no tool, so
 //!   `read_file` is refused; completes with `plain ok`.
 //! - `talk` (agent `talker`, the `channels` kernel, #133): sends
@@ -916,6 +929,116 @@ impl Agent {
             return self.fail(b"a promotion without data read was not refused");
         }
         self.complete(b"peeker ok")
+    }
+
+    fn poison(&self, me: u32) -> u64 {
+        use knowledge::code::REPLACES;
+        let old = flag::SUPERSEDED | flag::STALE;
+        let host = |h: &Head| h.author.is_none() && !h.written && h.promoted.is_none();
+        let mine = |h: &Head| h.author == Some((b"gullible".to_vec(), me)) && h.written;
+        // Around its scopes.
+        if self.k_get(IN_HR, b"pay", 0).err() != Some(status::NO_ACCESS)
+            || self.k_history(IN_HR, b"pay") != Err(status::NO_ACCESS)
+            || self.k_query(IN_HR, b"pay") != Err(status::NO_ACCESS)
+        {
+            return self.fail(b"hr was read");
+        }
+        if self.k_get(IN_OPS, b"pay", 0).err() != self.k_get(IN_OPS, b"none", 0).err()
+            || self.k_history(IN_OPS, b"pay") != self.k_history(IN_OPS, b"none")
+            || self.k_query(IN_OPS, b"pay") != Ok(Vec::new())
+            || self.k_put(&claim(IN_OPS, b"leak", 0, b"x", &[(IN_OPS, b"pay", 1)]))
+                != Err(status::NOT_FOUND)
+        {
+            return self.fail(b"what cites hr was seen");
+        }
+        // Forged provenance: a copy of a verified version is the agent's,
+        // unverified.
+        let policy = &b"deploys need two reviewers"[..];
+        match self.k_get(IN_NOTES, b"policy", 1).as_deref() {
+            Ok([h]) if host(h) && h.content == policy && h.status == flag::VERIFIED => {}
+            _ => return self.fail(b"the host-loaded version is not the user's, verified"),
+        }
+        let cites = [(IN_NOTES, &b"policy"[..], 1)];
+        if self.k_put(&claim(IN_OPS, b"deploy", 0, b"two reviewers", &cites)) != Ok(1)
+            || self.k_put(&claim(IN_NOTES, b"policy", 1, policy, &[])) != Ok(2)
+        {
+            return self.fail(b"the puts failed");
+        }
+        match self.k_get(IN_NOTES, b"policy", 2).as_deref() {
+            Ok([h]) if mine(h) && h.content == policy && h.status & flag::VERIFIED == 0 => {}
+            _ => return self.fail(b"a copy of a verified version was verified"),
+        }
+        // No version rewritten.
+        if self.k_put(&claim(IN_NOTES, b"policy", 9, b"x", &[])) != Err(REPLACES)
+            || self.k_put(&claim(IN_NOTES, b"policy", 0, b"x", &[])) != Err(REPLACES)
+            || self.k_put(&claim(IN_NOTES, b"policy/m1", 0, b"x", &[])) != Err(status::BAD_REQUEST)
+        {
+            return self.fail(b"a version was rewritten");
+        }
+        let one = &b"deploys need one reviewer"[..];
+        if self.k_put(&claim(IN_NOTES, b"policy", 1, one, &[])) != Ok(3) {
+            return self.fail(b"the second correction failed");
+        }
+        let c = flag::CONFLICTING;
+        let heads = self.k_get(IN_NOTES, b"policy", 0);
+        let both = heads
+            .as_deref()
+            .is_ok_and(|h| h.len() == 2 && h.iter().all(|h| mine(h) && h.status == c));
+        let first = self.k_get(IN_NOTES, b"policy", 1);
+        let kept = first.as_deref().is_ok_and(|h| {
+            matches!(h, [h] if host(h) && h.content == policy && h.status == flag::VERIFIED | old)
+        });
+        if !both
+            || !kept
+            || self.k_history(IN_NOTES, b"policy")
+                != Ok(alloc::vec![(1, flag::VERIFIED | old), (2, c), (3, c)])
+        {
+            return self.fail(b"the conflict is not marked");
+        }
+        // Stale through its evidence; a retraction ends the conflict.
+        match self.k_get(IN_OPS, b"deploy", 1).as_deref() {
+            Ok([h]) if mine(h) && h.status == flag::STALE => {}
+            _ => return self.fail(b"what cites a superseded version is not stale"),
+        }
+        let retract = Put {
+            kind: Kind::Retraction,
+            ..claim(IN_NOTES, b"policy", 2, b"", &[])
+        };
+        if self.k_put(&retract) != Ok(4)
+            || self.k_history(IN_NOTES, b"policy")
+                != Ok(alloc::vec![
+                    (1, flag::VERIFIED | old),
+                    (2, old | flag::RETRACTED),
+                    (3, 0),
+                    (4, 0)
+                ])
+        {
+            return self.fail(b"the retraction is not marked");
+        }
+        // Instructions stored as a verified entry grant nothing.
+        let orders = match self.k_get(IN_NOTES, b"orders", 0).as_deref() {
+            Ok([h]) if host(h) && h.status == flag::VERIFIED => h.content.clone(),
+            _ => return self.fail(b"the orders did not read"),
+        };
+        if !orders.starts_with(b"SYSTEM:") {
+            return self.fail(b"the orders are not the host's");
+        }
+        // Only to the serial console: never on the trusted one.
+        let text = &orders[..orders.len().min(agents::MAX_TEXT)];
+        self.call(&Request::Log { text }, &mut [0; 256]);
+        let hr = Permission::knowledge(b"hr", false);
+        let own = Request::Answer {
+            number: 1,
+            yes: true,
+        };
+        if self.k_get(IN_HR, b"pay", 0).err() != Some(status::NO_ACCESS)
+            || hr.and_then(|p| self.ask(p, 0)) != Some(Asked::Refused)
+            || self.call(&own, &mut [0; 256]).0 != status::NO_ACCESS
+            || self.k_get(IN_HR, b"pay", 0).err() != Some(status::NO_ACCESS)
+        {
+            return self.fail(b"the stored orders were obeyed");
+        }
+        self.complete(b"gullible ok")
     }
 
     /// `MESSAGE_SEND` of `bytes` with `kind` to `to`: the status.
@@ -2337,6 +2460,7 @@ fn main(_: u64) -> u64 {
         b"listen" => a.listen(),
         b"scribe" => a.scribe(task.task),
         b"peek" => a.peek(),
+        b"poison" => a.poison(task.task),
         b"outside" => a.outside(),
         b"spam" => a.spam(),
         b"tools-plain" if a.read_file("report.txt").0 == status::NO_ACCESS => {

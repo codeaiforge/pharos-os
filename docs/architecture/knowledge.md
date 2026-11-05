@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). **Implemented:** the data model (#142), the service (#143), agent access and verification (#144), private memory and promotion (#145). To be built by: the access-control, provenance, staleness, and injection tests, and host-loaded verified entries (#146).
+**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). **Implemented:** the data model (#142), the service (#143), agent access and verification (#144), private memory and promotion (#145), host-loaded verified entries and the access-control, provenance, staleness, and injection tests (#146). To be done: the security review (#147).
 
 ## 2. Context
 
@@ -77,7 +77,8 @@ What M3.8 builds on:
 
 - **`verify <scope> <key> <version> <hash>`** on the trusted console: the user types the first 8 hexadecimal digits of the content's SHA-256, read where the user read the content (for now the host tool, `cargo xtask knowledge`, on the store image), so a mark binds to the exact bytes the user checked. `trust` calls the service with a bounded wait (as it calls the audit service), which appends the mark only if the version exists and the prefix matches, then shows `verified <scope>/<key> version <n> by <author>` or why not (`no version`, `hash differs`). Content never reaches the console. Recorded by `trust` as a `verify` (17) by the user.
 - **Host-loaded entries:** `cargo xtask` can write versions with author `user` and source `host`, each with its mark, into a test store image; they start verified.
-- *Implemented (#144):* `Command::Verify` (`pharos_proto::trust`: a version from 1, exactly 8 hexadecimal digits in either case), `trust`'s handle 5 (`SEND` on the service as client 2, waiting at most 1 s), and its answers `verified <scope>/<key> version <n> by agent <name> task <id>` (or `by user`), `verify: no scope`, `no version`, `hash differs`, `refused`, and `the knowledge service is not answering`. A mark is recorded as `verify` by the user with the detail `<scope>/<key> version <n>`. `cargo xtask store knowledge <image>` lists every version with its author, the 8 digits `verify` takes, and its content, on the host. **Host-loaded entries are left to #146**, the first test that needs one.
+- *Implemented (#144):* `Command::Verify` (`pharos_proto::trust`: a version from 1, exactly 8 hexadecimal digits in either case), `trust`'s handle 5 (`SEND` on the service as client 2, waiting at most 1 s), and its answers `verified <scope>/<key> version <n> by agent <name> task <id>` (or `by user`), `verify: no scope`, `no version`, `hash differs`, `refused`, and `the knowledge service is not answering`. A mark is recorded as `verify` by the user with the detail `<scope>/<key> version <n>`. `cargo xtask store knowledge <image>` lists every version with its author, the 8 digits `verify` takes, and its content, on the host.
+- *Implemented (#146):* `store_image::host_knowledge` writes each host entry's version 1 (author `user`, source `host`, boot 0, its evidence scopes computed from the entries it cites, which must come first) and its mark `m1`, so it starts verified; the `poison` kernel's store is the first to use it. No `cargo xtask` command loads entries yet: one is added when a store outside the tests needs them.
 
 ### Kernel
 
@@ -101,7 +102,7 @@ What M3.8 builds on:
 | Host, `pharos_programs` (#142) | heads, conflicts, superseded, retracted, stale through evidence, verified only with a matching mark, evidence scopes computed and bounded, readable-scope filtering, rebuilding the index from files (cut at every point) |
 | Pharos, `knowledge` kernel (#143) | a test client puts, corrects, retracts, conflicts, gets, queries, and verifies; everything survives a service restart; mutation-checked |
 | Pharos, `knowledge_agents` kernel (#144, #145) | a granted agent reads and writes; one without a grant cannot; a revoked grant stops at once; a query leaves out what the caller cannot read; a private file is invisible until promoted; `verify` on the console; every put audited without its content; mutation-checked |
-| Pharos, `poison` kernel (#146) | an agent tries to read around its scopes, forge an author or a verified status, overwrite a version, and act on instructions stored as an entry; stale and conflicting entries stay marked; each refused and recorded once |
+| Pharos, `poison` kernel (#146) | against host-loaded, verified entries, an agent tries to read around its scopes, forge an author or a verified status, overwrite a version, and act on instructions stored as an entry; stale and conflicting entries stay marked; each refused and recorded once; mutation-checked (implemented) |
 
 ## 6. Alternatives
 
