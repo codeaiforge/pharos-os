@@ -224,6 +224,10 @@ name = "audit"
 harness = false
 
 [[test]]
+name = "knowledge"
+harness = false
+
+[[test]]
 name = "services"
 harness = false
 

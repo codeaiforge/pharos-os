@@ -596,7 +596,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 26] = [
+const USER_PROGRAMS: [&str; 28] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -623,6 +623,8 @@ const USER_PROGRAMS: [&str; 26] = [
     "agentclient",
     "audit",
     "auditclient",
+    "knowledge",
+    "knowledgeclient",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -1499,6 +1501,9 @@ const HOSTILE_REFUSED: &[&str] = &["approve #2", "approve #9"];
 /// The audit service (#107): a tiny fresh store, so it fills.
 const AUDIT_TEST: &str = "audit";
 const AUDIT_BLOCKS: u64 = 16;
+/// The knowledge service's test kernel (#143) and its fresh store.
+const KNOWLEDGE_TEST: &str = "knowledge";
+const KNOWLEDGE_BLOCKS: u64 = 512;
 /// `trust` shows the anchor at start; then the runner types `audit`.
 const AUDIT_SCRIPT: &[console::Step] = &[
     ("trust: ready", ""),
@@ -2295,6 +2300,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     ];
     if service_store.contains(&name.as_str()) {
         store_image::service(&out.join(STORE_IMAGE))?;
+    }
+    if name == KNOWLEDGE_TEST {
+        store_image::fresh(&out.join(STORE_IMAGE), KNOWLEDGE_BLOCKS)?;
     }
     if name == AUDIT_TEST {
         store_image::fresh(&out.join(STORE_IMAGE), AUDIT_BLOCKS)?;

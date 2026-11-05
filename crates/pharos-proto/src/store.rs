@@ -87,6 +87,9 @@ pub const NAMESPACES: &[(u16, &[u8])] = &[
     // Files the user gives agents (#127, tools.md), filled by the host
     // tool; the runtime holds it read-only.
     (7, b"files"),
+    // Shared knowledge (#143, knowledge.md), held only by the knowledge
+    // service.
+    (8, b"knowledge"),
 ];
 
 /// The namespace prefix for `badge` and whether it is read-only; `None`

@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). **Implemented:** the data model (#142). To be built by: the service (#143), agent access (#144), private memory and promotion (#145), and the access-control, provenance, staleness, and injection tests (#146).
+**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). **Implemented:** the data model (#142), the service (#143). To be built by: agent access (#144), private memory and promotion (#145), and the access-control, provenance, staleness, and injection tests (#146).
 
 ## 2. Context
 
@@ -54,6 +54,7 @@ What M3.8 builds on:
 - **Who may call:** badges name the runtime and `trust` (and the test clients); the runtime's requests carry the author (agent and task) and the caller's **readable scopes** (at most 8). The service answers a read only for a version whose scope and evidence scopes are all readable, and leaves out of `GET`, `HISTORY`, and `QUERY` replies anything else, without saying that it exists. A write's evidence must be readable by the writer.
 - **No audit capability:** the service is told who acts and only stores; the runtime records agent updates and `trust` records verifications, as each records the actions it takes today.
 - **Limits:** 256 keys per scope and 64 versions per key (each refused past it, `FULL`); a key's versions are numbered by the service.
+- *Implemented (#143):* the interface in `pharos_proto::knowledge` (`PUT`, `GET`, `HISTORY`, `QUERY`, `VERIFY`, `ATTACH`, `INFO`; badges `client::RUNTIME` 1 and `client::TRUST` 2; codes `FULL`, `REPLACES`, `HASH_DIFFERS`, `UNWRITABLE`), `pharos_programs::knowledge::Service` (every request, host-tested), and `bin/knowledge`, which receives requests, keeps each client's buffer (24 to 64 KiB, 4 clients), copies a `PUT` out of it before parsing, and replies. **Scopes are a fixed table,** `SCOPES` (`notes`, `ops`, `hr`, `team`, `test`), reviewed code like the store's namespaces: requests name a scope by number and the readable scopes by a bit each, so each request fits in a 256-byte message; records keep the names. A `PUT`'s body and a `GET`'s, `HISTORY`'s, or `QUERY`'s answer go through the buffer. The runtime may not write as the user or with the source `host` (`NO_ACCESS`). Each start is counted in the namespace's `starts` file, which is the `boot` in each version's time. A second mark of the same version and hash writes nothing. The service holds no audit capability: the runtime will record agent puts (#144). Not yet in `init`'s boot table: it joins with the runtime's capability (#144).
 
 ### Agent access (#144)
 
