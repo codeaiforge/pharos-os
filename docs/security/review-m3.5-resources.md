@@ -52,13 +52,15 @@
 
 ## IPC round trip
 
-`cargo xtask bench-ipc` under KVM, 100,000 round trips per run. **At or just over D-004's 2,000 ns budget on this host:**
+`cargo xtask bench-ipc` under KVM, 100,000 round trips per run. **Within D-004's 2,000 ns budget after #121's change (median 1,935 ns); at or just over it before:**
 
 - 5 runs at `066a9c9`: median 2,010 ns (run medians 1,950 to 2,047).
 - Alternating with the M3.4 gate's kernel (`c233cec`), 9 runs each: median 1,979 ns for M3.4 and 2,043 ns now; this kernel was slower in 6 of the 9 pairs. M3.5 added about 30 to 60 ns.
 - Alternating with the kernel before #120 (`8201aa9`), 9 runs each: 1,947 against 1,973 ns, within the host's spread. #120 and #122 changed nothing on the round trip's path but a relaxed atomic load of the root table, the same instruction as before.
 
 The cost comes from #114 and #115, each measured within the host's spread at the time: a TSC read and the CPU count on every switch, a class check per wake-up and queue, the `preempt` flag on every system call, and the table's limit check. The run-to-run spread on this host is about 100 ns, as large as the cost.
+
+**Recovered in #121** (the maintainer chose to fix it before closing): `sched::current_id`, which `process::current` calls on every system call, took the scheduler lock; it is now a plain load of the running task's ID, kept at each switch. `sched::stopping`, also on every system call, took the lock and searched the stopping set; it is now a plain load while no task is told to end. Alternating with `8ff293a`, 9 runs each pinned to one host CPU: median 1,895 ns against 2,024 ns, faster in all 9 pairs. Then 5 runs: median 1,935 ns (run medians 1,889 to 1,990). Mutations: never setting the flag in `stop` fails `spawn`; clearing it on every exit fails `agents`.
 
 ## `unsafe` added in M3.5
 

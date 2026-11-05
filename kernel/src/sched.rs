@@ -324,6 +324,7 @@ pub fn init() -> Result<(), SchedError> {
         live: 1,
         ticks: 0,
     });
+    CURRENT.store(0, Ordering::Relaxed);
     Ok(())
 }
 
@@ -435,8 +436,15 @@ pub fn enable_preemption() -> Result<(), SchedError> {
 
 /// ID of the running task (`None` before [`init`]).
 pub fn current_id() -> Option<TaskId> {
-    SCHEDULER.lock().as_ref().map(|s| s.queue.current().id)
+    match CURRENT.load(Ordering::Relaxed) {
+        u64::MAX => None,
+        id => Some(id),
+    }
 }
+
+/// The run queue's current task, kept at every switch so [`current_id`],
+/// on every system call, is a plain load; `u64::MAX` before [`init`].
+static CURRENT: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// The running task's class ([`TRUSTED`] before [`init`]).
 pub fn current_class() -> Class {
@@ -553,6 +561,7 @@ fn pick_next(leave: Leave, before: impl FnOnce(&mut Scheduler)) -> Option<Switch
     reaped = scheduler.exited.take();
     before(scheduler);
     let (previous, next) = scheduler.queue.rotate(leave)?;
+    CURRENT.store(next.id, Ordering::Relaxed);
     // This switch picks the highest class; an earlier wake-up needs no
     // further `preempt`.
     PREEMPT.store(false, Ordering::Relaxed);
@@ -709,6 +718,7 @@ pub fn stop(id: TaskId) -> bool {
         return false;
     };
     s.stopping.insert(id);
+    ANY_STOPPING.store(true, Ordering::Relaxed);
     if let Some(task) = s.blocked.remove(&id) {
         s.timeouts.remove(&id);
         task.timed_out.store(true, Ordering::Relaxed);
@@ -721,8 +731,15 @@ pub fn stop(id: TaskId) -> bool {
     true
 }
 
+/// True while any task is told to end: [`stopping`] runs on every system
+/// call, and without one it is a plain load, not the scheduler's lock.
+static ANY_STOPPING: AtomicBool = AtomicBool::new(false);
+
 /// True if the running task was told to end ([`stop`]).
 pub fn stopping() -> bool {
+    if !ANY_STOPPING.load(Ordering::Relaxed) {
+        return false;
+    }
     SCHEDULER
         .lock()
         .as_ref()
@@ -774,6 +791,7 @@ pub fn exit() -> ! {
         s.live -= 1;
         let current = s.queue.current().clone();
         s.stopping.remove(&current.id);
+        ANY_STOPPING.store(!s.stopping.is_empty(), Ordering::Relaxed);
         s.tasks.remove(&current.id);
         s.exited = Some(current);
     }) else {
