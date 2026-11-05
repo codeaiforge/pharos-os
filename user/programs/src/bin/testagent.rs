@@ -451,7 +451,13 @@ impl Agent {
         if self.send_confirmed("hello") != agents::REFUSED {
             return self.fail(b"an unanswered send was not refused");
         }
-        if self.send_confirmed("hello") != status::NO_ACCESS {
+        // The user revokes the destination while this one waits; it must
+        // end then, not when the call is repeated (M3.6 review F1).
+        if self.send_tool("10.0.2.2:47000", "hello") != agents::PENDING {
+            return self.fail(b"send was not asked for");
+        }
+        sleep(2_000_000);
+        if self.send_tool("10.0.2.2:47000", "hello") != status::NO_ACCESS {
             return self.fail(b"a send waiting when its destination was revoked was not refused");
         }
         if self.send_tool("10.0.2.2:47000", "hello") != status::NO_ACCESS {

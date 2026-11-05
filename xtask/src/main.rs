@@ -1383,8 +1383,8 @@ const TOOLS_SCRIPT: &[console::Step] = &[
         "confirm #5: reader task 1 wants to send 5 bytes to 10.0.2.2:47000? (yes 5 / no 5)",
         "revoke reader net 10.0.2.2:47000\n",
     ),
-    ("revoked net 10.0.2.2:47000 from reader", ""),
     ("confirm #5: refused", ""),
+    ("revoked net 10.0.2.2:47000 from reader", ""),
 ];
 /// Nothing else is asked (`secrets.txt` is not askable, and the call
 /// made while one waits is `BUSY`), and no payload reaches the console.
@@ -1755,10 +1755,27 @@ fn tools_audit(image: &Path) -> Result<()> {
             "{outcomes} outcomes of reader's tool calls, expected at least 2"
         ));
     }
-    // Refused by the user, then ended by the revocation (#128).
-    let refused = count("client 3 Event refuse reader task 1/1 net 10.0.2.2:47000  outcome 2 user");
-    if refused != 2 {
-        return Err(format!("{refused} refused confirmations, expected 2"));
+    // Refused by the user, then ended by the revocation (#128), at once:
+    // the agent repeats the call only 2 s later (M3.6 review F1).
+    let time = |want: &str| {
+        lines
+            .iter()
+            .filter(|l| l.contains(want))
+            .filter_map(|l| l.split(' ').nth(1)?.parse::<f64>().ok())
+            .collect::<Vec<f64>>()
+    };
+    let refused = time("client 3 Event refuse reader task 1/1 net 10.0.2.2:47000  outcome 2 user");
+    let revoked = time("client 3 Event revoke reader task 1/1 net 10.0.2.2:47000  outcome 1 user");
+    let (&[_, ended], &[at]) = (refused.as_slice(), revoked.as_slice()) else {
+        return Err(format!(
+            "expected 2 refused confirmations and 1 revocation: {refused:?} {revoked:?}"
+        ));
+    };
+    if !(0.0..1.0).contains(&(ended - at)) {
+        return Err(format!(
+            "the waiting send ended {:.3} s after its destination was revoked, expected under 1 s",
+            ended - at
+        ));
     }
     // A refused call is recorded once, by its own kind: never also as a
     // request not for agents.

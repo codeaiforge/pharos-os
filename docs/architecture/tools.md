@@ -131,4 +131,4 @@ A reviewed table in the runtime, `TOOLS`:
 
 ## 7. Open questions
 
-- Whether the user should see some of a `send`'s payload (for example as hexadecimal, never as text), decided at the review (#130).
+None. Decided at the M3.6 review (#130): the user sees a `send`'s destination and size, never its payload.

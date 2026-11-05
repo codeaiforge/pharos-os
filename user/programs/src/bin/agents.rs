@@ -2260,6 +2260,18 @@ impl Runtime {
                     audit::outcome::OK,
                     b"user",
                 );
+                // A call to it waiting for the user ends at once, as a
+                // session does (D-012 item 8; M3.6 review F1).
+                let waiting = self.slots[i]
+                    .as_mut()
+                    .and_then(|s| {
+                        s.confirm
+                            .take_if(|c| c.answer.is_none() && permission.covers(&c.permission))
+                    })
+                    .map(|c| c.number);
+                if let Some(number) = waiting {
+                    self.resolve(number, trust::Resolution::Refused);
+                }
             }
         }
         tell_trust(&trust::Request::Revoked {
