@@ -13,7 +13,7 @@ const PROJECT: &str = "Pharos OS";
 const ORGANIZATION: &str = "CodeAIForge";
 /// Comes from Cargo package metadata (workspace version), never hand-copied.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const STAGE: &str = "Phase 3 - AI Agent Platform (M3.6 complete, M3.7 next)";
+const STAGE: &str = "Phase 3 - AI Agent Platform (M3.7 complete, M3.8 next)";
 
 /// Command succeeded.
 const EXIT_OK: u8 = 0;

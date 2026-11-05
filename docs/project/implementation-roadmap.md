@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.7 — Agent communication and coordination.** Everything in Phases 3–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.8 — Knowledge service.** Everything in Phases 3–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -41,7 +41,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
 | 2 | Core System | Done (v0.2.0) |
-| 3 | AI Agent Platform | **Current** (M3.7; M3.1, M3.0, M3.2, M3.3, M3.4, M3.5, and M3.6 done) |
+| 3 | AI Agent Platform | **Current** (M3.8; M3.1, M3.0, M3.2, M3.3, M3.4, M3.5, M3.6, and M3.7 done) |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
 
@@ -291,7 +291,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ## Phase 3 — AI Agent Platform
 
-**Status: Current** (M3.7; M3.1, M3.0, M3.2, M3.3, M3.4, M3.5, and M3.6 done).
+**Status: Current** (M3.8; M3.1, M3.0, M3.2, M3.3, M3.4, M3.5, M3.6, and M3.7 done).
 
 Ordering notes:
 
@@ -443,7 +443,7 @@ Ordering notes:
 
 ### M3.7 — Agent communication and coordination
 
-**Status: Current.** M3.6 gives it agents that use tools only through validated calls and their grants, with the user confirming each `send`. D-024 accepted (#131): channels through the runtime, granted by policy, carrying data only; a supervisor submits subtasks to the workers its group names; it may pass a subset of its own grants to a subtask; a compiled-in verifier checks results before a goal counts as done. Design approved (#132): [coordination.md](../architecture/coordination.md). Implemented: channels (#133), groups and subtasks (#134), delegation (#135), failure and stop handling (#136), the verifier (#137), the isolation and confused-deputy tests (#138). Next: the M3.7 gate (#139).
+**Status: Done** — gate passed 2026-11-05: the CI jobs passed on `main` at `adc4655` ([run 42060360807](https://github.com/codeaiforge/pharos-os/actions/runs/42060360807)) with 63 test kernels, among them `channels` (messages only on granted channels, in order, 8 waiting at most, a revoked channel refused at once, no content in the trail), `groups` (a supervisor assigning only its workers; a delegated model used and revoked with its source; crashing and hung workers retried, then failed; a steered worker's result and a goal with failed subtasks not verified; a goal's end cancelling its subtasks; `stop group` ending a goal, its subtasks, and its approval request), and `deputy` (a compromised worker, a passed-on delegation, an injected message and a flood, and a supervisor doing what the message says, each refused and recorded once per kind). Removing the delegation check (a supervisor could delegate what it does not hold) failed CI on a throwaway branch ([run 42084216071](https://github.com/codeaiforge/pharos-os/actions/runs/42084216071)) in the host tests, on Rust 1.85, and at `deputy`. One CI run on `main` failed during M3.7 ([run 42048789818](https://github.com/codeaiforge/pharos-os/actions/runs/42048789818), on `0cebbab`): the `exhaustion` kernel's trusted task woke 43.4 ms late against its 40 ms bound on the shared runner; later runs passed, and the bound is kept. The review fixes after `adc4655` (`3be7ad2`) passed `scripts/check.sh` and the full QEMU suite locally, and are the broken branch's base. M3.7 changed no kernel code; the IPC round trip measured a 1,844 ns median. The security review ([review-m3.7-coordination.md](../security/review-m3.7-coordination.md)) found and fixed two issues: a supervisor could fill the task table with subtasks (F1; now 32 per goal) and could delegate data access (F2); it recorded one (F3: a revocation does not reach a subtask while its supervisor is between attempts); no new `unsafe`. The maintainer approved it on 2026-11-05. Delivered: D-024 (#131), the design (#132), channels (#133), groups and subtasks (#134), delegation (#135), failure and stop (#136), the verifier (#137), the isolation and confused-deputy tests (#138), and the gate (#139). Carried: the limits in the [threat model](../security/threat-model.md#open-limits-carried-out-of-phase-2).
 
 - **Where it runs (D-020):** Pharos; codecs and group-state logic host-tested.
 - **Objective and scope:** Agents communicate only through granted channels, and groups of agents work toward a shared goal under explicit authority and budgets.
@@ -458,7 +458,7 @@ Ordering notes:
 
 ### M3.8 — Knowledge service
 
-**Status: Planned.**
+**Status: Current.** M3.7 gives it agents that talk only on granted channels and work in groups under a supervisor, with delegation that only narrows authority and a verifier on every result. First step: its decision and issues.
 
 - **Where it runs (D-020):** Pharos; data model and provenance logic host-tested.
 - **Objective and scope:** A shared, permission-aware knowledge service with provenance, separate from each agent's private memory.
@@ -669,4 +669,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, and M3.6 (controlled tool integration) on 2026-11-05. The current milestone is **M3.7 — Agent communication and coordination**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, and M3.7 (agent communication and coordination) on 2026-11-05. The current milestone is **M3.8 — Knowledge service**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

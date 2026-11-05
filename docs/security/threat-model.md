@@ -1,6 +1,6 @@
 # Threat model
 
-**Status:** updated at the M2.10 gate, which closes Phase 2 (2026-10-29), at the M3.4 gate (2026-11-04), at the M3.5 gate (2026-11-05), and at the M3.6 gate (2026-11-05). It covers what exists today (the host workspace, and a kernel with isolated user processes, a read-only RAM-disk filesystem, user-space drivers, a service manager, and a user-space network service) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
+**Status:** updated at the M2.10 gate, which closes Phase 2 (2026-10-29), at the M3.4 gate (2026-11-04), at the M3.5 gate (2026-11-05), and at the M3.6 gate (2026-11-05), and at the M3.7 gate (2026-11-05). It covers what exists today (the host workspace, and a kernel with isolated user processes, a read-only RAM-disk filesystem, user-space drivers, a service manager, and a user-space network service) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
 
 ## Security principles
 
@@ -155,7 +155,7 @@ Design: [inference.md](../architecture/inference.md), from D-010, D-011, and D-0
 
 ### Open limits carried out of Phase 2
 
-Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-inference.md)), and M3.3 ([review](review-m3.3-agents.md)), M3.4 ([review](review-m3.4-permissions.md)), M3.5 ([review](review-m3.5-resources.md)), and M3.6 ([review](review-m3.6-tools.md)) close with these limits accepted. Each is carried to the milestone that addresses it; none blocks Phase 3, which runs only in QEMU.
+Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-inference.md)), and M3.3 ([review](review-m3.3-agents.md)), M3.4 ([review](review-m3.4-permissions.md)), M3.5 ([review](review-m3.5-resources.md)), M3.6 ([review](review-m3.6-tools.md)), and M3.7 ([review](review-m3.7-coordination.md)) close with these limits accepted. Each is carried to the milestone that addresses it; none blocks Phase 3, which runs only in QEMU.
 
 | Limit | Since | Carried to |
 | --- | --- | --- |
@@ -185,6 +185,9 @@ Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-in
 | The user confirms a `send`'s destination and size, not its payload | M3.6 | accepted at the M3.6 review |
 | A confirmed `send` is charged when sent, so it can still be refused `OVER_LIMIT`; `file_kb` is not given back when a store read fails | M3.6 | accepted |
 | The test model writes no tool calls; a real model's calls are not exercised in CI | M3.6 | the S1 run at the Phase 3 gate |
+| A revocation does not reach a subtask while its supervisor is between attempts (M3.7 review F3) | M3.7 | when supervisors get retries; `revoke <worker>` and `stop group` work meanwhile |
+| Messages between agents are lost when the runtime restarts | M3.7 | accepted (coordination.md) |
+| Revoking from a supervisor also takes an overlapping permission a subtask's own entry gives it, for that task | M3.7 | accepted: never wider |
 | Control clients can read, cancel, and forget every task; only `init` grants the badge, and only test tables do | M3.3 | M3.6 (who submits tasks) |
 | The inference service: a long prompt holds it (callers time out). **Resolved (#100):** a failed model read is not kept (the next `GENERATE` tries again with a new window), and client slots are freed when `init` reports the client ended | M3.2 | M3.5 (budgets) |
 
