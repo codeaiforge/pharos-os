@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.5 — Resource accounting and limits.** Everything in Phases 3–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.6 — Controlled tool integration.** Everything in Phases 3–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -41,7 +41,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
 | 2 | Core System | Done (v0.2.0) |
-| 3 | AI Agent Platform | **Current** (M3.5; M3.1, M3.0, M3.2, M3.3, and M3.4 done) |
+| 3 | AI Agent Platform | **Current** (M3.6; M3.1, M3.0, M3.2, M3.3, M3.4, and M3.5 done) |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
 
@@ -291,7 +291,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ## Phase 3 — AI Agent Platform
 
-**Status: Current** (M3.5; M3.1, M3.0, M3.2, M3.3, and M3.4 done).
+**Status: Current** (M3.6; M3.1, M3.0, M3.2, M3.3, M3.4, and M3.5 done).
 
 Ordering notes:
 
@@ -413,7 +413,7 @@ Ordering notes:
 
 ### M3.5 — Resource accounting and limits
 
-**Status: Current.** M3.4 gives it agents that hold only granted permissions, an audit trail of what they did, and the limits the M3.4 review carried here: a runtime that blocks on its services, a shared approval queue, and no rate limit on agent requests. D-022 accepted (#112): three fixed scheduling classes, a higher class always first; CPU time counted per process; pages, processes, and handles carved from the creator's; over a limit refused, an attempt over its CPU budget stopped; groups named in the policy table. Design: [resources.md](../architecture/resources.md) (#113), approved 2026-11-04. Implemented: scheduling classes and CPU time per process (#114), carved limits (#115), runtime budgets (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), exhaustion tests (#120), and freeing and sharing large mappings in batches (#122). Next: the gate (#121); the security review is [review-m3.5-resources.md](../security/review-m3.5-resources.md).
+**Status: Done** — gate passed 2026-11-05: the CI jobs passed on `main` at `066a9c9` ([run 41916822517](https://github.com/codeaiforge/pharos-os/actions/runs/41916822517)) with 58 test kernels, among them `exhaustion` (agents spinning, taking pages and handles until refused, and going past their rate, tokens, datagrams, bytes, and files all at once, beside a services-class process mapping, sharing, and freeing 320 MiB, while a trusted task wakes within 40 ms and the trusted console answers `usage` and `stop all` within 200 ms), `classes` (a higher class always first, the emergency stop at once), `budgets` (per-agent and per-group budgets, refused or stopped, each recorded), `fairness` (a stalled service answered `BUSY` at once, the request rate, one approval request per agent), and `spawn`, `user_memory`, and `shared_memory` (carved limits, stops and revocations during batched mappings). Removing the runtime's per-attempt token check failed CI on a throwaway branch ([run 41980883296](https://github.com/codeaiforge/pharos-os/actions/runs/41980883296)) in a host unit test and at `budgets`. No CI run on `main` failed during M3.5. The review fix and the IPC change after `066a9c9` (`8ff293a`, `666c476`) passed `scripts/check.sh` and the full QEMU suite locally. The IPC round trip had risen to 1,973–2,043 ns, over D-004's budget; with the scheduler lock taken off the system-call path it measured a 1,935 ns median. The security review ([review-m3.5-resources.md](../security/review-m3.5-resources.md)) found and fixed three issues: a stale pause mark (F1), a tick ending a process mid-call (F2), and `mem_map_cap` missing a revocation during its pauses (F3). The maintainer approved it on 2026-11-05. Delivered: D-022 (#112), the design (#113), scheduling classes and CPU time (#114), carved limits (#115), runtime budgets and groups (#116), not holding the runtime (#117), inference admission (#118), usage reporting (#119), exhaustion tests (#120), batched freeing and sharing (#122), and the gate (#121). Carried: the limits in the [threat model](../security/threat-model.md#open-limits-carried-out-of-phase-2).
 
 - **Where it runs (D-020):** Pharos; accounting logic host-tested.
 - **Objective and scope:** Per-agent and per-group limits on CPU, memory, storage, network, and inference usage, with resources reserved for essential system functions.
@@ -428,7 +428,7 @@ Ordering notes:
 
 ### M3.6 — Controlled tool integration
 
-**Status: Planned.**
+**Status: Current.** M3.5 gives it agents held to budgets for CPU, pages, processes, handles, inference, network, storage, and requests, with three scheduling classes so the trusted path always runs first.
 
 - **Where it runs (D-020):** Pharos; the tool-call validator host-tested and fuzzed.
 - **Objective and scope:** Let agents invoke defined tools only through capability checks.
@@ -667,4 +667,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, and M3.4 (permissions and audit) on 2026-11-04. The current milestone is **M3.5 — Resource accounting and limits**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, and M3.5 (resource accounting and limits) on 2026-11-05. The current milestone is **M3.6 — Controlled tool integration**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

@@ -1,6 +1,6 @@
 # Threat model
 
-**Status:** updated at the M2.10 gate, which closes Phase 2 (2026-10-29), and at the M3.4 gate (2026-11-04). It covers what exists today (the host workspace, and a kernel with isolated user processes, a read-only RAM-disk filesystem, user-space drivers, a service manager, and a user-space network service) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
+**Status:** updated at the M2.10 gate, which closes Phase 2 (2026-10-29), at the M3.4 gate (2026-11-04), and at the M3.5 gate (2026-11-05). It covers what exists today (the host workspace, and a kernel with isolated user processes, a read-only RAM-disk filesystem, user-space drivers, a service manager, and a user-space network service) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
 
 ## Security principles
 
@@ -155,7 +155,7 @@ Design: [inference.md](../architecture/inference.md), from D-010, D-011, and D-0
 
 ### Open limits carried out of Phase 2
 
-Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-inference.md)), and M3.3 ([review](review-m3.3-agents.md)), and M3.4 ([review](review-m3.4-permissions.md)) close with these limits accepted. Each is carried to the milestone that addresses it; none blocks Phase 3, which runs only in QEMU.
+Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-inference.md)), and M3.3 ([review](review-m3.3-agents.md)), M3.4 ([review](review-m3.4-permissions.md)), and M3.5 ([review](review-m3.5-resources.md)) close with these limits accepted. Each is carried to the milestone that addresses it; none blocks Phase 3, which runs only in QEMU.
 
 | Limit | Since | Carried to |
 | --- | --- | --- |
@@ -174,6 +174,11 @@ Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-in
 | The agent runtime serves one request at a time: a stalled service holds it for the call's timeout (inference 60 s, store 10 s, audit 2 s, network 1 s), so agents can be counted hung and use up attempts; no rate limit on agent requests. **Resolved (#117):** after one timeout a service is stalled and requests that need it are `BUSY` at once, with one 50 ms check a second; each agent's requests are held to its rate (`fairness`: a flood at a stopped network service waits once, another agent is served throughout; mutation-checked). Still: one `GENERATE` holds the runtime while the service reads the prompt (6.3 s for S1), bounded by admission (#118); a stall is cleared only by the check, which no test kernel exercises | M3.3 | M3.5 (budgets) |
 | One agent can keep all 4 places in the shared approval queue, 60 s each. **Resolved (#117):** one request waiting per agent (`fairness`) | M3.4 | M3.5 |
 | Agents granted the same destination that both sent to it both get its replies (one runtime port) | M3.4 | accepted; revisit if agents get their own ports |
+| A busy trusted or services-class process holds back every lower class; classes have no time share (D-022) | M3.5 | accepted; revisit with an SMP or time-share decision |
+| Interrupt and system-call time is charged to the process that was running | M3.5 | accepted |
+| The last reference to a large shared object dropped by deleting its capability frees it in one go, with the capability table locked | M3.5 | when a service shares objects of hundreds of MiB |
+| `mem_share`'s bookkeeping charge stays until the sharer ends; an object that outlives its sharer is charged to no one | M3.5 | accepted; bounded by the sharer's limit |
+| A manifest cannot narrow its entry's budget; a group's minute is a fixed window (up to twice the rate across its edge) | M3.5 | when an agent needs less than its entry |
 | Control clients can read, cancel, and forget every task; only `init` grants the badge, and only test tables do | M3.3 | M3.6 (who submits tasks) |
 | The inference service: a long prompt holds it (callers time out). **Resolved (#100):** a failed model read is not kept (the next `GENERATE` tries again with a new window), and client slots are freed when `init` reports the client ended | M3.2 | M3.5 (budgets) |
 
