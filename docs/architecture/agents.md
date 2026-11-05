@@ -116,7 +116,7 @@ Clients are told apart by badge: agent slots, and control clients that `init`'s 
 | `ASK` | agent | asks the user, through `trust`, for a permission its policy entry lists as askable, for some milliseconds or the rest of the task: `GRANTED`, `REFUSED`, or `PENDING` (ask again); see [capabilities.md](capabilities.md) (#106) | 1 s |
 | `SEND_TO` | agent | one UDP datagram of up to 248 bytes from its buffer to a destination it holds `net` for, through the runtime's port (#109) | 1 s |
 | `RECEIVE_FROM` | agent | the oldest datagram kept for it (only from a destination it sent to and still holds), into its buffer, with its source; `NOT_FOUND` at once if none (#109) | 1 s |
-| `TOOL` | agent | a tool call: its text in the agent's buffer (at most 1 KiB) is copied out, parsed, and checked against the agent's tools, grants, and budgets, then audited and run; `read_file` puts a granted file in the buffer; see [tools.md](tools.md) (#126, #127) | 10 s |
+| `TOOL` | agent | a tool call: its text in the agent's buffer (at most 1 KiB) is copied out, parsed, and checked against the agent's tools, grants, and budgets, then audited and run; `read_file` puts a granted file in the buffer, `send` sends a datagram once the user confirms that call (`PENDING` until then, `REFUSED` if not); see [tools.md](tools.md) (#126–#128) | 10 s |
 | `ANSWER` | `trust` | the user's `yes` or `no` to an approval request (#106) | none (a plain `send`) |
 | `REVOKE` | `trust` | takes a permission from every running task of an agent, for the rest of the task; answered with `trust`'s `REVOKED` (#105) | none (a plain `send`) |
 | `SUBMIT` | control | a new task: agent name, up to 4 task IDs it depends on, input from the client's buffer; returns the task ID | 10 s |

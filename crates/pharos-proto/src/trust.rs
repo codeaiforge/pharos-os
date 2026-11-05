@@ -18,7 +18,12 @@
 //!   prompt itself from these fields;
 //! - `RESOLVED` `[version, op, number (2), result]`: how request `number`
 //!   ended, decided by the runtime (granted, refused, or not answered in
-//!   time).
+//!   time);
+//! - `CONFIRM` `[version, op, number (2), name length, name, task (4),
+//!   tool, address (4), port (2), bytes (2)]` (#128, tools.md): ask the
+//!   user to confirm one call of a sensitive tool; `trust` writes the
+//!   prompt from these fields, never from agent or model text, and the
+//!   answer and `RESOLVED` work as for `APPROVE`.
 //!
 //! The badge says who sends: [`INIT`] or [`RUNTIME`]. There is no reply:
 //! the sender's blocking `send` returns once the service has the message,
@@ -41,6 +46,8 @@ pub mod op {
     /// What one running attempt uses, and one group (#119).
     pub const USED: u8 = 7;
     pub const GROUP_USED: u8 = 8;
+    /// Confirm one call of a sensitive tool (#128).
+    pub const CONFIRM: u8 = 9;
 }
 
 /// How an approval request ended.
@@ -107,6 +114,17 @@ pub enum Request<'a> {
         number: u16,
         resolution: Resolution,
     },
+    /// One call of tool `tool` (`pharos_proto::tool::number`): for `send`,
+    /// `bytes` to `addr:port` (#128).
+    Confirm {
+        number: u16,
+        name: &'a [u8],
+        task: u32,
+        tool: u8,
+        addr: [u8; 4],
+        port: u16,
+        bytes: u16,
+    },
     Revoked {
         outcome: Outcome,
         name: &'a [u8],
@@ -161,6 +179,20 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                 task: r.u32()?,
                 permission: Permission::read(&mut r)?,
                 for_ms: r.u32()?,
+            })
+        })(),
+        op::CONFIRM => (|| {
+            let number = r.u16()?;
+            let len = usize::from(r.u8()?);
+            let name = r.take(len).filter(|n| valid_name(n))?;
+            Some(Request::Confirm {
+                number,
+                name,
+                task: r.u32()?,
+                tool: r.u8()?,
+                addr: r.take(4)?.try_into().ok()?,
+                port: r.u16()?,
+                bytes: r.u16()?,
             })
         })(),
         op::RESOLVED => (|| {
@@ -252,6 +284,28 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.u32(task)?;
             permission.write(&mut w)?;
             w.u32(for_ms)?;
+        }
+        Request::Confirm {
+            number,
+            name,
+            task,
+            tool,
+            addr,
+            port,
+            bytes,
+        } => {
+            if !valid_name(name) {
+                return None;
+            }
+            w.bytes(&[VERSION, op::CONFIRM])?;
+            w.u16(number)?;
+            w.bytes(&[name.len() as u8])?;
+            w.bytes(name)?;
+            w.u32(task)?;
+            w.bytes(&[tool])?;
+            w.bytes(&addr)?;
+            w.u16(port)?;
+            w.u16(bytes)?;
         }
         Request::Resolved { number, resolution } => {
             w.bytes(&[VERSION, op::RESOLVED])?;
@@ -488,6 +542,15 @@ mod tests {
             Request::Resolved {
                 number: u16::MAX,
                 resolution: Resolution::Ended,
+            },
+            Request::Confirm {
+                number: 4,
+                name: &long,
+                task: u32::MAX,
+                tool: 2,
+                addr: [10, 0, 2, 2],
+                port: 47_000,
+                bytes: 248,
             },
             Request::Revoked {
                 outcome: Outcome::NotHeld,

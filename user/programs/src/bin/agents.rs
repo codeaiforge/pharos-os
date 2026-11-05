@@ -64,8 +64,11 @@
 //! checks the tool is one the attempt may use and the permission the call
 //! needs, then the budget, and audits before running it. `read_file` reads
 //! one granted file of the `files` namespace into the agent's buffer.
-//! `send` is sensitive and needs the user's confirmation, which comes with
-//! #128: until then it is refused.
+//! `send` is sensitive (#128): each call waits for the user's `yes` on the
+//! trusted console (`CONFIRM`, structured fields only), answered `PENDING`
+//! while the agent repeats the same call, sent once on a yes, and
+//! `REFUSED` otherwise (no answer within the approval timeout, `no`, or
+//! `trust` unreachable).
 
 #![no_std]
 #![no_main]
@@ -135,12 +138,11 @@ mod refusal {
     pub const OVER_GROUP_TOKENS: u16 = 256;
     pub const OVER_GROUP_NET: u16 = 512;
     /// Tool calls (#126): not a call or fitting no tool, a tool the attempt
-    /// may not use, granted files over `file_kb`, and a sensitive tool
-    /// without the user's confirmation.
+    /// may not use, and granted files over `file_kb`. A call the user did
+    /// not confirm is recorded with the answer (#128).
     pub const TOOL_MALFORMED: u16 = 1024;
     pub const TOOL_NOT_LISTED: u16 = 2048;
     pub const OVER_FILES: u16 = 4096;
-    pub const TOOL_UNCONFIRMED: u16 = 8192;
 }
 /// How often the runtime reads a running agent's CPU time, at most.
 const CPU_CHECK_US: u64 = 100_000;
@@ -822,6 +824,8 @@ struct Slot {
     held: Option<(Vec<u8>, Handle)>,
     /// Requests served this attempt (#119).
     requests: u32,
+    /// Its one sensitive call waiting for the user (#128).
+    confirm: Option<Confirm>,
 }
 
 struct Runtime {
@@ -859,6 +863,17 @@ struct Pending {
     permission: Permission,
     for_ms: u32,
     deadline: u64,
+    /// A tool call to confirm (#128), not a permission to approve.
+    call: bool,
+}
+
+/// A sensitive call waiting for the user, or answered and not yet taken
+/// (#128): its destination and payload, compared with each repeat.
+struct Confirm {
+    number: u16,
+    permission: Permission,
+    data: Vec<u8>,
+    answer: Option<bool>,
 }
 
 /// True if `entry` lets its agent ask for `p`.
@@ -1201,6 +1216,7 @@ impl Runtime {
             bucket: Bucket::full(limits.entry.budget.rate, now),
             held: None,
             requests: 0,
+            confirm: None,
         });
         // Every grant is recorded before it is given; none is given if a
         // record fails (#108).
@@ -1757,38 +1773,8 @@ impl Runtime {
                 if let Some(b) = buffer {
                     b.read_bytes(0, &mut payload);
                 }
-                let req = NetRequest::Send {
-                    ip: addr,
-                    port,
-                    payload: &payload,
-                };
-                let mut msg = [0u8; 256];
-                let n = net::encode(&req, &mut msg).ok_or(status::INTERNAL)?;
-                let agent = limits.entry.name;
-                let budget = limits.entry.budget;
-                self.charge(i, &budget, Some(p), |u, g| {
-                    u.send(&budget, g, now, u64::from(len))
-                })?;
-                let seq = self.intent(agent, id, action::NET_SEND, Some(p), net::NAME, b"")?;
-                // The request is sent from the reply buffer too.
-                let mut reply = [0u8; 256];
-                let code =
-                    match self
-                        .net_health
-                        .call(NET, &msg[..n], self.reply, &mut reply, NET_US)
-                    {
-                        Ok(Received::Message { len, .. }) if len >= 1 => reply[0],
-                        _ => status::INTERNAL,
-                    };
-                self.outcome(seq, agent, id, action::NET_SEND, code == net::OK, b"");
-                if code != net::OK {
-                    return Err(code);
-                }
-                if let Some(s) = self.slots[i].as_mut() {
-                    if !s.peers.contains(&(addr, port)) {
-                        s.peers.push((addr, port));
-                    }
-                }
+                let how = (action::NET_SEND, net::NAME, &b""[..]);
+                self.send_datagram(i, id, &limits, addr, port, &payload, how)?;
                 Ok(done(out))
             }
             Request::ReceiveFrom => {
@@ -1856,14 +1842,24 @@ impl Runtime {
                     .as_ref()
                     .is_some_and(|s| s.grants.allows(&p, now));
                 if !granted {
+                    // Revoked while the user was asked: that call ends.
+                    let waiting = self.slots[i]
+                        .as_ref()
+                        .and_then(|s| s.confirm.as_ref())
+                        .filter(|c| c.permission == p && c.answer.is_none())
+                        .map(|c| c.number);
+                    if let Some(number) = waiting {
+                        self.resolve(number, trust::Resolution::Refused);
+                    }
+                    if let Some(s) = self.slots[i].as_mut().filter(|_| waiting.is_some()) {
+                        s.confirm = None;
+                    }
                     self.note(i, refusal::NO_GRANT, Some(p));
                     return Err(status::NO_ACCESS);
                 }
                 if tools::sensitive(planned.tool) {
-                    // ponytail: confirmation on the trusted console is #128;
-                    // until then no sensitive tool runs.
-                    self.note(i, refusal::TOOL_UNCONFIRMED, Some(p));
-                    return Err(status::NO_ACCESS);
+                    let data = planned.data.to_vec();
+                    return self.confirmed_send(i, id, &limits, p, &data, out);
                 }
                 self.read_file(i, id, &limits, p, result_at, out)
             }
@@ -1884,6 +1880,57 @@ impl Runtime {
             | Request::Forget { .. } => Err(status::NO_ACCESS),
             Request::Attach { .. } => Err(status::BAD_REQUEST),
         }
+    }
+
+    /// One datagram from slot `i` on task `id` to `addr:port`, its grant
+    /// already checked: charged, audited as `how` (action, service,
+    /// detail), and sent on the runtime's port (`SEND_TO`, #109, and the
+    /// `send` tool, #128).
+    #[allow(clippy::too_many_arguments)]
+    fn send_datagram(
+        &mut self,
+        i: usize,
+        id: u32,
+        limits: &Limits,
+        addr: [u8; 4],
+        port: u16,
+        payload: &[u8],
+        how: (u8, &[u8], &[u8]),
+    ) -> Result<(), u8> {
+        let p = Permission::Net { addr, port };
+        let req = NetRequest::Send {
+            ip: addr,
+            port,
+            payload,
+        };
+        let mut msg = [0u8; 256];
+        let n = net::encode(&req, &mut msg).ok_or(status::INTERNAL)?;
+        let now = uptime();
+        let agent = limits.entry.name;
+        let budget = limits.entry.budget;
+        let len = payload.len() as u64;
+        self.charge(i, &budget, Some(p), |u, g| u.send(&budget, g, now, len))?;
+        let (act, service, detail) = how;
+        let seq = self.intent(agent, id, act, Some(p), service, detail)?;
+        // The request is sent from the reply buffer too.
+        let mut reply = [0u8; 256];
+        let code = match self
+            .net_health
+            .call(NET, &msg[..n], self.reply, &mut reply, NET_US)
+        {
+            Ok(Received::Message { len, .. }) if len >= 1 => reply[0],
+            _ => status::INTERNAL,
+        };
+        self.outcome(seq, agent, id, act, code == net::OK, detail);
+        if code != net::OK {
+            return Err(code);
+        }
+        if let Some(s) = self.slots[i].as_mut() {
+            if !s.peers.contains(&(addr, port)) {
+                s.peers.push((addr, port));
+            }
+        }
+        Ok(())
     }
 
     /// `read_file` (#127) for slot `i` on task `id`, its `file` permission
@@ -2082,8 +2129,7 @@ impl Runtime {
             refusal::OVER_GROUP_NET => b"over group net",
             refusal::TOOL_MALFORMED => b"tool malformed",
             refusal::TOOL_NOT_LISTED => b"tool not listed",
-            refusal::OVER_FILES => b"over files",
-            _ => b"tool unconfirmed",
+            _ => b"over files",
         };
         let agent = self.agent_of(task);
         self.refusal_event(&agent, task, p, why);
@@ -2247,6 +2293,7 @@ impl Runtime {
             permission: p,
             for_ms,
             deadline: now + self.approve_us,
+            call: false,
         });
         Asked::Pending
     }
@@ -2258,6 +2305,10 @@ impl Runtime {
         };
         let q = self.pending.remove(at);
         let agent = self.agent_of(q.task);
+        if q.call {
+            self.resolve_call(&agent, &q, how);
+            return;
+        }
         // An approval is given only once recorded; anything else is a
         // refusal, recorded when the trail can be.
         let approved = how == trust::Resolution::Granted
@@ -2302,6 +2353,123 @@ impl Runtime {
             number,
             resolution: how,
         });
+    }
+
+    /// Ends confirmation `q` (#128): a yes only once recorded, and either
+    /// way only for that call; the agent takes the answer on its next
+    /// repeat.
+    fn resolve_call(&mut self, agent: &[u8], q: &Pending, how: trust::Resolution) {
+        let yes = how == trust::Resolution::Granted
+            && self.permission_event(
+                agent,
+                q.task,
+                action::APPROVE,
+                q.permission,
+                outcome::OK,
+                b"user",
+            );
+        if !yes {
+            let why: &[u8] = match how {
+                trust::Resolution::Unanswered => b"no answer",
+                trust::Resolution::Ended => b"task ended",
+                _ => b"user",
+            };
+            self.permission_event(
+                agent,
+                q.task,
+                action::REFUSE,
+                q.permission,
+                outcome::REFUSED,
+                why,
+            );
+        }
+        for s in self.slots.iter_mut().flatten().filter(|s| s.task == q.task) {
+            if let Some(c) = s.confirm.as_mut().filter(|c| c.number == q.number) {
+                c.answer = Some(yes);
+            }
+        }
+        let resolution = match how {
+            trust::Resolution::Granted if !yes => trust::Resolution::Refused,
+            how => how,
+        };
+        tell_trust(&trust::Request::Resolved {
+            number: q.number,
+            resolution,
+        });
+    }
+
+    /// `send` from slot `i` on task `id` (#128), its grant checked: sent
+    /// once the user confirms this call; `PENDING` until then.
+    fn confirmed_send(
+        &mut self,
+        i: usize,
+        id: u32,
+        limits: &Limits,
+        p: Permission,
+        data: &[u8],
+        out: &mut [u8; 256],
+    ) -> Result<usize, u8> {
+        let Permission::Net { addr, port } = p else {
+            return Err(status::INTERNAL);
+        };
+        let state = self.slots[i]
+            .as_ref()
+            .and_then(|s| s.confirm.as_ref())
+            .map(|c| (c.permission == p && c.data == data, c.answer));
+        match state {
+            Some((true, None)) => return Err(agents::PENDING),
+            Some((false, None)) => return Err(status::BUSY),
+            Some((true, Some(yes))) => {
+                if let Some(s) = self.slots[i].as_mut() {
+                    s.confirm = None;
+                }
+                if !yes {
+                    return Err(agents::REFUSED);
+                }
+                self.net_health.ready()?;
+                let how = (action::TOOL, net::NAME, &b"send"[..]);
+                self.send_datagram(i, id, limits, addr, port, data, how)?;
+                return Ok(done(out));
+            }
+            // Answered, then a different call: asked anew.
+            Some((false, Some(_))) | None => {}
+        }
+        // One request waiting per agent (#117).
+        if self.pending.len() >= MAX_PENDING || self.pending.iter().any(|q| q.task == id) {
+            return Err(status::BUSY);
+        }
+        self.next_request = self.next_request.wrapping_add(1).max(1);
+        let number = self.next_request;
+        let asked = tell_trust(&trust::Request::Confirm {
+            number,
+            name: limits.entry.name,
+            task: id,
+            tool: tool::number::SEND,
+            addr,
+            port,
+            bytes: data.len() as u16,
+        });
+        // `trust` unreachable means no (D-018 item 4).
+        if !asked {
+            return Err(agents::REFUSED);
+        }
+        self.pending.push(Pending {
+            number,
+            task: id,
+            permission: p,
+            for_ms: 0,
+            deadline: uptime() + self.approve_us,
+            call: true,
+        });
+        if let Some(s) = self.slots[i].as_mut() {
+            s.confirm = Some(Confirm {
+                number,
+                permission: p,
+                data: data.to_vec(),
+                answer: None,
+            });
+        }
+        Err(agents::PENDING)
     }
 
     /// Requests past their deadline are refused; returns the wait until

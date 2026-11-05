@@ -1351,7 +1351,9 @@ const AGENTS_NET_SCRIPT: &[console::Step] = &[
 /// `10.0.2.2:47002` is not askable: never a prompt.
 const AGENTS_NET_REFUSED: &[&str] = &["approve #2"];
 /// Tool calls (#126, #127): `reader` (task 1) asks for `notes.txt`; once
-/// approved, the user revokes `report.txt`.
+/// approved, the user revokes `report.txt`. Then its `send` calls (#128):
+/// confirmed, refused, left unanswered, and ended by revoking the
+/// destination.
 const TOOLS_TEST: &str = "tools";
 const TOOLS_SCRIPT: &[console::Step] = &[
     ("trust: ready", ""),
@@ -1362,9 +1364,31 @@ const TOOLS_SCRIPT: &[console::Step] = &[
     ),
     ("approve #1: granted", "revoke reader file report.txt\n"),
     ("revoked file report.txt from reader", ""),
+    (
+        "confirm #2: reader task 1 wants to send 5 bytes to 10.0.2.2:47000? (yes 2 / no 2)",
+        "yes 2\n",
+    ),
+    ("confirm #2: confirmed", ""),
+    (
+        "confirm #3: reader task 1 wants to send 5 bytes to 10.0.2.2:47000? (yes 3 / no 3)",
+        "no 3\n",
+    ),
+    ("confirm #3: refused", ""),
+    (
+        "confirm #4: reader task 1 wants to send 5 bytes to 10.0.2.2:47000? (yes 4 / no 4)",
+        "",
+    ),
+    ("confirm #4: no answer; refused", ""),
+    (
+        "confirm #5: reader task 1 wants to send 5 bytes to 10.0.2.2:47000? (yes 5 / no 5)",
+        "revoke reader net 10.0.2.2:47000\n",
+    ),
+    ("revoked net 10.0.2.2:47000 from reader", ""),
+    ("confirm #5: refused", ""),
 ];
-/// Nothing else is asked: `secrets.txt` is not askable.
-const TOOLS_REFUSED: &[&str] = &["approve #2"];
+/// Nothing else is asked (`secrets.txt` is not askable, and the call
+/// made while one waits is `BUSY`), and no payload reaches the console.
+const TOOLS_REFUSED: &[&str] = &["approve #2", "confirm #6", "hello", "other"];
 /// The hostile agent (#110): its four approval requests fill the queue
 /// (nobody answers; they end with its task).
 const HOSTILE_TEST: &str = "hostile";
@@ -1688,7 +1712,10 @@ fn tools_audit(image: &Path) -> Result<()> {
         "client 3 Event refuse reader task 1/1 file secrets.txt  outcome 2 no grant",
         "client 3 Event refuse reader task 1/1   outcome 2 tool malformed",
         "client 3 Event refuse reader task 1/1   outcome 2 malformed",
-        "client 3 Event refuse reader task 1/1 net 10.0.2.2:47000  outcome 2 tool unconfirmed",
+        "client 3 Intent tool reader task 1/1 net 10.0.2.2:47000 net outcome 0 send",
+        "client 3 Event approve reader task 1/1 net 10.0.2.2:47000  outcome 1 user",
+        "client 3 Event refuse reader task 1/1 net 10.0.2.2:47000  outcome 2 no answer",
+        "client 3 Event revoke reader task 1/1 net 10.0.2.2:47000  outcome 1 user",
         "client 3 Event refuse reader task 1/1 file big.txt  outcome 2 over files",
         "client 3 Event refuse plain task 2/1   outcome 2 tool not listed",
         "client 3 Event approve reader task 1/1 file notes.txt",
@@ -1706,6 +1733,11 @@ fn tools_audit(image: &Path) -> Result<()> {
         return Err(format!(
             "{outcomes} outcomes of reader's tool calls, expected at least 2"
         ));
+    }
+    // Refused by the user, then ended by the revocation (#128).
+    let refused = count("client 3 Event refuse reader task 1/1 net 10.0.2.2:47000  outcome 2 user");
+    if refused != 2 {
+        return Err(format!("{refused} refused confirmations, expected 2"));
     }
     // A refused call is recorded once, by its own kind: never also as a
     // request not for agents.

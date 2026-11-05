@@ -73,6 +73,8 @@ struct Trust {
     channel: Option<Handle>,
     /// Approval requests shown and not yet resolved.
     open: [u16; 4],
+    /// Which of them are confirmations of a tool call (#128).
+    confirms: [u16; 4],
     /// For `call`s to the audit service.
     reply: Option<Handle>,
     agents: [Option<Agent>; SLOTS as usize],
@@ -337,19 +339,75 @@ impl Trust {
                     let _ = delete(cap);
                 }
             }
+            Ok(Request::Confirm {
+                number,
+                name,
+                task,
+                tool,
+                addr,
+                port,
+                bytes,
+            }) if badge == RUNTIME && number != 0 => {
+                if let Some(free) = self.open.iter_mut().find(|n| **n == 0) {
+                    *free = number;
+                }
+                if let Some(free) = self.confirms.iter_mut().find(|n| **n == 0) {
+                    *free = number;
+                }
+                let mut d = [[0u8; 20]; 3];
+                let [a, b, c] = &mut d;
+                let n = decimal(u64::from(number), a);
+                let id = decimal(u64::from(task), b);
+                let size = decimal(u64::from(bytes), c);
+                let mut t = [0u8; pharos_proto::permission::TEXT];
+                // Only `send` is sensitive; its destination as `net` types it.
+                let dest = &Permission::Net { addr, port }.text(&mut t)[4..];
+                let (what, size, to, dest): (&[u8], &[u8], &[u8], &[u8]) =
+                    if tool == pharos_proto::tool::number::SEND {
+                        (b" wants to send ", size, b" bytes to ", dest)
+                    } else {
+                        (b" wants to use an unknown tool", b"", b"", b"")
+                    };
+                self.say(&[
+                    b"confirm #",
+                    n,
+                    b": ",
+                    name,
+                    b" task ",
+                    id,
+                    what,
+                    size,
+                    to,
+                    dest,
+                    b"? (yes ",
+                    n,
+                    b" / no ",
+                    n,
+                    b")",
+                ]);
+                if cap != 0 {
+                    let _ = delete(cap);
+                }
+            }
             Ok(Request::Resolved { number, resolution }) if badge == RUNTIME => {
                 for open in self.open.iter_mut().filter(|n| **n == number) {
                     *open = 0;
                 }
+                let confirm = self.confirms.contains(&number);
+                for c in self.confirms.iter_mut().filter(|n| **n == number) {
+                    *c = 0;
+                }
                 let mut a = [0u8; 20];
                 let n = decimal(u64::from(number), &mut a);
                 let what: &[u8] = match resolution {
+                    trust::Resolution::Granted if confirm => b"confirmed",
                     trust::Resolution::Granted => b"granted",
                     trust::Resolution::Refused => b"refused",
                     trust::Resolution::Unanswered => b"no answer; refused",
                     trust::Resolution::Ended => b"the task ended",
                 };
-                self.say(&[b"approve #", n, b": ", what]);
+                let label: &[u8] = if confirm { b"confirm #" } else { b"approve #" };
+                self.say(&[label, n, b": ", what]);
                 if cap != 0 {
                     let _ = delete(cap);
                 }
@@ -476,6 +534,7 @@ fn main(_: u64) -> u64 {
         runtime: None,
         channel: None,
         open: [0; 4],
+        confirms: [0; 4],
         reply: endpoint_create().ok(),
         agents: [None; SLOTS as usize],
     };

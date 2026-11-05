@@ -93,6 +93,11 @@ pub const NO_SESSION: u8 = status::OWN;
 /// Refused: the audit trail could not record the action (#108, D-012
 /// item 11).
 pub const NO_AUDIT: u8 = status::OWN + 1;
+/// `TOOL` (#128): a sensitive call waits for the user's answer; send the
+/// same call again.
+pub const PENDING: u8 = status::OWN + 2;
+/// `TOOL` (#128): the user refused the call, or did not answer in time.
+pub const REFUSED: u8 = status::OWN + 3;
 
 /// Largest datagram an agent sends or receives.
 pub const MAX_DATAGRAM: u32 = crate::net::MAX_PAYLOAD as u32;

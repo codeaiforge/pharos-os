@@ -70,10 +70,13 @@
 //!   reads its granted `report.txt`, and is refused another file
 //!   (`NO_ACCESS`), a path, text that is not a call, an unknown tool
 //!   (`BAD_REQUEST`), a call past its buffer (`NO_BUFFER`), and `big.txt`
-//!   past its `file_kb` (`OVER_LIMIT`); `send` is refused, unconfirmed or
-//!   not granted (`NO_ACCESS`); `notes.txt` is read once the user approves
-//!   it; `report.txt` is refused once the user revokes it; completes with
-//!   `tools ok`.
+//!   past its `file_kb` (`OVER_LIMIT`); `send` to a destination not
+//!   granted is refused (`NO_ACCESS`); `notes.txt` is read once the user
+//!   approves it; `report.txt` is refused once the user revokes it. Then
+//!   `send` to the echo server (#128): `PENDING`, another call `BUSY` while
+//!   it waits, sent once the user confirms (and echoed); then refused by
+//!   the user, unanswered (`REFUSED`), and ended by revoking the
+//!   destination (`NO_ACCESS`); completes with `tools ok`.
 //! - `tools-plain` (agent `plain`): holds `report.txt` but no tool, so
 //!   `read_file` is refused; completes with `plain ok`.
 
@@ -294,17 +297,8 @@ impl Agent {
         if self.call(&past, &mut [0; 256]).0 != status::NO_BUFFER {
             return self.fail(b"a call past the buffer was not refused");
         }
-        let send = |to: &str| {
-            let call = [
-                &br#"{"name":"send","arguments":{"to":""#[..],
-                to.as_bytes(),
-                br#"","data":"secrets"}}"#,
-            ]
-            .concat();
-            self.tool(&call).0
-        };
-        if send("10.0.2.2:47000") != status::NO_ACCESS || send("10.0.2.2:1") != status::NO_ACCESS {
-            return self.fail(b"send ran without the user's confirmation");
+        if self.send_tool("10.0.2.2:1", "secrets") != status::NO_ACCESS {
+            return self.fail(b"send to a destination not granted was not refused");
         }
         if self.read_file("big.txt").0 != status::OVER_LIMIT {
             return self.fail(b"a file past file_kb was not refused");
@@ -323,11 +317,77 @@ impl Agent {
         for _ in 0..300 {
             match self.read_file("report.txt").0 {
                 status::OK => sleep(100_000),
-                status::NO_ACCESS => return self.complete(b"tools ok"),
+                status::NO_ACCESS => return self.confirm(),
                 _ => return self.fail(b"reading report.txt failed"),
             }
         }
         self.fail(b"report.txt was not revoked")
+    }
+
+    /// `send` as a model writes it.
+    fn send_tool(&self, to: &str, data: &str) -> u8 {
+        let call = [
+            &br#"{"name":"send","arguments":{"to":""#[..],
+            to.as_bytes(),
+            br#"","data":""#,
+            data.as_bytes(),
+            br#""}}"#,
+        ]
+        .concat();
+        self.tool(&call).0
+    }
+
+    /// Repeats `send` to the host echo server while it is pending, at most
+    /// 30 s: how it ended.
+    fn send_confirmed(&self, data: &str) -> u8 {
+        for _ in 0..300 {
+            match self.send_tool("10.0.2.2:47000", data) {
+                agents::PENDING => sleep(100_000),
+                code => return code,
+            }
+        }
+        agents::PENDING
+    }
+
+    /// The `tools` kernel's `send` calls (#128), the runner answering: the
+    /// first confirmed (and echoed), the next refused, then unanswered,
+    /// then ended by revoking the destination.
+    fn confirm(&self) -> u64 {
+        if self.send_tool("10.0.2.2:47000", "hello") != agents::PENDING {
+            return self.fail(b"send was not asked for");
+        }
+        if self.send_confirmed("hello") != status::OK {
+            return self.fail(b"the confirmed send was not sent");
+        }
+        let echoed = (0..20).any(|_| match self.receive_from() {
+            Ok((_, bytes)) => bytes == b"hello",
+            Err(_) => {
+                sleep(100_000);
+                false
+            }
+        });
+        if !echoed {
+            return self.fail(b"the confirmed datagram was not echoed");
+        }
+        if self.send_confirmed("hello") != agents::REFUSED {
+            return self.fail(b"a send the user refused was not refused");
+        }
+        // Nobody answers this one for 5 s: another call meanwhile is BUSY.
+        if self.send_tool("10.0.2.2:47000", "hello") != agents::PENDING
+            || self.send_tool("10.0.2.2:47000", "other") != status::BUSY
+        {
+            return self.fail(b"a second call was not BUSY while one waits");
+        }
+        if self.send_confirmed("hello") != agents::REFUSED {
+            return self.fail(b"an unanswered send was not refused");
+        }
+        if self.send_confirmed("hello") != status::NO_ACCESS {
+            return self.fail(b"a send waiting when its destination was revoked was not refused");
+        }
+        if self.send_tool("10.0.2.2:47000", "hello") != status::NO_ACCESS {
+            return self.fail(b"send after the revocation was not refused");
+        }
+        self.complete(b"tools ok")
     }
 
     fn ask(&self, permission: Permission, for_ms: u32) -> Option<Asked> {
