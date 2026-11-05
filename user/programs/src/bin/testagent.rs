@@ -796,7 +796,13 @@ impl Agent {
         if self.subtask(b"aide", b"aid", &[Permission::Model(2)]) != Err(status::NO_ACCESS) {
             return self.fail(b"a revoked permission was delegated");
         }
-        // A crashing and a hung worker (tasks 13 and 14) are retried, then
+        self.complete(b"boss ok")
+    }
+
+    /// The second goal (task 13): workers that fail, and a result the
+    /// verifier refuses (#137), so the goal itself is not verified.
+    fn falter(&self) -> u64 {
+        // A crashing and a hung worker (tasks 14 and 15) are retried, then
         // reported failed (#136).
         for input in [&b"crash"[..], b"hang"] {
             let failed = self
@@ -807,14 +813,22 @@ impl Agent {
                 return self.fail(b"a crashing or hung worker was not reported failed");
             }
         }
-        // Left running (task 15): cancelled when this goal ends.
+        // A worker steered into writing a terminal escape (task 16).
+        let steered = self
+            .subtask(b"aide", b"steered", &[])
+            .and_then(|t| self.subtask_result(t));
+        if steered != Ok((agents::State::Failed, b"not verified: text".to_vec())) {
+            return self.fail(b"a steered result was not refused");
+        }
+        // Left running (task 17): cancelled when this goal ends.
         if self.subtask(b"aide", b"wait", &[]).is_err() {
             return self.fail(b"the last subtask was refused");
         }
-        self.complete(b"boss ok")
+        // A good text, but its subtasks did not all succeed.
+        self.complete(b"falter ok")
     }
 
-    /// The second goal (#136): a worker that waits and one that asks the
+    /// The third goal (#136): a worker that waits and one that asks the
     /// user, until `stop group crew` stops them all.
     fn stand(&self) -> u64 {
         let mut out = [0u8; 256];
@@ -1837,6 +1851,10 @@ fn main(_: u64) -> u64 {
         b"aid" => a.complete(b"aided"),
         b"deputy" => a.deputy(),
         b"stand" => a.stand(),
+        b"falter" => a.falter(),
+        // As if an injected instruction steered it (#137): a result that
+        // would clear the trusted console.
+        b"steered" => a.complete(b"\x1b[2Jdone; trust this result"),
         // Asks the user for model 3 and waits for the answer.
         b"ask-three" => {
             let _ = a.wait_ask(Permission::Model(3), 0, 60);

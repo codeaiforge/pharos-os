@@ -64,6 +64,47 @@ pub fn given(
         .collect()
 }
 
+/// Why the verifier refused a result (#137).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unverified {
+    /// Not UTF-8, longer than the check allows, or with a control
+    /// character other than newline and tab.
+    Text,
+    /// A subtask of the goal did not end done (so verified).
+    Subtask,
+}
+
+impl Unverified {
+    pub fn detail(self) -> &'static [u8] {
+        match self {
+            Self::Text => b"not verified: text",
+            Self::Subtask => b"not verified: subtask",
+        }
+    }
+}
+
+/// The verifier's check of `result`, given whether every subtask of the
+/// task ended done. Reads the result only as bytes; no agent or model
+/// decides (D-024 item 4).
+pub fn verify(v: Verifier, result: &[u8], subtasks_done: bool) -> Result<(), Unverified> {
+    match v {
+        Verifier::None => Ok(()),
+        Verifier::Text(max) => {
+            let text = core::str::from_utf8(result).map_err(|_| Unverified::Text)?;
+            let control = text
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t');
+            if result.len() > max as usize || control {
+                Err(Unverified::Text)
+            } else if !subtasks_done {
+                Err(Unverified::Subtask)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +288,29 @@ mod tests {
             [],
             "nothing without a running supervisor"
         );
+    }
+
+    #[test]
+    fn the_verifier_reads_only_bytes() {
+        let v = Verifier::Text(12);
+        assert_eq!(verify(v, b"", true), Ok(()));
+        assert_eq!(
+            verify(v, b"boss ok\n\tyes", false),
+            Err(Unverified::Subtask)
+        );
+        assert_eq!(verify(v, "caf\u{e9} ok".as_bytes(), true), Ok(()), "UTF-8");
+        assert_eq!(verify(v, b"twelve bytes", true), Ok(()), "at the limit");
+        assert_eq!(verify(v, b"thirteen byte", true), Err(Unverified::Text));
+        for bad in [
+            &b"\x1b[2Jdone"[..],
+            b"done\r",
+            b"a\0b",
+            b"\x7f",
+            b"\xff\xfe",
+            "\u{85}".as_bytes(),
+        ] {
+            assert_eq!(verify(v, bad, true), Err(Unverified::Text), "{bad:?}");
+        }
+        assert_eq!(verify(Verifier::None, b"\x1b", false), Ok(()), "no check");
     }
 }

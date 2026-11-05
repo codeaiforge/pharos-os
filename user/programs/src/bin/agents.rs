@@ -1838,6 +1838,29 @@ impl Runtime {
                 if let Some(b) = buffer {
                     b.read_bytes(0, &mut result);
                 }
+                // The group's verifier first (#137): a refused result ends
+                // the task failed, and the decision is recorded before.
+                if let Some(v) = self.verifier(limits.entry) {
+                    let subtasks_done = self
+                        .tasks
+                        .list
+                        .iter()
+                        .filter(|c| c.parent == id)
+                        .all(|c| c.state == State::Done);
+                    let checked = groups::verify(v, &result, subtasks_done);
+                    let (how, detail) = match checked {
+                        Ok(()) => (outcome::OK, &b"verified"[..]),
+                        Err(why) => (outcome::REFUSED, why.detail()),
+                    };
+                    let agent = limits.entry.name;
+                    self.verify_event(agent, id, how, detail).ok_or(NO_AUDIT)?;
+                    if checked.is_err() {
+                        stored(self.tasks.finish(&mut self.store, t, State::Failed, detail))?;
+                        self.end(i, Ending::Finished);
+                        self.event(id, b"not verified", None);
+                        return Ok(done(out));
+                    }
+                }
                 stored(self.tasks.finish(&mut self.store, t, State::Done, &result))?;
                 self.end(i, Ending::Finished);
                 self.event(id, b"completed", None);
@@ -2599,6 +2622,36 @@ impl Runtime {
     }
 
     /// The agent name of task `id`.
+    /// The verifier of the coordinated group `entry` belongs to (#137).
+    fn verifier(&self, entry: &Entry) -> Option<Verifier> {
+        let member = |n: &[u8]| {
+            self.agents
+                .iter()
+                .find(|l| l.entry.name == n)
+                .map(|l| l.entry)
+        };
+        self.groups
+            .iter()
+            .find(|g| !entry.budget.group.is_empty() && g.name == entry.budget.group)
+            .filter(|g| groups::coordinated(g, member))
+            .map(|g| g.verifier)
+    }
+
+    fn verify_event(&self, actor: &[u8], task: u32, how: u8, detail: &[u8]) -> Option<u64> {
+        self.audit(&Record {
+            kind: Kind::Event,
+            refers: 0,
+            actor,
+            task,
+            attempt: self.attempt(task),
+            action: action::VERIFY,
+            permission: None,
+            service: b"",
+            outcome: how,
+            detail,
+        })
+    }
+
     /// What subtask `id` gets from its supervisor (#135): each delegated
     /// permission its parent's running attempt still holds at `now`, with
     /// that grant's deadline, and not revoked from `id`.

@@ -77,7 +77,9 @@ pub mod action {
     pub const TOOL: u8 = 15;
     /// A message to another agent (#133): kind and length as detail.
     pub const MESSAGE: u8 = 16;
-    pub const LAST: u8 = MESSAGE;
+    /// The verifier's decision on a result (#137), its reason as detail.
+    pub const VERIFY: u8 = 17;
+    pub const LAST: u8 = VERIFY;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -98,6 +100,7 @@ pub mod action {
             "usage",
             "tool",
             "message",
+            "verify",
         ]
         .get(usize::from(code))
         .copied()

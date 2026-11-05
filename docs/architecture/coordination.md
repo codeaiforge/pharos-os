@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#132),** with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. **Implemented:** channels (#133), groups and subtasks (#134), delegation (#135), failure and stop handling (#136). To be built by: the verifier (#137), and the isolation and confused-deputy tests (#138).
+**Planned. Design approved by the maintainer on 2026-11-05 (#132),** with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. **Implemented:** channels (#133), groups and subtasks (#134), delegation (#135), failure and stop handling (#136), the verifier (#137). To be built by: the isolation and confused-deputy tests (#138).
 
 ## 2. Context
 
@@ -66,6 +66,7 @@ What M3.7 builds on:
 - **A compiled-in check, named by the group:** `text <max bytes>` (the result is UTF-8 of at most that many bytes, with no control characters but newline and tab, and every subtask of the goal is done and passed the same check). The table of checks is reviewed code; a group with no verifier cannot have a supervisor.
 - **Applied at `COMPLETE`:** a supervisor's or worker's `COMPLETE` is checked first; one that fails ends its task failed with `not verified` instead of done, so a refused result never counts. Each decision is recorded, new action `verify` (17), with the outcome.
 - **Not an agent:** no model or agent text decides; the check reads the result only as bytes.
+- *Implemented (#137):* `pharos_programs::groups::verify` and the audit action `verify` (17). At `COMPLETE` by an agent whose entry names a coordinated group, the runtime checks the result against the group's `Verifier::Text(max)`: UTF-8, at most `max` bytes, no control character but newline and tab (so no terminal escape reaches a supervisor or the console as a result), and every subtask of the task ended `done`. Since a member's result is done only if verified, "done" means "verified". The decision is recorded first (`Event verify … outcome 1 verified`, or `outcome 2 not verified: text` or `not verified: subtask`), else `NO_AUDIT` and nothing ends; a refused result ends the task `failed` with that reason as its result, never retried, and a goal's end then cancels its open subtasks (#136). The test group `crew` checks `text 4096`.
 
 ## 4. Security
 

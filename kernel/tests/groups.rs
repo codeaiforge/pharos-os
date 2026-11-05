@@ -3,8 +3,10 @@
 //! `permissions` kernel does, and `agentclient` mode 11: a `boss` task,
 //! which gives subtasks to `helper` and `aide` in group `crew` and
 //! delegates model 2 to `aide` (#135); the console script revokes it from
-//! `boss`; crashing and hung workers fail, a goal's end cancels its last
-//! subtask, and `stop group crew` ends a second goal (#136). Afterwards
+//! `boss`. A second goal has crashing and hung workers fail and a steered
+//! worker's result refused by the verifier, so it is not verified, and its
+//! end cancels its last subtask (#136, #137); `stop group crew` ends a
+//! third. Afterwards
 //! the runner checks the audit trail. Runs under UEFI
 //! (D-009).
 
@@ -71,6 +73,7 @@ fn run(t: &mut TestRun) {
     }
     for step in [
         "a supervisor completes a goal through its workers, and only them",
+        "a goal whose subtasks failed is not verified",
         "a goal's end cancels its open subtasks",
         "stop group ends the group's goal, its subtasks, and its request",
     ] {

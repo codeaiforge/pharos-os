@@ -1403,10 +1403,10 @@ const GROUPS_SCRIPT: &[console::Step] = &[
     ),
     ("approve #1: refused", "revoke boss model 2\n"),
     ("revoked model 2 from boss", ""),
-    // #136: the second goal's `aide` (task 18) asks; the user stops the
+    // #136: the third goal's `aide` (task 20) asks; the user stops the
     // group instead of answering.
     (
-        "approve #2: aide task 18 wants model 3 for this task? (yes 2 / no 2)",
+        "approve #2: aide task 20 wants model 3 for this task? (yes 2 / no 2)",
         "stop group crew\n",
     ),
     ("stopped group crew", ""),
@@ -1987,11 +1987,11 @@ fn groups_audit(image: &Path) -> Result<()> {
     for (want, n) in [
         (
             "client 3 Intent submit boss task 1/1  agents outcome 0 helper",
-            11,
+            9,
         ),
         (
             "client 3 Intent submit boss task 1/1  agents outcome 0 aide",
-            3,
+            2,
         ),
         (
             "client 3 Event refuse boss task 1/1   outcome 2 not in group",
@@ -2012,17 +2012,29 @@ fn groups_audit(image: &Path) -> Result<()> {
             1,
         ),
         ("from boss task 1", 2),
-        // #136: the goal's end cancels its last subtask; the user stops
-        // the second goal's group.
+        // #136: the second goal's end cancels its last subtask; the user
+        // stops the third goal's group.
+        ("Intent submit boss task 13/1", 4),
         (
-            "client 3 Intent cancel aide task 15/1  agents outcome 0 goal ended",
+            "client 3 Intent cancel aide task 17/1  agents outcome 0 goal ended",
             1,
         ),
         (
             "client 2 Event stop user task 0/0  trust outcome 1 group crew",
             1,
         ),
-        ("Intent submit boss task 16/1", 2),
+        ("Intent submit boss task 18/1", 2),
+        // #137: completed results checked; two refused.
+        ("Event verify boss task 1/1   outcome 1 verified", 1),
+        (
+            "Event verify aide task 16/1   outcome 2 not verified: text",
+            1,
+        ),
+        (
+            "Event verify boss task 13/1   outcome 2 not verified: subtask",
+            1,
+        ),
+        ("outcome 2 not verified", 2),
     ] {
         if count(want) != n {
             return Err(format!(

@@ -110,7 +110,7 @@ Clients are told apart by badge: agent slots, and control clients that `init`'s 
 | `CHECKPOINT` | agent | stores up to 64 KiB from its buffer as the task's checkpoint; `OK` only after the store committed | 10 s |
 | `BEGIN` | agent | starts a consequential operation with a 16-byte idempotency key: `GO`, `DONE` with the recorded result, or `UNKNOWN` | 10 s |
 | `END` | agent | records the operation's result (up to 64 bytes) | 10 s |
-| `COMPLETE`, `FAIL` | agent | ends the task with a result (up to 4 KiB) or a reason | 10 s |
+| `COMPLETE`, `FAIL` | agent | ends the task with a result (up to 4 KiB) or a reason; in a coordinated group the result is first checked by the group's verifier, and one it refuses ends the task failed with `not verified: text` or `not verified: subtask` (#137, [coordination.md](coordination.md#the-verifier-137)) | 10 s |
 | `INFER`, `NEXT`, `CANCEL_INFER` | agent | inference through the runtime: the prompt is copied from the agent's buffer into the runtime's own buffer at the inference service; models only from the agent's manifest | as `inference` |
 | `LOG` | agent | one console line, at most 200 bytes, printable characters only | 1 s |
 | `DATA_PUT`, `DATA_GET` | agent | writes or reads one of the agent's own files (a name as agent names are, up to 64 KiB, through its buffer), kept by the runtime at `data/<agent>/<name>` in its store namespace; needs `data write` or `data read` (#105) | 10 s |
