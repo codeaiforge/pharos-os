@@ -783,6 +783,34 @@ Two system calls per direction plus two task switches and two address-space swit
 
 **Consequences.** The runtime gains a parser of untrusted text, so its correctness is part of the trusted base; the fuzz test and corpus guard it. An agent can still call a tool without any model, with any text it likes: the checks are the same, which is the point. The details (the operation's fields, the schemas, the size limits, the `files` namespace number, the confirmation timeout) are in the design (#124).
 
+### D-024: Agent communication and coordination
+
+- **Status:** Accepted
+- **Needed by:** M3.7
+- **Date accepted:** 2026-11-05 (issue #131)
+
+**Context.** M3.7 lets agents communicate only through granted channels, and groups of agents work toward a shared goal under explicit authority and budgets: no channel means no communication, a compromised agent cannot gain another's capabilities through messaging, joining a group grants nothing, delegation only narrows, a group stays within its budget, a failed or timed-out worker is handled, stopping a group leaves no running work, and results are checked by a non-agent verifier before they count as done.
+
+**Evidence (2026-11-05, issue #131):**
+- **Agents cannot reach each other.** Each holds one capability, `SEND` on the agent runtime badged with its slot (D-018, M3.3); the `hostile` and `injection` kernels show it holds nothing else.
+- **The runtime already mediates and records everything an agent does:** grants per task attempt, revocable at once (D-012), budgets and budget groups (D-022), validated tool calls (D-023), and refusals recorded once per kind.
+- **Tasks are durable,** with up to 4 dependencies and recovery after a restart (M3.3), but only control clients submit them; no agent can start work for another.
+- **Delegation only narrows** (D-018 item 3); runtime grants may carry a deadline (D-012 item 9).
+
+**Options.** Channels: through the runtime, granted by policy, or kernel endpoints handed to agents; messages that carry data only, or also a permission. Coordination: a supervisor agent submitting subtasks, or fixed pipelines in policy. Delegation: a subset of the supervisor's grants, or nothing. The verifier: compiled-in checks, the user, or a separate service.
+
+**Evaluation criteria.** No path for authority between agents except explicit, narrowing, recorded delegation; the runtime can log, budget, revoke, and stop every conversation; no agent or model text on the trusted console; least new trusted code; no kernel change.
+
+**Decision (the maintainer chose each recommendation):**
+
+1. **Channels go through the runtime and carry data only.** The policy table grants a channel from one named agent to another; agents send and receive typed, bounded messages (D-019) with new runtime requests, as they use every other service. A message never carries a permission or capability. Messages are logged per policy, charged to budgets, and a channel is revocable while the agents run. Rejected: messages that may carry a grant (data and authority on one path, which is the leak M3.7 must prevent); kernel endpoints between agents (the runtime could no longer log, budget, revoke, or stop a conversation, and each agent would hold more than one capability).
+2. **A supervisor submits subtasks to its workers.** A group in the policy table names its supervisor, its workers, its budget group (D-022), and its verifier. The supervisor submits subtasks (durable tasks, M3.3) for its workers through the runtime and reads their results; a worker gets only its own entry. Joining a group grants nothing. Rejected: fixed pipelines in policy (no agent could adapt the plan, and the roadmap asks for coordination patterns such as supervisor and worker).
+3. **A supervisor may pass a subset of its own grants to a subtask.** It names permissions it holds when it submits; the subtask gets them on top of its worker's entry, never more than the supervisor holds then, recorded in the audit trail, ending with the subtask, and revoked when the supervisor's grant is revoked. Rejected: no delegation (a supervisor could not share a granted file with a worker, and delegation is an M3.7 deliverable).
+4. **The verifier is a compiled-in check in the runtime,** named by the group (for example: the result is text within a size, and every subtask it depends on is done and verified). Its decision is recorded; a result it refuses does not count, and the goal is not done. Rejected: the user confirming results (an agent's text would reach the trusted console); a verifier service (a new process, interface, and trust boundary now, for checks the runtime can make).
+5. **Failure and stop:** a worker's failed or timed-out subtask is retried within its attempts (M3.3) and then reported to the supervisor as failed; stopping a group, from the trusted console or because its goal failed, stops its supervisor and workers and ends their sessions, pending requests, and subtasks.
+
+**Consequences.** The runtime gains message queues and group state, kept in its store as tasks are, and stays the single place where agents meet. A supervisor's plan is untrusted, like any agent output: it can only start workers its group names, with authority it holds. The details (message fields and sizes, queue limits, the subtask request, the verifier checks) are in the design (#132).
+
 ## Open and proposed decisions
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.

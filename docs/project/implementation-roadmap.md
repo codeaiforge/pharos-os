@@ -443,7 +443,7 @@ Ordering notes:
 
 ### M3.7 — Agent communication and coordination
 
-**Status: Current.** M3.6 gives it agents that use tools only through validated calls and their grants, with the user confirming each `send`. First step: its decision and issues.
+**Status: Current.** M3.6 gives it agents that use tools only through validated calls and their grants, with the user confirming each `send`. D-024 accepted (#131): channels through the runtime, granted by policy, carrying data only; a supervisor submits subtasks to the workers its group names; it may pass a subset of its own grants to a subtask; a compiled-in verifier checks results before a goal counts as done. Next: the design, `docs/architecture/coordination.md` (#132).
 
 - **Where it runs (D-020):** Pharos; codecs and group-state logic host-tested.
 - **Objective and scope:** Agents communicate only through granted channels, and groups of agents work toward a shared goal under explicit authority and budgets.
@@ -639,7 +639,7 @@ Ordering notes:
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part and D-018 on 2026-11-01; D-012 (final, with D-018) on 2026-11-03; D-022 on 2026-11-04; D-023 on 2026-11-05; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part and D-018 on 2026-11-01; D-012 (final, with D-018) on 2026-11-03; D-022 on 2026-11-04; D-023 and D-024 on 2026-11-05; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -665,6 +665,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-013 | Scheduling model | M2.6 | **Accepted:** preemptive round-robin on one CPU, 10 ms slice, kernel threads on guarded stacks, no lock held across a switch; amended by D-022 with three scheduling classes |
 | D-022 | Resource accounting and limits | M3.5 | **Accepted** (#112): three fixed scheduling classes (trusted, services, agents), a higher class always first; CPU time counted per process by the kernel; pages, processes, and handles carved from the creator's; over a limit refused, requests over the rate throttled, an attempt over its CPU budget stopped; groups named in the policy table; the runtime enforces CPU per attempt, storage, network, inference, and requests |
 | D-023 | Tool interface and tool-call validation | M3.6 | **Accepted** (#123): the runtime parses the model's text as a strict JSON subset with a fuzzed `no_std` parser; tools compiled in, one `TOOL` operation, the policy entry listing an agent's tools; `file <name>` grants one file of a read-only `files` namespace; `read_file` and `send`; a sensitive tool confirmed per call on the trusted console, from structured fields |
+| D-024 | Agent communication and coordination | M3.7 | **Accepted** (#131): channels through the runtime, granted by policy, carrying data only; groups in policy with a supervisor submitting subtasks to its workers; delegation of a subset of the supervisor's grants to a subtask, recorded and revoked with the source; a compiled-in verifier before a goal is done |
 
 ## Next milestone
 
