@@ -106,13 +106,20 @@ static PAUSING: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::n
 /// drops in it free (#122). Only where nothing relies on interrupts
 /// staying off; called with interrupts disabled and no lock held. Another
 /// task that runs meanwhile does not pause (the mark is the current
-/// task's), and may end this task's pauses early: that costs latency only.
+/// task's), and may take the mark over, ending this task's pauses early:
+/// that costs latency only.
 pub(crate) fn with_pauses(f: impl FnOnce()) {
-    use core::sync::atomic::Ordering;
     let id = sched::current_id().unwrap_or(u64::MAX);
-    let before = PAUSING.swap(id, Ordering::Relaxed);
+    PAUSING.store(id, core::sync::atomic::Ordering::Relaxed);
     f();
-    PAUSING.store(before, Ordering::Relaxed);
+    unmark(&PAUSING, id);
+}
+
+/// Clears `id`'s mark, and only its: restoring the mark from before would
+/// leave a stale one when two tasks' `with_pauses` overlap (M3.5 review F1).
+fn unmark(mark: &core::sync::atomic::AtomicU64, id: u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let _ = mark.compare_exchange(id, u64::MAX, Relaxed, Relaxed);
 }
 
 /// Lets interrupts in if the current task is in [`with_pauses`], with
@@ -1111,6 +1118,19 @@ mod tests {
         assert_eq!(m.reserve(1), None, "region full");
         assert_eq!(UserMemory::new(5).reserve(u64::MAX), None, "no overflow");
         assert_eq!(UserMemory::new(0).reserve(1), None, "limit 0");
+    }
+
+    #[test]
+    fn overlapping_pauses_leave_no_stale_mark() {
+        use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+        // Task 1 marks, is preempted; task 2 marks; 1 ends, then 2.
+        let mark = AtomicU64::new(u64::MAX);
+        mark.store(1, Relaxed);
+        mark.store(2, Relaxed);
+        unmark(&mark, 1);
+        assert_eq!(mark.load(Relaxed), 2, "task 2's mark stays");
+        unmark(&mark, 2);
+        assert_eq!(mark.load(Relaxed), u64::MAX, "no task stays marked");
     }
 
     #[test]
