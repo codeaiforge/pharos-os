@@ -3,7 +3,9 @@
 //! `permissions` kernel does, and `agentclient` mode 11: a `boss` task,
 //! which gives subtasks to `helper` and `aide` in group `crew` and
 //! delegates model 2 to `aide` (#135); the console script revokes it from
-//! `boss`. Afterwards the runner checks the audit trail. Runs under UEFI
+//! `boss`; crashing and hung workers fail, a goal's end cancels its last
+//! subtask, and `stop group crew` ends a second goal (#136). Afterwards
+//! the runner checks the audit trail. Runs under UEFI
 //! (D-009).
 
 #![no_std]
@@ -67,9 +69,14 @@ fn run(t: &mut TestRun) {
             None => {}
         }
     }
-    let step = "a supervisor completes a goal through its workers, and only them";
-    let want = alloc::format!("ok {step}");
-    t.check(step, passed.iter().any(|l| l == want.as_bytes()));
+    for step in [
+        "a supervisor completes a goal through its workers, and only them",
+        "a goal's end cancels its open subtasks",
+        "stop group ends the group's goal, its subtasks, and its request",
+    ] {
+        let want = alloc::format!("ok {step}");
+        t.check(step, passed.iter().any(|l| l == want.as_bytes()));
+    }
     let mut exit = None;
     for _ in 0..40 {
         exit = process::exits().into_iter().find(|e| e.task == client);

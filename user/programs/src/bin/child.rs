@@ -156,6 +156,7 @@ fn main(arg: u64) -> u64 {
                 let register = Request::Register {
                     slot,
                     name: b"worker",
+                    group: b"",
                 };
                 let Some(n) = trust::encode(&register, &mut msg) else {
                     return 2;

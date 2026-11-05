@@ -18,7 +18,7 @@
 //! process capabilities over [`pharos_proto::trust`]: the agent runtime's
 //! from `init`, each agent's from the runtime.
 //!
-//! Commands, one per line: `list`, `stop <agent>`, `stop all`, and
+//! Commands, one per line: `list`, `stop <agent>`, `stop group <group>` (#136), `stop all`, and
 //! `revoke <agent> <permission>` (#105), which `trust` passes to the
 //! runtime with a non-blocking send on the capability the runtime gave it
 //! (`CHANNEL`), so a hung runtime never holds `trust`; the runtime's
@@ -53,16 +53,19 @@ const AUDIT: Handle = 4;
 /// How long `trust` waits for the audit service's `HEAD`.
 const AUDIT_US: u64 = 1_000_000;
 const BASE: u64 = 0x1000_0000;
-const HELP: &[u8] = b"commands: list, stop <agent>, stop all, revoke <agent> <permission>, \
-yes <n>, no <n>, audit, usage";
+const HELP: &[u8] = b"commands: list, stop <agent>, stop group <group>, stop all, \
+revoke <agent> <permission>, yes <n>, no <n>, audit, usage";
 /// How long a stop may take before the answer says it is still running.
 const STOP_WAIT_US: u64 = 1_000_000;
 
-/// A registered agent: its name and process capability (`STOP`, `WAIT`).
+/// A registered agent: its name, its group (#136), and its process
+/// capability (`STOP`, `WAIT`).
 #[derive(Clone, Copy)]
 struct Agent {
     name: [u8; MAX_NAME],
     len: usize,
+    group: [u8; MAX_NAME],
+    group_len: usize,
     process: Handle,
 }
 
@@ -221,6 +224,27 @@ impl Trust {
                     self.record(audit::action::STOP, None, name);
                 } else {
                     self.say(&[b"no agent ", name]);
+                }
+            }
+            // Without the runtime (#136): `trust` holds every agent's STOP.
+            // The runtime cancels each stopped task, and a goal's end
+            // cancels its subtasks not yet started.
+            Command::StopGroup(group) => {
+                let agents = self.agents;
+                let mut found = false;
+                for a in agents
+                    .iter()
+                    .flatten()
+                    .filter(|a| &a.group[..a.group_len] == group)
+                {
+                    self.stop(&a.name[..a.len], a.process);
+                    found = true;
+                }
+                if found {
+                    self.record(audit::action::STOP, None, &[&b"group "[..], group].concat());
+                    self.say(&[b"stopped group ", group]);
+                } else {
+                    self.say(&[b"no group ", group]);
                 }
             }
             // The runtime first: its agents end with it (children stop
@@ -486,13 +510,16 @@ impl Trust {
                 }
                 self.say(&[b"registered runtime"]);
             }
-            Ok(Request::Register { slot, name }) if badge == RUNTIME && valid => {
+            Ok(Request::Register { slot, name, group }) if badge == RUNTIME && valid => {
                 let mut a = Agent {
                     name: [0; MAX_NAME],
                     len: name.len(),
+                    group: [0; MAX_NAME],
+                    group_len: group.len(),
                     process: cap,
                 };
                 a.name[..name.len()].copy_from_slice(name);
+                a.group[..group.len()].copy_from_slice(group);
                 if let Some(old) = self.agents[usize::from(slot)].replace(a) {
                     let _ = delete(old.process);
                 }

@@ -755,7 +755,8 @@ const TEST: &[Entry] = &[
         pages: 256,
         models: 0,
         attempts: 2,
-        progress_ms: 10_000,
+        // A hung attempt is stopped after 2 s (#136).
+        progress_ms: 2_000,
         task_ms: 60_000,
         data: Data::None,
         ask_models: 0,
@@ -1425,10 +1426,11 @@ impl Runtime {
             return;
         };
         // `trust` holds the agent's STOP before the runtime answers it.
-        let mut msg = [0u8; 64];
+        let mut msg = [0u8; 80];
         let register = trust::Request::Register {
             slot: slot as u8,
             name: limits.entry.name,
+            group: limits.entry.budget.group,
         };
         let registered = trust::encode(&register, &mut msg)
             .is_some_and(|n| send(TRUST, &msg[..n], process, STOP | WAIT, 0).is_ok());
@@ -3024,25 +3026,7 @@ impl Runtime {
                 .ok_or(status::INTERNAL)
             }
             Request::Cancel { task } => {
-                let at = self.tasks.find(task).ok_or(status::NOT_FOUND)?;
-                if self.tasks.list[at].ended() {
-                    return Ok(done(out));
-                }
-                let agent = self.agent_of(task);
-                let seq = self.intent(&agent, task, action::CANCEL, None, NAME, b"")?;
-                let cancelled =
-                    self.tasks
-                        .finish(&mut self.store, at, State::Cancelled, b"cancelled");
-                self.outcome(seq, &agent, task, action::CANCEL, cancelled.is_ok(), b"");
-                cancelled.map_err(store_error)?;
-                if let Some(slot) = self
-                    .slots
-                    .iter()
-                    .position(|s| s.as_ref().is_some_and(|s| s.task == task))
-                {
-                    self.end(slot, Ending::Cancelled);
-                }
-                self.event(task, b"cancelled", None);
+                self.cancel(task, b"")?;
                 Ok(done(out))
             }
             Request::Forget { task } => {
@@ -3054,6 +3038,39 @@ impl Runtime {
             Request::Info => self.info(out).ok_or(status::INTERNAL),
             Request::Attach { .. } => Err(status::BAD_REQUEST),
             _ => Err(status::NO_ACCESS),
+        }
+    }
+
+    /// Cancels task `id` (recorded, with `why` as the intent's detail) and
+    /// stops its agent if it runs. An ended task is left as it is.
+    fn cancel(&mut self, id: u32, why: &[u8]) -> Result<(), u8> {
+        let at = self.tasks.find(id).ok_or(status::NOT_FOUND)?;
+        if self.tasks.list[at].ended() {
+            return Ok(());
+        }
+        let agent = self.agent_of(id);
+        let seq = self.intent(&agent, id, action::CANCEL, None, NAME, why)?;
+        let cancelled = self
+            .tasks
+            .finish(&mut self.store, at, State::Cancelled, b"cancelled");
+        self.outcome(seq, &agent, id, action::CANCEL, cancelled.is_ok(), b"");
+        cancelled.map_err(store_error)?;
+        if let Some(slot) = self
+            .slots
+            .iter()
+            .position(|s| s.as_ref().is_some_and(|s| s.task == id))
+        {
+            self.end(slot, Ending::Cancelled);
+        }
+        self.event(id, b"cancelled", None);
+        Ok(())
+    }
+
+    /// Cancels the open subtasks of goals that ended, however they ended
+    /// (#136). One the store or trail refuses is tried again next pass.
+    fn cancel_orphans(&mut self) {
+        for id in self.tasks.orphans() {
+            let _ = self.cancel(id, b"goal ended");
         }
     }
 
@@ -3364,6 +3381,8 @@ fn main(arg: u64) -> u64 {
     loop {
         // A refused retry is tried again within a second.
         let stranded = r.retry_stranded();
+        // Before starting any: a subtask of an ended goal never starts.
+        r.cancel_orphans();
         r.start_pending();
         let wait = r
             .check_deadlines()

@@ -373,6 +373,17 @@ impl Tasks {
         Ok(id)
     }
 
+    /// Subtasks not ended whose goal has ended or is gone (#136): no work
+    /// outlives its goal.
+    pub fn orphans(&self) -> Vec<u32> {
+        let open = |id: u32| self.find(id).is_some_and(|i| !self.list[i].ended());
+        self.list
+            .iter()
+            .filter(|t| t.parent != 0 && !t.ended() && !open(t.parent))
+            .map(|t| t.id)
+            .collect()
+    }
+
     /// Subtasks of `parent` not yet ended.
     pub fn open_children(&self, parent: u32) -> usize {
         self.list
@@ -690,6 +701,40 @@ mod tests {
             (goal, &[file][..])
         );
         assert_eq!(again.open_children(goal), 1);
+        assert_eq!(again.orphans(), [], "its goal is open");
+    }
+
+    #[test]
+    fn subtasks_of_an_ended_goal_are_orphans() {
+        let mut f = Mem::default();
+        let (mut tasks, _) = load(&mut f);
+        let other = tasks.submit(&mut f, b"worker", &[], b"other").unwrap();
+        let c = tasks
+            .submit_child(&mut f, b"worker", other, b"c", &[])
+            .unwrap();
+        for state in [State::Done, State::Failed, State::Cancelled] {
+            let goal = tasks.submit(&mut f, b"worker", &[], b"goal").unwrap();
+            let a = tasks
+                .submit_child(&mut f, b"worker", goal, b"a", &[])
+                .unwrap();
+            let b = tasks
+                .submit_child(&mut f, b"worker", goal, b"b", &[])
+                .unwrap();
+            tasks
+                .finish(&mut f, tasks.find(b).unwrap(), State::Done, b"ok")
+                .unwrap();
+            assert_eq!(tasks.orphans(), []);
+            tasks
+                .finish(&mut f, tasks.find(goal).unwrap(), state, b"")
+                .unwrap();
+            assert_eq!(tasks.orphans(), [a], "{state:?}: the open one only");
+            tasks
+                .finish(&mut f, tasks.find(a).unwrap(), State::Cancelled, b"")
+                .unwrap();
+        }
+        // A goal forgotten (or never stored) leaves its subtasks orphans.
+        tasks.list.retain(|t| t.id != other);
+        assert_eq!(tasks.orphans(), [c]);
     }
 
     #[test]

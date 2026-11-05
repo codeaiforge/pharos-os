@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#132),** with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. **Implemented:** channels (#133), groups and subtasks (#134), delegation (#135). To be built by: failure and stop handling (#136), the verifier (#137), and the isolation and confused-deputy tests (#138).
+**Planned. Design approved by the maintainer on 2026-11-05 (#132),** with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. **Implemented:** channels (#133), groups and subtasks (#134), delegation (#135), failure and stop handling (#136). To be built by: the verifier (#137), and the isolation and confused-deputy tests (#138).
 
 ## 2. Context
 
@@ -59,6 +59,7 @@ What M3.7 builds on:
 - **A failed, crashed, or hung worker** is retried within its entry's attempts (M3.3); then its subtask fails, and the supervisor sees it with `SUBTASK_STATUS` and decides.
 - **A goal that ends** (done, failed, or cancelled) cancels its open subtasks, stopping their agents: no work outlives its goal.
 - **`stop group <name>`** on the trusted console stops every agent `trust` registered in that group, without the runtime: `REGISTER` gains the agent's group name. The runtime marks each stopped task cancelled (as today), and the supervisor's end cancels any subtask not yet started.
+- *Implemented (#136):* `Tasks::orphans` (the open subtasks of a goal that ended, however it ended, or is gone), which the runtime cancels on every pass of its loop before starting any task: each cancellation is audited as a `cancel` intent with the detail `goal ended`, then its outcome, and a running subtask's agent is stopped. One the store or the trail refuses is tried again on the next pass. `REGISTER` carries the agent's policy-entry group (empty for none), and `trust`'s `stop group <group>` stops every agent registered in it ([agents.md](agents.md)). A failed, crashed, or hung worker needed nothing new: its subtask is retried within its entry's attempts and then fails, as any task, and the supervisor reads `failed` with `SUBTASK_STATUS`. **Carried:** between a goal's attempts (a retry) its subtasks keep running; only its end cancels them.
 
 ### The verifier (#137)
 

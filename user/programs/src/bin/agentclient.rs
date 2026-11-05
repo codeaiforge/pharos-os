@@ -208,6 +208,29 @@ fn main(arg: u64) -> u64 {
             "a supervisor completes a goal through its workers, and only them",
             done,
         );
+        // #136: the goal's end cancelled its last subtask (15). Then a
+        // second goal (16, subtasks 17 and 18), which `stop group crew` on
+        // the trusted console ends.
+        let mut out = [0u8; 256];
+        let cancelled =
+            |c: &Client, t: u32| c.status(t).is_some_and(|s| s.state == State::Cancelled);
+        let idle = |c: &Client, out: &mut [u8; 256]| {
+            let (_, n) = c.call(&Request::Info, out);
+            Info::parse(&out[..n]).is_some_and(|i| i.details == [17, 0])
+        };
+        sleep(1_000_000);
+        c.step(
+            "a goal's end cancels its open subtasks",
+            cancelled(&c, 15) && idle(&c, &mut out),
+        );
+        let stood = c.submit(b"boss", b"stand").ok() == Some(16)
+            && c.wait(16, 90)
+                .is_some_and(|(s, _)| s.state == State::Cancelled);
+        sleep(1_000_000);
+        c.step(
+            "stop group ends the group's goal, its subtasks, and its request",
+            stood && cancelled(&c, 17) && cancelled(&c, 18) && idle(&c, &mut out),
+        );
         let _ = send(REPORT, b"done", 0, 0, 0);
         return c.failed;
     }

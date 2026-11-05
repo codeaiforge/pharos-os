@@ -273,7 +273,7 @@ pub const TEST_MANIFESTS: [(&str, &str); 31] = [
     (
         "agents/helper.manifest",
         "manifest = 1\nname = helper\nprogram = bin/testagent\npages = 256\nmodels =\n\
-         attempts = 2\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet =\n",
+         attempts = 2\nprogress_ms = 2000\ntask_ms = 60000\ndata = none\nnet =\n",
     ),
     (
         "agents/aide.manifest",

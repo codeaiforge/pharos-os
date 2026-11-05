@@ -4,8 +4,9 @@
 //! Messages carry a process capability (`STOP` and `WAIT`) and nothing
 //! else is asked of the service:
 //! - `RUNTIME` `[version, op]`, from `init` only: the agent runtime;
-//! - `REGISTER` `[version, op, slot, name length, name]`, from the runtime
-//!   only: an agent, before the runtime grants it anything.
+//! - `REGISTER` `[version, op, slot, name length, name, group length,
+//!   group]`, from the runtime only: an agent and its policy entry's group
+//!   (empty for none; #136), before the runtime grants it anything.
 //!
 //! And from the runtime only (#105):
 //! - `CHANNEL` `[version, op]`, carrying `SEND` on the runtime's endpoint
@@ -101,6 +102,8 @@ pub enum Request<'a> {
     Register {
         slot: u8,
         name: &'a [u8],
+        /// Its policy entry's group, or empty (#136).
+        group: &'a [u8],
     },
     Channel,
     Approve {
@@ -166,7 +169,9 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             let slot = r.u8().filter(|s| *s < SLOTS)?;
             let len = usize::from(r.u8()?);
             let name = r.take(len).filter(|n| valid_name(n))?;
-            Some(Request::Register { slot, name })
+            let len = usize::from(r.u8()?);
+            let group = r.take(len).filter(|g| g.is_empty() || valid_name(g))?;
+            Some(Request::Register { slot, name, group })
         })(),
         op::CHANNEL => Some(Request::Channel),
         op::APPROVE => (|| {
@@ -259,12 +264,14 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
     let mut w = Writer::new(out);
     match *req {
         Request::Runtime => w.bytes(&[VERSION, op::RUNTIME])?,
-        Request::Register { slot, name } => {
-            if slot >= SLOTS || !valid_name(name) {
+        Request::Register { slot, name, group } => {
+            if slot >= SLOTS || !valid_name(name) || !(group.is_empty() || valid_name(group)) {
                 return None;
             }
             w.bytes(&[VERSION, op::REGISTER, slot, name.len() as u8])?;
             w.bytes(name)?;
+            w.bytes(&[group.len() as u8])?;
+            w.bytes(group)?;
         }
         Request::Channel => w.bytes(&[VERSION, op::CHANNEL])?,
         Request::Approve {
@@ -371,6 +378,8 @@ pub enum Command<'a> {
     Stop(&'a [u8]),
     /// `stop all`: the runtime, so every agent (the emergency stop).
     StopAll,
+    /// `stop group <name>`: every agent registered in that group (#136).
+    StopGroup(&'a [u8]),
     /// `revoke <agent> <permission>` (#105).
     Revoke(&'a [u8], Permission),
     /// `yes <n>` or `no <n>`: the answer to approval request `n` (#106).
@@ -410,6 +419,11 @@ pub fn command(line: &[u8]) -> Command<'_> {
         (Some(b"audit"), None, None) => Command::Audit,
         (Some(b"usage"), None, None) => Command::Usage,
         (Some(b"stop"), Some(b"all"), None) => Command::StopAll,
+        (Some(b"stop"), Some(b"group"), Some(name))
+            if valid_name(name) && words.next().is_none() =>
+        {
+            Command::StopGroup(name)
+        }
         (Some(b"stop"), Some(name), None) if valid_name(name) => Command::Stop(name),
         (Some(word @ (b"yes" | b"no")), Some(n), None) => match request_number(n) {
             Some(n) => Command::Answer(n, word == b"yes"),
@@ -507,10 +521,12 @@ mod tests {
             Request::Register {
                 slot: 0,
                 name: b"summarize",
+                group: b"",
             },
             Request::Register {
                 slot: SLOTS - 1,
                 name: &long,
+                group: &long,
             },
             Request::Channel,
             Request::Used {
@@ -566,7 +582,7 @@ mod tests {
                 },
             },
         ] {
-            let mut buf = [0u8; 64];
+            let mut buf = [0u8; 80];
             let n = encode(&req, &mut buf).unwrap();
             assert_eq!(parse(&buf[..n]), Ok(req));
             assert_eq!(parse(&buf[..n + 1]), Err(Refused::Bad), "{req:?} + byte");
@@ -579,11 +595,30 @@ mod tests {
 
     #[test]
     fn bad_requests_are_refused() {
-        let reg = |slot: u8, name: &[u8]| {
+        let reg_in = |slot: u8, name: &[u8], group: &[u8]| {
             let mut m = std::vec![VERSION, op::REGISTER, slot, name.len() as u8];
             m.extend_from_slice(name);
+            m.push(group.len() as u8);
+            m.extend_from_slice(group);
             m
         };
+        let reg = |slot: u8, name: &[u8]| reg_in(slot, name, b"");
+        assert!(parse(&reg(0, b"a")).is_ok());
+        assert_eq!(
+            parse(&reg_in(0, b"a", b"a b")),
+            Err(Refused::Bad),
+            "bad group"
+        );
+        assert_eq!(
+            parse(&reg_in(0, b"a", &[b'g'; 33])),
+            Err(Refused::Bad),
+            "long group"
+        );
+        assert_eq!(
+            parse(&reg(0, b"a")[..5]),
+            Err(Refused::Bad),
+            "no group length"
+        );
         assert_eq!(parse(&reg(SLOTS, b"a")), Err(Refused::Bad), "slot 16");
         assert_eq!(parse(&reg(0, b"")), Err(Refused::Bad), "empty name");
         assert_eq!(parse(&reg(0, &[b'a'; 33])), Err(Refused::Bad), "long name");
@@ -596,14 +631,22 @@ mod tests {
         let bad = Request::Register {
             slot: 0,
             name: b"x y",
+            group: b"",
         };
-        assert_eq!(encode(&bad, &mut [0; 64]), None);
+        assert_eq!(encode(&bad, &mut [0; 80]), None);
+        let bad = Request::Register {
+            slot: 0,
+            name: b"x",
+            group: b"x\n",
+        };
+        assert_eq!(encode(&bad, &mut [0; 80]), None);
         crate::fuzz(100_000, 6, |m| {
             let mut v = [0u8; 302];
             v[0] = VERSION;
             v[1..1 + m.len()].copy_from_slice(m);
-            if let Ok(Request::Register { name, slot }) = parse(&v[..1 + m.len()]) {
+            if let Ok(Request::Register { name, slot, group }) = parse(&v[..1 + m.len()]) {
                 assert!(valid_name(name) && slot < SLOTS);
+                assert!(group.is_empty() || valid_name(group));
             }
             let _ = parse(m);
             let _ = command(m);
@@ -616,6 +659,14 @@ mod tests {
         assert_eq!(command(b"  list "), Command::List);
         assert_eq!(command(b"stop all"), Command::StopAll);
         assert_eq!(command(b"stop\tworker-1"), Command::Stop(b"worker-1"));
+        assert_eq!(command(b"stop group crew"), Command::StopGroup(b"crew"));
+        assert_eq!(
+            command(b"stop group"),
+            Command::Stop(b"group"),
+            "an agent named group"
+        );
+        assert_eq!(command(b"stop group a b"), Command::Help);
+        assert_eq!(command(b"stop group a;b"), Command::Help);
         assert_eq!(command(b"yes 3"), Command::Answer(3, true));
         assert_eq!(command(b"audit"), Command::Audit);
         assert_eq!(command(b" usage "), Command::Usage);

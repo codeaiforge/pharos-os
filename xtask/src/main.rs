@@ -1403,6 +1403,13 @@ const GROUPS_SCRIPT: &[console::Step] = &[
     ),
     ("approve #1: refused", "revoke boss model 2\n"),
     ("revoked model 2 from boss", ""),
+    // #136: the second goal's `aide` (task 18) asks; the user stops the
+    // group instead of answering.
+    (
+        "approve #2: aide task 18 wants model 3 for this task? (yes 2 / no 2)",
+        "stop group crew\n",
+    ),
+    ("stopped group crew", ""),
 ];
 /// Message channels (#133): `talker` (task 2) asks for model 3; the user
 /// refuses, then revokes its channel to `hearer`.
@@ -1980,11 +1987,11 @@ fn groups_audit(image: &Path) -> Result<()> {
     for (want, n) in [
         (
             "client 3 Intent submit boss task 1/1  agents outcome 0 helper",
-            9,
+            11,
         ),
         (
             "client 3 Intent submit boss task 1/1  agents outcome 0 aide",
-            2,
+            3,
         ),
         (
             "client 3 Event refuse boss task 1/1   outcome 2 not in group",
@@ -2005,6 +2012,17 @@ fn groups_audit(image: &Path) -> Result<()> {
             1,
         ),
         ("from boss task 1", 2),
+        // #136: the goal's end cancels its last subtask; the user stops
+        // the second goal's group.
+        (
+            "client 3 Intent cancel aide task 15/1  agents outcome 0 goal ended",
+            1,
+        ),
+        (
+            "client 2 Event stop user task 0/0  trust outcome 1 group crew",
+            1,
+        ),
+        ("Intent submit boss task 16/1", 2),
     ] {
         if count(want) != n {
             return Err(format!(
