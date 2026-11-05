@@ -443,7 +443,7 @@ Ordering notes:
 
 ### M3.7 — Agent communication and coordination
 
-**Status: Current.** M3.6 gives it agents that use tools only through validated calls and their grants, with the user confirming each `send`. D-024 accepted (#131): channels through the runtime, granted by policy, carrying data only; a supervisor submits subtasks to the workers its group names; it may pass a subset of its own grants to a subtask; a compiled-in verifier checks results before a goal counts as done. Design approved (#132): [coordination.md](../architecture/coordination.md). Next: channels (#133).
+**Status: Current.** M3.6 gives it agents that use tools only through validated calls and their grants, with the user confirming each `send`. D-024 accepted (#131): channels through the runtime, granted by policy, carrying data only; a supervisor submits subtasks to the workers its group names; it may pass a subset of its own grants to a subtask; a compiled-in verifier checks results before a goal counts as done. Design approved (#132): [coordination.md](../architecture/coordination.md). Implemented: channels (#133). Next: groups and subtasks (#134).
 
 - **Where it runs (D-020):** Pharos; codecs and group-state logic host-tested.
 - **Objective and scope:** Agents communicate only through granted channels, and groups of agents work toward a shared goal under explicit authority and budgets.

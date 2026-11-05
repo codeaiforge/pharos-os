@@ -79,6 +79,7 @@ use alloc::vec::Vec;
 
 use pharos_programs::budgets::{self, Bucket, GroupUse, Over, Usage};
 use pharos_programs::grants::Grants;
+use pharos_programs::mailbox::{self, Mailboxes};
 use pharos_programs::tasks::{self, Begin, Files, StoreFailed, Tasks};
 use pharos_programs::tools;
 use pharos_proto::agents::{
@@ -143,6 +144,8 @@ mod refusal {
     pub const TOOL_MALFORMED: u16 = 1024;
     pub const TOOL_NOT_LISTED: u16 = 2048;
     pub const OVER_FILES: u16 = 4096;
+    /// Messages past the attempt's `messages` (#133).
+    pub const OVER_MESSAGES: u16 = 8192;
 }
 /// How often the runtime reads a running agent's CPU time, at most.
 const CPU_CHECK_US: u64 = 100_000;
@@ -239,6 +242,7 @@ const SPEND: Budget = Budget {
     net_bytes: 64,
     data_kb: 1,
     file_kb: u32::MAX,
+    messages: u32::MAX,
     rate: u32::MAX,
     group: b"spend",
 };
@@ -374,6 +378,7 @@ const fn budget_entry(name: &'static [u8], budget: Budget, pages: u32) -> Entry 
         tools: 0,
         files: &[],
         ask_files: &[],
+        channels: &[],
     }
 }
 
@@ -398,6 +403,7 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        channels: &[],
     },
     Entry {
         name: b"greedy",
@@ -416,6 +422,7 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        channels: &[],
     },
     Entry {
         name: b"absent",
@@ -434,6 +441,7 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        channels: &[],
     },
     Entry {
         name: b"counter",
@@ -452,6 +460,7 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        channels: &[],
     },
     // The `permissions` kernel's (#105).
     Entry {
@@ -471,6 +480,7 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        channels: &[],
     },
     // Gets nothing; may ask for model 2 and data access (#106).
     Entry {
@@ -490,6 +500,7 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        channels: &[],
     },
     // The `agents_net` kernel's (#109): gets the host echo server, may
     // ask for the port after it.
@@ -510,6 +521,7 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        channels: &[],
     },
     // The same grant as `netter`, which the user's `revoke netter` leaves.
     Entry {
@@ -529,6 +541,7 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        channels: &[],
     },
     // The `hostile` kernel's (#110): its own files, and five models to ask
     // for, one more than the approval queue holds.
@@ -549,6 +562,7 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        channels: &[],
     },
     // The `tools` kernel's (#126, #127): both tools, `report.txt` and
     // `big.txt` (more than its 4 KiB of `file_kb`), `notes.txt` to ask for,
@@ -574,6 +588,7 @@ const TEST: &[Entry] = &[
         tools: 1 << tool::number::READ_FILE | 1 << tool::number::SEND,
         files: &[b"report.txt", b"big.txt"],
         ask_files: &[b"notes.txt"],
+        channels: &[],
     },
     // The `injection` kernel's (#129): both tools, `report.txt` with its
     // injected instructions, model 2, and the host echo server.
@@ -594,6 +609,89 @@ const TEST: &[Entry] = &[
         tools: 1 << tool::number::READ_FILE | 1 << tool::number::SEND,
         files: &[b"report.txt"],
         ask_files: &[],
+        channels: &[],
+    },
+    // The `channels` kernel's (#133): `talker` may send to `hearer` (and
+    // ask for model 3, the runner's cue to revoke its channel), `spammer` to
+    // `outsider` twice; `hearer` and `outsider` may send to no one.
+    Entry {
+        name: b"talker",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 0,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::None,
+        ask_models: 1 << 3,
+        ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
+        budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
+        channels: &[b"hearer"],
+    },
+    Entry {
+        name: b"hearer",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 0,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
+        budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
+        channels: &[],
+    },
+    Entry {
+        name: b"outsider",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 0,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
+        budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
+        channels: &[],
+    },
+    Entry {
+        name: b"spammer",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 0,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
+        budget: Budget {
+            messages: 2,
+            ..Budget::UNLIMITED
+        },
+        tools: 0,
+        files: &[],
+        ask_files: &[],
+        channels: &[b"outsider"],
     },
     Entry {
         name: b"plain",
@@ -612,6 +710,7 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[b"report.txt"],
         ask_files: &[],
+        channels: &[],
     },
 ];
 
@@ -631,6 +730,9 @@ struct Limits {
     tools: u32,
     files: [&'static [u8]; manifest::MAX_FILES],
     file_count: usize,
+    /// The agents it may send messages to (#133), as the entry's names.
+    channels: [&'static [u8]; manifest::MAX_FILES],
+    channel_count: usize,
 }
 
 /// The storage service as [`Files`], through the runtime's buffer there:
@@ -854,6 +956,8 @@ struct Runtime {
     store: Store,
     /// Granted files (#127), if `init` gave the runtime handle 10.
     files: Option<Store>,
+    /// Messages waiting for agents, by name (#133).
+    mailboxes: Mailboxes,
     slots: [Option<Slot>; SLOTS],
     controls: [Option<(u32, Mapped)>; MAX_CONTROLS],
     infer_buffer: Mapped,
@@ -904,6 +1008,8 @@ fn askable(entry: &Entry, p: &Permission) -> bool {
         Permission::DataWrite => entry.ask_data == Data::Write,
         Permission::Net { addr, port } => entry.ask_net.contains(&(addr, port)),
         Permission::File { .. } => p.file_name().is_some_and(|f| entry.ask_files.contains(&f)),
+        // Channels are not askable in M3.7 (coordination.md).
+        Permission::Channel { .. } => false,
     }
 }
 
@@ -1007,11 +1113,21 @@ fn load(e: &'static Entry, table: &'static [Entry]) -> Result<Limits, &'static [
             file_count += 1;
         }
     }
+    let mut channels = [&b""[..]; manifest::MAX_FILES];
+    let mut channel_count = 0;
+    for c in m.channels.as_slice() {
+        if let Some(name) = e.channels.iter().find(|n| *n == c) {
+            channels[channel_count] = name;
+            channel_count += 1;
+        }
+    }
     Ok(Limits {
         entry: e,
         tools: m.tools,
         files,
         file_count,
+        channels,
+        channel_count,
         pages: m.pages,
         models: m.models,
         attempts: m.attempts,
@@ -1241,7 +1357,14 @@ impl Runtime {
         // Every grant is recorded before it is given; none is given if a
         // record fails (#108).
         let files = &limits.files[..limits.file_count];
-        let mut g = Grants::new(limits.models, limits.data, limits.net.as_slice(), files);
+        let channels = &limits.channels[..limits.channel_count];
+        let mut g = Grants::new(
+            limits.models,
+            limits.data,
+            limits.net.as_slice(),
+            files,
+            channels,
+        );
         for (_, p, until) in self.approved.iter().filter(|(t, ..)| *t == id) {
             g.add(*p, *until);
         }
@@ -1830,6 +1953,73 @@ impl Runtime {
                 }
                 Err(status::NOT_FOUND)
             }
+            Request::MessageSend { to, kind, len } => {
+                let p = Permission::channel(to).ok_or(status::BAD_REQUEST)?;
+                let allowed = self.slots[i]
+                    .as_ref()
+                    .is_some_and(|s| s.grants.allows(&p, now));
+                if !allowed {
+                    return Err(status::NO_ACCESS);
+                }
+                if len as usize > buffer_len {
+                    return Err(status::NO_BUFFER);
+                }
+                // A full queue refuses before anything is charged.
+                if !self.mailboxes.has_room(to) {
+                    return Err(status::BUSY);
+                }
+                // Copied out first; never read by the runtime.
+                let mut bytes = alloc::vec![0u8; len as usize];
+                if let Some(b) = buffer {
+                    b.read_bytes(0, &mut bytes);
+                }
+                let budget = limits.entry.budget;
+                self.charge(i, &budget, Some(p), |u, _| u.message(&budget))?;
+                let agent = limits.entry.name;
+                // Kind and length only: the content is never recorded.
+                let mut d = [[0u8; 20]; 2];
+                let [k, l] = &mut d;
+                let detail = [
+                    &b"kind "[..],
+                    decimal(u64::from(kind), k),
+                    b" len ",
+                    decimal(u64::from(len), l),
+                ]
+                .concat();
+                let seq = self.intent(agent, id, action::MESSAGE, Some(p), NAME, &detail)?;
+                let queued = self.mailboxes.put(
+                    to,
+                    mailbox::Message {
+                        from: agent.to_vec(),
+                        kind,
+                        bytes,
+                    },
+                );
+                self.outcome(seq, agent, id, action::MESSAGE, queued, &detail);
+                if !queued {
+                    return Err(status::BUSY);
+                }
+                Ok(done(out))
+            }
+            Request::MessageReceive => {
+                if buffer_len < agents::MAX_MESSAGE as usize {
+                    return Err(status::NO_BUFFER);
+                }
+                let m = self
+                    .mailboxes
+                    .take(limits.entry.name)
+                    .ok_or(status::NOT_FOUND)?;
+                if let Some(b) = self.slots[i].as_ref().and_then(|s| s.buffer.as_ref()) {
+                    b.write_bytes(0, &m.bytes);
+                }
+                agents::Message {
+                    from: &m.from,
+                    kind: m.kind,
+                    len: m.bytes.len() as u32,
+                }
+                .encode(out)
+                .ok_or(status::INTERNAL)
+            }
             Request::Tool {
                 call_at,
                 call_len,
@@ -2149,7 +2339,8 @@ impl Runtime {
             refusal::OVER_GROUP_NET => b"over group net",
             refusal::TOOL_MALFORMED => b"tool malformed",
             refusal::TOOL_NOT_LISTED => b"tool not listed",
-            _ => b"over files",
+            refusal::OVER_FILES => b"over files",
+            _ => b"over messages",
         };
         let agent = self.agent_of(task);
         self.refusal_event(&agent, task, p, why);
@@ -2184,6 +2375,7 @@ impl Runtime {
             Over::GroupTokens => refusal::OVER_GROUP_TOKENS,
             Over::GroupNet => refusal::OVER_GROUP_NET,
             Over::Files => refusal::OVER_FILES,
+            Over::Messages => refusal::OVER_MESSAGES,
         };
         self.note(i, kind, p);
         Err(status::OVER_LIMIT)
@@ -2792,6 +2984,7 @@ fn needed(req: &Request<'_>) -> Option<Permission> {
         Request::DataPut { .. } => Some(Permission::DataWrite),
         Request::DataGet { .. } => Some(Permission::DataRead),
         Request::SendTo { addr, port, .. } => Some(Permission::Net { addr, port }),
+        Request::MessageSend { to, .. } => Permission::channel(to),
         _ => None,
     }
 }
@@ -2885,6 +3078,7 @@ fn main(arg: u64) -> u64 {
         tasks,
         store,
         files,
+        mailboxes: Mailboxes::default(),
         slots: Default::default(),
         controls: Default::default(),
         infer_buffer,

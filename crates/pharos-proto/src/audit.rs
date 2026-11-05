@@ -75,7 +75,9 @@ pub mod action {
     pub const USAGE: u8 = 14;
     /// A tool call (#126), with the tool's name as detail.
     pub const TOOL: u8 = 15;
-    pub const LAST: u8 = TOOL;
+    /// A message to another agent (#133): kind and length as detail.
+    pub const MESSAGE: u8 = 16;
+    pub const LAST: u8 = MESSAGE;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -95,6 +97,7 @@ pub mod action {
             "cancel",
             "usage",
             "tool",
+            "message",
         ]
         .get(usize::from(code))
         .copied()

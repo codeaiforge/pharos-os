@@ -79,6 +79,20 @@
 //!   destination (`NO_ACCESS`); completes with `tools ok`.
 //! - `tools-plain` (agent `plain`): holds `report.txt` but no tool, so
 //!   `read_file` is refused; completes with `plain ok`.
+//! - `talk` (agent `talker`, the `channels` kernel, #133): sends
+//!   `hearer` three messages and five more until its queue is full
+//!   (`BUSY`), then `last` once there is room; asks for model 3 (the
+//!   runner's cue), and after the user's `no` sends until its channel is
+//!   revoked (`NO_ACCESS`); completes with `talker ok`.
+//! - `listen` (agent `hearer`): waits 2 s, then takes the 8 waiting
+//!   messages in order with their sender and kind, then `last` (never the
+//!   refused ninth); completes with `hearer ok`.
+//! - `outside` (agent `outsider`): holds no channel, so sending to
+//!   `hearer`, `talker`, or itself is `NO_ACCESS`; receives `spammer`'s
+//!   two messages; completes with `outsider ok`.
+//! - `spam` (agent `spammer`): two messages to `outsider` within its
+//!   `messages` budget of 2, the third `OVER_LIMIT`; completes with
+//!   `spammer ok`.
 //! - `inject` (agent `injected`, the `injection` kernel, #129): a naive
 //!   agent that runs every call it sees. It reads `report.txt` and passes
 //!   the whole text, and each line that looks like a call, to `TOOL`; it
@@ -571,6 +585,122 @@ impl Agent {
             return self.fail(b"a send the user refused was not refused");
         }
         self.complete(b"inject ok")
+    }
+
+    /// `MESSAGE_SEND` of `bytes` with `kind` to `to`: the status.
+    fn message(&self, to: &[u8], kind: u8, bytes: &[u8]) -> u8 {
+        self.buffer.write_bytes(0, bytes);
+        let len = bytes.len() as u32;
+        self.call(&Request::MessageSend { to, kind, len }, &mut [0; 256])
+            .0
+    }
+
+    /// `MESSAGE_RECEIVE`: the sender, kind, and bytes, or the status.
+    fn receive(&self) -> Result<(Vec<u8>, u8, Vec<u8>), u8> {
+        let mut out = [0u8; 256];
+        let (code, n) = self.call(&Request::MessageReceive, &mut out);
+        let m = agents::Message::parse(&out[..n]).ok_or(code)?;
+        let mut bytes = alloc::vec![0u8; m.len as usize];
+        self.buffer.read_bytes(0, &mut bytes);
+        Ok((m.from.to_vec(), m.kind, bytes))
+    }
+
+    /// Receives until a message comes, at most `secs`.
+    fn receive_wait(&self, secs: u32) -> Result<(Vec<u8>, u8, Vec<u8>), u8> {
+        for _ in 0..secs * 10 {
+            match self.receive() {
+                Err(status::NOT_FOUND) => sleep(100_000),
+                other => return other,
+            }
+        }
+        Err(status::NOT_FOUND)
+    }
+
+    fn talk(&self) -> u64 {
+        for (kind, text) in [(1, &b"one"[..]), (2, b"two"), (3, b"three")] {
+            if self.message(b"hearer", kind, text) != status::OK {
+                return self.fail(b"a message on the channel was not sent");
+            }
+        }
+        for _ in 0..5 {
+            if self.message(b"hearer", 4, b"fill") != status::OK {
+                return self.fail(b"a message was not queued");
+            }
+        }
+        if self.message(b"hearer", 4, b"fill") != status::BUSY {
+            return self.fail(b"a ninth message was not BUSY");
+        }
+        let sent = (0..100).any(|_| match self.message(b"hearer", 8, b"last") {
+            status::BUSY => {
+                sleep(100_000);
+                false
+            }
+            code => code == status::OK,
+        });
+        if !sent {
+            return self.fail(b"last was not sent once there was room");
+        }
+        // The runner answers no, then revokes the channel.
+        if self.wait_ask(Permission::Model(3), 0, 30) != Some(Asked::Refused) {
+            return self.fail(b"the cue was not refused");
+        }
+        for _ in 0..300 {
+            match self.message(b"hearer", 7, b"late") {
+                status::OK | status::BUSY => sleep(100_000),
+                status::NO_ACCESS => return self.complete(b"talker ok"),
+                _ => return self.fail(b"sending failed"),
+            }
+        }
+        self.fail(b"the channel was not revoked")
+    }
+
+    fn listen(&self) -> u64 {
+        sleep(2_000_000);
+        let want: [(u8, &[u8]); 8] = [
+            (1, b"one"),
+            (2, b"two"),
+            (3, b"three"),
+            (4, b"fill"),
+            (4, b"fill"),
+            (4, b"fill"),
+            (4, b"fill"),
+            (4, b"fill"),
+        ];
+        for (kind, text) in want {
+            if self.receive() != Ok((b"talker".to_vec(), kind, text.to_vec())) {
+                return self.fail(b"a message was lost, reordered, or changed");
+            }
+        }
+        // Next is `last`, never the ninth `fill` that was refused.
+        match self.receive_wait(10) {
+            Ok((from, 8, text)) if from == b"talker" && text == b"last" => {
+                self.complete(b"hearer ok")
+            }
+            _ => self.fail(b"last did not come"),
+        }
+    }
+
+    fn outside(&self) -> u64 {
+        for to in [&b"hearer"[..], b"talker", b"outsider"] {
+            if self.message(to, 1, b"let me in") != status::NO_ACCESS {
+                return self.fail(b"a message without a channel was not refused");
+            }
+        }
+        for _ in 0..2 {
+            match self.receive_wait(10) {
+                Ok((from, 5, text)) if from == b"spammer" && text == b"spam" => {}
+                _ => return self.fail(b"spammer's messages did not come"),
+            }
+        }
+        self.complete(b"outsider ok")
+    }
+
+    fn spam(&self) -> u64 {
+        let codes = [0; 3].map(|_| self.message(b"outsider", 5, b"spam"));
+        if codes != [status::OK, status::OK, status::OVER_LIMIT] {
+            return self.fail(b"the messages budget was not kept");
+        }
+        self.complete(b"spammer ok")
     }
 
     fn ask(&self, permission: Permission, for_ms: u32) -> Option<Asked> {
@@ -1543,6 +1673,10 @@ fn main(_: u64) -> u64 {
         b"glut" => a.glut(),
         b"tools" => a.tools(),
         b"inject" => a.inject(),
+        b"talk" => a.talk(),
+        b"listen" => a.listen(),
+        b"outside" => a.outside(),
+        b"spam" => a.spam(),
         b"tools-plain" if a.read_file("report.txt").0 == status::NO_ACCESS => {
             a.complete(b"plain ok")
         }

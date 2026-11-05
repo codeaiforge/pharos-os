@@ -60,9 +60,14 @@ pub struct Files<'a> {
 impl<'a> Files<'a> {
     /// `None` if more than [`MAX_FILES`], repeated, or not file names.
     pub fn new(names: &[&'a [u8]]) -> Option<Self> {
+        Self::new_with(names, crate::permission::valid_file)
+    }
+
+    /// As [`Files::new`], with names checked by `valid`.
+    pub fn new_with(names: &[&'a [u8]], valid: fn(&[u8]) -> bool) -> Option<Self> {
         let mut f = Self::default();
         for (i, n) in names.iter().enumerate() {
-            if !crate::permission::valid_file(n) || names[..i].contains(n) {
+            if !valid(n) || names[..i].contains(n) {
                 return None;
             }
             *f.list.get_mut(i)? = n;
@@ -139,6 +144,8 @@ pub struct Manifest<'a> {
     /// number, and the files it gets; none when absent.
     pub tools: u32,
     pub files: Files<'a>,
+    /// Optional (#133): the agents it may send messages to.
+    pub channels: Files<'a>,
 }
 
 /// What the runtime's policy table allows one agent: the most it may get.
@@ -169,6 +176,8 @@ pub struct Entry {
     pub tools: u32,
     pub files: &'static [&'static [u8]],
     pub ask_files: &'static [&'static [u8]],
+    /// The agents it may send messages to (#133; not askable).
+    pub channels: &'static [&'static [u8]],
 }
 
 /// What one attempt of an agent may use (D-022, resources.md). Each limit
@@ -184,6 +193,8 @@ pub struct Budget {
     pub data_kb: u32,
     /// Granted files read with `read_file` (#127), in KiB.
     pub file_kb: u32,
+    /// Messages sent to other agents (#133).
+    pub messages: u32,
     /// Requests per second, with a burst of as many; one past it is held
     /// until the rate allows (#117).
     pub rate: u32,
@@ -200,6 +211,7 @@ impl Budget {
         net_bytes: u32::MAX,
         data_kb: u32::MAX,
         file_kb: u32::MAX,
+        messages: u32::MAX,
         rate: u32::MAX,
         group: b"",
     };
@@ -250,8 +262,8 @@ pub struct Refusal {
     pub why: Why,
 }
 
-/// The keys; the last two are optional.
-const KEYS: [&[u8]; 12] = [
+/// The keys; the last three are optional.
+const KEYS: [&[u8]; 13] = [
     b"manifest",
     b"name",
     b"program",
@@ -264,6 +276,7 @@ const KEYS: [&[u8]; 12] = [
     b"net",
     b"tools",
     b"files",
+    b"channels",
 ];
 const REQUIRED: usize = 10;
 
@@ -364,6 +377,13 @@ fn tools(v: &[u8]) -> Option<u32> {
     Some(mask)
 }
 
+/// Agent names, each at most once.
+fn channels(v: &[u8]) -> Option<Files<'_>> {
+    let mut names = [&b""[..]; MAX_FILES + 1];
+    let n = list(v, &mut names)?;
+    Files::new_with(&names[..n], valid_name)
+}
+
 fn files(v: &[u8]) -> Option<Files<'_>> {
     let mut names = [&b""[..]; MAX_FILES + 1];
     let n = list(v, &mut names)?;
@@ -375,7 +395,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
     if text.len() > MAX_SIZE {
         return Err(whole(Why::TooLarge));
     }
-    let mut values: [Option<&[u8]>; 12] = [None; 12];
+    let mut values: [Option<&[u8]>; 13] = [None; 13];
     for (i, line) in text.split(|b| *b == b'\n').enumerate() {
         let at = |why| Refusal { line: i + 1, why };
         if !line.iter().all(|b| (b' '..=b'~').contains(b)) {
@@ -398,7 +418,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
             return Err(at(Why::RepeatedKey));
         }
     }
-    let mut v = [&b""[..]; 12];
+    let mut v = [&b""[..]; 13];
     for (k, (out, value)) in v.iter_mut().zip(values).enumerate() {
         *out = match value {
             Some(value) => value,
@@ -419,6 +439,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
         net,
         tool_list,
         file_list,
+        channel_list,
     ] = v;
     let bad = whole(Why::BadValue);
     if number(version, u32::MAX) != Some(VERSION) {
@@ -441,6 +462,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
         net: destinations(net).ok_or(bad)?,
         tools: tools(tool_list).ok_or(bad)?,
         files: files(file_list).ok_or(bad)?,
+        channels: channels(channel_list).ok_or(bad)?,
     };
     if m.progress_ms > m.task_ms {
         return Err(whole(Why::ProgressOverTask));
@@ -483,7 +505,12 @@ impl Manifest<'_> {
             && self.data <= e.data
             && self.net.as_slice().iter().all(|d| e.net.contains(d))
             && self.tools & !e.tools == 0
-            && self.files.as_slice().iter().all(|f| e.files.contains(f));
+            && self.files.as_slice().iter().all(|f| e.files.contains(f))
+            && self
+                .channels
+                .as_slice()
+                .iter()
+                .all(|c| e.channels.contains(c));
         if fits { Ok(e) } else { Err(Why::OverPolicy) }
     }
 
@@ -537,10 +564,16 @@ impl Manifest<'_> {
                 }
             }
         }
-        if !self.files.as_slice().is_empty() {
-            w.bytes(b"\nfiles =")?;
+        for (key, list) in [
+            (&b"\nfiles ="[..], &self.files),
+            (b"\nchannels =", &self.channels),
+        ] {
+            if list.as_slice().is_empty() {
+                continue;
+            }
+            w.bytes(key)?;
             let mut sep = &b" "[..];
-            for f in self.files.as_slice() {
+            for f in list.as_slice() {
                 w.bytes(sep)?;
                 w.bytes(f)?;
                 sep = b", ";
@@ -575,6 +608,7 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
         tools: 1 << 1,
         files: &[b"report.txt", b"notes"],
         ask_files: &[],
+        channels: &[b"listener"],
     }];
 
     fn with(key: &str, value: &str) -> std::string::String {
@@ -616,6 +650,7 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
                 net: Net::new(&[([10, 0, 2, 2], 47_000)]).unwrap(),
                 tools: 0,
                 files: Files::default(),
+                channels: Files::default(),
             }
         );
         let text = plus("tools = send , read_file\nfiles = report.txt,a-b_c.1");
@@ -663,7 +698,7 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
             with("net", ""),
             with("net", "10.0.2.3:53, 10.0.2.2:47000"),
             std::format!(
-                "{}tools = read_file, send\nfiles = a, b, c, d\n",
+                "{}tools = read_file, send\nfiles = a, b, c, d\nchannels = x-1, y_2\n",
                 std::str::from_utf8(S).unwrap()
             ),
         ] {
@@ -820,6 +855,9 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
             "files = a,",
             "files = a, b, c, d, e",
             "files = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "channels = a.b",
+            "channels = a, a",
+            "channels = a b",
         ] {
             assert_eq!(why(plus(line).as_bytes()), Some(Why::BadValue), "{line}");
         }
@@ -883,6 +921,12 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
             check("files = secrets.txt"),
             Err(Why::OverPolicy),
             "a file not listed"
+        );
+        assert_eq!(check("channels = listener"), Ok(()));
+        assert_eq!(
+            check("channels = boss"),
+            Err(Why::OverPolicy),
+            "a channel not listed"
         );
     }
 

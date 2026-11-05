@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#132),** with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. To be built by: channels (#133), groups and subtasks (#134), delegation (#135), failure and stop handling (#136), the verifier (#137), and the isolation and confused-deputy tests (#138).
+**Planned. Design approved by the maintainer on 2026-11-05 (#132),** with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. **Implemented:** channels (#133). To be built by: groups and subtasks (#134), delegation (#135), failure and stop handling (#136), the verifier (#137), and the isolation and confused-deputy tests (#138).
 
 ## 2. Context
 
@@ -33,6 +33,7 @@ What M3.7 builds on:
 - **A message is data:** the runtime copies its bytes out of the sender's buffer before use and never interprets them; the receiver treats them as untrusted input, as it treats a file or model output. No request carries a permission in a message.
 - **Logged:** every message is audited as a consequential action, new action `message` (16): an `INTENT` naming the sender, `channel <receiver>`, and the kind and length (never the content), stored before the message is queued (else `NO_AUDIT`), then its `OUTCOME`.
 - **Budgeted:** a new per-attempt budget field, `messages`, and every message counts against `rate`.
+- *Implemented (#133):* `Permission::Channel` (wire kind 6, `channel <agent>` typed), the policy entry's `channels` and the optional manifest key `channels` (at most 4 agent names, each in the entry's), `MESSAGE_SEND` (24) and `MESSAGE_RECEIVE` (25) with the `Message` reply (`pharos_proto::agents`, `MAX_MESSAGE` 1 KiB), `pharos_programs::mailbox` (8 waiting per receiving agent name), the budget field `messages` (`OVER_LIMIT`, recorded as `over messages`), and the audit action `message` (16): `Intent message <sender> … channel <receiver> agents … kind <k> len <n>`, then its outcome. The service named in the record is `agents`. A full queue answers `BUSY` before anything is charged or recorded. `MESSAGE_RECEIVE` needs a buffer of at least 1 KiB (`NO_BUFFER`). A receiver gets messages by its agent name, so every running attempt of that agent shares its queue.
 
 ### Groups and subtasks (#134)
 

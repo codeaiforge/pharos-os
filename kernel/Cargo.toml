@@ -196,6 +196,10 @@ name = "injection"
 harness = false
 
 [[test]]
+name = "channels"
+harness = false
+
+[[test]]
 name = "budgets"
 harness = false
 

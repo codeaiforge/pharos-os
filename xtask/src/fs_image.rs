@@ -213,8 +213,9 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// `permissions` kernel's, which may write its own files (#105), and
 /// `asker`, which gets nothing and asks (#106), the `budgets` kernel's
 /// five (#116), the `fairness` kernel's four (#117), the `tools`
-/// kernel's two (#126, #127), and the `injection` kernel's (#129).
-pub const TEST_MANIFESTS: [(&str, &str); 24] = [
+/// kernel's two (#126, #127), the `injection` kernel's (#129), and the
+/// `channels` kernel's four (#133).
+pub const TEST_MANIFESTS: [(&str, &str); 28] = [
     (
         "agents/worker.manifest",
         "# The agents test kernel's worker.\nmanifest = 1\nname = worker\nprogram = bin/testagent\n\
@@ -262,6 +263,27 @@ pub const TEST_MANIFESTS: [(&str, &str); 24] = [
         "manifest = 1\nname = reader\nprogram = bin/testagent\npages = 256\nmodels =\n\
          attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = write\nnet = 10.0.2.2:47000\n\
          tools = read_file, send\nfiles = report.txt, big.txt\n",
+    ),
+    // The `channels` kernel's (#133).
+    (
+        "agents/talker.manifest",
+        "manifest = 1\nname = talker\nprogram = bin/testagent\npages = 256\nmodels =\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet =\nchannels = hearer\n",
+    ),
+    (
+        "agents/hearer.manifest",
+        "manifest = 1\nname = hearer\nprogram = bin/testagent\npages = 256\nmodels =\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet =\n",
+    ),
+    (
+        "agents/outsider.manifest",
+        "manifest = 1\nname = outsider\nprogram = bin/testagent\npages = 256\nmodels =\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet =\n",
+    ),
+    (
+        "agents/spammer.manifest",
+        "manifest = 1\nname = spammer\nprogram = bin/testagent\npages = 256\nmodels =\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet =\nchannels = outsider\n",
     ),
     // The `injection` kernel's (#129).
     (

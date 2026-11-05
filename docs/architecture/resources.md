@@ -54,6 +54,7 @@ What M3.5 builds on:
   - `net_sends` and `net_bytes`: datagrams and their payload bytes;
   - `data_kb`: the agent's stored files in total (across attempts and tasks, since they persist);
   - `file_kb`: granted files read with `read_file` (#127, tools.md);
+  - `messages`: messages sent to other agents (#133, coordination.md);
   - `rate`: requests per second, with a burst of the same number;
   - `group`: the group's name.
 - **Pages are not a runtime budget:** the entry's `pages` already goes to `spawn`, and the kernel now carves it from the runtime's own limit (#115), so all agents together fit in the runtime's.

@@ -15,6 +15,8 @@ pub enum Over {
     Data,
     /// Granted files read with `read_file` (#127).
     Files,
+    /// Messages to other agents (#133).
+    Messages,
     GroupTokens,
     GroupNet,
 }
@@ -85,6 +87,8 @@ pub struct Usage {
     pub net_bytes: u64,
     /// Bytes of granted files read (#127).
     pub file_bytes: u64,
+    /// Messages sent (#133).
+    pub messages: u64,
 }
 
 fn within(used: u64, amount: u64, limit: u32) -> bool {
@@ -123,6 +127,15 @@ impl Usage {
             return Err(Over::Files);
         }
         self.file_bytes += bytes;
+        Ok(())
+    }
+
+    /// Charges one message to another agent, or refuses (#133).
+    pub fn message(&mut self, budget: &Budget) -> Result<(), Over> {
+        if !within(self.messages, 1, budget.messages) {
+            return Err(Over::Messages);
+        }
+        self.messages += 1;
         Ok(())
     }
 
@@ -238,6 +251,7 @@ mod tests {
         net_bytes: 64,
         data_kb: 1,
         file_kb: 2,
+        messages: 2,
         rate: 2,
         group: b"g",
     };
@@ -274,6 +288,15 @@ mod tests {
             Usage::default().read_file(&Budget::UNLIMITED, u64::from(u32::MAX)),
             Ok(())
         );
+    }
+
+    #[test]
+    fn messages_within_the_budget() {
+        let mut u = Usage::default();
+        assert_eq!(u.message(&LIMITED), Ok(()));
+        assert_eq!(u.message(&LIMITED), Ok(()));
+        assert_eq!(u.message(&LIMITED), Err(Over::Messages));
+        assert_eq!(u.messages, 2, "a refused message costs nothing");
     }
 
     #[test]

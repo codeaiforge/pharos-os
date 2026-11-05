@@ -1389,6 +1389,21 @@ const TOOLS_SCRIPT: &[console::Step] = &[
 /// Nothing else is asked (`secrets.txt` is not askable, and the call
 /// made while one waits is `BUSY`), and no payload reaches the console.
 const TOOLS_REFUSED: &[&str] = &["approve #2", "confirm #6", "hello", "other"];
+/// Message channels (#133): `talker` (task 2) asks for model 3; the user
+/// refuses, then revokes its channel to `hearer`.
+const CHANNELS_TEST: &str = "channels";
+const CHANNELS_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("registered runtime", ""),
+    (
+        "approve #1: talker task 2 wants model 3 for this task? (yes 1 / no 1)",
+        "no 1\n",
+    ),
+    ("approve #1: refused", "revoke talker channel hearer\n"),
+    ("revoked channel hearer from talker", ""),
+];
+/// Message contents never reach the trusted console.
+const CHANNELS_REFUSED: &[&str] = &["approve #2", "three", "let me in"];
 /// Prompt injection and malformed calls (#129): the user refuses the one
 /// `send` the naive agent makes.
 const INJECTION_TEST: &str = "injection";
@@ -1861,6 +1876,84 @@ fn injection_audit(image: &Path) -> Result<()> {
     Ok(())
 }
 
+/// After the `channels` test kernel (#133): each message an intent and an
+/// outcome with its kind and length and never its content; each refusal
+/// once; the revocation recorded.
+fn channels_audit(image: &Path) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    let count = |want: &str| lines.iter().filter(|l| l.contains(want)).count();
+    for (want, n) in [
+        (
+            "client 3 Intent message talker task 2/1 channel hearer agents outcome 0 kind 1 len 3",
+            1,
+        ),
+        (
+            "client 3 Intent message talker task 2/1 channel hearer agents outcome 0 kind 3 len 5",
+            1,
+        ),
+        (
+            "client 3 Intent message talker task 2/1 channel hearer agents outcome 0 kind 4 len 4",
+            5,
+        ),
+        (
+            "client 3 Intent message talker task 2/1 channel hearer agents outcome 0 kind 8 len 4",
+            1,
+        ),
+        (
+            "client 3 Intent message spammer task 4/1 channel outsider agents outcome 0 kind 5 len 4",
+            2,
+        ),
+        ("client 3 Event grant talker task 2/1 channel hearer", 1),
+        (
+            "client 3 Event refuse outsider task 3/1 channel hearer  outcome 2 no grant",
+            1,
+        ),
+        (
+            "client 3 Event refuse spammer task 4/1 channel outsider  outcome 2 over messages",
+            1,
+        ),
+        (
+            "client 3 Event revoke talker task 2/1 channel hearer  outcome 1 user",
+            1,
+        ),
+        (
+            "client 3 Event refuse talker task 2/1 channel hearer  outcome 2 no grant",
+            1,
+        ),
+    ] {
+        if count(want) != n {
+            return Err(format!(
+                "{} records like {want:?}, expected {n}",
+                count(want)
+            ));
+        }
+    }
+    for content in ["three", "fill", "let me in", "spam "] {
+        if count(content) != 0 {
+            return Err(format!(
+                "a message's content {content:?} is in the audit trail"
+            ));
+        }
+    }
+    let outcomes = lines
+        .iter()
+        .filter(|l| l.contains("client 3 Outcome of #") && l.contains(" message talker task 2/1 "))
+        .count();
+    if outcomes < 9 {
+        return Err(format!(
+            "{outcomes} outcomes of talker's messages, expected at least 9"
+        ));
+    }
+    println!(
+        "  audit trail: {} records, every message accounted for without its content",
+        lines.len()
+    );
+    Ok(())
+}
+
 fn hostile_audit(image: &Path) -> Result<()> {
     let streams = store_image::audit(image)?;
     let [(_, lines)] = streams.as_slice() else {
@@ -2041,6 +2134,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         BUDGETS_TEST,
         "fairness",
         EXHAUSTION_TEST,
+        CHANNELS_TEST,
     ];
     if service_store.contains(&name.as_str()) {
         store_image::service(&out.join(STORE_IMAGE))?;
@@ -2066,6 +2160,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         HOSTILE_TEST => (HOSTILE_SCRIPT, HOSTILE_REFUSED),
         TOOLS_TEST => (TOOLS_SCRIPT, TOOLS_REFUSED),
         INJECTION_TEST => (INJECTION_SCRIPT, INJECTION_REFUSED),
+        CHANNELS_TEST => (CHANNELS_SCRIPT, CHANNELS_REFUSED),
         BUDGETS_TEST => (BUDGETS_SCRIPT, &[]),
         EXHAUSTION_TEST => (EXHAUSTION_SCRIPT, &[]),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
@@ -2109,6 +2204,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == INJECTION_TEST {
                 injection_audit(&out.join(STORE_IMAGE))?;
+            }
+            if name == CHANNELS_TEST {
+                channels_audit(&out.join(STORE_IMAGE))?;
             }
             if name == EXHAUSTION_TEST {
                 for (step, what) in [(3, "usage"), (5, "stop all")] {

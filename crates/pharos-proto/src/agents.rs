@@ -25,6 +25,12 @@
 //! buffer (`call_at`, `call_len`, at most [`crate::tool::MAX_CALL`]) and
 //! where its result goes (`result_at`); the reply is `[OK, length u32]`,
 //! the result's bytes at `result_at`.
+//!
+//! Messages (#133, coordination.md): `MESSAGE_SEND` sends the first `len`
+//! bytes of the agent's buffer (at most [`MAX_MESSAGE`]) with a kind byte
+//! to a named agent it holds `channel` for; `MESSAGE_RECEIVE` copies the
+//! oldest message waiting for it into its buffer ([`Message`]), or answers
+//! `NOT_FOUND` at once. A message carries data only.
 
 use crate::{Reader, Refused, Writer, op as common, split, status};
 
@@ -58,6 +64,9 @@ pub mod op {
     pub const USAGE: u8 = 22;
     /// A tool call (#126, tools.md).
     pub const TOOL: u8 = 23;
+    /// Messages between agents (#133, coordination.md).
+    pub const MESSAGE_SEND: u8 = 24;
+    pub const MESSAGE_RECEIVE: u8 = 25;
 }
 
 /// The `ASK` reply's outcome, after `OK` (#106).
@@ -129,6 +138,39 @@ impl Datagram {
             len: r.u32()?,
         };
         (ok && r.is_empty() && d.len <= MAX_DATAGRAM).then_some(d)
+    }
+}
+
+/// Largest message between agents (#133).
+pub const MAX_MESSAGE: u32 = 1024;
+
+/// The `MESSAGE_RECEIVE` reply: `[OK, sender name length, sender, kind,
+/// length u32]`; the bytes are at the start of the agent's buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Message<'a> {
+    pub from: &'a [u8],
+    pub kind: u8,
+    pub len: u32,
+}
+
+impl<'a> Message<'a> {
+    pub fn encode(&self, out: &mut [u8]) -> Option<usize> {
+        let mut w = Writer::new(out);
+        w.bytes(&[status::OK])?;
+        write_name(&mut w, self.from)?;
+        w.bytes(&[self.kind])?;
+        w.u32(self.len)?;
+        Some(w.len())
+    }
+    pub fn parse(reply: &'a [u8]) -> Option<Self> {
+        let mut r = Reader::new(reply);
+        let ok = r.u8()? == status::OK;
+        let m = Self {
+            from: name(&mut r)?,
+            kind: r.u8()?,
+            len: r.u32()?,
+        };
+        (ok && r.is_empty() && m.len <= MAX_MESSAGE).then_some(m)
     }
 }
 
@@ -271,6 +313,15 @@ pub enum Request<'a> {
     },
     /// Agent: the oldest datagram waiting for it, into its buffer.
     ReceiveFrom,
+    /// Agent: the first `len` bytes of its buffer, with `kind`, to agent
+    /// `to` (needs `channel <to>`, #133).
+    MessageSend {
+        to: &'a [u8],
+        kind: u8,
+        len: u32,
+    },
+    /// Agent: the oldest message waiting for it, into its buffer.
+    MessageReceive,
     /// Agent: the tool call in its buffer at `call_at`, `call_len` bytes;
     /// the result goes to `result_at` (#126).
     Tool {
@@ -394,6 +445,12 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             },
             op::RECEIVE_FROM => Request::ReceiveFrom,
             op::USAGE => Request::Usage,
+            op::MESSAGE_SEND => Request::MessageSend {
+                to: name(&mut r)?,
+                kind: r.u8()?,
+                len: r.u32().filter(|n| *n <= MAX_MESSAGE)?,
+            },
+            op::MESSAGE_RECEIVE => Request::MessageReceive,
             op::TOOL => Request::Tool {
                 call_at: r.u32()?,
                 call_len: r
@@ -516,6 +573,16 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
         }
         Request::ReceiveFrom => head(&mut w, op::RECEIVE_FROM)?,
         Request::Usage => head(&mut w, op::USAGE)?,
+        Request::MessageSend { to, kind, len } => {
+            if len > MAX_MESSAGE {
+                return None;
+            }
+            head(&mut w, op::MESSAGE_SEND)?;
+            write_name(&mut w, to)?;
+            w.bytes(&[kind])?;
+            w.u32(len)?;
+        }
+        Request::MessageReceive => head(&mut w, op::MESSAGE_RECEIVE)?,
         Request::Tool {
             call_at,
             call_len,
@@ -784,6 +851,12 @@ mod tests {
             },
             Request::ReceiveFrom,
             Request::Usage,
+            Request::MessageSend {
+                to: &[b'l'; 32],
+                kind: u8::MAX,
+                len: MAX_MESSAGE,
+            },
+            Request::MessageReceive,
             Request::Tool {
                 call_at: 4096,
                 call_len: crate::tool::MAX_CALL as u16,
@@ -859,6 +932,25 @@ mod tests {
         long[..2].copy_from_slice(&[VERSION, op::TOOL]);
         long[6..8].copy_from_slice(&(crate::tool::MAX_CALL as u16 + 1).to_le_bytes());
         assert_eq!(parse(&long), Err(Refused::Bad), "a call over 1 KiB");
+        let mut over = std::vec![VERSION, op::MESSAGE_SEND, 1, b'a', 0];
+        over.extend_from_slice(&(MAX_MESSAGE + 1).to_le_bytes());
+        assert_eq!(parse(&over), Err(Refused::Bad), "a message over 1 KiB");
+        assert_eq!(
+            parse(&[VERSION, op::MESSAGE_SEND, 1, b'.', 0, 1, 0, 0, 0]),
+            Err(Refused::Bad),
+            "a bad name"
+        );
+        let m = Message {
+            from: b"talker",
+            kind: 3,
+            len: MAX_MESSAGE,
+        };
+        let mut out = [0u8; 64];
+        let n = m.encode(&mut out).unwrap();
+        assert_eq!(Message::parse(&out[..n]), Some(m));
+        assert_eq!(Message::parse(&out[..n - 1]), None);
+        out[n - 2] = 0x10;
+        assert_eq!(Message::parse(&out[..n]), None, "over 1 KiB");
         assert_eq!(
             parse(&[VERSION, op::TASK, 0]),
             Err(Refused::Bad),

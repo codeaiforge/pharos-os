@@ -32,6 +32,9 @@ pub enum Permission {
     /// namespace (#127, tools.md); made with [`Permission::file`], so the
     /// name is valid and the unused bytes zero.
     File { name: [u8; MAX_FILE], len: u8 },
+    /// Sending messages to one named agent (#133, coordination.md); made
+    /// with [`Permission::channel`].
+    Channel { name: [u8; MAX_FILE], len: u8 },
 }
 
 /// A file name: 1 to [`MAX_FILE`] letters, digits, `-`, `_`, or `.`, not
@@ -50,6 +53,7 @@ mod kind {
     pub const DATA_WRITE: u8 = 3;
     pub const NET: u8 = 4;
     pub const FILE: u8 = 5;
+    pub const CHANNEL: u8 = 6;
 }
 
 impl Permission {
@@ -74,6 +78,36 @@ impl Permission {
         }
     }
 
+    /// `channel <agent>`; `None` if `agent` is not a valid agent name.
+    pub fn channel(agent: &[u8]) -> Option<Self> {
+        if !crate::trust::valid_name(agent) || agent.len() > MAX_FILE {
+            return None;
+        }
+        let mut name = [0u8; MAX_FILE];
+        name[..agent.len()].copy_from_slice(agent);
+        Some(Self::Channel {
+            name,
+            len: agent.len() as u8,
+        })
+    }
+
+    /// The agent a `channel` permission names.
+    pub fn channel_to(&self) -> Option<&[u8]> {
+        match self {
+            Self::Channel { name, len } => name.get(..usize::from(*len)),
+            _ => None,
+        }
+    }
+
+    /// A name and its kind byte, for the kinds that carry one.
+    fn name(&self) -> Option<(u8, &[u8])> {
+        match self {
+            Self::File { .. } => Some((kind::FILE, self.file_name()?)),
+            Self::Channel { .. } => Some((kind::CHANNEL, self.channel_to()?)),
+            _ => None,
+        }
+    }
+
     /// True if holding `self` allows what `wanted` needs.
     pub fn covers(&self, wanted: &Self) -> bool {
         self == wanted || (*self == Self::DataWrite && *wanted == Self::DataRead)
@@ -88,6 +122,12 @@ impl Permission {
                 let n = usize::from(len);
                 n <= MAX_FILE && valid_file(&name[..n]) && name[n..].iter().all(|b| *b == 0)
             }
+            Self::Channel { name, len } => {
+                let n = usize::from(len);
+                n <= MAX_FILE
+                    && crate::trust::valid_name(&name[..n])
+                    && name[n..].iter().all(|b| *b == 0)
+            }
         }
     }
 
@@ -97,8 +137,8 @@ impl Permission {
         if !self.valid() {
             return None;
         }
-        if let Some(name) = self.file_name() {
-            w.bytes(&[kind::FILE, name.len() as u8])?;
+        if let Some((k, name)) = self.name() {
+            w.bytes(&[k, name.len() as u8])?;
             return w.bytes(name);
         }
         let mut b = [0u8; FIXED];
@@ -111,17 +151,22 @@ impl Permission {
                 b[1..5].copy_from_slice(&addr);
                 b[5..].copy_from_slice(&port.to_le_bytes());
             }
-            Self::File { .. } => return None,
+            Self::File { .. } | Self::Channel { .. } => return None,
         }
         w.bytes(&b)
     }
 
     /// Reads what [`Permission::write`] wrote; unused bytes must be zero.
     pub fn read(r: &mut Reader<'_>) -> Option<Self> {
-        if r.peek() == Some(kind::FILE) {
+        if let Some(k @ (kind::FILE | kind::CHANNEL)) = r.peek() {
             r.u8()?;
             let n = usize::from(r.u8()?);
-            return Self::file(r.take(n)?);
+            let name = r.take(n)?;
+            return if k == kind::FILE {
+                Self::file(name)
+            } else {
+                Self::channel(name)
+            };
         }
         let b = r.take(FIXED)?;
         let zero = |from: usize| b[from..].iter().all(|x| *x == 0);
@@ -139,13 +184,14 @@ impl Permission {
     }
 
     /// Parses the typed form: `model <n>`, `data read`, `data write`,
-    /// `net <a.b.c.d>:<port>`, or `file <name>`.
+    /// `net <a.b.c.d>:<port>`, `file <name>`, or `channel <agent>`.
     pub fn parse(words: &[&[u8]]) -> Option<Self> {
         let p = match words {
             [b"model", n] => Self::Model(u8::try_from(number(n, u32::from(MAX_MODEL))?).ok()?),
             [b"data", b"read"] => Self::DataRead,
             [b"data", b"write"] => Self::DataWrite,
             [b"file", name] => Self::file(name)?,
+            [b"channel", agent] => Self::channel(agent)?,
             [b"net", dest] => {
                 let colon = dest.iter().position(|b| *b == b':')?;
                 let mut addr = [0u8; 4];
@@ -172,6 +218,9 @@ impl Permission {
             Self::DataRead => w.bytes(b"data read"),
             Self::DataWrite => w.bytes(b"data write"),
             Self::File { .. } => w.bytes(b"file ").and_then(|()| w.bytes(self.file_name()?)),
+            Self::Channel { .. } => w
+                .bytes(b"channel ")
+                .and_then(|()| w.bytes(self.channel_to()?)),
             Self::Net { addr, port } => (|| {
                 w.bytes(b"net ")?;
                 for (i, a) in addr.iter().enumerate() {
@@ -229,7 +278,7 @@ fn decimal(w: &mut Writer<'_>, mut n: u32) -> Option<()> {
 mod tests {
     use super::*;
 
-    const ALL: [Permission; 6] = [
+    const ALL: [Permission; 7] = [
         Permission::Model(1),
         Permission::Model(MAX_MODEL),
         Permission::DataRead,
@@ -241,6 +290,10 @@ mod tests {
         Permission::File {
             name: *b"report.txt\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
             len: 10,
+        },
+        Permission::Channel {
+            name: *b"listener\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+            len: 8,
         },
     ];
 
@@ -275,6 +328,13 @@ mod tests {
         let long = [b'a'; MAX_FILE];
         let p = Permission::file(&long).unwrap();
         assert_eq!(p.text(&mut t).len(), 5 + MAX_FILE);
+        assert_eq!(ALL[6].text(&mut t), b"channel listener");
+        assert_eq!(Permission::channel(b"listener"), Some(ALL[6]));
+        assert_eq!(ALL[6].channel_to(), Some(&b"listener"[..]));
+        assert_eq!(ALL[6].file_name(), None, "a channel is not a file");
+        let p = Permission::channel(&[b'a'; MAX_FILE]).unwrap();
+        assert_eq!(p.text(&mut t).len(), TEXT, "the longest typed form fits");
+        assert!(!Permission::file(b"listener").unwrap().covers(&ALL[6]));
     }
 
     #[test]
@@ -301,6 +361,10 @@ mod tests {
             "file .hidden",
             "file a b",
             "file aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "channel",
+            "channel a.b",
+            "channel a/b",
+            "channel aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ] {
             assert_eq!(Permission::parse(&words(s)), None, "{s}");
         }
@@ -322,7 +386,10 @@ mod tests {
             assert_eq!(Permission::read(&mut Reader::new(&b)), None, "{b:?}");
         }
         for b in [
-            &b"\x05\x00"[..],
+            &b"\x06\x00"[..],
+            b"\x06\x02a.",
+            b"\x06\x01",
+            b"\x05\x00",
             b"\x05\x02a/",
             b"\x05\x02.a",
             b"\x05\x21aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -348,10 +415,15 @@ mod tests {
             let Some((len, name)) = m.split_first() else {
                 return;
             };
-            let mut msg = std::vec![5, len % 34];
+            // `file` for even lengths, `channel` for odd ones.
+            let mut msg = std::vec![5 + len % 2, len % 34];
             msg.extend(name.iter().map(|b| b"./ab0_-"[usize::from(*b) % 7]));
             if let Some(p) = Permission::read(&mut Reader::new(&msg)) {
-                assert!(p.valid() && p.file_name().is_some_and(valid_file));
+                assert!(p.valid());
+                assert!(
+                    p.file_name().is_some_and(valid_file)
+                        || p.channel_to().is_some_and(crate::trust::valid_name)
+                );
             }
         });
     }

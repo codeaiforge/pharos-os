@@ -27,7 +27,8 @@ What M3.4 builds on:
   - `model <n>`: inference with manifest model *n* (exists today as the manifest's model mask);
   - `data read` or `data write`: the agent's own files, kept by the runtime under `data/<agent>/` in its store namespace (new; agents have no files today);
   - `net <address>:<port>`: UDP datagrams to one IPv4 destination, and its replies (#109);
-  - `file <name>`: reading one file the user gives agents, in the store's `files` namespace, through the `read_file` tool (#127, [tools.md](tools.md)).
+  - `file <name>`: reading one file the user gives agents, in the store's `files` namespace, through the `read_file` tool (#127, [tools.md](tools.md));
+  - `channel <agent>`: sending messages to one named agent, through the runtime (#133, [coordination.md](coordination.md)); not askable.
 - **The policy entry** lists, per agent, what it *gets* (granted at task start, as today) and what it *may ask for* (granted only by approval). Anything in neither list is refused without asking, so an agent cannot flood the user with requests for things nobody planned. The manifest may ask for less than the entry's *gets*, never more; it still cannot widen the entry.
 - **Grants are per task attempt**: rebuilt from the entry and the manifest when the attempt starts, plus the approvals given for this task. Nothing is remembered across tasks (D-012 item 7).
 - **Expiry:** each grant may carry a deadline in `uptime` microseconds, checked on every request that uses it; past it, the grant is gone as if revoked (D-012 item 9).
