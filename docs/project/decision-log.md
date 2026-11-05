@@ -811,6 +811,36 @@ Two system calls per direction plus two task switches and two address-space swit
 
 **Consequences.** The runtime gains message queues and group state, kept in its store as tasks are, and stays the single place where agents meet. A supervisor's plan is untrusted, like any agent output: it can only start workers its group names, with authority it holds. The details (message fields and sizes, queue limits, the subtask request, the verifier checks) are in the design (#132).
 
+### D-025: The knowledge service
+
+- **Status:** Accepted
+- **Needed by:** M3.8
+- **Date accepted:** 2026-11-05 (issue #140)
+
+**Context.** M3.8 adds a shared, permission-aware knowledge service with provenance, separate from each agent's private memory: reads and writes need capabilities, a query never returns content whose evidence the caller cannot read, verified facts, unverified claims, stale entries, and conflicting entries stay distinguishable, stored content is never instructions or policy, and every update is attributable and audited. History is kept, so a correction never rewrites the evidence behind an earlier decision.
+
+**Evidence (2026-11-05, issue #140):**
+- **The store (M3.0)** gives each client one namespace by badge (`pharos_proto::store::NAMESPACES`, 1 to 7), with crash-consistent writes, appends, and records of at most 200 bytes inline; services speak typed, versioned interfaces (D-019).
+- **Agents reach services only through the runtime,** which checks, budgets, and audits every request (D-012, D-022), and already keeps each agent's private files (`data read`/`data write`, under `data/<agent>/` in its namespace).
+- **Permissions as runtime grants work for named things:** `file <name>` (#127) and `channel <agent>` (#133) are granted by policy or approval, revocable at once, and recorded.
+- **Agent text never reaches the trusted console:** `trust` writes every prompt from structured fields (D-018).
+- **The runtime holds nine capabilities at boot,** one past `spawn`'s `MAX_SPAWN_CAPS` (8), so the boot runtime already lacks two of them (a recorded limit, M3.6); one more client capability needs that limit raised.
+- **The D-024 verifier checks form only** (text within a size), not truth.
+
+**Options.** Where it runs: its own service, or inside the runtime. History: append-only versions, or a current value with a change log. Access: named scopes granted as runtime permissions, or access lists on each entry. Verification: only the user marks an entry verified, the D-024 verifier may too, or no verified status yet.
+
+**Evaluation criteria.** No authority from stored content; nothing readable without a grant, including through a query or another entry's evidence; history never rewritten; least new trusted code, and no agent text on the trusted console; one place that enforces access; host-testable logic (D-020).
+
+**Decision (the maintainer chose each recommendation):**
+
+1. **A new `knowledge` service** on its own store namespace, with a typed, versioned interface (D-019). Agents reach it only through new runtime requests, which check the agent's grants, charge its budget, and audit each update; the runtime is the service's only agent-facing client and names the author of each write, so an agent cannot claim another's authorship. Later clients (the shell, the user) use the same interface. `MAX_SPAWN_CAPS` is raised so the runtime can hold the new capability. Rejected: knowledge inside the runtime (no new process or kernel change, but the 3,300-line runtime would grow again and become the only way to knowledge).
+2. **Append-only versions.** An entry is a key in a scope with a series of immutable versions; a correction adds a version that names the one it replaces, and a retraction is a version too. Nothing is rewritten or deleted, so the evidence an earlier decision used stays readable. Rejected: a current value with a change log (old evidence rebuilt from the log, and the two can disagree after a crash).
+3. **Scopes granted as runtime permissions:** `knowledge read <scope>` and `knowledge write <scope>`, given by the policy entry or by approval as `file` and `channel` are, revocable while the agent runs, and recorded. A query or summary skips any entry the caller cannot read, and any entry whose cited evidence is in a scope it cannot read. Rejected: access lists on each entry (finer, but every write would set policy, and agents, which are untrusted, would write those lists).
+4. **Only the user marks a version verified,** on the trusted console (`verify <scope> <key> <version>`), which shows names, the version, and a hash, never content. Every entry an agent writes or promotes starts unverified; entries the user loads from the host (as `files` are) start verified. Rejected: the D-024 verifier marking results verified (it checks form, not truth, so verified would mean less); no verified status yet (the roadmap asks for verified and unverified entries to be distinguishable).
+5. **Fixed by the roadmap:** each agent's private memory stays its own `data` files, and promotion to shared knowledge is an explicit runtime request that needs `knowledge write <scope>` and is recorded with its provenance; queries are by exact key and tag, with no semantic search or graph database until measured queries justify one; stored content is data, never instructions or policy.
+
+**Consequences.** One new service and store namespace, new runtime requests and two permission kinds, a trusted-console command, and a kernel limit raised. Stale and conflicting entries are derived from versions and provenance (the rules are in the design, #141). A poisoned entry can still mislead an agent that reads it, but it carries its author, source, and unverified status, and gives no authority.
+
 ## Open and proposed decisions
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.

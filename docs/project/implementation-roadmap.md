@@ -458,7 +458,7 @@ Ordering notes:
 
 ### M3.8 — Knowledge service
 
-**Status: Current.** M3.7 gives it agents that talk only on granted channels and work in groups under a supervisor, with delegation that only narrows authority and a verifier on every result. First step: its decision and issues.
+**Status: Current.** M3.7 gives it agents that talk only on granted channels and work in groups under a supervisor, with delegation that only narrows authority and a verifier on every result. Issues #140–#147. D-025 accepted (#140): a `knowledge` service on its own store namespace, reached by agents only through the runtime; append-only versions; scopes granted as runtime permissions; only the user marks a version verified. Next: the design (#141).
 
 - **Where it runs (D-020):** Pharos; data model and provenance logic host-tested.
 - **Objective and scope:** A shared, permission-aware knowledge service with provenance, separate from each agent's private memory.
@@ -639,7 +639,7 @@ Ordering notes:
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part and D-018 on 2026-11-01; D-012 (final, with D-018) on 2026-11-03; D-022 on 2026-11-04; D-023 and D-024 on 2026-11-05; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part and D-018 on 2026-11-01; D-012 (final, with D-018) on 2026-11-03; D-022 on 2026-11-04; D-023, D-024, and D-025 on 2026-11-05; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -666,6 +666,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-022 | Resource accounting and limits | M3.5 | **Accepted** (#112): three fixed scheduling classes (trusted, services, agents), a higher class always first; CPU time counted per process by the kernel; pages, processes, and handles carved from the creator's; over a limit refused, requests over the rate throttled, an attempt over its CPU budget stopped; groups named in the policy table; the runtime enforces CPU per attempt, storage, network, inference, and requests |
 | D-023 | Tool interface and tool-call validation | M3.6 | **Accepted** (#123): the runtime parses the model's text as a strict JSON subset with a fuzzed `no_std` parser; tools compiled in, one `TOOL` operation, the policy entry listing an agent's tools; `file <name>` grants one file of a read-only `files` namespace; `read_file` and `send`; a sensitive tool confirmed per call on the trusted console, from structured fields |
 | D-024 | Agent communication and coordination | M3.7 | **Accepted** (#131): channels through the runtime, granted by policy, carrying data only; groups in policy with a supervisor submitting subtasks to its workers; delegation of a subset of the supervisor's grants to a subtask, recorded and revoked with the source; a compiled-in verifier before a goal is done |
+| D-025 | The knowledge service | M3.8 | **Accepted** (#140): a new `knowledge` service on its own store namespace, reached by agents only through the runtime; append-only versions; scopes granted as runtime permissions (`knowledge read`/`write <scope>`), with queries that skip what the caller, or the evidence it cites, cannot read; only the user marks a version verified, on the trusted console |
 
 ## Next milestone
 
