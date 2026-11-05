@@ -753,6 +753,36 @@ Two system calls per direction plus two task switches and two address-space swit
 
 **Consequences.** A spinning trusted or service process starves every lower class: those processes are trusted and reviewed, and spend their time waiting on IPC; the inference service computing a `GENERATE` holds agents off the CPU, which wait on it anyway. CPU budgets are enforced only by stopping, at the runtime's next check, so an agent overruns by up to that interval. The details (units, check intervals, the new status, the policy fields) are in the design (#113).
 
+### D-023: Tool interface and tool-call validation
+
+- **Status:** Accepted
+- **Needed by:** M3.6
+- **Date accepted:** 2026-11-05 (issue #123)
+
+**Context.** M3.6 lets agents invoke defined tools only through capability checks, rejects malformed or injected tool calls, and asks the user before sensitive tools run (scenario U3; S1's "read a granted file"). D-020 puts the tool-call validator on the host, with fuzzing and an injection corpus, and the enforcement on Pharos.
+
+**Evidence (2026-11-05, issue #123):**
+- **Every agent request already passes the runtime.** An agent holds one capability, `SEND` on the agent runtime; the runtime checks each request against the task's grants, charges its budgets, and audits it (D-012, D-022). A tool can be one more request it serves.
+- **The runtime never reads model output.** Inference output reaches the agent as data (agents.md); nothing in trusted code parses it today.
+- **No agent can read a file the user chose.** Permissions are `model`, `data read`, `data write`, and `net`; an agent's files are only its own (`data/<agent>/`). The store's namespaces are `test`, `spare`, `models`, `crash`, and `agents`; files reach the store image through the host tool, as models do.
+- **Approvals already exist** on the trusted path: `trust` writes the console text from structured fields, an agent picks only which listed permission it asks for, and no answer means no (D-012 item 7).
+- **The scenario model writes calls as JSON.** Qwen2.5-Instruct emits `{"name": ..., "arguments": {...}}` between `<tool_call>` tags.
+
+**Options.** Where a call is parsed: in the runtime from the model's text, by the agent into a binary form the runtime checks, or by the runtime running the whole model loop. Tools: compiled-in or declared in policy, invoked by one operation or one per tool. A file grant: a new permission naming one file, or the agent's own files. Sensitive tools: which, and confirmed per call or per task.
+
+**Evaluation criteria.** Model output and agents stay untrusted (D-018); the enforcement point is the code the injection corpus tests; least trusted code; no new kernel code or `unsafe`; a granted call costs no more prompts than its grant warrants.
+
+**Decision (the maintainer chose each recommendation):**
+
+1. **The runtime parses and validates the call.** The agent passes the model's text unchanged in a new runtime operation; the runtime parses it as a strict subset of JSON: one object, `name` a string and `arguments` an object of string and integer values, no nesting, no duplicate keys, at most 1 KiB, nothing after it. The parser is a `no_std` module with `unsafe` forbidden and no dependencies, host-tested, fuzzed, and run against an injection corpus; a parser never panics. Rejected: a binary form built by the agent (the corpus would test the agent's parser, not the enforcement point); the runtime running the model loop (much more runtime code, tied to one prompt format).
+2. **Tools are compiled in, invoked with one operation, `TOOL`.** A reviewed table in the runtime gives each tool its name, its argument schema, the permission it needs, and whether it is sensitive. The policy entry lists the tools an agent may use; a manifest may ask for fewer. An unknown tool, a tool not listed, a missing, extra, or oversized argument, and a call without its permission are refused and audited. Rejected: tools declared in policy (each schema becomes configuration to parse and review).
+3. **A new permission, `file <name>`, grants reading one file** from a new read-only store namespace, `files`, which the host tool fills when the image is built, as it does models. It comes from the policy table, a manifest within it, or approval, and is revoked like any other (D-012 item 8). Rejected: the agent's own files (`data read` covers all of them, and `data write` could overwrite what the user gave).
+4. **M3.6's tools:** `read_file` (needs `file <name>`, not sensitive: the grant is the user's consent) and `send` (one UDP datagram to a destination the agent holds `net` for; sensitive).
+5. **A sensitive tool runs only after the user confirms that call** on the trusted console. `trust` writes the prompt from structured fields (the agent, the tool, the destination, the byte count), never from agent or model text. No answer, `no`, or `trust` unreachable mean no; the request and the answer are audited. Rejected: per task (one yes would cover whatever the model sends later); confirming every tool (adds nothing to a read the user already granted).
+6. **Tool results reach the agent as data**, as inference output does; the runtime never acts on a result.
+
+**Consequences.** The runtime gains a parser of untrusted text, so its correctness is part of the trusted base; the fuzz test and corpus guard it. An agent can still call a tool without any model, with any text it likes: the checks are the same, which is the point. The details (the operation's fields, the schemas, the size limits, the `files` namespace number, the confirmation timeout) are in the design (#124).
+
 ## Open and proposed decisions
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.

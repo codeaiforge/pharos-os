@@ -428,7 +428,7 @@ Ordering notes:
 
 ### M3.6 — Controlled tool integration
 
-**Status: Current.** M3.5 gives it agents held to budgets for CPU, pages, processes, handles, inference, network, storage, and requests, with three scheduling classes so the trusted path always runs first.
+**Status: Current.** M3.5 gives it agents held to budgets for CPU, pages, processes, handles, inference, network, storage, and requests, with three scheduling classes so the trusted path always runs first. D-023 accepted (#123): the runtime parses and validates each tool call, a strict JSON subset of the model's text, with a fuzzed `no_std` parser; tools compiled in and invoked with one `TOOL` operation; a new `file <name>` permission on a read-only `files` namespace; `read_file` and `send`, the second confirmed by the user for each call on the trusted console. Next: the design, `docs/architecture/tools.md` (#124).
 
 - **Where it runs (D-020):** Pharos; the tool-call validator host-tested and fuzzed.
 - **Objective and scope:** Let agents invoke defined tools only through capability checks.
@@ -639,7 +639,7 @@ Ordering notes:
 
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part and D-018 on 2026-11-01; D-012 (final, with D-018) on 2026-11-03; D-022 on 2026-11-04; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part and D-018 on 2026-11-01; D-012 (final, with D-018) on 2026-11-03; D-022 on 2026-11-04; D-023 on 2026-11-05; the rest are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -664,6 +664,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-020 | Where Phase 3 runs first | M3.1 | **Accepted:** one codebase of `no_std` crates tested on the host and run on Pharos; measurements on the host; enforcement shown only on Pharos; M3.0 on the critical path from M3.2 |
 | D-013 | Scheduling model | M2.6 | **Accepted:** preemptive round-robin on one CPU, 10 ms slice, kernel threads on guarded stacks, no lock held across a switch; amended by D-022 with three scheduling classes |
 | D-022 | Resource accounting and limits | M3.5 | **Accepted** (#112): three fixed scheduling classes (trusted, services, agents), a higher class always first; CPU time counted per process by the kernel; pages, processes, and handles carved from the creator's; over a limit refused, requests over the rate throttled, an attempt over its CPU budget stopped; groups named in the policy table; the runtime enforces CPU per attempt, storage, network, inference, and requests |
+| D-023 | Tool interface and tool-call validation | M3.6 | **Accepted** (#123): the runtime parses the model's text as a strict JSON subset with a fuzzed `no_std` parser; tools compiled in, one `TOOL` operation, the policy entry listing an agent's tools; `file <name>` grants one file of a read-only `files` namespace; `read_file` and `send`; a sensitive tool confirmed per call on the trusted console, from structured fields |
 
 ## Next milestone
 
