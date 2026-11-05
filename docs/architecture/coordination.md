@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#132),** with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. **Implemented:** channels (#133), groups and subtasks (#134), delegation (#135), failure and stop handling (#136), the verifier (#137). To be built by: the isolation and confused-deputy tests (#138).
+**Planned. Design approved by the maintainer on 2026-11-05 (#132),** with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. **Implemented:** channels (#133), groups and subtasks (#134), delegation (#135), failure and stop handling (#136), the verifier (#137), and the isolation and confused-deputy tests (#138).
 
 ## 2. Context
 
@@ -84,7 +84,7 @@ What M3.7 builds on:
 | Host, `pharos_programs` | queues (limits, order, a full queue), group membership checks, delegation (a subset only, deadlines, revocation with the source), the parent field in task records and recovery, verifier checks |
 | Pharos, `channels` kernel (#133) | two agents with a channel exchange messages; a third without one is refused; a revoked channel stops at once; a full queue is `BUSY`; every message audited, no content in the trail; mutation-checked |
 | Pharos, `groups` kernel (#134–#137) | a supervisor and two workers complete a goal within the group budget; a delegated file is read by a worker and a wider delegation refused; revoking the supervisor's grant revokes the worker's; a crashing worker is retried, then reported failed; a bad result is not verified and the goal fails; `stop group` leaves nothing running; mutation-checked |
-| Pharos, `deputy` kernel (#138) | agents without a channel try to reach each other; a worker tries to use its supervisor's grants, submit subtasks, read another goal's subtasks, and pass on a delegation; messages with injected instructions and a flood of messages; each refused and recorded once |
+| Pharos, `deputy` kernel (#138; implemented, see [testing.md](../development/testing.md)) | agents without a channel try to reach each other; a worker tries to use its supervisor's grants, submit subtasks, read another goal's subtasks, and pass on a delegation; messages with injected instructions and a flood of messages; each refused and recorded once |
 
 ## 6. Alternatives
 

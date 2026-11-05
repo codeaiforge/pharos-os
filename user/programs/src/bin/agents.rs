@@ -792,7 +792,8 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
-        channels: &[],
+        // Its one channel, for the `deputy` kernel (#138).
+        channels: &[b"boss"],
     },
     Entry {
         name: b"plain",

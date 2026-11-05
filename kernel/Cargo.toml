@@ -204,6 +204,10 @@ name = "groups"
 harness = false
 
 [[test]]
+name = "deputy"
+harness = false
+
+[[test]]
 name = "budgets"
 harness = false
 

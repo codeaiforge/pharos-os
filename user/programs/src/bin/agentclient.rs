@@ -21,7 +21,8 @@
 //! task, then a `plain` task. Argument 9: the `injection` kernel (#129):
 //! an `injected` task. Argument 10: the `channels` kernel (#133):
 //! `hearer`, `talker`, `outsider`, and `spammer` tasks at once. Argument
-//! 11: the `groups` kernel (#134): a `boss` task.
+//! 11: the `groups` kernel (#134): a `boss` task. Argument 12: the
+//! `deputy` kernel (#138): two `boss` goals, one after the other.
 
 #![no_std]
 #![no_main]
@@ -190,6 +191,28 @@ fn main(arg: u64) -> u64 {
     }
     if arg == 8 {
         return tools(c);
+    }
+    if arg == 12 {
+        let goal = |c: &Client, input: &[u8], id: u32, want: &[u8]| {
+            c.submit(b"boss", input).ok() == Some(id)
+                && c.wait(id, 90).is_some_and(|(s, result)| {
+                    if result != want {
+                        let mut line = Vec::from(&b"deputy kernel result: "[..]);
+                        line.extend_from_slice(&result[..result.len().min(200)]);
+                        let _ = debug_write(CONSOLE, &line);
+                    }
+                    s.state == State::Done && result == want
+                })
+        };
+        let trapped = goal(&c, b"trap", 1, b"trap ok");
+        c.step(
+            "a compromised worker, a passed-on delegation, and injected messages gain nothing",
+            trapped,
+        );
+        let apart = goal(&c, b"apart", 4, b"apart ok");
+        c.step("a goal reads only its own subtasks", apart);
+        let _ = send(REPORT, b"done", 0, 0, 0);
+        return c.failed;
     }
     if arg == 11 {
         let task = c.submit(b"boss", b"lead");

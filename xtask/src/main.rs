@@ -1392,6 +1392,11 @@ const TOOLS_REFUSED: &[&str] = &["approve #2", "confirm #6", "hello", "other"];
 /// Agent groups and subtasks (#134): the console is only watched, so the
 /// trail is checked afterwards.
 const GROUPS_TEST: &str = "groups";
+/// Isolation and the confused deputy (#138): nothing is asked of the user,
+/// and the injected message never reaches the console.
+const DEPUTY_TEST: &str = "deputy";
+const DEPUTY_SCRIPT: &[console::Step] = &[("trust: ready", ""), ("registered runtime", "")];
+const DEPUTY_REFUSED: &[&str] = &["approve #", "confirm #", "SYSTEM", "let me in"];
 /// `aide` (task 12) holds model 2 from `boss` and asks for model 3; the
 /// user refuses, then revokes boss's model 2, which takes aide's (#135).
 const GROUPS_SCRIPT: &[console::Step] = &[
@@ -1978,6 +1983,56 @@ fn channels_audit(image: &Path) -> Result<()> {
 
 /// After the `groups` test kernel (#134): each subtask an intent and an
 /// outcome naming its worker; each refusal once.
+/// Each attempt's refusals recorded once per kind, with the first example;
+/// the injected message's words and the refused messages never stored.
+fn deputy_audit(image: &Path) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    let count = |want: &str| lines.iter().filter(|l| l.contains(want)).count();
+    for (want, n) in [
+        ("refuse helper task 2/1 model 2  outcome 2 no grant", 1),
+        ("refuse helper task 2/1   outcome 2 not in group", 1),
+        ("refuse helper task 2/1 model 2  outcome 2 not askable", 1),
+        // 3 models, 50 messages, 20 subtasks, 1 ask: one record per kind.
+        ("refuse helper task 2/1   outcome 2 74 requests refused", 1),
+        ("refuse helper task 2/1", 4),
+        ("refuse aide task 3/1   outcome 2 not in group", 1),
+        (
+            "refuse boss task 1/1 net 10.0.2.2:47000  outcome 2 no grant",
+            1,
+        ),
+        (
+            "Event grant aide task 3/1 model 2  outcome 1 from boss task 1",
+            1,
+        ),
+        ("Event grant helper", 0),
+        ("Intent message aide task 3/1 channel boss agents", 8),
+        ("Intent message helper", 0),
+        ("Intent submit helper", 0),
+        ("Intent submit aide", 0),
+        ("Intent submit boss task 1/1", 2),
+        ("Event verify boss task 4/1   outcome 1 verified", 1),
+        ("not verified", 0),
+        ("SYSTEM", 0),
+        ("approves", 0),
+    ] {
+        if count(want) != n {
+            let like: Vec<&String> = lines.iter().filter(|l| l.contains(want)).take(8).collect();
+            return Err(format!(
+                "{} records like {want:?}, expected {n}: {like:?}",
+                count(want)
+            ));
+        }
+    }
+    println!(
+        "  audit trail: {} records, every attempt refused and recorded once per kind",
+        lines.len()
+    );
+    Ok(())
+}
+
 fn groups_audit(image: &Path) -> Result<()> {
     let streams = store_image::audit(image)?;
     let [(_, lines)] = streams.as_slice() else {
@@ -2232,6 +2287,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         EXHAUSTION_TEST,
         CHANNELS_TEST,
         GROUPS_TEST,
+        DEPUTY_TEST,
     ];
     if service_store.contains(&name.as_str()) {
         store_image::service(&out.join(STORE_IMAGE))?;
@@ -2259,6 +2315,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         INJECTION_TEST => (INJECTION_SCRIPT, INJECTION_REFUSED),
         CHANNELS_TEST => (CHANNELS_SCRIPT, CHANNELS_REFUSED),
         GROUPS_TEST => (GROUPS_SCRIPT, &[]),
+        DEPUTY_TEST => (DEPUTY_SCRIPT, DEPUTY_REFUSED),
         BUDGETS_TEST => (BUDGETS_SCRIPT, &[]),
         EXHAUSTION_TEST => (EXHAUSTION_SCRIPT, &[]),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
@@ -2308,6 +2365,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == GROUPS_TEST {
                 groups_audit(&out.join(STORE_IMAGE))?;
+            }
+            if name == DEPUTY_TEST {
+                deputy_audit(&out.join(STORE_IMAGE))?;
             }
             if name == EXHAUSTION_TEST {
                 for (step, what) in [(3, "usage"), (5, "stop all")] {

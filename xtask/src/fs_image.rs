@@ -278,7 +278,7 @@ pub const TEST_MANIFESTS: [(&str, &str); 31] = [
     (
         "agents/aide.manifest",
         "manifest = 1\nname = aide\nprogram = bin/testagent\npages = 256\nmodels =\n\
-         attempts = 2\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet =\n",
+         attempts = 2\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet =\nchannels = boss\n",
     ),
     // The `channels` kernel's (#133).
     (
