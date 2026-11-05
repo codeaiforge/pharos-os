@@ -2,7 +2,7 @@
 //! version and an operation, every reply with a status. Status codes 0–31
 //! and operations 0xF0 and up mean the same in every interface; each
 //! interface module ([`store`], [`net`], [`infer`], [`trust`], [`agents`], and the
-//! [`manifest`] text format) defines the rest, with `parse` and
+//! [`manifest`] and [`tool`] text formats) defines the rest, with `parse` and
 //! `encode` shared by the service and its clients.
 //!
 //! Parsers take untrusted bytes: they check every length, refuse trailing
@@ -21,6 +21,7 @@ pub mod manifest;
 pub mod net;
 pub mod permission;
 pub mod store;
+pub mod tool;
 pub mod trust;
 
 /// Status codes common to every interface; an interface's own start at 32.
