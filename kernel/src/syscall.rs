@@ -62,7 +62,7 @@ pub const MAX_PATH: usize = pharos_fs::MAX_PATH;
 /// Largest buffer `read` accepts.
 pub const MAX_READ: usize = 4096;
 /// Most capabilities one `spawn` passes (services.md).
-pub const MAX_SPAWN_CAPS: usize = 8;
+pub const MAX_SPAWN_CAPS: usize = 12;
 /// Bytes per `spawn` capability entry: handle u64, rights u32, badge u32.
 pub const SPAWN_ENTRY: usize = 16;
 /// Most live processes (services.md).
@@ -1467,10 +1467,14 @@ mod tests {
             "the limit rides in bits 32-63"
         );
         assert!(spawn(0, 0, 0).is_ok(), "no capabilities: no buffer");
+        assert!(matches!(
+            spawn(0x40_0000, 12, 0),
+            Ok(Call::Spawn { count: 12, .. })
+        ));
         assert_eq!(
-            spawn(0x40_0000, 9, 0),
+            spawn(0x40_0000, 13, 0),
             Err(Error::TooLarge),
-            "9 capabilities"
+            "13 capabilities"
         );
         assert_eq!(spawn(0x40_0000, 1, 32), Err(Error::TooLarge), "bit 32");
         assert!(

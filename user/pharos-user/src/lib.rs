@@ -297,7 +297,7 @@ pub struct Grant {
 }
 
 /// Most capabilities one [`spawn`] passes.
-pub const MAX_SPAWN_CAPS: usize = 8;
+pub const MAX_SPAWN_CAPS: usize = 12;
 
 /// Starts the program in `file` (needs `READ`) with `arg`; `caps[i]`
 /// becomes the child's handle `i + 1`. With `notify = Some((endpoint,

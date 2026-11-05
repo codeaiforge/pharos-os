@@ -95,7 +95,7 @@ Design: [services.md](../architecture/services.md) and [D-015](../project/decisi
 | --- | --- |
 | A process starts programs or passes capabilities it should not | `spawn` takes the program as a file capability (`READ`) and passes only listed capabilities, each derived from one the caller holds with `GRANT`, rights only narrowed; revocation reaches children |
 | A client forges its identity | Badges are set once by the capability's grantor and delivered by the kernel; holders cannot change them |
-| A process exhausts kernel memory by spawning or signalling | 32 live processes, 8 capabilities per spawn, notifications are a fixed word per endpoint; limits checked before allocation |
+| A process exhausts kernel memory by spawning or signalling | 32 live processes, 12 capabilities per spawn (8 before #144), notifications are a fixed word per endpoint; limits checked before allocation |
 | A server keeps a reply capability and answers a later call meant for another server | Replies are one-shot: the kernel revokes the server's reply capability when the call returns, and `call` refuses a reply endpoint with a queued message (review F1, `spawn`) |
 | `init` misuses its authority | `init` holds every boot capability; it is small, its service table is reviewed code, and it passes each service only what the table lists |
 | A stuck service hangs the boot | **Limit:** no timeouts; the kernel's 30 s wait turns a stuck `init` into a boot failure instead of a pass |
@@ -179,7 +179,7 @@ Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-in
 | The last reference to a large shared object dropped by deleting its capability frees it in one go, with the capability table locked | M3.5 | when a service shares objects of hundreds of MiB |
 | `mem_share`'s bookkeeping charge stays until the sharer ends; an object that outlives its sharer is charged to no one | M3.5 | accepted; bounded by the sharer's limit |
 | A manifest cannot narrow its entry's budget; a group's minute is a fixed window (up to twice the rate across its edge) | M3.5 | when an agent needs less than its entry |
-| `init` passes a service at most 8 capabilities (`spawn`'s limit), so the boot runtime gets neither the network service (handle 9, since #109) nor granted files (handle 10, #127); harmless while its boot policy table runs no agent | M3.6 (found in #127) | before the boot runtime runs agents: raise `MAX_SPAWN_CAPS` |
+| `init` passes a service at most 8 capabilities (`spawn`'s limit), so the boot runtime gets neither the network service (handle 9, since #109) nor granted files (handle 10, #127); harmless while its boot policy table runs no agent. **Resolved (#144):** `MAX_SPAWN_CAPS` is 12, and the boot runtime gets handles 9 to 11 (network, files, knowledge) | M3.6 (found in #127) | M3.8 |
 | A trusted-console line is at most 64 bytes, so `revoke <agent> file <name>` does not fit with a long agent and file name | M3.6 | when names that long are used; `trust`'s 64-byte buffer to the runtime grows with it |
 | A granted file reaches the model in full, so the model can be steered by it; the agent still gets nothing beyond its grants | M3.6 | accepted (D-023) |
 | The user confirms a `send`'s destination and size, not its payload | M3.6 | accepted at the M3.6 review |

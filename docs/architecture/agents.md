@@ -13,7 +13,7 @@ What M3.3 builds on:
 - **D-018's choices:** the trusted path under QEMU is a virtio-console device owned by a small trusted service. A `STOP` right also stops every process its target spawned. The trusted service holds `STOP` on the agent runtime, and on each agent before that agent is granted anything. M3.3 grants only what a reviewed, compiled-in table allows.
 - **Services and interfaces (D-019):** hand-written codecs in `pharos-proto`, a version and operation on every message, `ATTACH` for bulk data, timeouts on every operation, long results pulled with `NEXT`.
 - **The writable store (D-017):** a write replaces a whole file in one crash-consistent commit, and clients see only their namespace.
-- **IPC** carries 256 bytes and at most one capability per message. `spawn` gives a child up to 8 capabilities and returns a process handle with `WAIT` and `GRANT`. A process's end can set a bit on an endpoint.
+- **IPC** carries 256 bytes and at most one capability per message. `spawn` gives a child up to 12 capabilities (8 until #144) and returns a process handle with `WAIT` and `GRANT`. A process's end can set a bit on an endpoint.
 
 ## 3. Design
 

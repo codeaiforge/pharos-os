@@ -140,11 +140,19 @@ fn main(_: u64) -> u64 {
         "send with a 25-bit badge: TOO_LARGE",
         send(events, b"x", CONSOLE, WRITE, 1 << 24) == Err(Error::TooLarge),
     );
-    let nine = [caps[0]; 9];
+    // Mode 7 sends on handle 1, a console without SEND, and exits 1.
+    let twelve = spawn(child, 7, &[caps[0]; 12], Some((events, 6)));
     report(
         &mut f,
-        "9 capabilities: TOO_LARGE",
-        spawn(child, 1, &nine, None) == Err(Error::TooLarge),
+        "12 capabilities: the child runs",
+        twelve.is_ok()
+            && receive(events, &mut buf) == Ok(Received::Notification(1 << 6))
+            && twelve.and_then(process_status) == Ok(Status::Exited(1)),
+    );
+    report(
+        &mut f,
+        "13 capabilities: TOO_LARGE",
+        spawn(child, 1, &[caps[0]; 13], None) == Err(Error::TooLarge),
     );
     let mut bad = true;
     for path in [&b"bad/magic"[..], b"bad/wx", b"bad/truncated", b"bad/empty"] {

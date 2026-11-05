@@ -389,6 +389,15 @@ pub enum Command<'a> {
     /// `usage`: what the runtime, each running agent, and each group use
     /// (#119).
     Usage,
+    /// `verify <scope> <key> <version> <hash>`: marks a knowledge version
+    /// verified (#144); `hash` is the first 8 hexadecimal digits of its
+    /// content's SHA-256, as 4 bytes.
+    Verify {
+        scope: &'a [u8],
+        key: &'a [u8],
+        version: u32,
+        prefix: [u8; 4],
+    },
     /// Anything else: the service answers with the commands it knows.
     Help,
 }
@@ -407,6 +416,19 @@ pub fn command(line: &[u8]) -> Command<'_> {
         }
         all[count] = w;
         count += 1;
+    }
+    if let [b"verify", scope, key, version, hash] = &all[..count] {
+        return match (version_number(version), hash_prefix(hash)) {
+            (Some(version), Some(prefix)) if valid_name(scope) && valid_name(key) => {
+                Command::Verify {
+                    scope,
+                    key,
+                    version,
+                    prefix,
+                }
+            }
+            _ => Command::Help,
+        };
     }
     if let [b"revoke", name, rest @ ..] = &all[..count] {
         return match Permission::parse(rest) {
@@ -440,6 +462,28 @@ fn request_number(v: &[u8]) -> Option<u16> {
     }
     let n = v.iter().fold(0u32, |n, b| n * 10 + u32::from(b - b'0'));
     u16::try_from(n).ok()
+}
+
+/// A version number: 1 to `u32::MAX`, no leading zero.
+fn version_number(v: &[u8]) -> Option<u32> {
+    if v.is_empty() || v.len() > 10 || v[0] == b'0' || !v.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let n = v.iter().fold(0u64, |n, b| n * 10 + u64::from(b - b'0'));
+    u32::try_from(n).ok()
+}
+
+/// Exactly 8 hexadecimal digits, either case.
+fn hash_prefix(v: &[u8]) -> Option<[u8; 4]> {
+    let digit = |b: u8| char::from(b).to_digit(16).map(|d| d as u8);
+    let mut out = [0u8; 4];
+    if v.len() != 8 {
+        return None;
+    }
+    for (o, pair) in out.iter_mut().zip(v.chunks_exact(2)) {
+        *o = digit(pair[0])? << 4 | digit(pair[1])?;
+    }
+    Some(out)
 }
 
 /// Collects typed bytes into lines of at most [`Lines::MAX`] bytes. A line
@@ -687,8 +731,30 @@ mod tests {
                 }
             )
         );
+        assert_eq!(
+            command(b"verify notes vendor 3 0aB1c2D3"),
+            Command::Verify {
+                scope: b"notes",
+                key: b"vendor",
+                version: 3,
+                prefix: [0x0a, 0xb1, 0xc2, 0xd3],
+            }
+        );
+        assert_eq!(
+            command(b"revoke w knowledge read notes"),
+            Command::Revoke(b"w", Permission::knowledge(b"notes", false).unwrap())
+        );
         for line in [
             &b""[..],
+            b"verify notes vendor 3",
+            b"verify notes vendor 0 0ab1c2d3",
+            b"verify notes vendor 03 0ab1c2d3",
+            b"verify notes vendor 4294967296 0ab1c2d3",
+            b"verify notes vendor 3 0ab1c2d",
+            b"verify notes vendor 3 0ab1c2d3e",
+            b"verify notes vendor 3 0ab1c2dg",
+            b"verify no;tes vendor 3 0ab1c2d3",
+            b"verify notes ven/dor 3 0ab1c2d3",
             b"lis",
             b"list x",
             b"stop",

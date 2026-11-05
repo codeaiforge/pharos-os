@@ -140,7 +140,7 @@ That is, for a notification, bits 32–63 hold the 32 notification bits.
 - **Least privilege:** a child gets only the capabilities listed in `spawn`, each narrowed, and only from capabilities the parent holds with `GRANT`. Badges cannot be forged or changed by their holders.
 - **Revocation** reaches children through the derivation tree, as before.
 - **Kernel resources:**
-  - 32 live processes, 8 capabilities per `spawn`;
+  - 32 live processes, 12 capabilities per `spawn` (8 until #144);
   - notifications are a fixed word per endpoint;
   - process status records live as long as their capability.
 
@@ -156,7 +156,7 @@ That is, for a notification, bits 32–63 hold the 32 notification bits.
 | Host, `cap` | Badge rules: set once, kept when narrowed, never re-badged |
 | Host, `ipc` | Notification bits: set, coalesce, returned before messages, cleared |
 | Host, `syscall` | Decoding and the fuzz test cover the new calls; the `spawn` array and its limits |
-| QEMU, `spawn` | A parent starts a child with two capabilities (one badged); the child uses them; the parent gets the exit notification and code. A killed child reports its vector. Refused, with no frame lost: a file without `READ`, a capability without `GRANT`, a malformed program, more than 8 capabilities, the process limit |
+| QEMU, `spawn` | A parent starts a child with two capabilities (one badged); the child uses them; the parent gets the exit notification and code. A killed child reports its vector. Refused, with no frame lost: a file without `READ`, a capability without `GRANT`, a malformed program, more than 12 capabilities (12 accepted, #144), the process limit |
 | QEMU, `services` | `init` with a test table: services start in order; a crashing service is reported by name and its dependents skipped, while independent ones still start; a missing program is reported; the summary reaches the kernel |
 | Boot check | The main kernel starts `init`, the boot services succeed, and `PHAROS: boot ok` follows the summary |
 

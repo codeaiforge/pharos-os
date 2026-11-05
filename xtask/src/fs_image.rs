@@ -215,7 +215,7 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// five (#116), the `fairness` kernel's four (#117), the `tools`
 /// kernel's two (#126, #127), the `injection` kernel's (#129), and the
 /// `channels` kernel's four (#133), and the `groups` kernel's three (#134).
-pub const TEST_MANIFESTS: [(&str, &str); 31] = [
+pub const TEST_MANIFESTS: [(&str, &str); 33] = [
     (
         "agents/worker.manifest",
         "# The agents test kernel's worker.\nmanifest = 1\nname = worker\nprogram = bin/testagent\n\
@@ -300,6 +300,19 @@ pub const TEST_MANIFESTS: [(&str, &str); 31] = [
         "agents/spammer.manifest",
         "manifest = 1\nname = spammer\nprogram = bin/testagent\npages = 256\nmodels =\n\
          attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet =\nchannels = outsider\n",
+    ),
+    // The `knowledge_agents` kernel's (#144).
+    (
+        "agents/scribe.manifest",
+        "manifest = 1\nname = scribe\nprogram = bin/testagent\npages = 256\nmodels =\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 120000\ndata = none\nnet =\n\
+         knowledge_read = notes, ops\nknowledge_write = notes, ops\n",
+    ),
+    (
+        "agents/peeker.manifest",
+        "manifest = 1\nname = peeker\nprogram = bin/testagent\npages = 256\nmodels =\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet =\n\
+         knowledge_read = ops\n",
     ),
     // The `injection` kernel's (#129).
     (

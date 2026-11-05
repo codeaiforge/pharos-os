@@ -23,6 +23,8 @@
 //! `hearer`, `talker`, `outsider`, and `spammer` tasks at once. Argument
 //! 11: the `groups` kernel (#134): a `boss` task. Argument 12: the
 //! `deputy` kernel (#138): three `boss` goals, one after the other.
+//! Argument 13: the `knowledge_agents` kernel (#144): a `scribe` task,
+//! then a `peeker` task once it is done.
 
 #![no_std]
 #![no_main]
@@ -192,6 +194,32 @@ fn main(arg: u64) -> u64 {
     if arg == 8 {
         return tools(c);
     }
+    if arg == 13 {
+        let ended = |c: &Client, t: Result<u32, u8>, want: &[u8]| {
+            t.ok().and_then(|t| c.wait(t, 150)).is_some_and(|(s, r)| {
+                if r != want {
+                    let mut line = Vec::from(&b"knowledge_agents kernel result: "[..]);
+                    line.extend_from_slice(&r[..r.len().min(200)]);
+                    let _ = debug_write(CONSOLE, &line);
+                }
+                s.state == State::Done && r == want
+            })
+        };
+        let scribe = c.submit(b"scribe", b"scribe");
+        let peeker = scribe.and_then(|s| c.submit_after(b"peeker", b"peek", &[s]));
+        let wrote = ended(&c, scribe, b"scribe ok");
+        c.step(
+            "an agent puts and reads its granted scopes as itself, within its budget",
+            wrote,
+        );
+        let peeked = ended(&c, peeker, b"peeker ok");
+        c.step(
+            "an agent reads no scope it lacks, nor what cites one",
+            peeked,
+        );
+        let _ = send(REPORT, b"done", 0, 0, 0);
+        return c.failed;
+    }
     if arg == 12 {
         let goal = |c: &Client, input: &[u8], id: u32, want: &[u8]| {
             c.submit(b"boss", input).ok() == Some(id)
@@ -241,7 +269,7 @@ fn main(arg: u64) -> u64 {
             |c: &Client, t: u32| c.status(t).is_some_and(|s| s.state == State::Cancelled);
         let idle = |c: &Client, out: &mut [u8; 256]| {
             let (_, n) = c.call(&Request::Info, out);
-            Info::parse(&out[..n]).is_some_and(|i| i.details == [17, 0])
+            Info::parse(&out[..n]).is_some_and(|i| i.details == [19, 0])
         };
         let refused = c.submit(b"boss", b"falter").ok() == Some(13)
             && c.wait(13, 90).is_some_and(|(s, result)| {
@@ -316,8 +344,8 @@ fn main(arg: u64) -> u64 {
     let (_, n) = c.call(&Request::Info, &mut out);
     let info = Info::parse(&out[..n]);
     c.step(
-        "INFO: interface agents, seventeen agents accepted, none running",
-        info.is_some_and(|i| i.name == NAME && i.details == [17, 0]),
+        "INFO: interface agents, nineteen agents accepted, none running",
+        info.is_some_and(|i| i.name == NAME && i.details == [19, 0]),
     );
     let refused = [&b"greedy"[..], b"absent", b"noentry"]
         .iter()
@@ -411,7 +439,7 @@ fn main(arg: u64) -> u64 {
         .iter()
         .all(|&t| c.status(t).is_some_and(|s| s.state == State::Cancelled));
     let (_, n) = c.call(&Request::Info, &mut out);
-    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [17, 0]);
+    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [19, 0]);
     c.step(
         "cancelling running and pending tasks stops their agents",
         cancelled && all && idle,

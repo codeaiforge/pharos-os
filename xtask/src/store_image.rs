@@ -232,6 +232,54 @@ pub fn audit(image: &Path) -> Result<Vec<(String, Vec<String>)>> {
     Ok(out)
 }
 
+/// `cargo xtask store knowledge <image>` (#144, knowledge.md): every
+/// version in namespace `knowledge`, read with the store's checks and
+/// parsed as `pharos_proto::knowledge` defines it, one line each: `scope/
+/// key vN`, kind, what it replaces, author, the first 8 hexadecimal digits
+/// of its content's SHA-256 (what `verify` on the trusted console takes),
+/// and its content, escaped. Content is shown here, on the host, never on
+/// the trusted console.
+pub fn knowledge(image: &Path) -> Result<Vec<String>> {
+    use pharos_proto::knowledge::{Author, Kind as VersionKind, parse_version};
+    let mut store =
+        Store::mount(FileDevice::open(image)?).map_err(|e| format!("{}: {e}", image.display()))?;
+    let paths: Vec<Vec<u8>> = store.list(b"knowledge/").map(<[u8]>::to_vec).collect();
+    let mut lines = Vec::new();
+    for path in paths {
+        let name = String::from_utf8_lossy(&path).into_owned();
+        // Versions are `<scope>/<key>/v<n>`; marks and `starts` are not.
+        if !name.rsplit('/').next().is_some_and(|f| f.starts_with('v')) {
+            continue;
+        }
+        let info = store.stat(&path).map_err(|e| format!("{name}: {e}"))?;
+        let mut data = vec![0u8; info.len as usize];
+        store
+            .read(&path, 0, &mut data)
+            .map_err(|e| format!("{name}: {e}"))?;
+        let v = parse_version(&data).ok_or(format!("{name}: not a version record"))?;
+        let author = match v.author {
+            Author::Agent { name, task } => {
+                format!("agent {} task {task}", String::from_utf8_lossy(name))
+            }
+            Author::User => "user".to_owned(),
+        };
+        let kind = match v.kind {
+            VersionKind::Claim => "claim",
+            VersionKind::Retraction => "retraction",
+        };
+        lines.push(format!(
+            "{}/{} v{} {kind} replaces {} by {author} hash {}: {}",
+            String::from_utf8_lossy(v.scope),
+            String::from_utf8_lossy(v.key),
+            v.version,
+            v.replaces,
+            &hex(&v.hash)[..8],
+            v.content.escape_ascii(),
+        ));
+    }
+    Ok(lines)
+}
+
 /// The chain value after the first record of the stream at `path`:
 /// SHA-256 of 32 zero bytes and the record (D-017).
 pub fn first_chain_value(image: &Path, path: &[u8]) -> Result<[u8; 32]> {

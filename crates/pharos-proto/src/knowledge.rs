@@ -739,6 +739,24 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
     Some(w.len())
 }
 
+/// The longest `HISTORY` or `QUERY` page: [`MAX_PAGE`] summaries of an
+/// agent author with a 32-byte name.
+pub const MAX_PAGE_BYTES: usize = MAX_PAGE * (4 + 1 + 4 + 1 + 1 + 33 + 4);
+
+/// The bytes of a `HISTORY` (`query` false) or `QUERY` page of `count`
+/// items at the start of `b`; `None` if they do not parse.
+pub fn page_len(b: &[u8], count: u8, query: bool) -> Option<usize> {
+    let mut r = Reader::new(b);
+    for _ in 0..count {
+        if query {
+            name(&mut r).filter(|k| valid_name(k))?;
+        } else {
+            Summary::read(&mut r)?;
+        }
+    }
+    Some(b.len() - r.rest().len())
+}
+
 /// Reads the author a `VERIFY` reply carries after its status.
 pub fn parse_author(b: &[u8]) -> Option<Author<'_>> {
     let mut r = Reader::new(b);
@@ -1217,6 +1235,34 @@ mod tests {
             assert_eq!(parse_author(&out[..n]), Some(author));
             assert_eq!(parse_author(&out[..n - 1]), None);
         }
+    }
+
+    #[test]
+    fn pages_measured_exactly() {
+        let s = Summary {
+            version: u32::MAX,
+            kind: Kind::Claim,
+            replaces: 1,
+            status: 0,
+            author: Author::Agent {
+                name: LONG,
+                task: 3,
+            },
+        };
+        let mut out = [0xffu8; MAX_PAGE_BYTES + 8];
+        let mut w = Writer::new(&mut out);
+        for _ in 0..MAX_PAGE {
+            s.write(&mut w).unwrap();
+        }
+        let n = w.len();
+        assert_eq!(n, MAX_PAGE_BYTES, "the longest page");
+        assert_eq!(page_len(&out, MAX_PAGE as u8, false), Some(n));
+        assert_eq!(page_len(&out[..n - 1], MAX_PAGE as u8, false), None);
+        assert_eq!(page_len(&out, 0, false), Some(0));
+        let keys = b"\x03abc\x01k\xff";
+        assert_eq!(page_len(keys, 2, true), Some(6), "not the byte after");
+        assert_eq!(page_len(keys, 3, true), None);
+        assert_eq!(page_len(b"\x02a.", 1, true), None, "not a key");
     }
 
     #[test]

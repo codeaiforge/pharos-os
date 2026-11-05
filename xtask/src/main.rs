@@ -100,6 +100,8 @@ COMMANDS:
                             record's CRC-32 and SHA-256 chain, its format, and
                             consecutive sequence numbers from a boot record; then
                             print the records (capabilities.md).
+    store knowledge <IMAGE> List every knowledge version in a store: author, the
+                            hash prefix `verify` takes, and content (knowledge.md).
     bench-ipc [--runs <N>]  Measure the IPC round trip against D-004's 2 us budget:
                             build the release `ipc` test kernel with 100,000
                             round trips and boot it N times (default 5) under
@@ -156,6 +158,9 @@ enum Task {
         image: PathBuf,
     },
     StoreAudit {
+        image: PathBuf,
+    },
+    StoreKnowledge {
         image: PathBuf,
     },
     BenchIpc {
@@ -283,9 +288,16 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                     image: PathBuf::from(image),
                 }
             }
+            Some("knowledge") => {
+                let image = args.next().ok_or("store knowledge needs an image path")?;
+                Task::StoreKnowledge {
+                    image: PathBuf::from(image),
+                }
+            }
             _ => {
                 return Err(
-                    "store needs 'build <DIR> <IMAGE> --blocks <N>', 'ls <IMAGE>', or 'audit <IMAGE>'"
+                    "store needs 'build <DIR> <IMAGE> --blocks <N>', 'ls <IMAGE>', \
+                     'audit <IMAGE>', or 'knowledge <IMAGE>'"
                         .to_owned(),
                 );
             }
@@ -1418,6 +1430,35 @@ const GROUPS_SCRIPT: &[console::Step] = &[
     ),
     ("stopped group crew", ""),
 ];
+/// Agents and shared knowledge (#144): `scribe` (task 1) asks to read
+/// `hr` and the user approves; the user tries a version that does not
+/// exist and a wrong hash, verifies `notes/vendor` version 2 (`acme ships
+/// monday`), refuses `scribe`'s request to write `hr` (its cue that it saw
+/// the mark), and revokes its reading of `notes`.
+const KNOWLEDGE_AGENTS_TEST: &str = "knowledge_agents";
+const KNOWLEDGE_AGENTS_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("registered runtime", ""),
+    (
+        "approve #1: scribe task 1 wants knowledge read hr for this task? (yes 1 / no 1)",
+        "yes 1\n",
+    ),
+    ("approve #1: granted", "verify notes vendor 9 4899aefa\n"),
+    ("verify: no version", "verify notes vendor 2 00000000\n"),
+    ("verify: hash differs", "verify notes vendor 2 4899AEFA\n"),
+    ("verified notes/vendor version 2 by agent scribe task 1", ""),
+    (
+        "approve #2: scribe task 1 wants knowledge write hr for this task? (yes 2 / no 2)",
+        "no 2\n",
+    ),
+    (
+        "approve #2: refused",
+        "revoke scribe knowledge read notes\n",
+    ),
+    ("revoked knowledge read notes from scribe", ""),
+];
+/// Knowledge content never reaches the trusted console.
+const KNOWLEDGE_AGENTS_REFUSED: &[&str] = &["acme", "ops is fine", "vendor date"];
 /// Message channels (#133): `talker` (task 2) asks for model 3; the user
 /// refuses, then revokes its channel to `hearer`.
 const CHANNELS_TEST: &str = "channels";
@@ -1986,6 +2027,134 @@ fn channels_audit(image: &Path) -> Result<()> {
     Ok(())
 }
 
+/// After the `knowledge_agents` test kernel (#144): each put an intent
+/// and an outcome naming its key and length, never its content; each
+/// refusal once; the approval, the mark, and the revocation recorded; the
+/// versions in the store with the runtime's authorship.
+fn knowledge_agents_audit(image: &Path) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    let count = |want: &str| lines.iter().filter(|l| l.contains(want)).count();
+    let put = "client 3 Intent knowledge scribe task 1/1 knowledge write";
+    for (want, n) in [
+        (
+            format!("{put} notes knowledge outcome 0 vendor replaces 0 claim 17 bytes"),
+            1,
+        ),
+        (
+            format!("{put} notes knowledge outcome 0 vendor replaces 1 claim 17 bytes"),
+            1,
+        ),
+        (
+            format!("{put} ops knowledge outcome 0 summary replaces 0 claim 15 bytes"),
+            1,
+        ),
+        (
+            format!("{put} notes knowledge outcome 0 extra replaces 0 claim 4 bytes"),
+            1,
+        ),
+        ("client 3 Intent knowledge".to_owned(), 5),
+        (
+            "knowledge scribe task 1/1   outcome 1 version 2".to_owned(),
+            1,
+        ),
+        (
+            "client 3 Event grant scribe task 1/1 knowledge read notes".to_owned(),
+            1,
+        ),
+        (
+            "client 3 Event grant scribe task 1/1 knowledge write ops".to_owned(),
+            1,
+        ),
+        (
+            "client 3 Event refuse scribe task 1/1 knowledge write hr  outcome 2 no grant"
+                .to_owned(),
+            1,
+        ),
+        (
+            "client 3 Event refuse scribe task 1/1   outcome 2 malformed".to_owned(),
+            1,
+        ),
+        (
+            "client 3 Event refuse scribe task 1/1 knowledge write notes  outcome 2 over knowledge"
+                .to_owned(),
+            1,
+        ),
+        (
+            "client 3 Event approve scribe task 1/1 knowledge read hr".to_owned(),
+            1,
+        ),
+        (
+            "client 2 Event verify user task 0/0  trust outcome 1 notes/vendor version 2"
+                .to_owned(),
+            1,
+        ),
+        (
+            "client 3 Event revoke scribe task 1/1 knowledge read notes  outcome 1 user".to_owned(),
+            1,
+        ),
+        (
+            "client 3 Event refuse peeker task 2/1 knowledge read notes  outcome 2 no grant"
+                .to_owned(),
+            1,
+        ),
+        // Once per kind, then each attempt's total: `hr` put, malformed,
+        // over budget, `hr` before approval, `notes` after the revocation.
+        (
+            "client 3 Event refuse scribe task 1/1   outcome 2 5 requests refused".to_owned(),
+            1,
+        ),
+        (
+            "client 3 Event refuse peeker task 2/1   outcome 2 2 requests refused".to_owned(),
+            1,
+        ),
+        ("client 3 Event refuse peeker".to_owned(), 2),
+    ] {
+        if count(&want) != n {
+            for l in lines
+                .iter()
+                .filter(|l| l.contains("knowledge") || l.contains("verify"))
+            {
+                println!("    {l}");
+            }
+            return Err(format!(
+                "{} records like {want:?}, expected {n}",
+                count(&want)
+            ));
+        }
+    }
+    for content in ["acme", "ops is fine", "vendor date", "five"] {
+        if count(content) != 0 {
+            return Err(format!(
+                "a version's content {content:?} is in the audit trail"
+            ));
+        }
+    }
+    let versions = store_image::knowledge(image)?;
+    for want in [
+        "notes/vendor v1 claim replaces 0 by agent scribe task 1 hash ",
+        "notes/vendor v2 claim replaces 1 by agent scribe task 1 hash 4899aefa: acme ships monday",
+        "ops/summary v1 claim replaces 0 by agent scribe task 1 hash ",
+        "ops/plain v1 claim replaces 0 by agent scribe task 1 hash ",
+        "notes/extra v1 claim replaces 0 by agent scribe task 1 hash ",
+    ] {
+        if !versions.iter().any(|v| v.starts_with(want)) {
+            return Err(format!("no version like {want:?} in {versions:?}"));
+        }
+    }
+    if versions.len() != 5 {
+        return Err(format!("{} versions stored, expected 5", versions.len()));
+    }
+    println!(
+        "  audit trail: {} records, every put accounted for without its content; {} versions stored",
+        lines.len(),
+        versions.len()
+    );
+    Ok(())
+}
+
 /// After the `groups` test kernel (#134): each subtask an intent and an
 /// outcome naming its worker; each refusal once.
 /// Each attempt's refusals recorded once per kind, with the first example;
@@ -2295,6 +2464,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         "fairness",
         EXHAUSTION_TEST,
         CHANNELS_TEST,
+        KNOWLEDGE_AGENTS_TEST,
         GROUPS_TEST,
         DEPUTY_TEST,
     ];
@@ -2326,6 +2496,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         TOOLS_TEST => (TOOLS_SCRIPT, TOOLS_REFUSED),
         INJECTION_TEST => (INJECTION_SCRIPT, INJECTION_REFUSED),
         CHANNELS_TEST => (CHANNELS_SCRIPT, CHANNELS_REFUSED),
+        KNOWLEDGE_AGENTS_TEST => (KNOWLEDGE_AGENTS_SCRIPT, KNOWLEDGE_AGENTS_REFUSED),
         GROUPS_TEST => (GROUPS_SCRIPT, &[]),
         DEPUTY_TEST => (DEPUTY_SCRIPT, DEPUTY_REFUSED),
         BUDGETS_TEST => (BUDGETS_SCRIPT, &[]),
@@ -2374,6 +2545,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == CHANNELS_TEST {
                 channels_audit(&out.join(STORE_IMAGE))?;
+            }
+            if name == KNOWLEDGE_AGENTS_TEST {
+                knowledge_agents_audit(&out.join(STORE_IMAGE))?;
             }
             if name == GROUPS_TEST {
                 groups_audit(&out.join(STORE_IMAGE))?;
@@ -2445,6 +2619,11 @@ fn main() -> ExitCode {
                     for line in lines {
                         println!("  {line}");
                     }
+                }
+            }),
+            Task::StoreKnowledge { image } => store_image::knowledge(&image).map(|lines| {
+                for line in lines {
+                    println!("{line}");
                 }
             }),
             Task::BenchIpc { runs } => bench::ipc(&paths, runs),
@@ -2554,6 +2733,13 @@ mod tests {
                 image: PathBuf::from("s.img")
             })
         );
+        assert_eq!(
+            parse(args(&["store", "knowledge", "s.img"])),
+            Ok(Task::StoreKnowledge {
+                image: PathBuf::from("s.img")
+            })
+        );
+        assert!(parse(args(&["store", "knowledge"])).is_err());
         assert!(parse(args(&["store", "build", "d", "s.img"])).is_err());
         assert!(parse(args(&["store", "build", "d", "s.img", "--blocks", "3"])).is_err());
         assert!(parse(args(&["store", "build", "d", "s.img", "--blocks", "x"])).is_err());

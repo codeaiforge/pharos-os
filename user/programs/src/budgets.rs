@@ -17,6 +17,8 @@ pub enum Over {
     Files,
     /// Messages to other agents (#133).
     Messages,
+    /// Knowledge versions (#144).
+    Knowledge,
     GroupTokens,
     GroupNet,
 }
@@ -89,6 +91,8 @@ pub struct Usage {
     pub file_bytes: u64,
     /// Messages sent (#133).
     pub messages: u64,
+    /// Knowledge versions put (#144).
+    pub knowledge: u64,
 }
 
 fn within(used: u64, amount: u64, limit: u32) -> bool {
@@ -136,6 +140,15 @@ impl Usage {
             return Err(Over::Messages);
         }
         self.messages += 1;
+        Ok(())
+    }
+
+    /// Charges one knowledge version, or refuses (#144).
+    pub fn knowledge(&mut self, budget: &Budget) -> Result<(), Over> {
+        if !within(self.knowledge, 1, budget.knowledge) {
+            return Err(Over::Knowledge);
+        }
+        self.knowledge += 1;
         Ok(())
     }
 
@@ -252,6 +265,7 @@ mod tests {
         data_kb: 1,
         file_kb: 2,
         messages: 2,
+        knowledge: 1,
         rate: 2,
         group: b"g",
     };
@@ -300,6 +314,9 @@ mod tests {
         assert_eq!(u.message(&LIMITED), Ok(()));
         assert_eq!(u.message(&LIMITED), Err(Over::Messages));
         assert_eq!(u.messages, 2, "a refused message costs nothing");
+        assert_eq!(u.knowledge(&LIMITED), Ok(()));
+        assert_eq!(u.knowledge(&LIMITED), Err(Over::Knowledge));
+        assert_eq!(u.knowledge, 1, "a refused put costs nothing");
     }
 
     #[test]

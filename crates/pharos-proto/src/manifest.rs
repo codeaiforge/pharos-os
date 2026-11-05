@@ -146,6 +146,9 @@ pub struct Manifest<'a> {
     pub files: Files<'a>,
     /// Optional (#133): the agents it may send messages to.
     pub channels: Files<'a>,
+    /// Optional (#144): the knowledge scopes it may read and write.
+    pub knowledge_read: Files<'a>,
+    pub knowledge_write: Files<'a>,
 }
 
 /// What the runtime's policy table allows one agent: the most it may get.
@@ -178,6 +181,12 @@ pub struct Entry {
     pub ask_files: &'static [&'static [u8]],
     /// The agents it may send messages to (#133; not askable).
     pub channels: &'static [&'static [u8]],
+    /// The knowledge scopes it may read and write (#144), and what it may
+    /// ask for, typed as after `knowledge `: `read <scope>` or `write
+    /// <scope>`.
+    pub knowledge_read: &'static [&'static [u8]],
+    pub knowledge_write: &'static [&'static [u8]],
+    pub ask_knowledge: &'static [&'static [u8]],
 }
 
 /// What one attempt of an agent may use (D-022, resources.md). Each limit
@@ -195,6 +204,8 @@ pub struct Budget {
     pub file_kb: u32,
     /// Messages sent to other agents (#133).
     pub messages: u32,
+    /// Knowledge versions put (#144).
+    pub knowledge: u32,
     /// Requests per second, with a burst of as many; one past it is held
     /// until the rate allows (#117).
     pub rate: u32,
@@ -212,6 +223,7 @@ impl Budget {
         data_kb: u32::MAX,
         file_kb: u32::MAX,
         messages: u32::MAX,
+        knowledge: u32::MAX,
         rate: u32::MAX,
         group: b"",
     };
@@ -277,8 +289,8 @@ pub struct Refusal {
     pub why: Why,
 }
 
-/// The keys; the last three are optional.
-const KEYS: [&[u8]; 13] = [
+/// The keys; the last five are optional.
+const KEYS: [&[u8]; 15] = [
     b"manifest",
     b"name",
     b"program",
@@ -292,6 +304,8 @@ const KEYS: [&[u8]; 13] = [
     b"tools",
     b"files",
     b"channels",
+    b"knowledge_read",
+    b"knowledge_write",
 ];
 const REQUIRED: usize = 10;
 
@@ -410,7 +424,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
     if text.len() > MAX_SIZE {
         return Err(whole(Why::TooLarge));
     }
-    let mut values: [Option<&[u8]>; 13] = [None; 13];
+    let mut values: [Option<&[u8]>; 15] = [None; 15];
     for (i, line) in text.split(|b| *b == b'\n').enumerate() {
         let at = |why| Refusal { line: i + 1, why };
         if !line.iter().all(|b| (b' '..=b'~').contains(b)) {
@@ -433,7 +447,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
             return Err(at(Why::RepeatedKey));
         }
     }
-    let mut v = [&b""[..]; 13];
+    let mut v = [&b""[..]; 15];
     for (k, (out, value)) in v.iter_mut().zip(values).enumerate() {
         *out = match value {
             Some(value) => value,
@@ -455,6 +469,8 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
         tool_list,
         file_list,
         channel_list,
+        read_list,
+        write_list,
     ] = v;
     let bad = whole(Why::BadValue);
     if number(version, u32::MAX) != Some(VERSION) {
@@ -478,6 +494,9 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
         tools: tools(tool_list).ok_or(bad)?,
         files: files(file_list).ok_or(bad)?,
         channels: channels(channel_list).ok_or(bad)?,
+        // Scopes follow agent-name rules, as channels do.
+        knowledge_read: channels(read_list).ok_or(bad)?,
+        knowledge_write: channels(write_list).ok_or(bad)?,
     };
     if m.progress_ms > m.task_ms {
         return Err(whole(Why::ProgressOverTask));
@@ -525,7 +544,9 @@ impl Manifest<'_> {
                 .channels
                 .as_slice()
                 .iter()
-                .all(|c| e.channels.contains(c));
+                .all(|c| e.channels.contains(c))
+            && (self.knowledge_read.as_slice().iter()).all(|k| e.knowledge_read.contains(k))
+            && (self.knowledge_write.as_slice().iter()).all(|k| e.knowledge_write.contains(k));
         if fits { Ok(e) } else { Err(Why::OverPolicy) }
     }
 
@@ -582,6 +603,8 @@ impl Manifest<'_> {
         for (key, list) in [
             (&b"\nfiles ="[..], &self.files),
             (b"\nchannels =", &self.channels),
+            (b"\nknowledge_read =", &self.knowledge_read),
+            (b"\nknowledge_write =", &self.knowledge_write),
         ] {
             if list.as_slice().is_empty() {
                 continue;
@@ -624,6 +647,9 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
         files: &[b"report.txt", b"notes"],
         ask_files: &[],
         channels: &[b"listener"],
+        knowledge_read: &[b"notes", b"ops"],
+        knowledge_write: &[b"notes"],
+        ask_knowledge: &[],
     }];
 
     fn with(key: &str, value: &str) -> std::string::String {
@@ -666,6 +692,8 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
                 tools: 0,
                 files: Files::default(),
                 channels: Files::default(),
+                knowledge_read: Files::default(),
+                knowledge_write: Files::default(),
             }
         );
         let text = plus("tools = send , read_file\nfiles = report.txt,a-b_c.1");
@@ -713,7 +741,8 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
             with("net", ""),
             with("net", "10.0.2.3:53, 10.0.2.2:47000"),
             std::format!(
-                "{}tools = read_file, send\nfiles = a, b, c, d\nchannels = x-1, y_2\n",
+                "{}tools = read_file, send\nfiles = a, b, c, d\nchannels = x-1, y_2\n\
+knowledge_read = notes, ops\nknowledge_write = notes\n",
                 std::str::from_utf8(S).unwrap()
             ),
         ] {
@@ -942,6 +971,22 @@ pages = 262144\nmodels = 31 , 2,1\nattempts = 10\n   # comment\nprogress_ms = 1\
             check("channels = boss"),
             Err(Why::OverPolicy),
             "a channel not listed"
+        );
+        assert_eq!(check("knowledge_read = ops, notes"), Ok(()));
+        assert_eq!(check("knowledge_write = notes"), Ok(()));
+        assert_eq!(
+            check("knowledge_write = ops"),
+            Err(Why::OverPolicy),
+            "readable is not writable"
+        );
+        assert_eq!(check("knowledge_read = hr"), Err(Why::OverPolicy));
+        assert_eq!(
+            why(plus("knowledge_read = a.b").as_bytes()),
+            Some(Why::BadValue)
+        );
+        assert_eq!(
+            why(plus("knowledge_write = ops, ops").as_bytes()),
+            Some(Why::BadValue)
         );
     }
 

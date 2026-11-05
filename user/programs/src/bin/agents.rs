@@ -10,7 +10,9 @@
 //! audit service (`SEND`, client 3; #108), 9 the network service (`SEND`,
 //! badged with the runtime's UDP port; #109), 10 the storage service,
 //! badged for namespace `files`, read-only (the files the user gives
-//! agents, #127; optional: without it `read_file` finds nothing). The
+//! agents, #127; optional: without it `read_file` finds nothing), 11 the
+//! knowledge service (`SEND`, client 1; #144; optional: without it every
+//! knowledge request is `INTERNAL`). The
 //! argument selects the policy table (0: boot, empty; 1: the `agents` and
 //! `agents_crash` test kernels).
 //!
@@ -69,6 +71,14 @@
 //! while the agent repeats the same call, sent once on a yes, and
 //! `REFUSED` otherwise (no answer within the approval timeout, `no`, or
 //! `trust` unreachable).
+//!
+//! Knowledge (#144, knowledge.md): `KNOWLEDGE_PUT` needs `knowledge write`
+//! for its scope, counts against the attempt's `knowledge` budget, and is
+//! audited (`knowledge`, never the content) before the runtime sends it
+//! with the agent's name and task as author and its readable scopes. Reads
+//! need `knowledge read` for their scope and pass the readable scopes, so
+//! the service leaves out what the agent cannot reach; what the service
+//! answers is copied to the agent's buffer, exactly its length.
 
 #![no_std]
 #![no_main]
@@ -90,6 +100,7 @@ use pharos_proto::agents::{
 };
 use pharos_proto::audit::{self, Entry as Record, Kind, action, outcome};
 use pharos_proto::infer::{self, Record as InferRecord, Request as InferRequest, Started, Tokens};
+use pharos_proto::knowledge::{self, Author, Put, Request as KnowledgeRequest, Source};
 use pharos_proto::manifest::{self, Budget, Data, Dest, Entry, Group, Verifier, Why};
 use pharos_proto::net::{self, Request as NetRequest};
 use pharos_proto::permission::Permission;
@@ -116,6 +127,9 @@ const STORE: Handle = 7;
 const AUDIT: Handle = 8;
 const NET: Handle = 9;
 const FILES: Handle = 10;
+const KNOWLEDGE: Handle = 11;
+/// How long the knowledge service may take to answer.
+const KNOWLEDGE_US: u64 = 10_000_000;
 /// The runtime's buffer at the storage service for granted files: the
 /// largest file `read_file` reads.
 const FILES_BUFFER: u64 = agents::MAX_DATA as u64;
@@ -128,30 +142,32 @@ const HOST_ECHO: Dest = ([10, 0, 2, 2], 47_000);
 
 /// Kinds of refused agent requests, recorded once each per attempt.
 mod refusal {
-    pub const MALFORMED: u16 = 1;
-    pub const NO_GRANT: u16 = 2;
-    pub const NOT_FOR_AGENTS: u16 = 4;
-    pub const NOT_ASKABLE: u16 = 8;
+    pub const MALFORMED: u32 = 1;
+    pub const NO_GRANT: u32 = 2;
+    pub const NOT_FOR_AGENTS: u32 = 4;
+    pub const NOT_ASKABLE: u32 = 8;
     /// Over a budget (D-022, #116), one kind per resource.
-    pub const OVER_TOKENS: u16 = 16;
-    pub const OVER_NET_SENDS: u16 = 32;
-    pub const OVER_NET_BYTES: u16 = 64;
-    pub const OVER_DATA: u16 = 128;
-    pub const OVER_GROUP_TOKENS: u16 = 256;
-    pub const OVER_GROUP_NET: u16 = 512;
+    pub const OVER_TOKENS: u32 = 16;
+    pub const OVER_NET_SENDS: u32 = 32;
+    pub const OVER_NET_BYTES: u32 = 64;
+    pub const OVER_DATA: u32 = 128;
+    pub const OVER_GROUP_TOKENS: u32 = 256;
+    pub const OVER_GROUP_NET: u32 = 512;
     /// Tool calls (#126): not a call or fitting no tool, a tool the attempt
     /// may not use, and granted files over `file_kb`. A call the user did
     /// not confirm is recorded with the answer (#128).
-    pub const TOOL_MALFORMED: u16 = 1024;
-    pub const TOOL_NOT_LISTED: u16 = 2048;
-    pub const OVER_FILES: u16 = 4096;
+    pub const TOOL_MALFORMED: u32 = 1024;
+    pub const TOOL_NOT_LISTED: u32 = 2048;
+    pub const OVER_FILES: u32 = 4096;
     /// Messages past the attempt's `messages` (#133).
-    pub const OVER_MESSAGES: u16 = 8192;
+    pub const OVER_MESSAGES: u32 = 8192;
     /// A subtask from an agent that is not its group's supervisor, or for
     /// an agent that is not one of its workers (#134).
-    pub const NOT_IN_GROUP: u16 = 16384;
+    pub const NOT_IN_GROUP: u32 = 16384;
     /// A subtask past its goal's total (M3.7 review F1).
-    pub const OVER_SUBTASKS: u16 = 32768;
+    pub const OVER_SUBTASKS: u32 = 32768;
+    /// Knowledge puts past the attempt's `knowledge` (#144).
+    pub const OVER_KNOWLEDGE: u32 = 65536;
 }
 /// How often the runtime reads a running agent's CPU time, at most.
 const CPU_CHECK_US: u64 = 100_000;
@@ -254,6 +270,7 @@ const SPEND: Budget = Budget {
     data_kb: 1,
     file_kb: u32::MAX,
     messages: u32::MAX,
+    knowledge: u32::MAX,
     rate: u32::MAX,
     group: b"spend",
 };
@@ -414,6 +431,9 @@ const fn budget_entry(name: &'static [u8], budget: Budget, pages: u32) -> Entry 
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     }
 }
@@ -439,6 +459,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     Entry {
@@ -458,6 +481,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     Entry {
@@ -477,6 +503,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     Entry {
@@ -496,6 +525,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     // The `permissions` kernel's (#105).
@@ -516,6 +548,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     // Gets nothing; may ask for model 2 and data access (#106).
@@ -536,6 +571,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     // The `agents_net` kernel's (#109): gets the host echo server, may
@@ -557,6 +595,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     // The same grant as `netter`, which the user's `revoke netter` leaves.
@@ -577,6 +618,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     // The `hostile` kernel's (#110): its own files, and five models to ask
@@ -598,6 +642,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     // The `tools` kernel's (#126, #127): both tools, `report.txt` and
@@ -624,6 +671,9 @@ const TEST: &[Entry] = &[
         tools: 1 << tool::number::READ_FILE | 1 << tool::number::SEND,
         files: &[b"report.txt", b"big.txt"],
         ask_files: &[b"notes.txt"],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     // The `injection` kernel's (#129): both tools, `report.txt` with its
@@ -645,6 +695,9 @@ const TEST: &[Entry] = &[
         tools: 1 << tool::number::READ_FILE | 1 << tool::number::SEND,
         files: &[b"report.txt"],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     // The `channels` kernel's (#133): `talker` may send to `hearer` (and
@@ -667,6 +720,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[b"hearer"],
     },
     Entry {
@@ -686,6 +742,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     Entry {
@@ -705,6 +764,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     Entry {
@@ -727,6 +789,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[b"outsider"],
     },
     // The `groups` kernel's (#134): `boss` supervises `helper` and `aide`
@@ -752,6 +817,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     Entry {
@@ -775,6 +843,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
     Entry {
@@ -797,6 +868,9 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         // Its one channel, for the `deputy` kernel (#138).
         channels: &[b"boss"],
     },
@@ -817,9 +891,49 @@ const TEST: &[Entry] = &[
         tools: 0,
         files: &[b"report.txt"],
         ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
         channels: &[],
     },
+    KNOWLEDGE_AGENTS[0],
+    KNOWLEDGE_AGENTS[1],
 ];
+
+/// The `knowledge_agents` kernel's (#144): `scribe` reads and writes
+/// `notes` and `ops`, puts 5 versions at most, and may ask to read and
+/// write `hr`;
+/// `peeker` reads `ops` only.
+const KNOWLEDGE_AGENTS: [Entry; 2] = [
+    Entry {
+        task_ms: 120_000,
+        budget: Budget {
+            knowledge: 5,
+            ..Budget::UNLIMITED
+        },
+        knowledge_read: &[b"notes", b"ops"],
+        knowledge_write: &[b"notes", b"ops"],
+        ask_knowledge: &[b"read hr", b"write hr"],
+        ..knowledge_entry(b"scribe")
+    },
+    Entry {
+        knowledge_read: &[b"ops"],
+        ..knowledge_entry(b"peeker")
+    },
+];
+
+/// A `knowledge_agents` entry: `bin/testagent` with nothing else.
+const fn knowledge_entry(name: &'static [u8]) -> Entry {
+    Entry {
+        net: &[],
+        models: 0,
+        pages: 256,
+        data: Data::None,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        ..budget_entry(name, Budget::UNLIMITED, 256)
+    }
+}
 
 /// What an accepted manifest asked for (at most its entry).
 #[derive(Clone, Copy)]
@@ -840,6 +954,9 @@ struct Limits {
     /// The agents it may send messages to (#133), as the entry's names.
     channels: [&'static [u8]; manifest::MAX_FILES],
     channel_count: usize,
+    /// The knowledge scopes it may read and write (#144), a bit each over
+    /// `knowledge::SCOPES`.
+    knowledge: (u8, u8),
 }
 
 /// The storage service as [`Files`], through the runtime's buffer there:
@@ -911,6 +1028,47 @@ impl Store {
             Ok(Received::Message { len, .. }) if len >= 1 => Ok(StoreStatus::from_code(out[0])),
             _ => Err(StoreFailed),
         }
+    }
+}
+
+/// The knowledge service (#144), through the runtime's buffer there.
+struct Knowledge {
+    buffer: Mapped,
+    reply: Handle,
+    health: Health,
+}
+
+impl Knowledge {
+    /// Attaches the buffer: at start, and again after the service
+    /// restarted and lost it.
+    fn attach(&self) -> bool {
+        let len = self.buffer.len() as u64;
+        mem_share(self.buffer.addr(), len).is_ok_and(|memory| {
+            let mut msg = [0u8; 16];
+            let sent = knowledge::encode(&KnowledgeRequest::Attach { len }, &mut msg)
+                .is_some_and(|n| send(KNOWLEDGE, &msg[..n], memory, READ | WRITE, 0).is_ok());
+            let _ = delete(memory);
+            sent
+        })
+    }
+
+    /// `req`'s reply length in `out`, attaching the buffer again once if
+    /// the service has none from us.
+    fn call(&self, req: &KnowledgeRequest<'_>, out: &mut [u8; 256]) -> Result<usize, u8> {
+        let mut msg = [0u8; 256];
+        let n = knowledge::encode(req, &mut msg).ok_or(status::INTERNAL)?;
+        for again in [true, false] {
+            match (self.health).call(KNOWLEDGE, &msg[..n], self.reply, out, KNOWLEDGE_US) {
+                Ok(Received::Message { len, .. }) if len >= 1 => {
+                    if !(again && out[0] == status::NO_BUFFER && self.attach()) {
+                        return Ok(len.min(256));
+                    }
+                }
+                Err(pharos_user::Error::WouldBlock) => return Err(status::BUSY),
+                _ => return Err(status::INTERNAL),
+            }
+        }
+        Err(status::INTERNAL)
     }
 }
 
@@ -1044,7 +1202,7 @@ struct Slot {
     inbox: Vec<(Dest, Vec<u8>)>,
     /// Refused requests this attempt, and the kinds already recorded.
     refused: u32,
-    noted: u16,
+    noted: u32,
     /// What this attempt has used (#116).
     usage: Usage,
     /// Its requests over time, and the one held past its rate with its
@@ -1063,6 +1221,8 @@ struct Runtime {
     store: Store,
     /// Granted files (#127), if `init` gave the runtime handle 10.
     files: Option<Store>,
+    /// Shared knowledge (#144), if `init` gave the runtime handle 11.
+    knowledge: Option<Knowledge>,
     /// Messages waiting for agents, by name (#133).
     mailboxes: Mailboxes,
     slots: [Option<Slot>; SLOTS],
@@ -1117,6 +1277,13 @@ fn askable(entry: &Entry, p: &Permission) -> bool {
         Permission::File { .. } => p.file_name().is_some_and(|f| entry.ask_files.contains(&f)),
         // Channels are not askable in M3.7 (coordination.md).
         Permission::Channel { .. } => false,
+        // As typed after `knowledge `: `read <scope>` or `write <scope>`.
+        Permission::KnowledgeRead { .. } | Permission::KnowledgeWrite { .. } => {
+            p.knowledge_scope().is_some_and(|(scope, write)| {
+                let how: &[u8] = if write { b"write " } else { b"read " };
+                (entry.ask_knowledge.iter()).any(|a| a.strip_prefix(how) == Some(scope))
+            })
+        }
     }
 }
 
@@ -1228,8 +1395,14 @@ fn load(e: &'static Entry, table: &'static [Entry]) -> Result<Limits, &'static [
             channel_count += 1;
         }
     }
+    let scopes = |list: manifest::Files<'_>| {
+        (list.as_slice().iter())
+            .filter_map(|s| knowledge::scope_number(s))
+            .fold(0u8, |mask, n| mask | 1 << n)
+    };
     Ok(Limits {
         entry: e,
+        knowledge: (scopes(m.knowledge_read), scopes(m.knowledge_write)),
         tools: m.tools,
         files,
         file_count,
@@ -1472,6 +1645,7 @@ impl Runtime {
             limits.net.as_slice(),
             files,
             channels,
+            limits.knowledge,
         );
         for (_, p, until) in self.approved.iter().filter(|(t, ..)| *t == id) {
             g.add(*p, *until);
@@ -2035,6 +2209,10 @@ impl Runtime {
                 out[1..5].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
                 Ok(5)
             }
+            Request::KnowledgePut { .. }
+            | Request::KnowledgeGet { .. }
+            | Request::KnowledgeHistory { .. }
+            | Request::KnowledgeQuery { .. } => self.knowledge(i, id, &limits, req, now, out),
             Request::SendTo { addr, port, len } => {
                 let p = Permission::Net { addr, port };
                 let allowed = self.slots[i]
@@ -2315,6 +2493,185 @@ impl Runtime {
     /// already checked: charged, audited as `how` (action, service,
     /// detail), and sent on the runtime's port (`SEND_TO`, #109, and the
     /// `send` tool, #128).
+    /// A knowledge request from slot `i`, task `id` (#144).
+    fn knowledge(
+        &mut self,
+        i: usize,
+        id: u32,
+        limits: &Limits,
+        req: Request<'_>,
+        now: u64,
+        out: &mut [u8; 256],
+    ) -> Result<usize, u8> {
+        let slot = self.slots[i].as_ref().ok_or(NO_SESSION)?;
+        // Taken now, so a revocation holds from the next request.
+        let readable = slot.grants.readable(now);
+        let buffer_len = slot.buffer.as_ref().map_or(0, Mapped::len);
+        let (req, scope, page) = match req {
+            Request::KnowledgePut { len } => {
+                return self.knowledge_put(i, id, limits, len, readable, now, out);
+            }
+            Request::KnowledgeGet {
+                scope,
+                key,
+                version,
+            } => {
+                let req = KnowledgeRequest::Get {
+                    scope,
+                    key,
+                    version,
+                    readable,
+                };
+                (req, scope, None)
+            }
+            Request::KnowledgeHistory { scope, key, from } => {
+                let req = KnowledgeRequest::History {
+                    scope,
+                    key,
+                    from,
+                    readable,
+                };
+                (req, scope, Some(false))
+            }
+            Request::KnowledgeQuery { scope, tag, start } => {
+                let req = KnowledgeRequest::Query {
+                    scope,
+                    tag,
+                    start,
+                    readable,
+                };
+                (req, scope, Some(true))
+            }
+            _ => return Err(status::INTERNAL),
+        };
+        if readable & 1 << scope == 0 {
+            return Err(status::NO_ACCESS);
+        }
+        let k = self.knowledge.as_ref().ok_or(status::INTERNAL)?;
+        k.health.ready()?;
+        let n = k.call(&req, out)?;
+        if out[0] != status::OK {
+            return Ok(n);
+        }
+        // Exactly what the service wrote: never bytes left from an
+        // earlier answer, perhaps for another agent.
+        let len = match (page, &out[..n]) {
+            (None, [_, _, a, b, c, d]) => u32::from_le_bytes([*a, *b, *c, *d]) as usize,
+            (Some(query), [_, count, _]) => {
+                let mut bytes = alloc::vec![0u8; knowledge::MAX_PAGE_BYTES.min(k.buffer.len())];
+                k.buffer.read_bytes(0, &mut bytes);
+                knowledge::page_len(&bytes, *count, query).ok_or(status::INTERNAL)?
+            }
+            _ => return Err(status::INTERNAL),
+        };
+        if len > k.buffer.len() {
+            return Err(status::INTERNAL);
+        }
+        if len > buffer_len {
+            return Err(status::NO_BUFFER);
+        }
+        let mut bytes = alloc::vec![0u8; len];
+        k.buffer.read_bytes(0, &mut bytes);
+        if let Some(b) = self.slots[i].as_ref().and_then(|s| s.buffer.as_ref()) {
+            b.write_bytes(0, &bytes);
+        }
+        Ok(n)
+    }
+
+    /// `KNOWLEDGE_PUT` (#144): the put in the agent's buffer, with the
+    /// runtime's author, source, and readable scopes; audited first.
+    #[allow(clippy::too_many_arguments)]
+    fn knowledge_put(
+        &mut self,
+        i: usize,
+        id: u32,
+        limits: &Limits,
+        len: u16,
+        readable: u8,
+        now: u64,
+        out: &mut [u8; 256],
+    ) -> Result<usize, u8> {
+        let len = usize::from(len);
+        let buffer = self.slots[i].as_ref().and_then(|s| s.buffer.as_ref());
+        if len > knowledge::MAX_RECORD || len > buffer.map_or(0, Mapped::len) {
+            self.note(i, refusal::MALFORMED, None);
+            return Err(status::TOO_LARGE);
+        }
+        // Copied out first: the agent may change its buffer meanwhile.
+        let mut body = alloc::vec![0u8; len];
+        if let Some(b) = buffer {
+            b.read_bytes(0, &mut body);
+        }
+        let Some(put) = Put::parse(&body) else {
+            self.note(i, refusal::MALFORMED, None);
+            return Err(status::BAD_REQUEST);
+        };
+        let scope = knowledge::SCOPES[usize::from(put.scope)];
+        let p = Permission::knowledge(scope, true).ok_or(status::INTERNAL)?;
+        let allowed = self.slots[i]
+            .as_ref()
+            .is_some_and(|s| s.grants.allows(&p, now));
+        if !allowed {
+            self.note(i, refusal::NO_GRANT, Some(p));
+            return Err(status::NO_ACCESS);
+        }
+        self.knowledge
+            .as_ref()
+            .ok_or(status::INTERNAL)?
+            .health
+            .ready()?;
+        let budget = limits.entry.budget;
+        self.charge(i, &budget, Some(p), |u, _| u.knowledge(&budget))?;
+        let agent = limits.entry.name;
+        let put = Put {
+            author: Author::Agent {
+                name: agent,
+                task: id,
+            },
+            source: Source::Written,
+            readable,
+            ..put
+        };
+        let mut record = alloc::vec![0u8; knowledge::MAX_RECORD];
+        let n = put.encode(&mut record).ok_or(status::BAD_REQUEST)?;
+        // The key, what it replaces, the kind, and the length: never the
+        // content.
+        let mut d = [[0u8; 20]; 2];
+        let [a, b] = &mut d;
+        let kind: &[u8] = match put.kind {
+            knowledge::Kind::Claim => b" claim ",
+            knowledge::Kind::Retraction => b" retraction ",
+        };
+        let replaces = decimal(u64::from(put.replaces), a);
+        let size = decimal(put.content.len() as u64, b);
+        let detail = [put.key, b" replaces ", replaces, kind, size, b" bytes"].concat();
+        let detail = &detail[..detail.len().min(audit::MAX_DETAIL)];
+        let seq = self.intent(
+            agent,
+            id,
+            action::KNOWLEDGE,
+            Some(p),
+            knowledge::NAME,
+            detail,
+        )?;
+        let k = self.knowledge.as_ref().ok_or(status::INTERNAL)?;
+        k.buffer.write_bytes(0, &record[..n]);
+        let r = k.call(&KnowledgeRequest::Put { len: n as u16 }, out);
+        let version = match (r, &out[..]) {
+            (Ok(5), [status::OK, v0, v1, v2, v3, ..]) => {
+                Some(u32::from_le_bytes([*v0, *v1, *v2, *v3]))
+            }
+            _ => None,
+        };
+        let mut v = [0u8; 20];
+        let ended: Vec<u8> = match version {
+            Some(n) => [&b"version "[..], decimal(u64::from(n), &mut v)].concat(),
+            None => [&b"status "[..], decimal(u64::from(out[0]), &mut v)].concat(),
+        };
+        self.outcome(seq, agent, id, action::KNOWLEDGE, version.is_some(), &ended);
+        r
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn send_datagram(
         &mut self,
@@ -2535,7 +2892,7 @@ impl Runtime {
 
     /// Counts a refused request from slot `i`; the first of its `kind` this
     /// attempt is recorded (best effort, as other refusals).
-    fn note(&mut self, i: usize, kind: u16, p: Option<Permission>) {
+    fn note(&mut self, i: usize, kind: u32, p: Option<Permission>) {
         let Some(s) = self.slots[i].as_mut() else {
             return;
         };
@@ -2561,6 +2918,7 @@ impl Runtime {
             refusal::OVER_FILES => b"over files",
             refusal::OVER_MESSAGES => b"over messages",
             refusal::OVER_SUBTASKS => b"over subtasks",
+            refusal::OVER_KNOWLEDGE => b"over knowledge",
             _ => b"not in group",
         };
         let agent = self.agent_of(task);
@@ -2597,6 +2955,7 @@ impl Runtime {
             Over::GroupNet => refusal::OVER_GROUP_NET,
             Over::Files => refusal::OVER_FILES,
             Over::Messages => refusal::OVER_MESSAGES,
+            Over::Knowledge => refusal::OVER_KNOWLEDGE,
         };
         self.note(i, kind, p);
         Err(status::OVER_LIMIT)
@@ -3258,9 +3617,12 @@ impl Runtime {
         let result = match agent_slot(badge) {
             Some(i) => {
                 let result = self.agent(i, req, out);
-                // `TOOL` and `SUBTASK` record their own refusals, by kind
-                // (#126, #135).
-                let tool = matches!(req, Request::Tool { .. } | Request::Subtask { .. });
+                // `TOOL`, `SUBTASK`, and `KNOWLEDGE_PUT` record their own
+                // refusals, by kind (#126, #135, #144).
+                let tool = matches!(
+                    req,
+                    Request::Tool { .. } | Request::Subtask { .. } | Request::KnowledgePut { .. }
+                );
                 match result {
                     _ if tool => {}
                     Err(status::NO_ACCESS) => match needed(&req) {
@@ -3315,6 +3677,11 @@ fn needed(req: &Request<'_>) -> Option<Permission> {
         Request::DataGet { .. } => Some(Permission::DataRead),
         Request::SendTo { addr, port, .. } => Some(Permission::Net { addr, port }),
         Request::MessageSend { to, .. } => Permission::channel(to),
+        Request::KnowledgeGet { scope, .. }
+        | Request::KnowledgeHistory { scope, .. }
+        | Request::KnowledgeQuery { scope, .. } => knowledge::SCOPES
+            .get(usize::from(scope))
+            .and_then(|s| Permission::knowledge(s, false)),
         _ => None,
     }
 }
@@ -3388,6 +3755,17 @@ fn main(arg: u64) -> u64 {
         };
         files.attach().then_some(files)
     });
+    // Shared knowledge (#144): optional, as handle 11 is.
+    let knowledge = mem_map_buffer(knowledge::MIN_BUFFER)
+        .ok()
+        .and_then(|buffer| {
+            let k = Knowledge {
+                buffer,
+                reply,
+                health: Health::default(),
+            };
+            k.attach().then_some(k)
+        });
     let attempts = |name: &[u8]| {
         agents
             .iter()
@@ -3414,6 +3792,7 @@ fn main(arg: u64) -> u64 {
         tasks,
         store,
         files,
+        knowledge,
         mailboxes: Mailboxes::default(),
         slots: Default::default(),
         controls: Default::default(),

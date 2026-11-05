@@ -4,9 +4,10 @@
 //! what the user types or write what looks like its answers.
 //!
 //! Handles: 1 the virtio-console device, 2 its endpoint (`RECEIVE`), 3
-//! `init`'s report endpoint (`SEND`), and 4 the audit service (`SEND`,
-//! badged as `trust`; #107), when given. Nothing else: it holds no serial
-//! console, storage, network, or inference capability.
+//! `init`'s report endpoint (`SEND`), 4 the audit service (`SEND`,
+//! badged as `trust`; #107), and 5 the knowledge service (`SEND`, client
+//! 2; #144), when given. Nothing else: it holds no serial console,
+//! storage, network, or inference capability.
 //!
 //! The audit trail's anchor (#107): at start and on `audit`, `trust` shows
 //! the audit service's boot, record count, and chain head, so the user can
@@ -29,16 +30,23 @@
 //! <permission> for this task? (yes <n> / no <n>)`; the user answers
 //! `yes <n>` or `no <n>`. The runtime decides the outcome (including the
 //! timeout) and says so with `RESOLVED`, which `trust` shows.
+//!
+//! Verification (#144, knowledge.md): `verify <scope> <key> <version>
+//! <hash>` asks the knowledge service, with a bounded wait, to mark the
+//! version verified if its content's SHA-256 starts with the 8 typed
+//! hexadecimal digits, read where the user read the content. The console
+//! shows the version's author or why not, never its content.
 
 #![no_std]
 #![no_main]
 
 use pharos_programs::virtio_console::{Console, RX_BUFFER};
+use pharos_proto::knowledge::{self, Author};
 use pharos_proto::permission::Permission;
 use pharos_proto::trust::{
     self, Command, INIT, Line, Lines, MAX_NAME, Outcome, RUNTIME, Request, SLOTS, parse,
 };
-use pharos_proto::{agents, audit};
+use pharos_proto::{agents, audit, status};
 use pharos_user::{
     Handle, Received, Status, Usage as Use, call_timeout, delete, endpoint_create, irq_create,
     irq_notify, process_status, process_stop, process_usage, receive, send, sleep, try_send,
@@ -50,11 +58,15 @@ const DEVICE: Handle = 1;
 const SERVICE: Handle = 2;
 const REPORT: Handle = 3;
 const AUDIT: Handle = 4;
+const KNOWLEDGE: Handle = 5;
+/// How long `trust` waits for the knowledge service's `VERIFY`.
+const KNOWLEDGE_US: u64 = 1_000_000;
 /// How long `trust` waits for the audit service's `HEAD`.
 const AUDIT_US: u64 = 1_000_000;
 const BASE: u64 = 0x1000_0000;
 const HELP: &[u8] = b"commands: list, stop <agent>, stop group <group>, stop all, \
-revoke <agent> <permission>, yes <n>, no <n>, audit, usage";
+revoke <agent> <permission>, yes <n>, no <n>, audit, usage, \
+verify <scope> <key> <version> <hash>";
 /// How long a stop may take before the answer says it is still running.
 const STOP_WAIT_US: u64 = 1_000_000;
 
@@ -302,7 +314,63 @@ impl Trust {
                     self.say(&[b"usage: the runtime is not answering; stop works"]);
                 }
             }
+            Command::Verify {
+                scope,
+                key,
+                version,
+                prefix,
+            } => self.verify(scope, key, version, prefix),
             Command::Help => self.say(&[HELP]),
+        }
+    }
+
+    /// Marks `scope/key` version `version` verified if its hash starts
+    /// with `prefix` (#144); shows its author, never its content.
+    fn verify(&mut self, scope: &[u8], key: &[u8], version: u32, prefix: [u8; 4]) {
+        let mut d = [[0u8; 20]; 2];
+        let [v, t] = &mut d;
+        let v = decimal(u64::from(version), v);
+        let Some(number) = knowledge::scope_number(scope) else {
+            self.say(&[b"verify: no scope ", scope]);
+            return;
+        };
+        let req = knowledge::Request::Verify {
+            scope: number,
+            key,
+            version,
+            prefix,
+        };
+        let (mut msg, mut out) = ([0u8; 256], [0u8; 256]);
+        let reply: &[u8] = match (self.reply, knowledge::encode(&req, &mut msg)) {
+            (Some(reply), Some(n)) => {
+                match call_timeout(KNOWLEDGE, &msg[..n], reply, &mut out, KNOWLEDGE_US) {
+                    Ok(Received::Message { len, .. }) => &out[..len.min(256)],
+                    _ => &[],
+                }
+            }
+            _ => &[],
+        };
+        match reply {
+            [status::OK, author @ ..] => {
+                let by: [&[u8]; 4] = match knowledge::parse_author(author) {
+                    Some(Author::Agent { name, task }) => {
+                        [b"agent ", name, b" task ", decimal(u64::from(task), t)]
+                    }
+                    Some(Author::User) => [b"user", b"", b"", b""],
+                    None => [b"?", b"", b"", b""],
+                };
+                let what = [scope, b"/", key, b" version ", v].concat();
+                self.say(&[b"verified ", &what, b" by ", by[0], by[1], by[2], by[3]]);
+                self.record(
+                    audit::action::VERIFY,
+                    None,
+                    &what[..what.len().min(audit::MAX_DETAIL)],
+                );
+            }
+            [status::NOT_FOUND, ..] => self.say(&[b"verify: no version"]),
+            [knowledge::code::HASH_DIFFERS, ..] => self.say(&[b"verify: hash differs"]),
+            [] => self.say(&[b"verify: the knowledge service is not answering"]),
+            _ => self.say(&[b"verify: refused"]),
         }
     }
 

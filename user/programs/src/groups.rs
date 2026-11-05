@@ -136,6 +136,9 @@ mod tests {
             tools: 0,
             files: &[],
             ask_files: &[],
+            knowledge_read: &[],
+            knowledge_write: &[],
+            ask_knowledge: &[],
             channels: &[],
         }
     }
@@ -228,7 +231,7 @@ mod tests {
     #[test]
     fn only_what_the_supervisor_holds_and_no_longer() {
         let report = Permission::file(b"report.txt").unwrap();
-        let mut held = Grants::new(1 << 2, Data::Write, &[], &[b"report.txt"], &[]);
+        let mut held = Grants::new(1 << 2, Data::Write, &[], &[b"report.txt"], &[], (0, 0));
         held.add(Permission::Model(3), Some(500));
         assert_eq!(delegable(&held, [], 0), Ok(Vec::new()), "nothing");
         assert_eq!(
@@ -259,7 +262,7 @@ mod tests {
             Err(other),
             "one wider refuses all"
         );
-        let held = Grants::new(0, Data::Read, &[], &[], &[]);
+        let held = Grants::new(0, Data::Read, &[], &[], &[], (0, 0));
         assert_eq!(
             delegable(&held, [Permission::DataWrite], 0),
             Err(Permission::DataWrite),
@@ -270,7 +273,7 @@ mod tests {
 
     #[test]
     fn given_at_start_only_while_still_held() {
-        let mut held = Grants::new(1 << 2, Data::None, &[], &[], &[]);
+        let mut held = Grants::new(1 << 2, Data::None, &[], &[], &[], (0, 0));
         held.add(Permission::Model(3), Some(500));
         let both = [Permission::Model(2), Permission::Model(3)];
         assert_eq!(

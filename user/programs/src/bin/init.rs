@@ -27,8 +27,9 @@ use pharos_proto::net::{self, Allowed, Dest, Request as NetRequest};
 use pharos_proto::store::{self, Request as StoreRequest};
 use pharos_user::rights::{CONFIG, GRANT, IRQ, MAP, READ, RECEIVE, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
-    Class, Error, Grant, Handle, Limits, Received, Status, call_timeout, config_read, debug_write,
-    endpoint_create, open, process_status, receive_timeout, send, spawn_with, uptime,
+    Class, Error, Grant, Handle, Limits, MAX_SPAWN_CAPS, Received, Status, call_timeout,
+    config_read, debug_write, endpoint_create, open, process_status, receive_timeout, send,
+    spawn_with, uptime,
 };
 
 pharos_user::entry!(main);
@@ -90,6 +91,11 @@ enum Cap {
     /// `SEND` on the audit service, badged as this client
     /// (`pharos_proto::audit::client`).
     Audit(u32),
+    /// The knowledge service's endpoint, to receive on (the service, #144).
+    KnowledgeService,
+    /// `SEND` on the knowledge service, badged as this client
+    /// (`pharos_proto::knowledge::client`).
+    Knowledge(u32),
 }
 
 struct Service {
@@ -127,6 +133,9 @@ const RUNTIME_HANDLES: u16 = 64 + 16 * 16;
 const STORE_LIMIT: u32 = 1 << 18;
 /// 1 GiB (D-011): one S1 model, its 16 MiB read window, cache, and heap.
 const INFER_LIMIT: u32 = 1 << 18;
+/// The knowledge service (#144): its heap (each key's version index) and
+/// up to 4 clients' buffers of at most 64 KiB each.
+const KNOWLEDGE_LIMIT: u32 = 1024;
 /// The agent runtime (#98): its own heap and buffers; agents' limits come
 /// from its policy table, each at most this.
 const AGENTS_LIMIT: u32 = 1 << 14;
@@ -142,6 +151,14 @@ const AGENTS_TASKS: u32 = 5;
 const MODELS_READ_ONLY: u32 = 3 | 1 << 16;
 /// Namespace 6, `audit`, read-write: the audit trail (#107).
 const AUDIT_TRAIL: u32 = 6;
+/// Namespace 7, `files`, read-only: the files the user gives agents (#127).
+const FILES_READ_ONLY: u32 = 7 | 1 << 16;
+/// Namespace 8, `knowledge`, read-write: shared knowledge (#144).
+const KNOWLEDGE_STORE: u32 = 8;
+/// The knowledge service's client numbers
+/// (`pharos_proto::knowledge::client`).
+const KNOWLEDGE_RUNTIME: u32 = 1;
+const KNOWLEDGE_TRUST: u32 = 2;
 /// The audit service's client numbers (`pharos_proto::audit::client`).
 const AUDIT_TRUST: u32 = 2;
 const AUDIT_RUNTIME: u32 = 3;
@@ -209,8 +226,25 @@ const BOOT: &[Service] = &[
         after: &[2],
         limit: 0,
     },
+    // The knowledge service (#144): the only writer of namespace
+    // `knowledge`; before `trust` and the runtime, its two clients.
+    Service {
+        name: "knowledge",
+        path: b"bin/knowledge",
+        arg: 0,
+        kind: Kind::Daemon,
+        caps: &[
+            Cap::Console,
+            Cap::KnowledgeService,
+            Cap::Report,
+            Cap::Storage(KNOWLEDGE_STORE),
+        ],
+        after: &[2],
+        limit: KNOWLEDGE_LIMIT,
+    },
     // The trusted service (#96, D-018): the trusted path's device and its
-    // endpoint, and the audit service, whose chain head it shows (#107).
+    // endpoint, the audit service, whose chain head it shows (#107), and
+    // the knowledge service, to mark versions verified (#144).
     Service {
         name: "trust",
         path: b"bin/trust",
@@ -221,8 +255,9 @@ const BOOT: &[Service] = &[
             Cap::TrustService,
             Cap::Report,
             Cap::Audit(AUDIT_TRUST),
+            Cap::Knowledge(KNOWLEDGE_TRUST),
         ],
-        after: &[4],
+        after: &[4, 5],
         limit: 0,
     },
     // The agent runtime (#98), after `trust`, which `init` then sends its
@@ -243,13 +278,11 @@ const BOOT: &[Service] = &[
             Cap::Storage(AGENTS_TASKS),
             Cap::Audit(AUDIT_RUNTIME),
             // The union of its policy table's destinations: none.
-            // ponytail: the 9th capability, past `spawn`'s 8, so the boot
-            // runtime does not get it (nor handle 10, `files` read-only,
-            // #127); harmless while its boot table is empty. Raise
-            // `MAX_SPAWN_CAPS` before the boot runtime runs agents.
             Cap::Network(RUNTIME_PORT, &[]),
+            Cap::Storage(FILES_READ_ONLY),
+            Cap::Knowledge(KNOWLEDGE_RUNTIME),
         ],
-        after: &[2, 3, 5],
+        after: &[2, 3, 5, 6],
         limit: AGENTS_LIMIT,
     },
 ];
@@ -538,6 +571,7 @@ struct Init {
     trust: Handle,
     agents: Handle,
     audit: Handle,
+    knowledge: Handle,
     devices: [(Handle, u32); 8],
     device_count: usize,
     state: [State; MAX_SERVICES],
@@ -572,6 +606,8 @@ impl Init {
             Cap::TrustRuntime => g(self.trust, SEND, TRUST_RUNTIME_BADGE),
             Cap::AuditService => g(self.audit, RECEIVE, 0),
             Cap::Audit(badge) => g(self.audit, SEND, *badge),
+            Cap::KnowledgeService => g(self.knowledge, RECEIVE, 0),
+            Cap::Knowledge(badge) => g(self.knowledge, SEND, *badge),
             Cap::Network(0, _) => None,
             Cap::Network(port, _) => g(self.net, SEND, *port),
             Cap::Device(id) | Cap::SecondDevice(id) => {
@@ -597,7 +633,7 @@ impl Init {
             handle: 0,
             rights: 0,
             badge: 0,
-        }; 8];
+        }; MAX_SPAWN_CAPS];
         for (grant, cap) in grants.iter_mut().zip(service.caps) {
             match self.grant(i, cap) {
                 Some(g) => *grant = g,
@@ -608,7 +644,7 @@ impl Init {
                 }
             }
         }
-        let caps = &grants[..service.caps.len().min(8)];
+        let caps = &grants[..service.caps.len().min(MAX_SPAWN_CAPS)];
         let notify = Some((self.events, i as u32));
         // D-022: `trust` keeps `init`'s class, so the emergency stop runs
         // ahead of everything else; every other service is below it.
@@ -887,7 +923,7 @@ fn main(arg: u64) -> u64 {
         3 => SUPERVISE,
         _ => &[],
     };
-    let mut handles = [0; 8];
+    let mut handles = [0; 9];
     for h in handles.iter_mut() {
         match endpoint_create() {
             Ok(e) => *h = e,
@@ -897,7 +933,17 @@ fn main(arg: u64) -> u64 {
             }
         }
     }
-    let [events, reply, net, store, infer, trust, agents, audit] = handles;
+    let [
+        events,
+        reply,
+        net,
+        store,
+        infer,
+        trust,
+        agents,
+        audit,
+        knowledge,
+    ] = handles;
     let (devices, device_count) = devices();
     let mut init = Init {
         table,
@@ -909,6 +955,7 @@ fn main(arg: u64) -> u64 {
         trust,
         agents,
         audit,
+        knowledge,
         devices,
         device_count,
         state: [State::Pending; MAX_SERVICES],

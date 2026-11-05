@@ -77,9 +77,13 @@ pub mod action {
     pub const TOOL: u8 = 15;
     /// A message to another agent (#133): kind and length as detail.
     pub const MESSAGE: u8 = 16;
-    /// The verifier's decision on a result (#137), its reason as detail.
+    /// The verifier's decision on a result (#137), its reason as detail;
+    /// the user's mark on a knowledge version (#144).
     pub const VERIFY: u8 = 17;
-    pub const LAST: u8 = VERIFY;
+    /// A new knowledge version (#144): key, replaced version, kind, and
+    /// length as detail, never the content.
+    pub const KNOWLEDGE: u8 = 18;
+    pub const LAST: u8 = KNOWLEDGE;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -101,6 +105,7 @@ pub mod action {
             "tool",
             "message",
             "verify",
+            "knowledge",
         ]
         .get(usize::from(code))
         .copied()

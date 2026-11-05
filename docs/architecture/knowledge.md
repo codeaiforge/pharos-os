@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). **Implemented:** the data model (#142), the service (#143). To be built by: agent access (#144), private memory and promotion (#145), and the access-control, provenance, staleness, and injection tests (#146).
+**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). **Implemented:** the data model (#142), the service (#143), agent access and verification (#144). To be built by: private memory and promotion (#145), the access-control, provenance, staleness, and injection tests, and host-loaded verified entries (#146).
 
 ## 2. Context
 
@@ -18,7 +18,7 @@ What M3.8 builds on:
 - **The store** (M3.0, [storage.md](storage.md)): one namespace per client badge, crash-consistent writes and appends, paths of at most 80 bytes, appends of at most 200 bytes inline, larger data through an attached buffer.
 - **The runtime** checks, budgets, and audits every agent request; permissions are runtime grants per task attempt, revocable at once ([capabilities.md](capabilities.md)); each agent's private files are `data/<agent>/<file>` in the runtime's namespace.
 - **The trusted path:** `trust` writes every console line from structured fields; it calls the audit service with a bounded wait and never waits on the runtime ([agents.md](agents.md)).
-- **Limits:** `spawn` passes at most 8 capabilities (`MAX_SPAWN_CAPS`); the runtime already has 9 at boot, so the boot runtime lacks its network and `files` capabilities.
+- **Limits:** `spawn` passed at most 8 capabilities (`MAX_SPAWN_CAPS`); the runtime already had 9 at boot, so the boot runtime lacked its network and `files` capabilities (raised to 12 in #144).
 
 ## 3. Design
 
@@ -65,6 +65,7 @@ What M3.8 builds on:
 - **Audited:** each put is a consequential action, new action `knowledge` (18): an `INTENT` naming the agent, `knowledge write <scope>`, the key, the version it replaces, the kind, and the length (never the content), stored before the request is sent (else `NO_AUDIT`), then its `OUTCOME` with the new version. Reads are not audited (they change nothing), except their refusals, recorded once per kind per attempt as today.
 - **Budgeted:** a new per-attempt budget field, `knowledge`, counts puts and promotions; every request counts against `rate`.
 - **Content is data:** an agent gets content only in its buffer, with the status and provenance in the reply's structured fields; a model that reads it reads untrusted text, as with a file or a message, and anything it then does goes through its own grants.
+- *Implemented (#144):* `Permission::KnowledgeRead` and `KnowledgeWrite` (`pharos_proto::permission`; typed forms up to 48 bytes, `permission::TEXT`); the manifest keys `knowledge_read` and `knowledge_write` (at most 4 scopes each, each in the entry's list) and the entry's `knowledge_read`, `knowledge_write`, and `ask_knowledge` (typed as after `knowledge `: `read <scope>` or `write <scope>`); grants built per scope over `knowledge::SCOPES` (`Grants::new`, `Grants::readable`). **Scopes are named by number** on the agent's side too, as on the service's. `KNOWLEDGE_PUT` takes a `knowledge::Put` from the agent's buffer, copied out first, and the runtime replaces its author, source, and readable scopes, so a forged author or source is never stored. The reads answer with the service's own reply and codes, and the runtime copies exactly what the service wrote (`GET`'s length; a `HISTORY` or `QUERY` page measured by `knowledge::page_len`) to the agent's buffer, never bytes left from an earlier answer. Refusals are recorded once per kind per attempt, as `no grant` with the permission, `malformed`, or the new `over knowledge`; the refusal kinds are now 32 bits (16 were taken). A put's intent detail is `<key> replaces <n> <kind> <length> bytes` (cut to 64 bytes), its outcome `version <n>` or `status <code>`. The budget counts every put sent to the service, including ones it refuses (`REPLACES`, `FULL`). The runtime's handle 11 is `SEND` on the service as client 1, with a 24 KiB buffer there; without it every knowledge request is `INTERNAL`.
 
 ### Private memory and promotion (#145)
 
@@ -75,10 +76,12 @@ What M3.8 builds on:
 
 - **`verify <scope> <key> <version> <hash>`** on the trusted console: the user types the first 8 hexadecimal digits of the content's SHA-256, read where the user read the content (for now the host tool, `cargo xtask knowledge`, on the store image), so a mark binds to the exact bytes the user checked. `trust` calls the service with a bounded wait (as it calls the audit service), which appends the mark only if the version exists and the prefix matches, then shows `verified <scope>/<key> version <n> by <author>` or why not (`no version`, `hash differs`). Content never reaches the console. Recorded by `trust` as a `verify` (17) by the user.
 - **Host-loaded entries:** `cargo xtask` can write versions with author `user` and source `host`, each with its mark, into a test store image; they start verified.
+- *Implemented (#144):* `Command::Verify` (`pharos_proto::trust`: a version from 1, exactly 8 hexadecimal digits in either case), `trust`'s handle 5 (`SEND` on the service as client 2, waiting at most 1 s), and its answers `verified <scope>/<key> version <n> by agent <name> task <id>` (or `by user`), `verify: no scope`, `no version`, `hash differs`, `refused`, and `the knowledge service is not answering`. A mark is recorded as `verify` by the user with the detail `<scope>/<key> version <n>`. `cargo xtask store knowledge <image>` lists every version with its author, the 8 digits `verify` takes, and its content, on the host. **Host-loaded entries are left to #146**, the first test that needs one.
 
 ### Kernel
 
 - **`MAX_SPAWN_CAPS` raised from 8 to 12,** so the runtime holds the knowledge capability, and the boot runtime gets its network and `files` capabilities too; `trust` gets a fifth. The `spawn` test kernels check 12 passed and 13 refused.
+- *Implemented (#144):* the kernel's and `pharos_user`'s `MAX_SPAWN_CAPS` are 12; `init` starts `knowledge` after the store (its fifth service) and before `trust`, gives `trust` and the runtime their clients, and gives the boot runtime handles 9, 10, and 11. The test kernels that start agents start `knowledge` the same way.
 
 ## 4. Security
 

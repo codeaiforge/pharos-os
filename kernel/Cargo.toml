@@ -228,6 +228,10 @@ name = "knowledge"
 harness = false
 
 [[test]]
+name = "knowledge_agents"
+harness = false
+
+[[test]]
 name = "services"
 harness = false
 

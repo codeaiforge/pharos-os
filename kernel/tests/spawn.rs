@@ -28,7 +28,7 @@ fn free_frames() -> usize {
 }
 
 /// Steps `spawner` must report as passed.
-const STEPS: [&str; 23] = [
+const STEPS: [&str; 24] = [
     "endpoint_create and open bin/child",
     "spawn a child with two capabilities",
     "the child's message carries badge 7",
@@ -41,7 +41,8 @@ const STEPS: [&str; 23] = [
     "capability without GRANT: MISSING_RIGHT",
     "notify endpoint without RECEIVE: MISSING_RIGHT",
     "send with a 25-bit badge: TOO_LARGE",
-    "9 capabilities: TOO_LARGE",
+    "12 capabilities: the child runs",
+    "13 capabilities: TOO_LARGE",
     "malformed programs: BAD_PROGRAM",
     "a child in the agents class: a higher class is TOO_LARGE",
     "process_usage: CPU time and pages while running, CPU time kept once stopped",

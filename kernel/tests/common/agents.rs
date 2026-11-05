@@ -1,8 +1,8 @@
 //! What the `agents`, `agents_crash`, `agents_store`, `permissions`, and
 //! `agents_net` test kernels share (#98, #99, #109):
-//! starting `store`, `infer`, `trust`, and the agent runtime with the
-//! capabilities `init` gives them, replacing the runtime, and starting
-//! the control client.
+//! starting `store`, `infer`, `audit`, `knowledge` (#144), `trust`, and
+//! the agent runtime with the capabilities `init` gives them, replacing
+//! the runtime, and starting the control client.
 
 // Each kernel uses only part of it.
 #![allow(dead_code)]
@@ -36,6 +36,11 @@ const AUDIT_RUNTIME: u32 = 3;
 /// Namespace 7, `files`, read-only (#127): the runtime's handle 10, given
 /// after the network service's handle 9.
 const FILES_READ_ONLY: u32 = 7 | 1 << 16;
+/// Namespace 8, `knowledge`, read-write, and the knowledge service's
+/// clients (#144): the runtime's handle 11, after `files`, and `trust`'s 5.
+const KNOWLEDGE_STORE: u32 = 8;
+const KNOWLEDGE_RUNTIME: u32 = 1;
+const KNOWLEDGE_TRUST: u32 = 2;
 /// `pharos_proto::trust`: `RUNTIME`, under `init`'s (no) badge, and the
 /// runtime's badge.
 const TRUST_RUNTIME: [u8; 2] = [1, 1];
@@ -69,6 +74,8 @@ pub struct Services {
     /// The audit service (#108), for tests that kill it.
     pub audit: Arc<Endpoint>,
     pub audit_id: TaskId,
+    /// The knowledge service (#144).
+    pub knowledge: Arc<Endpoint>,
     /// The network service, if [`start_net`] started it: the runtime then
     /// gets handle 9 on it.
     pub net: Option<Arc<Endpoint>>,
@@ -113,7 +120,7 @@ fn start(
 }
 
 /// Starts `store` (on the second virtio-blk disk), `infer`, `audit` (#108),
-/// and `trust` (on the virtio-console), as `init` does. The scheduler and processes must be set up.
+/// `knowledge` (#144), and `trust` (on the virtio-console), as `init` does. The scheduler and processes must be set up.
 pub fn setup(t: &mut TestRun) -> Option<Services> {
     pci::enumerate();
     let devices = pci::devices();
@@ -165,12 +172,22 @@ pub fn setup(t: &mut TestRun) -> Option<Services> {
     ];
     let audit_id = start(t, &programs, b"bin/audit", 0, caps, &report, 0)?;
     let audit_send = Capability::new(Object::Endpoint(audit.clone()), SEND);
+    let knowledge = Endpoint::new();
+    let caps = vec![
+        Capability::new(Object::DebugConsole, WRITE),
+        Capability::new(Object::Endpoint(knowledge.clone()), RECEIVE),
+        Capability::new(Object::Endpoint(report.clone()), SEND),
+        store_send.derive_badged(SEND, KNOWLEDGE_STORE),
+    ];
+    start(t, &programs, b"bin/knowledge", 0, caps, &report, 1024)?;
+    let knowledge_send = Capability::new(Object::Endpoint(knowledge.clone()), SEND);
     let trust_ep = Endpoint::new();
     let caps = vec![
         Capability::new(Object::Device(console), MAP | CONFIG | IRQ),
         Capability::new(Object::Endpoint(trust_ep.clone()), RECEIVE),
         Capability::new(Object::Endpoint(report.clone()), SEND),
         audit_send.derive_badged(SEND, AUDIT_TRUST),
+        knowledge_send.derive_badged(SEND, KNOWLEDGE_TRUST),
     ];
     let trust = start(t, &programs, b"bin/trust", 0, caps, &report, 0)?;
     Some(Services {
@@ -185,6 +202,7 @@ pub fn setup(t: &mut TestRun) -> Option<Services> {
         store_caps,
         audit,
         audit_id,
+        knowledge,
         net: None,
         net_id: 0,
     })
@@ -286,6 +304,10 @@ pub fn start_runtime_table(t: &mut TestRun, s: &Services, table: u64) -> Option<
             Capability::new(Object::Endpoint(net.clone()), SEND).derive_badged(SEND, RUNTIME_PORT),
         );
         caps.push(store_send.derive_badged(SEND, FILES_READ_ONLY));
+        caps.push(
+            Capability::new(Object::Endpoint(s.knowledge.clone()), SEND)
+                .derive_badged(SEND, KNOWLEDGE_RUNTIME),
+        );
     }
     let runtime = start(
         t,

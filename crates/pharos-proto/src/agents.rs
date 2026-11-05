@@ -31,6 +31,15 @@
 //! to a named agent it holds `channel` for; `MESSAGE_RECEIVE` copies the
 //! oldest message waiting for it into its buffer ([`Message`]), or answers
 //! `NOT_FOUND` at once. A message carries data only.
+//!
+//! Knowledge (#144, knowledge.md): a scope is named by its number in
+//! [`crate::knowledge::SCOPES`]. `KNOWLEDGE_PUT` takes a
+//! [`crate::knowledge::Put`] from the first `len` bytes of the agent's
+//! buffer; the runtime replaces its author, source, and readable scopes
+//! with its own. `KNOWLEDGE_GET`, `KNOWLEDGE_HISTORY`, and
+//! `KNOWLEDGE_QUERY` answer with the knowledge service's reply, and what
+//! it put in the runtime's buffer is copied to the start of the agent's.
+//! Content is data, never instructions.
 
 use crate::{Reader, Refused, Writer, op as common, split, status};
 
@@ -70,6 +79,11 @@ pub mod op {
     /// Subtasks (#134, coordination.md).
     pub const SUBTASK: u8 = 26;
     pub const SUBTASK_STATUS: u8 = 27;
+    /// Shared knowledge (#144, knowledge.md).
+    pub const KNOWLEDGE_PUT: u8 = 28;
+    pub const KNOWLEDGE_GET: u8 = 29;
+    pub const KNOWLEDGE_HISTORY: u8 = 30;
+    pub const KNOWLEDGE_QUERY: u8 = 31;
 }
 
 /// The `ASK` reply's outcome, after `OK` (#106).
@@ -365,6 +379,31 @@ pub enum Request<'a> {
         call_len: u16,
         result_at: u32,
     },
+    /// Agent: a new version from its buffer (needs `knowledge write` for
+    /// the put's scope); the reply is `[OK, version u32]`.
+    KnowledgePut {
+        len: u16,
+    },
+    /// Agent: a version of `key` (0: its heads) into its buffer (needs
+    /// `knowledge read <scope>`), as the service's `GET`.
+    KnowledgeGet {
+        scope: u8,
+        key: &'a [u8],
+        version: u32,
+    },
+    /// Agent: `key`'s versions from `from`, as the service's `HISTORY`.
+    KnowledgeHistory {
+        scope: u8,
+        key: &'a [u8],
+        from: u32,
+    },
+    /// Agent: the keys whose heads carry `tag`, from the `start`th, as the
+    /// service's `QUERY`.
+    KnowledgeQuery {
+        scope: u8,
+        tag: &'a [u8],
+        start: u16,
+    },
     /// `trust`: the user's answer to approval request `number`.
     Answer {
         number: u16,
@@ -414,6 +453,12 @@ fn write_name(w: &mut Writer<'_>, name: &[u8]) -> Option<()> {
     }
     w.bytes(&[name.len() as u8])?;
     w.bytes(name)
+}
+
+/// A scope's number in [`crate::knowledge::SCOPES`].
+fn scope(r: &mut Reader<'_>) -> Option<u8> {
+    r.u8()
+        .filter(|s| usize::from(*s) < crate::knowledge::SCOPES.len())
 }
 
 pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
@@ -502,6 +547,22 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                 }
             }
             op::SUBTASK_STATUS => Request::SubtaskStatus { task: r.u32()? },
+            op::KNOWLEDGE_PUT => Request::KnowledgePut { len: r.u16()? },
+            op::KNOWLEDGE_GET => Request::KnowledgeGet {
+                scope: scope(&mut r)?,
+                key: name(&mut r)?,
+                version: r.u32()?,
+            },
+            op::KNOWLEDGE_HISTORY => Request::KnowledgeHistory {
+                scope: scope(&mut r)?,
+                key: name(&mut r)?,
+                from: r.u32()?,
+            },
+            op::KNOWLEDGE_QUERY => Request::KnowledgeQuery {
+                scope: scope(&mut r)?,
+                tag: name(&mut r)?,
+                start: r.u16()?,
+            },
             op::TOOL => Request::Tool {
                 call_at: r.u32()?,
                 call_len: r
@@ -653,6 +714,42 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
         Request::SubtaskStatus { task } => {
             head(&mut w, op::SUBTASK_STATUS)?;
             w.u32(task)?;
+        }
+        Request::KnowledgePut { len } => {
+            head(&mut w, op::KNOWLEDGE_PUT)?;
+            w.u16(len)?;
+        }
+        Request::KnowledgeGet {
+            scope,
+            key: n,
+            version: v,
+        }
+        | Request::KnowledgeHistory {
+            scope,
+            key: n,
+            from: v,
+        } => {
+            if usize::from(scope) >= crate::knowledge::SCOPES.len() {
+                return None;
+            }
+            let code = if matches!(req, Request::KnowledgeGet { .. }) {
+                op::KNOWLEDGE_GET
+            } else {
+                op::KNOWLEDGE_HISTORY
+            };
+            head(&mut w, code)?;
+            w.bytes(&[scope])?;
+            write_name(&mut w, n)?;
+            w.u32(v)?;
+        }
+        Request::KnowledgeQuery { scope, tag, start } => {
+            if usize::from(scope) >= crate::knowledge::SCOPES.len() {
+                return None;
+            }
+            head(&mut w, op::KNOWLEDGE_QUERY)?;
+            w.bytes(&[scope])?;
+            write_name(&mut w, tag)?;
+            w.u16(start)?;
         }
         Request::Tool {
             call_at,
@@ -942,6 +1039,22 @@ mod tests {
                 .unwrap(),
             },
             Request::SubtaskStatus { task: u32::MAX },
+            Request::KnowledgePut { len: 4096 },
+            Request::KnowledgeGet {
+                scope: 0,
+                key: b"vendor",
+                version: 0,
+            },
+            Request::KnowledgeHistory {
+                scope: 4,
+                key: &[b'k'; 32],
+                from: u32::MAX,
+            },
+            Request::KnowledgeQuery {
+                scope: 1,
+                tag: b"billing",
+                start: 16,
+            },
             Request::Tool {
                 call_at: 4096,
                 call_len: crate::tool::MAX_CALL as u16,
@@ -1012,6 +1125,23 @@ mod tests {
             "truncated"
         );
         assert_eq!(parse(&[VERSION, op::STATUS, 1, 2, 3]), Err(Refused::Bad));
+        // A scope past the table, on the wire and when encoding.
+        let five = crate::knowledge::SCOPES.len() as u8;
+        assert_eq!(
+            parse(&[VERSION, op::KNOWLEDGE_GET, five, 1, b'k', 0, 0, 0, 0]),
+            Err(Refused::Bad)
+        );
+        assert!(parse(&[VERSION, op::KNOWLEDGE_GET, 0, 1, b'k', 0, 0, 0, 0]).is_ok());
+        assert_eq!(
+            parse(&[VERSION, op::KNOWLEDGE_QUERY, 0, 1, b'.', 0, 0]),
+            Err(Refused::Bad)
+        );
+        let past = Request::KnowledgeQuery {
+            scope: five,
+            tag: b"t",
+            start: 0,
+        };
+        assert_eq!(encode(&past, &mut [0; 64]), None);
         assert_eq!(parse(&[VERSION, 99]), Err(Refused::Bad), "unknown op");
         let mut long = [0u8; 12];
         long[..2].copy_from_slice(&[VERSION, op::TOOL]);
