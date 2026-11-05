@@ -93,6 +93,14 @@
 //! - `spam` (agent `spammer`): two messages to `outsider` within its
 //!   `messages` budget of 2, the third `OVER_LIMIT`; completes with
 //!   `spammer ok`.
+//! - `lead` (agent `boss`, the `groups` kernel, #134): gives `helper` and
+//!   `aide` a subtask each; is refused one for an agent outside its group,
+//!   for itself, and with a delegated permission (until #135), and the
+//!   status of a task that is not its subtask; reads both results; then
+//!   eight `nap` subtasks, the ninth `BUSY`; completes with `boss ok`.
+//! - `help` (agent `helper`): may not use `boss`'s model 2 or give
+//!   subtasks itself; completes with `helped`. `aid` (agent `aide`):
+//!   completes with `aided`.
 //! - `inject` (agent `injected`, the `injection` kernel, #129): a naive
 //!   agent that runs every call it sees. It reads `report.txt` and passes
 //!   the whole text, and each line that looks like a call, to `TOOL`; it
@@ -701,6 +709,90 @@ impl Agent {
             return self.fail(b"the messages budget was not kept");
         }
         self.complete(b"spammer ok")
+    }
+
+    /// `SUBTASK` for `worker` with `input`: its task ID or the status.
+    fn subtask(&self, worker: &[u8], input: &[u8], delegate: &[Permission]) -> Result<u32, u8> {
+        self.buffer.write_bytes(0, input);
+        let req = Request::Subtask {
+            worker,
+            input_len: input.len() as u32,
+            delegate: agents::Delegated::new(delegate).ok_or(status::TOO_LARGE)?,
+        };
+        let mut out = [0u8; 256];
+        let (code, n) = self.call(&req, &mut out);
+        agents::parse_submitted(&out[..n]).ok_or(code)
+    }
+
+    /// Waits up to 60 s for subtask `task` to end: its state and result.
+    fn subtask_result(&self, task: u32) -> Result<(agents::State, Vec<u8>), u8> {
+        for _ in 0..600 {
+            let mut out = [0u8; 256];
+            let (code, n) = self.call(&Request::SubtaskStatus { task }, &mut out);
+            let s = agents::TaskStatus::parse(&out[..n]).ok_or(code)?;
+            if !matches!(s.state, agents::State::Pending | agents::State::Running) {
+                let mut result = alloc::vec![0u8; s.result_len as usize];
+                self.buffer.read_bytes(0, &mut result);
+                return Ok((s.state, result));
+            }
+            sleep(100_000);
+        }
+        Err(status::BUSY)
+    }
+
+    fn lead(&self, me: u32) -> u64 {
+        let (Ok(h), Ok(a)) = (
+            self.subtask(b"helper", b"help", &[]),
+            self.subtask(b"aide", b"aid", &[]),
+        ) else {
+            return self.fail(b"a subtask for a worker was refused");
+        };
+        for worker in [&b"worker"[..], b"boss"] {
+            if self.subtask(worker, b"complete", &[]) != Err(status::NO_ACCESS) {
+                return self.fail(b"a subtask outside the group was not refused");
+            }
+        }
+        if self.subtask(b"helper", b"help", &[Permission::Model(2)]) != Err(status::NO_ACCESS) {
+            return self.fail(b"a delegated permission was not refused");
+        }
+        for task in [me, 9_999] {
+            if self.subtask_result(task) != Err(NO_SESSION) {
+                return self.fail(b"the status of a task not its subtask was given");
+            }
+        }
+        let done = |r: Result<(agents::State, Vec<u8>), u8>, want: &[u8]| {
+            r == Ok((agents::State::Done, want.to_vec()))
+        };
+        if !done(self.subtask_result(h), b"helped") || !done(self.subtask_result(a), b"aided") {
+            return self.fail(b"a subtask did not complete");
+        }
+        let mut naps = Vec::new();
+        for _ in 0..8 {
+            match self.subtask(b"helper", b"nap", &[]) {
+                Ok(t) => naps.push(t),
+                Err(_) => return self.fail(b"a nap subtask was refused"),
+            }
+        }
+        if self.subtask(b"helper", b"nap", &[]) != Err(status::BUSY) {
+            return self.fail(b"a ninth open subtask was not BUSY");
+        }
+        if !naps
+            .into_iter()
+            .all(|t| done(self.subtask_result(t), b"napped"))
+        {
+            return self.fail(b"a nap subtask did not complete");
+        }
+        self.complete(b"boss ok")
+    }
+
+    fn help(&self) -> u64 {
+        if self.generate(4).0 != status::NO_ACCESS {
+            return self.fail(b"a worker used its supervisor's model");
+        }
+        if self.subtask(b"aide", b"aid", &[]) != Err(status::NO_ACCESS) {
+            return self.fail(b"a worker gave a subtask");
+        }
+        self.complete(b"helped")
     }
 
     fn ask(&self, permission: Permission, for_ms: u32) -> Option<Asked> {
@@ -1674,6 +1766,9 @@ fn main(_: u64) -> u64 {
         b"tools" => a.tools(),
         b"inject" => a.inject(),
         b"talk" => a.talk(),
+        b"lead" => a.lead(task.task),
+        b"help" => a.help(),
+        b"aid" => a.complete(b"aided"),
         b"listen" => a.listen(),
         b"outside" => a.outside(),
         b"spam" => a.spam(),

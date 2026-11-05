@@ -261,6 +261,9 @@ mod tests {
         pages: 300,
         tokens_per_min: 30,
         net_bytes_per_min: 48,
+        supervisor: b"",
+        workers: &[],
+        verifier: pharos_proto::manifest::Verifier::None,
     };
 
     #[test]

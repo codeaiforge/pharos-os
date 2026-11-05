@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#132),** with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. **Implemented:** channels (#133). To be built by: groups and subtasks (#134), delegation (#135), failure and stop handling (#136), the verifier (#137), and the isolation and confused-deputy tests (#138).
+**Planned. Design approved by the maintainer on 2026-11-05 (#132),** with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. **Implemented:** channels (#133), groups and subtasks (#134). To be built by: delegation (#135), failure and stop handling (#136), the verifier (#137), and the isolation and confused-deputy tests (#138).
 
 ## 2. Context
 
@@ -43,6 +43,7 @@ What M3.7 builds on:
 - **New request `SUBTASK_STATUS` (27):** a subtask's state, attempts, and result (into the buffer), only for the caller's own subtasks; `NO_SESSION` otherwise.
 - **Joining grants nothing:** a worker's subtask runs with its own entry's grants and what is delegated to it; being in a group adds no permission, and a worker cannot submit subtasks or reach its supervisor's task.
 - **The group budget** covers every member's attempts (D-022): a subtask that would exceed the group's `agents` or `pages` waits to start, as attempts do.
+- *Implemented (#134):* `Group`'s `supervisor`, `workers`, and `verifier` (`manifest::Verifier`, `None` or `Text`), `pharos_programs::groups` (`coordinated`: a supervisor, a verifier, and every member's entry naming the group; `assigning`), task records format 2 with `parent` and `delegated` (format 1 still read), `Tasks::submit_child` and `open_children`, and `SUBTASK` (26) and `SUBTASK_STATUS` (27) in `agents`, with `Delegated` (at most 4 permissions on the wire). At start the runtime says `group <name> cannot coordinate` for a group with a supervisor that does not, and it then gives no subtasks. A `SUBTASK` is audited as a `submit` by the supervisor with the worker's name; a refusal is recorded as `not in group`. A subtask is the worker's own task: it runs, retries, and is recovered after a restart as any task. **Until #135** a subtask with delegated permissions is refused with `NO_ACCESS`.
 
 ### Delegation (#135)
 

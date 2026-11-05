@@ -79,6 +79,7 @@ use alloc::vec::Vec;
 
 use pharos_programs::budgets::{self, Bucket, GroupUse, Over, Usage};
 use pharos_programs::grants::Grants;
+use pharos_programs::groups;
 use pharos_programs::mailbox::{self, Mailboxes};
 use pharos_programs::tasks::{self, Begin, Files, StoreFailed, Tasks};
 use pharos_programs::tools;
@@ -89,7 +90,7 @@ use pharos_proto::agents::{
 };
 use pharos_proto::audit::{self, Entry as Record, Kind, action, outcome};
 use pharos_proto::infer::{self, Record as InferRecord, Request as InferRequest, Started, Tokens};
-use pharos_proto::manifest::{self, Budget, Data, Dest, Entry, Group, Why};
+use pharos_proto::manifest::{self, Budget, Data, Dest, Entry, Group, Verifier, Why};
 use pharos_proto::net::{self, Request as NetRequest};
 use pharos_proto::permission::Permission;
 use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
@@ -146,6 +147,9 @@ mod refusal {
     pub const OVER_FILES: u16 = 4096;
     /// Messages past the attempt's `messages` (#133).
     pub const OVER_MESSAGES: u16 = 8192;
+    /// A subtask from an agent that is not its group's supervisor, or for
+    /// an agent that is not one of its workers (#134).
+    pub const NOT_IN_GROUP: u16 = 16384;
 }
 /// How often the runtime reads a running agent's CPU time, at most.
 const CPU_CHECK_US: u64 = 100_000;
@@ -224,6 +228,8 @@ const APPROVE_US: [u64; 2] = [60_000_000, 5_000_000];
 /// buffers of its own. The runtime's own budget from `init` has room for
 /// [`SLOTS`] of these.
 pub const AGENT_HANDLES: u16 = 16;
+/// Most open subtasks per goal (#134).
+const MAX_SUBTASKS: usize = 8;
 /// Most approval requests waiting at once.
 const MAX_PENDING: usize = 4;
 /// Control clients with an attached buffer.
@@ -307,6 +313,19 @@ const BUDGETS: &[Entry] = &[
     budget_entry(b"spinner", Budget::UNLIMITED, 64),
 ];
 
+/// The test table's group (#134): `boss` supervises `helper` and `aide`,
+/// three attempts at once.
+const TEST_GROUPS: &[Group] = &[Group {
+    name: b"crew",
+    agents: 3,
+    pages: 1 << 12,
+    tokens_per_min: u32::MAX,
+    net_bytes_per_min: u32::MAX,
+    supervisor: b"boss",
+    workers: &[b"helper", b"aide"],
+    verifier: Verifier::Text(agents::MAX_RESULT),
+}];
+
 /// The `fairness` test kernel's agents (#117), in the same table:
 /// `flooder` and `ticker` beside a stalled network service, `rater` at 2
 /// requests a second, and `queuer`, which may ask for models 3 and 4.
@@ -334,6 +353,9 @@ const BUDGET_GROUPS: &[Group] = &[
         pages: 1 << 12,
         tokens_per_min: 1000,
         net_bytes_per_min: 1000,
+        supervisor: b"",
+        workers: &[],
+        verifier: Verifier::None,
     },
     Group {
         name: b"tight",
@@ -341,6 +363,9 @@ const BUDGET_GROUPS: &[Group] = &[
         pages: 1 << 12,
         tokens_per_min: 30,
         net_bytes_per_min: 48,
+        supervisor: b"",
+        workers: &[],
+        verifier: Verifier::None,
     },
     Group {
         name: b"pair",
@@ -348,6 +373,9 @@ const BUDGET_GROUPS: &[Group] = &[
         pages: 1 << 12,
         tokens_per_min: u32::MAX,
         net_bytes_per_min: u32::MAX,
+        supervisor: b"",
+        workers: &[],
+        verifier: Verifier::None,
     },
     Group {
         name: b"heavy",
@@ -355,6 +383,9 @@ const BUDGET_GROUPS: &[Group] = &[
         pages: 300,
         tokens_per_min: u32::MAX,
         net_bytes_per_min: u32::MAX,
+        supervisor: b"",
+        workers: &[],
+        verifier: Verifier::None,
     },
 ];
 
@@ -692,6 +723,74 @@ const TEST: &[Entry] = &[
         files: &[],
         ask_files: &[],
         channels: &[b"outsider"],
+    },
+    // The `groups` kernel's (#134): `boss` supervises `helper` and `aide`
+    // in group `crew` (`TEST_GROUPS`); only `boss` holds model 2.
+    Entry {
+        name: b"boss",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 1 << 2,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
+        budget: Budget {
+            group: b"crew",
+            ..Budget::UNLIMITED
+        },
+        tools: 0,
+        files: &[],
+        ask_files: &[],
+        channels: &[],
+    },
+    Entry {
+        name: b"helper",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 0,
+        attempts: 2,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
+        budget: Budget {
+            group: b"crew",
+            ..Budget::UNLIMITED
+        },
+        tools: 0,
+        files: &[],
+        ask_files: &[],
+        channels: &[],
+    },
+    Entry {
+        name: b"aide",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 0,
+        attempts: 2,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
+        budget: Budget {
+            group: b"crew",
+            ..Budget::UNLIMITED
+        },
+        tools: 0,
+        files: &[],
+        ask_files: &[],
+        channels: &[],
     },
     Entry {
         name: b"plain",
@@ -2001,6 +2100,73 @@ impl Runtime {
                 }
                 Ok(done(out))
             }
+            Request::Subtask {
+                worker,
+                input_len,
+                delegate,
+            } => {
+                let agent = limits.entry.name;
+                let entry = |n: &[u8]| {
+                    self.agents
+                        .iter()
+                        .find(|l| l.entry.name == n)
+                        .map(|l| l.entry)
+                };
+                if groups::assigning(self.groups, entry, agent, worker).is_none() {
+                    return Err(status::NO_ACCESS);
+                }
+                if self.limits(worker).is_none() {
+                    return Err(status::NOT_FOUND);
+                }
+                // ponytail: delegation is #135; until then a subtask gets
+                // only its worker's own entry.
+                if delegate.iter().next().is_some() {
+                    return Err(status::NO_ACCESS);
+                }
+                if self.tasks.open_children(id) >= MAX_SUBTASKS {
+                    return Err(status::BUSY);
+                }
+                if input_len as usize > buffer_len {
+                    return Err(status::NO_BUFFER);
+                }
+                let mut input = alloc::vec![0u8; input_len as usize];
+                if let Some(b) = buffer {
+                    b.read_bytes(0, &mut input);
+                }
+                let seq = self.intent(agent, id, action::SUBMIT, None, NAME, worker)?;
+                let submitted = self
+                    .tasks
+                    .submit_child(&mut self.store, worker, id, &input, &[]);
+                let mut d = [0u8; 20];
+                let detail = match &submitted {
+                    Ok(t) => [worker, b" ", decimal(u64::from(*t), &mut d)].concat(),
+                    Err(_) => worker.to_vec(),
+                };
+                self.outcome(seq, agent, id, action::SUBMIT, submitted.is_ok(), &detail);
+                let t = submitted.map_err(store_error)?;
+                agents::submitted(t, out).ok_or(status::INTERNAL)
+            }
+            Request::SubtaskStatus { task } => {
+                let t = self
+                    .tasks
+                    .find(task)
+                    .map(|j| &self.tasks.list[j])
+                    .filter(|t| t.parent == id)
+                    .ok_or(NO_SESSION)?;
+                if t.result.len() > buffer_len {
+                    return Err(status::NO_BUFFER);
+                }
+                if let Some(b) = buffer {
+                    b.write_bytes(0, &t.result);
+                }
+                TaskStatus {
+                    state: t.state,
+                    attempts: t.attempts,
+                    result_len: t.result.len() as u32,
+                }
+                .encode(out)
+                .ok_or(status::INTERNAL)
+            }
             Request::MessageReceive => {
                 if buffer_len < agents::MAX_MESSAGE as usize {
                     return Err(status::NO_BUFFER);
@@ -2340,7 +2506,8 @@ impl Runtime {
             refusal::TOOL_MALFORMED => b"tool malformed",
             refusal::TOOL_NOT_LISTED => b"tool not listed",
             refusal::OVER_FILES => b"over files",
-            _ => b"over messages",
+            refusal::OVER_MESSAGES => b"over messages",
+            _ => b"not in group",
         };
         let agent = self.agent_of(task);
         self.refusal_event(&agent, task, p, why);
@@ -2935,6 +3102,9 @@ impl Runtime {
                     _ if tool => {}
                     Err(status::NO_ACCESS) => match needed(&req) {
                         Some(p) => self.note(i, refusal::NO_GRANT, Some(p)),
+                        None if matches!(req, Request::Subtask { .. }) => {
+                            self.note(i, refusal::NOT_IN_GROUP, None);
+                        }
                         None => self.note(i, refusal::NOT_FOR_AGENTS, None),
                     },
                     Err(status::BAD_REQUEST | status::TOO_LARGE | status::NO_BUFFER) => {
@@ -3005,7 +3175,7 @@ fn attach_prompt(buffer: &Mapped) -> bool {
 fn main(arg: u64) -> u64 {
     let (table, groups): (&'static [Entry], &'static [Group]) = match arg {
         0 => (BOOT, &[]),
-        1 => (TEST, &[]),
+        1 => (TEST, TEST_GROUPS),
         2 => (BUDGETS, BUDGET_GROUPS),
         _ => (&[], &[]),
     };
@@ -3020,6 +3190,12 @@ fn main(arg: u64) -> u64 {
         return 3;
     }
     let mut agents = Vec::new();
+    for g in groups.iter().filter(|g| !g.supervisor.is_empty()) {
+        let entry = |n: &[u8]| table.iter().find(|e| e.name == n);
+        if !groups::coordinated(g, entry) {
+            say(&[b"agents: group ", g.name, b" cannot coordinate"]);
+        }
+    }
     for e in table {
         match load(e, table) {
             Ok(l) => {

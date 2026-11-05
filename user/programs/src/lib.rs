@@ -7,6 +7,7 @@ extern crate alloc;
 pub mod budgets;
 pub mod fp;
 pub mod grants;
+pub mod groups;
 pub mod mailbox;
 pub mod models;
 pub mod net;

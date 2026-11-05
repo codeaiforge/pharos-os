@@ -200,6 +200,10 @@ name = "channels"
 harness = false
 
 [[test]]
+name = "groups"
+harness = false
+
+[[test]]
 name = "budgets"
 harness = false
 

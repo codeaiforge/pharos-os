@@ -1389,6 +1389,10 @@ const TOOLS_SCRIPT: &[console::Step] = &[
 /// Nothing else is asked (`secrets.txt` is not askable, and the call
 /// made while one waits is `BUSY`), and no payload reaches the console.
 const TOOLS_REFUSED: &[&str] = &["approve #2", "confirm #6", "hello", "other"];
+/// Agent groups and subtasks (#134): the console is only watched, so the
+/// trail is checked afterwards.
+const GROUPS_TEST: &str = "groups";
+const GROUPS_SCRIPT: &[console::Step] = &[("trust: ready", ""), ("registered runtime", "")];
 /// Message channels (#133): `talker` (task 2) asks for model 3; the user
 /// refuses, then revokes its channel to `hearer`.
 const CHANNELS_TEST: &str = "channels";
@@ -1954,6 +1958,44 @@ fn channels_audit(image: &Path) -> Result<()> {
     Ok(())
 }
 
+/// After the `groups` test kernel (#134): each subtask an intent and an
+/// outcome naming its worker; each refusal once.
+fn groups_audit(image: &Path) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    let count = |want: &str| lines.iter().filter(|l| l.contains(want)).count();
+    for (want, n) in [
+        (
+            "client 3 Intent submit boss task 1/1  agents outcome 0 helper",
+            9,
+        ),
+        (
+            "client 3 Intent submit boss task 1/1  agents outcome 0 aide",
+            1,
+        ),
+        (
+            "client 3 Event refuse boss task 1/1   outcome 2 not in group",
+            1,
+        ),
+        ("outcome 2 not in group", 2),
+        ("refuse helper task 2/1 model 2  outcome 2 no grant", 1),
+    ] {
+        if count(want) != n {
+            return Err(format!(
+                "{} records like {want:?}, expected {n}",
+                count(want)
+            ));
+        }
+    }
+    println!(
+        "  audit trail: {} records, every subtask accounted for",
+        lines.len()
+    );
+    Ok(())
+}
+
 fn hostile_audit(image: &Path) -> Result<()> {
     let streams = store_image::audit(image)?;
     let [(_, lines)] = streams.as_slice() else {
@@ -2135,6 +2177,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         "fairness",
         EXHAUSTION_TEST,
         CHANNELS_TEST,
+        GROUPS_TEST,
     ];
     if service_store.contains(&name.as_str()) {
         store_image::service(&out.join(STORE_IMAGE))?;
@@ -2161,6 +2204,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         TOOLS_TEST => (TOOLS_SCRIPT, TOOLS_REFUSED),
         INJECTION_TEST => (INJECTION_SCRIPT, INJECTION_REFUSED),
         CHANNELS_TEST => (CHANNELS_SCRIPT, CHANNELS_REFUSED),
+        GROUPS_TEST => (GROUPS_SCRIPT, &[]),
         BUDGETS_TEST => (BUDGETS_SCRIPT, &[]),
         EXHAUSTION_TEST => (EXHAUSTION_SCRIPT, &[]),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
@@ -2207,6 +2251,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == CHANNELS_TEST {
                 channels_audit(&out.join(STORE_IMAGE))?;
+            }
+            if name == GROUPS_TEST {
+                groups_audit(&out.join(STORE_IMAGE))?;
             }
             if name == EXHAUSTION_TEST {
                 for (step, what) in [(3, "usage"), (5, "stop all")] {

@@ -67,6 +67,9 @@ pub mod op {
     /// Messages between agents (#133, coordination.md).
     pub const MESSAGE_SEND: u8 = 24;
     pub const MESSAGE_RECEIVE: u8 = 25;
+    /// Subtasks (#134, coordination.md).
+    pub const SUBTASK: u8 = 26;
+    pub const SUBTASK_STATUS: u8 = 27;
 }
 
 /// The `ASK` reply's outcome, after `OK` (#106).
@@ -138,6 +141,26 @@ impl Datagram {
             len: r.u32()?,
         };
         (ok && r.is_empty() && d.len <= MAX_DATAGRAM).then_some(d)
+    }
+}
+
+/// Permissions a supervisor delegates to a subtask (#135): at most 4.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Delegated {
+    list: [Option<crate::permission::Permission>; 4],
+}
+
+impl Delegated {
+    pub fn new(ps: &[crate::permission::Permission]) -> Option<Self> {
+        let mut d = Self::default();
+        for (slot, p) in d.list.iter_mut().zip(ps) {
+            *slot = Some(*p);
+        }
+        (ps.len() <= 4).then_some(d)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = crate::permission::Permission> + '_ {
+        self.list.iter().flatten().copied()
     }
 }
 
@@ -322,6 +345,19 @@ pub enum Request<'a> {
     },
     /// Agent: the oldest message waiting for it, into its buffer.
     MessageReceive,
+    /// Supervisor: a subtask for worker `worker`, its input the first
+    /// `input_len` bytes of the buffer, with up to 4 of the supervisor's
+    /// permissions delegated (#134, #135); the reply is as `SUBMIT`'s.
+    Subtask {
+        worker: &'a [u8],
+        input_len: u32,
+        delegate: Delegated,
+    },
+    /// Supervisor: one of its subtasks' state, its result into the buffer;
+    /// the reply is [`TaskStatus`].
+    SubtaskStatus {
+        task: u32,
+    },
     /// Agent: the tool call in its buffer at `call_at`, `call_len` bytes;
     /// the result goes to `result_at` (#126).
     Tool {
@@ -451,6 +487,21 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                 len: r.u32().filter(|n| *n <= MAX_MESSAGE)?,
             },
             op::MESSAGE_RECEIVE => Request::MessageReceive,
+            op::SUBTASK => {
+                let worker = name(&mut r)?;
+                let input_len = r.u32().filter(|n| *n <= MAX_INPUT)?;
+                let n = usize::from(r.u8()?);
+                let mut ps = [crate::permission::Permission::DataRead; 4];
+                for p in ps.get_mut(..n)? {
+                    *p = crate::permission::Permission::read(&mut r)?;
+                }
+                Request::Subtask {
+                    worker,
+                    input_len,
+                    delegate: Delegated::new(&ps[..n])?,
+                }
+            }
+            op::SUBTASK_STATUS => Request::SubtaskStatus { task: r.u32()? },
             op::TOOL => Request::Tool {
                 call_at: r.u32()?,
                 call_len: r
@@ -583,6 +634,26 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.u32(len)?;
         }
         Request::MessageReceive => head(&mut w, op::MESSAGE_RECEIVE)?,
+        Request::Subtask {
+            worker,
+            input_len,
+            delegate,
+        } => {
+            if input_len > MAX_INPUT {
+                return None;
+            }
+            head(&mut w, op::SUBTASK)?;
+            write_name(&mut w, worker)?;
+            w.u32(input_len)?;
+            w.bytes(&[delegate.iter().count() as u8])?;
+            for p in delegate.iter() {
+                p.write(&mut w)?;
+            }
+        }
+        Request::SubtaskStatus { task } => {
+            head(&mut w, op::SUBTASK_STATUS)?;
+            w.u32(task)?;
+        }
         Request::Tool {
             call_at,
             call_len,
@@ -857,6 +928,20 @@ mod tests {
                 len: MAX_MESSAGE,
             },
             Request::MessageReceive,
+            Request::Subtask {
+                worker: b"helper",
+                input_len: MAX_INPUT,
+                delegate: Delegated::default(),
+            },
+            Request::Subtask {
+                worker: &[b'w'; 32],
+                input_len: 0,
+                delegate: Delegated::new(
+                    &[crate::permission::Permission::file(&[b'f'; 32]).unwrap(); 4],
+                )
+                .unwrap(),
+            },
+            Request::SubtaskStatus { task: u32::MAX },
             Request::Tool {
                 call_at: 4096,
                 call_len: crate::tool::MAX_CALL as u16,
@@ -935,6 +1020,16 @@ mod tests {
         let mut over = std::vec![VERSION, op::MESSAGE_SEND, 1, b'a', 0];
         over.extend_from_slice(&(MAX_MESSAGE + 1).to_le_bytes());
         assert_eq!(parse(&over), Err(Refused::Bad), "a message over 1 KiB");
+        let mut five = std::vec![VERSION, op::SUBTASK, 1, b'w', 0, 0, 0, 0, 5];
+        for _ in 0..5 {
+            five.extend_from_slice(&[1, 2, 0, 0, 0, 0, 0]);
+        }
+        assert_eq!(
+            parse(&five),
+            Err(Refused::Bad),
+            "five delegated permissions"
+        );
+        assert!(Delegated::new(&[crate::permission::Permission::Model(2); 5]).is_none());
         assert_eq!(
             parse(&[VERSION, op::MESSAGE_SEND, 1, b'.', 0, 1, 0, 0, 0]),
             Err(Refused::Bad),

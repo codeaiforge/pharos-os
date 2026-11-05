@@ -20,7 +20,8 @@
 //! kernel (#120). Argument 8: the `tools` kernel (#126, #127): a `reader`
 //! task, then a `plain` task. Argument 9: the `injection` kernel (#129):
 //! an `injected` task. Argument 10: the `channels` kernel (#133):
-//! `hearer`, `talker`, `outsider`, and `spammer` tasks at once.
+//! `hearer`, `talker`, `outsider`, and `spammer` tasks at once. Argument
+//! 11: the `groups` kernel (#134): a `boss` task.
 
 #![no_std]
 #![no_main]
@@ -190,6 +191,26 @@ fn main(arg: u64) -> u64 {
     if arg == 8 {
         return tools(c);
     }
+    if arg == 11 {
+        let task = c.submit(b"boss", b"lead");
+        let done = task
+            .ok()
+            .and_then(|t| c.wait(t, 90))
+            .is_some_and(|(s, result)| {
+                if result != b"boss ok" {
+                    let mut line = Vec::from(&b"groups kernel result: "[..]);
+                    line.extend_from_slice(&result[..result.len().min(200)]);
+                    let _ = debug_write(CONSOLE, &line);
+                }
+                s.state == State::Done && result == b"boss ok"
+            });
+        c.step(
+            "a supervisor completes a goal through its workers, and only them",
+            done,
+        );
+        let _ = send(REPORT, b"done", 0, 0, 0);
+        return c.failed;
+    }
     if arg == 10 {
         let tasks = [
             (&b"hearer"[..], &b"listen"[..], &b"hearer ok"[..]),
@@ -242,8 +263,8 @@ fn main(arg: u64) -> u64 {
     let (_, n) = c.call(&Request::Info, &mut out);
     let info = Info::parse(&out[..n]);
     c.step(
-        "INFO: interface agents, fourteen agents accepted, none running",
-        info.is_some_and(|i| i.name == NAME && i.details == [14, 0]),
+        "INFO: interface agents, seventeen agents accepted, none running",
+        info.is_some_and(|i| i.name == NAME && i.details == [17, 0]),
     );
     let refused = [&b"greedy"[..], b"absent", b"noentry"]
         .iter()
@@ -337,7 +358,7 @@ fn main(arg: u64) -> u64 {
         .iter()
         .all(|&t| c.status(t).is_some_and(|s| s.state == State::Cancelled));
     let (_, n) = c.call(&Request::Info, &mut out);
-    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [14, 0]);
+    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [17, 0]);
     c.step(
         "cancelling running and pending tasks stops their agents",
         cancelled && all && idle,

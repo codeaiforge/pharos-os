@@ -228,6 +228,21 @@ pub struct Group {
     /// Inference tokens and network payload bytes, per minute.
     pub tokens_per_min: u32,
     pub net_bytes_per_min: u32,
+    /// Coordination (#134, coordination.md): the agent that submits
+    /// subtasks to `workers` (empty for a budget-only group), and the check
+    /// its results pass before they count as done.
+    pub supervisor: &'static [u8],
+    pub workers: &'static [&'static [u8]],
+    pub verifier: Verifier,
+}
+
+/// A compiled-in check of a group's results (#137, coordination.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verifier {
+    /// No check: a budget-only group, which cannot have a supervisor.
+    None,
+    /// Text of at most this many bytes.
+    Text(u32),
 }
 
 /// Why a manifest was refused.

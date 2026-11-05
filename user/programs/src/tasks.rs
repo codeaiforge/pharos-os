@@ -16,7 +16,8 @@ use pharos_proto::agents::{
     KEY, MAX_CHECKPOINT, MAX_DEPS, MAX_INPUT, MAX_KEY_RESULT, MAX_KEYS, MAX_RESULT, MAX_TASKS,
     State,
 };
-use pharos_proto::{Reader, trust};
+use pharos_proto::permission::Permission;
+use pharos_proto::{Reader, Writer, trust};
 
 /// The store did not do what was asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +37,11 @@ pub trait Files {
 pub const NEXT_ID: &[u8] = b"next-id";
 pub const DIR: &[u8] = b"tasks/";
 const MAGIC: &[u8; 4] = b"PTSK";
-const FORMAT: u8 = 1;
+/// Format 2 (#134) adds the parent task and delegated permissions;
+/// format 1 records are still read, with neither.
+const FORMAT: u8 = 2;
+/// Most permissions delegated to one subtask (#135).
+pub const MAX_DELEGATED: usize = 4;
 
 /// Why a change was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +74,10 @@ pub struct Task {
     /// The result, or why it failed.
     pub result: Vec<u8>,
     pub keys: Vec<Key>,
+    /// The goal this is a subtask of (#134); 0 for none.
+    pub parent: u32,
+    /// What its supervisor delegated to it (#135).
+    pub delegated: Vec<Permission>,
 }
 
 /// What `BEGIN` answers.
@@ -134,13 +143,27 @@ impl Task {
                 }
             }
         }
+        put_u32(&mut out, self.parent);
+        out.push(self.delegated.len() as u8);
+        for p in &self.delegated {
+            let mut b = [0u8; pharos_proto::permission::WIRE];
+            let mut w = Writer::new(&mut b);
+            if p.write(&mut w).is_some() {
+                let n = w.len();
+                out.extend_from_slice(&b[..n]);
+            }
+        }
         out
     }
 
     /// Parses a task file, checking every length and limit.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let mut r = Reader::new(bytes);
-        if r.take(4)? != MAGIC || r.u8()? != FORMAT {
+        if r.take(4)? != MAGIC {
+            return None;
+        }
+        let format = r.u8()?;
+        if format != 1 && format != FORMAT {
             return None;
         }
         let id = r.u32()?;
@@ -184,7 +207,20 @@ impl Task {
             }
             keys.push(Key { key, done });
         }
+        let (mut parent, mut delegated) = (0, Vec::new());
+        if format == FORMAT {
+            parent = r.u32()?;
+            let n = usize::from(r.u8()?);
+            if n > MAX_DELEGATED {
+                return None;
+            }
+            for _ in 0..n {
+                delegated.push(Permission::read(&mut r)?);
+            }
+        }
         r.is_empty().then_some(Self {
+            parent,
+            delegated,
             id,
             agent,
             state,
@@ -308,9 +344,41 @@ impl Tasks {
             checkpoint: Vec::new(),
             result: Vec::new(),
             keys: Vec::new(),
+            parent: 0,
+            delegated: Vec::new(),
         };
         self.save(f, None, task)?;
         Ok(id)
+    }
+
+    /// A new pending subtask of task `parent` (#134), with `delegated`
+    /// permissions (#135).
+    pub fn submit_child(
+        &mut self,
+        f: &mut impl Files,
+        agent: &[u8],
+        parent: u32,
+        input: &[u8],
+        delegated: &[Permission],
+    ) -> Result<u32, Error> {
+        if self.find(parent).is_none() || delegated.len() > MAX_DELEGATED {
+            return Err(Error::NotFound);
+        }
+        let id = self.submit(f, agent, &[], input)?;
+        let i = self.find(id).ok_or(Error::NotFound)?;
+        let mut t = self.list[i].clone();
+        t.parent = parent;
+        t.delegated = delegated.to_vec();
+        self.save(f, Some(i), t)?;
+        Ok(id)
+    }
+
+    /// Subtasks of `parent` not yet ended.
+    pub fn open_children(&self, parent: u32) -> usize {
+        self.list
+            .iter()
+            .filter(|t| t.parent == parent && !t.ended())
+            .count()
     }
 
     /// The oldest pending task whose dependencies are done and whose agent
@@ -562,7 +630,66 @@ mod tests {
                     done: Some(b"r".to_vec())
                 },
             ],
+            parent: 3,
+            delegated: std::vec![
+                Permission::file(b"report.txt").unwrap(),
+                Permission::Model(2)
+            ],
         }
+    }
+
+    #[test]
+    fn format_1_records_are_still_read() {
+        let mut t = task();
+        t.parent = 0;
+        t.delegated.clear();
+        let mut b = t.encode();
+        // Format 1: no parent, no delegated permissions.
+        b[4] = 1;
+        b.truncate(b.len() - 5);
+        assert_eq!(Task::decode(&b), Some(t));
+        b[4] = 3;
+        assert_eq!(Task::decode(&b), None, "an unknown format");
+    }
+
+    #[test]
+    fn subtasks_name_their_parent() {
+        let mut f = Mem::default();
+        let (mut tasks, _) = load(&mut f);
+        let goal = tasks.submit(&mut f, b"worker", &[], b"goal").unwrap();
+        let file = Permission::file(b"report.txt").unwrap();
+        let a = tasks
+            .submit_child(&mut f, b"worker", goal, b"a", &[file])
+            .unwrap();
+        let b = tasks
+            .submit_child(&mut f, b"worker", goal, b"b", &[])
+            .unwrap();
+        assert_eq!(
+            tasks.submit_child(&mut f, b"worker", 999, b"c", &[]),
+            Err(Error::NotFound)
+        );
+        assert_eq!(
+            tasks.submit_child(&mut f, b"worker", goal, b"c", &[file; 5]),
+            Err(Error::NotFound)
+        );
+        assert_eq!(tasks.open_children(goal), 2);
+        let i = tasks.find(a).unwrap();
+        assert_eq!(
+            (tasks.list[i].parent, tasks.list[i].delegated.as_slice()),
+            (goal, &[file][..])
+        );
+        tasks
+            .finish(&mut f, tasks.find(b).unwrap(), State::Done, b"ok")
+            .unwrap();
+        assert_eq!(tasks.open_children(goal), 1);
+        // Both kept across a restart.
+        let (again, _) = load(&mut f);
+        let i = again.find(a).unwrap();
+        assert_eq!(
+            (again.list[i].parent, again.list[i].delegated.as_slice()),
+            (goal, &[file][..])
+        );
+        assert_eq!(again.open_children(goal), 1);
     }
 
     #[test]
