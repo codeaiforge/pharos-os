@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Implemented** (M3.3, gate passed 2026-11-03, #101). Design approved by the maintainer on 2026-11-01 (#94); built by the kernel stop call (#95), the trusted path (#96), the manifest parser (#97), the agent runtime (#98), durable tasks (#99), and supervision in `init` (#100). Permissions, approvals, and audit for agents are in [capabilities.md](capabilities.md) (M3.4); resource limits are planned in [resources.md](resources.md) (M3.5).
+**Implemented** (M3.3, gate passed 2026-11-03, #101). Design approved by the maintainer on 2026-11-01 (#94); built by the kernel stop call (#95), the trusted path (#96), the manifest parser (#97), the agent runtime (#98), durable tasks (#99), and supervision in `init` (#100). Permissions, approvals, and audit for agents are in [capabilities.md](capabilities.md) (M3.4); resource limits are in [resources.md](resources.md) (M3.5); tools, planned, in [tools.md](tools.md) (M3.6).
 
 ## 2. Context
 

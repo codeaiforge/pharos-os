@@ -428,7 +428,7 @@ Ordering notes:
 
 ### M3.6 — Controlled tool integration
 
-**Status: Current.** M3.5 gives it agents held to budgets for CPU, pages, processes, handles, inference, network, storage, and requests, with three scheduling classes so the trusted path always runs first. D-023 accepted (#123): the runtime parses and validates each tool call, a strict JSON subset of the model's text, with a fuzzed `no_std` parser; tools compiled in and invoked with one `TOOL` operation; a new `file <name>` permission on a read-only `files` namespace; `read_file` and `send`, the second confirmed by the user for each call on the trusted console. Next: the design, `docs/architecture/tools.md` (#124).
+**Status: Current.** M3.5 gives it agents held to budgets for CPU, pages, processes, handles, inference, network, storage, and requests, with three scheduling classes so the trusted path always runs first. D-023 accepted (#123): the runtime parses and validates each tool call, a strict JSON subset of the model's text, with a fuzzed `no_std` parser; tools compiled in and invoked with one `TOOL` operation; a new `file <name>` permission on a read-only `files` namespace; `read_file` and `send`, the second confirmed by the user for each call on the trusted console. Design approved (#124): [tools.md](../architecture/tools.md). Next: the tool-call parser and validator (#125).
 
 - **Where it runs (D-020):** Pharos; the tool-call validator host-tested and fuzzed.
 - **Objective and scope:** Let agents invoke defined tools only through capability checks.

@@ -83,7 +83,7 @@ What an agent process can do on Pharos, each a check in the adversarial tests (#
 - every request is checked against its own slot's grants, so another slot's badge, task, session, or buffer is unreachable;
 - it cannot reach the trusted console, the audit service, or the store, except through runtime requests that are checked and audited.
 
-Its CPU time, inference tokens, datagrams, and stored files are limited by its policy entry's budget and its group's (#116, [resources.md](resources.md#runtime-budgets-116)).
+Its CPU time, inference tokens, datagrams, and stored files are limited by its policy entry's budget and its group's (#116, [resources.md](resources.md#runtime-budgets-116)). Tools (planned, M3.6) reach only what its permissions already allow, with a new `file <name>` permission for files the user gives it ([tools.md](tools.md)).
 
 - *Implemented (#110):* the `hostile` test kernel checks each of these with an agent that tries them (listed in [testing.md](../development/testing.md)), beside an agent that must be unaffected. The runtime records an agent's refused requests once per kind per attempt (malformed or out of bounds, no grant, not a request for agents, not askable), each with its first example, and the attempt's total when it ends, so a flood cannot fill the trail (the maintainer's choice, 2026-11-03). The approval queue (4) is shared, and since #117 an agent may have only one request waiting, so no agent can fill it.
 
