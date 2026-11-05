@@ -192,6 +192,10 @@ name = "tools"
 harness = false
 
 [[test]]
+name = "injection"
+harness = false
+
+[[test]]
 name = "budgets"
 harness = false
 

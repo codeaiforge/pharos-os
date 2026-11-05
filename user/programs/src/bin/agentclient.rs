@@ -18,7 +18,8 @@
 //! task beside a `keeper` task. Argument 5: the `budgets` kernel (#116).
 //! Argument 6: the `fairness` kernel (#117). Argument 7: the `exhaustion`
 //! kernel (#120). Argument 8: the `tools` kernel (#126, #127): a `reader`
-//! task, then a `plain` task.
+//! task, then a `plain` task. Argument 9: the `injection` kernel (#129):
+//! an `injected` task.
 
 #![no_std]
 #![no_main]
@@ -188,13 +189,33 @@ fn main(arg: u64) -> u64 {
     if arg == 8 {
         return tools(c);
     }
+    if arg == 9 {
+        let task = c.submit(b"injected", b"inject");
+        let done = task
+            .ok()
+            .and_then(|t| c.wait(t, 60))
+            .is_some_and(|(s, result)| {
+                if result != b"inject ok" {
+                    let mut line = Vec::from(&b"injection kernel result: "[..]);
+                    line.extend_from_slice(&result[..result.len().min(200)]);
+                    let _ = debug_write(CONSOLE, &line);
+                }
+                s.state == State::Done && result == b"inject ok" && s.attempts == 1
+            });
+        c.step(
+            "no injected or malformed call has any effect beyond the grants",
+            done,
+        );
+        let _ = send(REPORT, b"done", 0, 0, 0);
+        return c.failed;
+    }
     let mut out = [0u8; 256];
 
     let (_, n) = c.call(&Request::Info, &mut out);
     let info = Info::parse(&out[..n]);
     c.step(
-        "INFO: interface agents, nine agents accepted, none running",
-        info.is_some_and(|i| i.name == NAME && i.details == [9, 0]),
+        "INFO: interface agents, ten agents accepted, none running",
+        info.is_some_and(|i| i.name == NAME && i.details == [10, 0]),
     );
     let refused = [&b"greedy"[..], b"absent", b"noentry"]
         .iter()
@@ -288,7 +309,7 @@ fn main(arg: u64) -> u64 {
         .iter()
         .all(|&t| c.status(t).is_some_and(|s| s.state == State::Cancelled));
     let (_, n) = c.call(&Request::Info, &mut out);
-    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [9, 0]);
+    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [10, 0]);
     c.step(
         "cancelling running and pending tasks stops their agents",
         cancelled && all && idle,

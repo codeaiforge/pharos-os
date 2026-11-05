@@ -212,9 +212,9 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// entry allows, `noentry`, which has no entry, and `keeper`, the
 /// `permissions` kernel's, which may write its own files (#105), and
 /// `asker`, which gets nothing and asks (#106), the `budgets` kernel's
-/// five (#116), the `fairness` kernel's four (#117), and the `tools`
-/// kernel's two (#126, #127).
-pub const TEST_MANIFESTS: [(&str, &str); 23] = [
+/// five (#116), the `fairness` kernel's four (#117), the `tools`
+/// kernel's two (#126, #127), and the `injection` kernel's (#129).
+pub const TEST_MANIFESTS: [(&str, &str); 24] = [
     (
         "agents/worker.manifest",
         "# The agents test kernel's worker.\nmanifest = 1\nname = worker\nprogram = bin/testagent\n\
@@ -262,6 +262,13 @@ pub const TEST_MANIFESTS: [(&str, &str); 23] = [
         "manifest = 1\nname = reader\nprogram = bin/testagent\npages = 256\nmodels =\n\
          attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = write\nnet = 10.0.2.2:47000\n\
          tools = read_file, send\nfiles = report.txt, big.txt\n",
+    ),
+    // The `injection` kernel's (#129).
+    (
+        "agents/injected.manifest",
+        "manifest = 1\nname = injected\nprogram = bin/testagent\npages = 256\nmodels = 2\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet = 10.0.2.2:47000\n\
+         tools = read_file, send\nfiles = report.txt\n",
     ),
     (
         "agents/plain.manifest",

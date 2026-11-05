@@ -575,6 +575,26 @@ const TEST: &[Entry] = &[
         files: &[b"report.txt", b"big.txt"],
         ask_files: &[b"notes.txt"],
     },
+    // The `injection` kernel's (#129): both tools, `report.txt` with its
+    // injected instructions, model 2, and the host echo server.
+    Entry {
+        name: b"injected",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 1 << 2,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::None,
+        ask_models: 0,
+        ask_data: Data::None,
+        net: &[HOST_ECHO],
+        ask_net: &[],
+        budget: Budget::UNLIMITED,
+        tools: 1 << tool::number::READ_FILE | 1 << tool::number::SEND,
+        files: &[b"report.txt"],
+        ask_files: &[],
+    },
     Entry {
         name: b"plain",
         program: b"bin/testagent",

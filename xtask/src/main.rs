@@ -1389,6 +1389,27 @@ const TOOLS_SCRIPT: &[console::Step] = &[
 /// Nothing else is asked (`secrets.txt` is not askable, and the call
 /// made while one waits is `BUSY`), and no payload reaches the console.
 const TOOLS_REFUSED: &[&str] = &["approve #2", "confirm #6", "hello", "other"];
+/// Prompt injection and malformed calls (#129): the user refuses the one
+/// `send` the naive agent makes.
+const INJECTION_TEST: &str = "injection";
+const INJECTION_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("registered runtime", ""),
+    (
+        "confirm #1: injected task 1 wants to send 14 bytes to 10.0.2.2:47000? (yes 1 / no 1)",
+        "no 1\n",
+    ),
+    ("confirm #1: refused", ""),
+];
+/// The fake prompt the agent logs, its payload, the secret file's text,
+/// and any other request never reach the trusted console.
+const INJECTION_REFUSED: &[&str] = &[
+    "confirm #9",
+    "confirm #2",
+    "approve #",
+    "INJECTED",
+    "launch codes",
+];
 /// The hostile agent (#110): its four approval requests fill the queue
 /// (nobody answers; they end with its task).
 const HOSTILE_TEST: &str = "hostile";
@@ -1755,6 +1776,74 @@ fn tools_audit(image: &Path) -> Result<()> {
     Ok(())
 }
 
+/// After the `injection` test kernel (#129): the one file read is its
+/// granted one, nothing was sent, and each kind of refusal is recorded
+/// once however often it was tried, with the attempt's total.
+fn injection_audit(image: &Path) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    let count = |want: &str| lines.iter().filter(|l| l.contains(want)).count();
+    for (want, n) in [
+        (
+            "client 3 Intent tool injected task 1/1 file report.txt files",
+            1,
+        ),
+        ("Intent tool injected task 1/1 file secrets.txt", 0),
+        ("Intent tool injected task 1/1 net", 0),
+        ("Intent net send injected", 0),
+        (
+            "client 3 Event refuse injected task 1/1 file secrets.txt  outcome 2 no grant",
+            1,
+        ),
+        (
+            "client 3 Event refuse injected task 1/1   outcome 2 tool malformed",
+            1,
+        ),
+        (
+            "client 3 Event refuse injected task 1/1   outcome 2 malformed",
+            1,
+        ),
+        (
+            "client 3 Event refuse injected task 1/1   outcome 2 not for agents",
+            1,
+        ),
+        (
+            "client 3 Event refuse injected task 1/1 net 10.0.2.2:47000  outcome 2 user",
+            1,
+        ),
+        ("client 3 Intent infer injected task 1/1 model 2 infer", 1),
+    ] {
+        if count(want) != n {
+            return Err(format!(
+                "{} records like {want:?}, expected {n}",
+                count(want)
+            ));
+        }
+    }
+    let total = lines
+        .iter()
+        .filter(|l| l.contains("client 3 Event refuse injected task 1/1 "))
+        .find_map(|l| {
+            l.split("outcome 2 ")
+                .nth(1)?
+                .strip_suffix(" requests refused")
+        })
+        .and_then(|n| n.trim().parse::<u32>().ok())
+        .ok_or("no record of the attempt's refused requests in all")?;
+    if total < 120 {
+        return Err(format!(
+            "{total} refused requests in all, expected at least 120"
+        ));
+    }
+    println!(
+        "  audit trail: {} records; {total} refused calls, each kind recorded once",
+        lines.len()
+    );
+    Ok(())
+}
+
 fn hostile_audit(image: &Path) -> Result<()> {
     let streams = store_image::audit(image)?;
     let [(_, lines)] = streams.as_slice() else {
@@ -1942,7 +2031,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     if name == AUDIT_TEST {
         store_image::fresh(&out.join(STORE_IMAGE), AUDIT_BLOCKS)?;
     }
-    if name == TOOLS_TEST {
+    if name == TOOLS_TEST || name == INJECTION_TEST {
         store_image::tools(&out.join(STORE_IMAGE))?;
     }
     if name == SUPERVISION_TEST {
@@ -1959,6 +2048,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         AGENTS_NET_TEST => (AGENTS_NET_SCRIPT, AGENTS_NET_REFUSED),
         HOSTILE_TEST => (HOSTILE_SCRIPT, HOSTILE_REFUSED),
         TOOLS_TEST => (TOOLS_SCRIPT, TOOLS_REFUSED),
+        INJECTION_TEST => (INJECTION_SCRIPT, INJECTION_REFUSED),
         BUDGETS_TEST => (BUDGETS_SCRIPT, &[]),
         EXHAUSTION_TEST => (EXHAUSTION_SCRIPT, &[]),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
@@ -1999,6 +2089,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == TOOLS_TEST {
                 tools_audit(&out.join(STORE_IMAGE))?;
+            }
+            if name == INJECTION_TEST {
+                injection_audit(&out.join(STORE_IMAGE))?;
             }
             if name == EXHAUSTION_TEST {
                 for (step, what) in [(3, "usage"), (5, "stop all")] {

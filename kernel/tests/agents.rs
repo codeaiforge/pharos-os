@@ -127,7 +127,7 @@ fn run(t: &mut TestRun) {
         matches!(replaced, Some(Some(_))),
     );
     for step in [
-        "INFO: interface agents, nine agents accepted, none running",
+        "INFO: interface agents, ten agents accepted, none running",
         "agents with a refused, missing, or unlisted manifest are not found",
         "agent requests from a control client are refused",
         "an unknown task is not found",
