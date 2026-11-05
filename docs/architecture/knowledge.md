@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). **Implemented:** the data model (#142), the service (#143), agent access and verification (#144). To be built by: private memory and promotion (#145), the access-control, provenance, staleness, and injection tests, and host-loaded verified entries (#146).
+**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). **Implemented:** the data model (#142), the service (#143), agent access and verification (#144), private memory and promotion (#145). To be built by: the access-control, provenance, staleness, and injection tests, and host-loaded verified entries (#146).
 
 ## 2. Context
 
@@ -71,6 +71,7 @@ What M3.8 builds on:
 
 - **Private memory is the agent's `data` files** (D-012), unchanged: never seen by another agent and never in a scope by itself.
 - **`PROMOTE` (32):** the agent names one of its `data` files, a scope, a key, the version it replaces, and tags; it needs `data read` and `knowledge write <scope>`. The runtime reads the file itself and sends `PUT` with the source `promoted <file>`; the new version is unverified like any other. Audited as a `knowledge` intent with the detail `promote <file>`.
+- *Implemented (#145):* `PROMOTE` (`agents` 32) names the file, and the agent's buffer holds a `knowledge::Put` as for `KNOWLEDGE_PUT`: its scope, key, `replaces`, tags, and evidence; it must be a claim with no content of its own (else `BAD_REQUEST`, recorded as `malformed`), since the content is the file's bytes, read by the runtime from `data/<agent>/<file>`. A missing file is `NOT_FOUND` and costs nothing; one over 4 KiB is `TOO_LARGE`. Each promotion counts against the `knowledge` budget like a put. The checks run `knowledge write` first, then `data read`, each refusal recorded as `no grant` with that permission.
 
 ### Verification on the trusted path (#144)
 

@@ -2055,7 +2055,8 @@ fn knowledge_agents_audit(image: &Path) -> Result<()> {
             format!("{put} notes knowledge outcome 0 extra replaces 0 claim 4 bytes"),
             1,
         ),
-        ("client 3 Intent knowledge".to_owned(), 5),
+        (format!("{put} ops knowledge outcome 0 promote draft"), 1),
+        ("client 3 Intent knowledge".to_owned(), 6),
         (
             "knowledge scribe task 1/1   outcome 1 version 2".to_owned(),
             1,
@@ -2101,13 +2102,14 @@ fn knowledge_agents_audit(image: &Path) -> Result<()> {
             1,
         ),
         // Once per kind, then each attempt's total: `hr` put, malformed,
-        // over budget, `hr` before approval, `notes` after the revocation.
+        // a promotion with content and one into `hr`, over budget, `hr`
+        // before approval, `notes` after the revocation.
         (
-            "client 3 Event refuse scribe task 1/1   outcome 2 5 requests refused".to_owned(),
+            "client 3 Event refuse scribe task 1/1   outcome 2 7 requests refused".to_owned(),
             1,
         ),
         (
-            "client 3 Event refuse peeker task 2/1   outcome 2 2 requests refused".to_owned(),
+            "client 3 Event refuse peeker task 2/1   outcome 2 3 requests refused".to_owned(),
             1,
         ),
         ("client 3 Event refuse peeker".to_owned(), 2),
@@ -2125,7 +2127,7 @@ fn knowledge_agents_audit(image: &Path) -> Result<()> {
             ));
         }
     }
-    for content in ["acme", "ops is fine", "vendor date", "five"] {
+    for content in ["acme", "ops is fine", "vendor date", "five", "draft text"] {
         if count(content) != 0 {
             return Err(format!(
                 "a version's content {content:?} is in the audit trail"
@@ -2134,18 +2136,19 @@ fn knowledge_agents_audit(image: &Path) -> Result<()> {
     }
     let versions = store_image::knowledge(image)?;
     for want in [
-        "notes/vendor v1 claim replaces 0 by agent scribe task 1 hash ",
-        "notes/vendor v2 claim replaces 1 by agent scribe task 1 hash 4899aefa: acme ships monday",
-        "ops/summary v1 claim replaces 0 by agent scribe task 1 hash ",
-        "ops/plain v1 claim replaces 0 by agent scribe task 1 hash ",
-        "notes/extra v1 claim replaces 0 by agent scribe task 1 hash ",
+        "notes/vendor v1 claim replaces 0 by agent scribe task 1 from written hash ",
+        "notes/vendor v2 claim replaces 1 by agent scribe task 1 from written hash 4899aefa: acme ships monday",
+        "ops/summary v1 claim replaces 0 by agent scribe task 1 from written hash ",
+        "ops/plain v1 claim replaces 0 by agent scribe task 1 from written hash ",
+        "ops/memo v1 claim replaces 0 by agent scribe task 1 from promoted draft hash ",
+        "notes/extra v1 claim replaces 0 by agent scribe task 1 from written hash ",
     ] {
         if !versions.iter().any(|v| v.starts_with(want)) {
             return Err(format!("no version like {want:?} in {versions:?}"));
         }
     }
-    if versions.len() != 5 {
-        return Err(format!("{} versions stored, expected 5", versions.len()));
+    if versions.len() != 6 {
+        return Err(format!("{} versions stored, expected 6", versions.len()));
     }
     println!(
         "  audit trail: {} records, every put accounted for without its content; {} versions stored",

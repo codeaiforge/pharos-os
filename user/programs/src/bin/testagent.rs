@@ -81,14 +81,19 @@
 //!   `notes/vendor` with a forged author and source (stored as itself,
 //!   `written`), corrects it, puts `ops/summary` citing it and
 //!   `ops/plain`; a put in `hr` (not granted) and a malformed put are
-//!   refused, the sixth put is over its `knowledge` budget; the history
+//!   refused. Its private file `draft` is in no query until it promotes
+//!   it as `ops/memo` (#145), stored as `promoted draft`; a promotion of a
+//!   missing file, with content of its own, or into `hr` is refused. The
+//!   seventh put is over its `knowledge` budget; the history
 //!   and a query say what they should; reading `hr` works once the user
 //!   approves it; it waits until the user verifies `notes/vendor` version
 //!   2, says so by asking to write `hr` (the user refuses), then waits
 //!   until the user revokes reading `notes`; completes with `scribe ok`.
 //! - `peek` (agent `peeker`, reading `ops` only): `notes` is refused, and
 //!   `ops/summary`, which cites `notes`, is as missing as nothing, in a
-//!   query and a get; `ops/plain` reads; a put is refused; completes with
+//!   query and a get; `ops/plain` reads, and so does `scribe`'s promoted
+//!   `ops/memo`; a put in `ops` is refused, and so is promoting into
+//!   `team`, which it may write, without `data read`; completes with
 //!   `peeker ok`.
 //! - `tools-plain` (agent `plain`): holds `report.txt` but no tool, so
 //!   `read_file` is refused; completes with `plain ok`.
@@ -259,6 +264,8 @@ struct Head {
     /// The agent and task; `None` for the user.
     author: Option<(Vec<u8>, u32)>,
     written: bool,
+    /// The agent's file it was promoted from (#145).
+    promoted: Option<Vec<u8>>,
     content: Vec<u8>,
 }
 
@@ -659,10 +666,25 @@ impl Agent {
     }
 
     fn k_put_raw(&self, body: &[u8]) -> Result<u32, u8> {
+        self.k_send(body, None)
+    }
+
+    /// `PROMOTE` of its file `file` with the put `p` (#145).
+    fn k_promote(&self, file: &[u8], p: &Put<'_>) -> Result<u32, u8> {
+        let mut body = alloc::vec![0u8; knowledge::MAX_RECORD];
+        let n = p.encode(&mut body).ok_or(status::BAD_REQUEST)?;
+        self.k_send(&body[..n], Some(file))
+    }
+
+    fn k_send(&self, body: &[u8], file: Option<&[u8]>) -> Result<u32, u8> {
         self.buffer.write_bytes(0, body);
         let mut out = [0u8; 256];
         let len = body.len() as u16;
-        match self.call(&Request::KnowledgePut { len }, &mut out) {
+        let req = match file {
+            Some(file) => Request::Promote { file, len },
+            None => Request::KnowledgePut { len },
+        };
+        match self.call(&req, &mut out) {
             (status::OK, 5) => Ok(u32::from_le_bytes([out[1], out[2], out[3], out[4]])),
             (code, _) => Err(code),
         }
@@ -700,6 +722,10 @@ impl Agent {
                     Author::User => None,
                 },
                 written: v.source == Source::Written,
+                promoted: match v.source {
+                    Source::Promoted(f) => Some(f.to_vec()),
+                    _ => None,
+                },
                 content: v.content.to_vec(),
             });
             rest = &tail[k..];
@@ -778,7 +804,42 @@ impl Agent {
         if self.k_put_raw(b"\x00\x01") != Err(status::BAD_REQUEST) {
             return self.fail(b"a malformed put was not refused");
         }
-        // The fifth put in its budget, and a sixth over it.
+        // Private until promoted (#145).
+        let memo = |content| Put {
+            tags: List::new(&[&b"memo"[..]]).unwrap_or_default(),
+            ..claim(IN_OPS, b"memo", 0, content, &[])
+        };
+        if self.put(b"draft", b"draft text") != status::OK
+            || self.k_query(IN_OPS, b"memo") != Ok(Vec::new())
+        {
+            return self.fail(b"the private file was not private");
+        }
+        if self.k_promote(b"absent", &memo(b"")) != Err(status::NOT_FOUND)
+            || self.k_promote(b"draft", &memo(b"mine")) != Err(status::BAD_REQUEST)
+            || self.k_promote(
+                b"draft",
+                &Put {
+                    scope: IN_HR,
+                    ..memo(b"")
+                },
+            ) != Err(status::NO_ACCESS)
+        {
+            return self.fail(b"a bad promotion was not refused");
+        }
+        if self.k_promote(b"draft", &memo(b"")) != Ok(1)
+            || self.k_query(IN_OPS, b"memo") != Ok(alloc::vec![b"memo".to_vec()])
+        {
+            return self.fail(b"the promotion failed");
+        }
+        match self.k_get(IN_OPS, b"memo", 1).as_deref() {
+            Ok([h])
+                if h.author == Some((b"scribe".to_vec(), me))
+                    && h.promoted.as_deref() == Some(b"draft")
+                    && h.content == b"draft text"
+                    && h.status == 0 => {}
+            _ => return self.fail(b"the promoted version is wrong"),
+        }
+        // The sixth put in its budget, and a seventh over it.
         if self.k_put(&claim(IN_NOTES, b"extra", 0, b"five", &[])) != Ok(1)
             || self.k_put(&claim(IN_NOTES, b"extra", 1, b"six", &[])) != Err(status::OVER_LIMIT)
         {
@@ -843,8 +904,16 @@ impl Agent {
             Ok([h]) if h.content == b"ops is fine" => {}
             _ => return self.fail(b"ops/plain did not read"),
         }
+        match self.k_get(IN_OPS, b"memo", 0).as_deref() {
+            Ok([h]) if h.content == b"draft text" && h.promoted.is_some() => {}
+            _ => return self.fail(b"the promoted memo did not read"),
+        }
         if self.k_put(&claim(IN_OPS, b"plain", 1, b"mine", &[])) != Err(status::NO_ACCESS) {
             return self.fail(b"a put without knowledge write was not refused");
+        }
+        let team = claim(3, b"memo", 0, b"", &[]);
+        if self.k_promote(b"draft", &team) != Err(status::NO_ACCESS) {
+            return self.fail(b"a promotion without data read was not refused");
         }
         self.complete(b"peeker ok")
     }

@@ -39,7 +39,9 @@
 //! with its own. `KNOWLEDGE_GET`, `KNOWLEDGE_HISTORY`, and
 //! `KNOWLEDGE_QUERY` answer with the knowledge service's reply, and what
 //! it put in the runtime's buffer is copied to the start of the agent's.
-//! Content is data, never instructions.
+//! Content is data, never instructions. `PROMOTE` (#145) takes the put
+//! the same way, a claim with no content, and the runtime makes the
+//! agent's own file `file` its content, with the source `promoted <file>`.
 
 use crate::{Reader, Refused, Writer, op as common, split, status};
 
@@ -84,6 +86,7 @@ pub mod op {
     pub const KNOWLEDGE_GET: u8 = 29;
     pub const KNOWLEDGE_HISTORY: u8 = 30;
     pub const KNOWLEDGE_QUERY: u8 = 31;
+    pub const PROMOTE: u8 = 32;
 }
 
 /// The `ASK` reply's outcome, after `OK` (#106).
@@ -384,6 +387,12 @@ pub enum Request<'a> {
     KnowledgePut {
         len: u16,
     },
+    /// Agent: its file `file` as the content of the put in its buffer
+    /// (needs `data read` and `knowledge write` for the put's scope).
+    Promote {
+        file: &'a [u8],
+        len: u16,
+    },
     /// Agent: a version of `key` (0: its heads) into its buffer (needs
     /// `knowledge read <scope>`), as the service's `GET`.
     KnowledgeGet {
@@ -548,6 +557,10 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             }
             op::SUBTASK_STATUS => Request::SubtaskStatus { task: r.u32()? },
             op::KNOWLEDGE_PUT => Request::KnowledgePut { len: r.u16()? },
+            op::PROMOTE => Request::Promote {
+                file: name(&mut r)?,
+                len: r.u16()?,
+            },
             op::KNOWLEDGE_GET => Request::KnowledgeGet {
                 scope: scope(&mut r)?,
                 key: name(&mut r)?,
@@ -717,6 +730,11 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
         }
         Request::KnowledgePut { len } => {
             head(&mut w, op::KNOWLEDGE_PUT)?;
+            w.u16(len)?;
+        }
+        Request::Promote { file, len } => {
+            head(&mut w, op::PROMOTE)?;
+            write_name(&mut w, file)?;
             w.u16(len)?;
         }
         Request::KnowledgeGet {
@@ -1040,6 +1058,10 @@ mod tests {
             },
             Request::SubtaskStatus { task: u32::MAX },
             Request::KnowledgePut { len: 4096 },
+            Request::Promote {
+                file: &[b'f'; 32],
+                len: 60,
+            },
             Request::KnowledgeGet {
                 scope: 0,
                 key: b"vendor",

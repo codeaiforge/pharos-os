@@ -305,14 +305,14 @@ pub const TEST_MANIFESTS: [(&str, &str); 33] = [
     (
         "agents/scribe.manifest",
         "manifest = 1\nname = scribe\nprogram = bin/testagent\npages = 256\nmodels =\n\
-         attempts = 1\nprogress_ms = 10000\ntask_ms = 120000\ndata = none\nnet =\n\
+         attempts = 1\nprogress_ms = 10000\ntask_ms = 120000\ndata = write\nnet =\n\
          knowledge_read = notes, ops\nknowledge_write = notes, ops\n",
     ),
     (
         "agents/peeker.manifest",
         "manifest = 1\nname = peeker\nprogram = bin/testagent\npages = 256\nmodels =\n\
          attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = none\nnet =\n\
-         knowledge_read = ops\n",
+         knowledge_read = ops\nknowledge_write = team\n",
     ),
     // The `injection` kernel's (#129).
     (

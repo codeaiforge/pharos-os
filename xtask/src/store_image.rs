@@ -235,12 +235,12 @@ pub fn audit(image: &Path) -> Result<Vec<(String, Vec<String>)>> {
 /// `cargo xtask store knowledge <image>` (#144, knowledge.md): every
 /// version in namespace `knowledge`, read with the store's checks and
 /// parsed as `pharos_proto::knowledge` defines it, one line each: `scope/
-/// key vN`, kind, what it replaces, author, the first 8 hexadecimal digits
+/// key vN`, kind, what it replaces, author, source, the first 8 hexadecimal digits
 /// of its content's SHA-256 (what `verify` on the trusted console takes),
 /// and its content, escaped. Content is shown here, on the host, never on
 /// the trusted console.
 pub fn knowledge(image: &Path) -> Result<Vec<String>> {
-    use pharos_proto::knowledge::{Author, Kind as VersionKind, parse_version};
+    use pharos_proto::knowledge::{Author, Kind as VersionKind, Source, parse_version};
     let mut store =
         Store::mount(FileDevice::open(image)?).map_err(|e| format!("{}: {e}", image.display()))?;
     let paths: Vec<Vec<u8>> = store.list(b"knowledge/").map(<[u8]>::to_vec).collect();
@@ -267,8 +267,13 @@ pub fn knowledge(image: &Path) -> Result<Vec<String>> {
             VersionKind::Claim => "claim",
             VersionKind::Retraction => "retraction",
         };
+        let source = match v.source {
+            Source::Written => "written".to_owned(),
+            Source::Promoted(f) => format!("promoted {}", String::from_utf8_lossy(f)),
+            Source::Host => "host".to_owned(),
+        };
         lines.push(format!(
-            "{}/{} v{} {kind} replaces {} by {author} hash {}: {}",
+            "{}/{} v{} {kind} replaces {} by {author} from {source} hash {}: {}",
             String::from_utf8_lossy(v.scope),
             String::from_utf8_lossy(v.key),
             v.version,

@@ -78,7 +78,9 @@
 //! with the agent's name and task as author and its readable scopes. Reads
 //! need `knowledge read` for their scope and pass the readable scopes, so
 //! the service leaves out what the agent cannot reach; what the service
-//! answers is copied to the agent's buffer, exactly its length.
+//! answers is copied to the agent's buffer, exactly its length. `PROMOTE`
+//! (#145) also needs `data read`: the runtime reads the agent's file
+//! itself and puts it with the source `promoted <file>`.
 
 #![no_std]
 #![no_main]
@@ -901,14 +903,15 @@ const TEST: &[Entry] = &[
 ];
 
 /// The `knowledge_agents` kernel's (#144): `scribe` reads and writes
-/// `notes` and `ops`, puts 5 versions at most, and may ask to read and
-/// write `hr`;
-/// `peeker` reads `ops` only.
+/// `notes` and `ops`, puts 6 versions at most (a promotion among them),
+/// has its own files, and may ask to read and write `hr`;
+/// `peeker` reads `ops` and writes `team`, with no files of its own.
 const KNOWLEDGE_AGENTS: [Entry; 2] = [
     Entry {
         task_ms: 120_000,
+        data: Data::Write,
         budget: Budget {
-            knowledge: 5,
+            knowledge: 6,
             ..Budget::UNLIMITED
         },
         knowledge_read: &[b"notes", b"ops"],
@@ -918,6 +921,7 @@ const KNOWLEDGE_AGENTS: [Entry; 2] = [
     },
     Entry {
         knowledge_read: &[b"ops"],
+        knowledge_write: &[b"team"],
         ..knowledge_entry(b"peeker")
     },
 ];
@@ -2210,6 +2214,7 @@ impl Runtime {
                 Ok(5)
             }
             Request::KnowledgePut { .. }
+            | Request::Promote { .. }
             | Request::KnowledgeGet { .. }
             | Request::KnowledgeHistory { .. }
             | Request::KnowledgeQuery { .. } => self.knowledge(i, id, &limits, req, now, out),
@@ -2509,7 +2514,10 @@ impl Runtime {
         let buffer_len = slot.buffer.as_ref().map_or(0, Mapped::len);
         let (req, scope, page) = match req {
             Request::KnowledgePut { len } => {
-                return self.knowledge_put(i, id, limits, len, readable, now, out);
+                return self.knowledge_put(i, id, limits, len, None, readable, now, out);
+            }
+            Request::Promote { file, len } => {
+                return self.knowledge_put(i, id, limits, len, Some(file), readable, now, out);
             }
             Request::KnowledgeGet {
                 scope,
@@ -2579,7 +2587,9 @@ impl Runtime {
     }
 
     /// `KNOWLEDGE_PUT` (#144): the put in the agent's buffer, with the
-    /// runtime's author, source, and readable scopes; audited first.
+    /// runtime's author, source, and readable scopes; audited first. With
+    /// `file`, `PROMOTE` (#145): that file of the agent's, read by the
+    /// runtime, is the content.
     #[allow(clippy::too_many_arguments)]
     fn knowledge_put(
         &mut self,
@@ -2587,6 +2597,7 @@ impl Runtime {
         id: u32,
         limits: &Limits,
         len: u16,
+        file: Option<&[u8]>,
         readable: u8,
         now: u64,
         out: &mut [u8; 256],
@@ -2620,16 +2631,45 @@ impl Runtime {
             .ok_or(status::INTERNAL)?
             .health
             .ready()?;
+        let agent = limits.entry.name;
+        // A promotion: a claim whose content is the file, never the
+        // agent's own bytes.
+        let mut promoted = Vec::new();
+        if let Some(f) = file {
+            if put.kind != knowledge::Kind::Claim || !put.content.is_empty() {
+                self.note(i, refusal::MALFORMED, None);
+                return Err(status::BAD_REQUEST);
+            }
+            let readable_data = self.slots[i]
+                .as_ref()
+                .is_some_and(|s| s.grants.allows(&Permission::DataRead, now));
+            if !readable_data {
+                self.note(i, refusal::NO_GRANT, Some(Permission::DataRead));
+                return Err(status::NO_ACCESS);
+            }
+            self.store.health.ready()?;
+            promoted = (self.store.read(&data_path(agent, f)))
+                .map_err(|_| status::INTERNAL)?
+                .ok_or(status::NOT_FOUND)?;
+            if promoted.len() > knowledge::MAX_CONTENT {
+                self.note(i, refusal::MALFORMED, None);
+                return Err(status::TOO_LARGE);
+            }
+        }
         let budget = limits.entry.budget;
         self.charge(i, &budget, Some(p), |u, _| u.knowledge(&budget))?;
-        let agent = limits.entry.name;
         let put = Put {
             author: Author::Agent {
                 name: agent,
                 task: id,
             },
-            source: Source::Written,
+            source: file.map_or(Source::Written, Source::Promoted),
             readable,
+            content: if file.is_some() {
+                &promoted
+            } else {
+                put.content
+            },
             ..put
         };
         let mut record = alloc::vec![0u8; knowledge::MAX_RECORD];
@@ -2644,7 +2684,10 @@ impl Runtime {
         };
         let replaces = decimal(u64::from(put.replaces), a);
         let size = decimal(put.content.len() as u64, b);
-        let detail = [put.key, b" replaces ", replaces, kind, size, b" bytes"].concat();
+        let detail = match file {
+            Some(f) => [&b"promote "[..], f].concat(),
+            None => [put.key, b" replaces ", replaces, kind, size, b" bytes"].concat(),
+        };
         let detail = &detail[..detail.len().min(audit::MAX_DETAIL)];
         let seq = self.intent(
             agent,
@@ -3621,7 +3664,10 @@ impl Runtime {
                 // refusals, by kind (#126, #135, #144).
                 let tool = matches!(
                     req,
-                    Request::Tool { .. } | Request::Subtask { .. } | Request::KnowledgePut { .. }
+                    Request::Tool { .. }
+                        | Request::Subtask { .. }
+                        | Request::KnowledgePut { .. }
+                        | Request::Promote { .. }
                 );
                 match result {
                     _ if tool => {}
