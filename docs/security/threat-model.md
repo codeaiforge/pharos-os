@@ -1,6 +1,6 @@
 # Threat model
 
-**Status:** updated at the M2.10 gate, which closes Phase 2 (2026-10-29), at the M3.4 gate (2026-11-04), and at the M3.5 gate (2026-11-05). It covers what exists today (the host workspace, and a kernel with isolated user processes, a read-only RAM-disk filesystem, user-space drivers, a service manager, and a user-space network service) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
+**Status:** updated at the M2.10 gate, which closes Phase 2 (2026-10-29), at the M3.4 gate (2026-11-04), at the M3.5 gate (2026-11-05), and at the M3.6 gate (2026-11-05). It covers what exists today (the host workspace, and a kernel with isolated user processes, a read-only RAM-disk filesystem, user-space drivers, a service manager, and a user-space network service) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
 
 ## Security principles
 
@@ -155,7 +155,7 @@ Design: [inference.md](../architecture/inference.md), from D-010, D-011, and D-0
 
 ### Open limits carried out of Phase 2
 
-Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-inference.md)), and M3.3 ([review](review-m3.3-agents.md)), M3.4 ([review](review-m3.4-permissions.md)), and M3.5 ([review](review-m3.5-resources.md)) close with these limits accepted. Each is carried to the milestone that addresses it; none blocks Phase 3, which runs only in QEMU.
+Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-inference.md)), and M3.3 ([review](review-m3.3-agents.md)), M3.4 ([review](review-m3.4-permissions.md)), M3.5 ([review](review-m3.5-resources.md)), and M3.6 ([review](review-m3.6-tools.md)) close with these limits accepted. Each is carried to the milestone that addresses it; none blocks Phase 3, which runs only in QEMU.
 
 | Limit | Since | Carried to |
 | --- | --- | --- |
@@ -180,7 +180,11 @@ Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-in
 | `mem_share`'s bookkeeping charge stays until the sharer ends; an object that outlives its sharer is charged to no one | M3.5 | accepted; bounded by the sharer's limit |
 | A manifest cannot narrow its entry's budget; a group's minute is a fixed window (up to twice the rate across its edge) | M3.5 | when an agent needs less than its entry |
 | `init` passes a service at most 8 capabilities (`spawn`'s limit), so the boot runtime gets neither the network service (handle 9, since #109) nor granted files (handle 10, #127); harmless while its boot policy table runs no agent | M3.6 (found in #127) | before the boot runtime runs agents: raise `MAX_SPAWN_CAPS` |
-| A trusted-console line is at most 64 bytes, so `revoke <agent> file <name>` does not fit with a long agent and file name | M3.6 | when names that long are used |
+| A trusted-console line is at most 64 bytes, so `revoke <agent> file <name>` does not fit with a long agent and file name | M3.6 | when names that long are used; `trust`'s 64-byte buffer to the runtime grows with it |
+| A granted file reaches the model in full, so the model can be steered by it; the agent still gets nothing beyond its grants | M3.6 | accepted (D-023) |
+| The user confirms a `send`'s destination and size, not its payload | M3.6 | accepted at the M3.6 review |
+| A confirmed `send` is charged when sent, so it can still be refused `OVER_LIMIT`; `file_kb` is not given back when a store read fails | M3.6 | accepted |
+| The test model writes no tool calls; a real model's calls are not exercised in CI | M3.6 | the S1 run at the Phase 3 gate |
 | Control clients can read, cancel, and forget every task; only `init` grants the badge, and only test tables do | M3.3 | M3.6 (who submits tasks) |
 | The inference service: a long prompt holds it (callers time out). **Resolved (#100):** a failed model read is not kept (the next `GENERATE` tries again with a new window), and client slots are freed when `init` reports the client ended | M3.2 | M3.5 (budgets) |
 

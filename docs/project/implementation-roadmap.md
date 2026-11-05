@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.6 — Controlled tool integration.** Everything in Phases 3–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.7 — Agent communication and coordination.** Everything in Phases 3–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -41,7 +41,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
 | 2 | Core System | Done (v0.2.0) |
-| 3 | AI Agent Platform | **Current** (M3.6; M3.1, M3.0, M3.2, M3.3, M3.4, and M3.5 done) |
+| 3 | AI Agent Platform | **Current** (M3.7; M3.1, M3.0, M3.2, M3.3, M3.4, M3.5, and M3.6 done) |
 | 4 | Full Operating System | Planned |
 | 5 | Deployment and Release | Planned |
 
@@ -291,7 +291,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ## Phase 3 — AI Agent Platform
 
-**Status: Current** (M3.6; M3.1, M3.0, M3.2, M3.3, M3.4, and M3.5 done).
+**Status: Current** (M3.7; M3.1, M3.0, M3.2, M3.3, M3.4, M3.5, and M3.6 done).
 
 Ordering notes:
 
@@ -428,7 +428,7 @@ Ordering notes:
 
 ### M3.6 — Controlled tool integration
 
-**Status: Current.** M3.5 gives it agents held to budgets for CPU, pages, processes, handles, inference, network, storage, and requests, with three scheduling classes so the trusted path always runs first. D-023 accepted (#123): the runtime parses and validates each tool call, a strict JSON subset of the model's text, with a fuzzed `no_std` parser; tools compiled in and invoked with one `TOOL` operation; a new `file <name>` permission on a read-only `files` namespace; `read_file` and `send`, the second confirmed by the user for each call on the trusted console. Design approved (#124): [tools.md](../architecture/tools.md). Implemented: the tool-call parser and validator (#125), the `TOOL` request (#126), `read_file` with the `file` permission (#127), confirmation of each `send` on the trusted console (#128), and the prompt-injection and malformed-call suite (#129). Next: the gate (#130).
+**Status: Done** — gate passed 2026-11-05: the CI jobs passed on `main` at `219adeb` ([run 42019844812](https://github.com/codeaiforge/pharos-os/actions/runs/42019844812)) with 60 test kernels, among them `tools` (`read_file` on a granted file; a file not granted, a path, text that is not a call, an unknown tool, a tool not listed, and a file past `file_kb` refused and each recorded once; a file approved, then revoked; `send` sent once on the user's yes, refused on a no, without an answer, and when its destination is revoked while it waits, with no payload on the trusted console) and `injection` (a naive agent runs every call in a granted file with injected instructions, in model output, and from the corpus, and gets nothing beyond its grants), and the host injection corpus of 48 calls with 1,000,000 fuzzed texts. Removing the runtime's grant check for tools failed CI on a throwaway branch ([run 42020468290](https://github.com/codeaiforge/pharos-os/actions/runs/42020468290)) at `injection`, with the host and lint jobs passing. No CI run on `main` failed during M3.6. The review fix after `219adeb` (`f3f4f0e`) passed `scripts/check.sh` and the full QEMU suite locally. M3.6 changed no kernel code; the IPC round trip measured a 1,907 ns median. The security review ([review-m3.6-tools.md](../security/review-m3.6-tools.md)) found and fixed one issue: a waiting `send` confirmation not ended when its destination was revoked (F1); no new `unsafe`. The maintainer approved it on 2026-11-05 and chose to keep a `send`'s payload off the trusted console. Delivered: D-023 (#123), the design (#124), the parser and validator (#125), the `TOOL` request (#126), `read_file` and the `file` permission (#127), confirmation (#128), the injection suite (#129), and the gate (#130). Carried: the limits in the [threat model](../security/threat-model.md#open-limits-carried-out-of-phase-2), among them the boot runtime missing its network and files handles (`spawn`'s 8 capabilities).
 
 - **Where it runs (D-020):** Pharos; the tool-call validator host-tested and fuzzed.
 - **Objective and scope:** Let agents invoke defined tools only through capability checks.
@@ -443,7 +443,7 @@ Ordering notes:
 
 ### M3.7 — Agent communication and coordination
 
-**Status: Planned.**
+**Status: Current.** M3.6 gives it agents that use tools only through validated calls and their grants, with the user confirming each `send`. First step: its decision and issues.
 
 - **Where it runs (D-020):** Pharos; codecs and group-state logic host-tested.
 - **Objective and scope:** Agents communicate only through granted channels, and groups of agents work toward a shared goal under explicit authority and budgets.
@@ -668,4 +668,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, and M3.5 (resource accounting and limits) on 2026-11-05. The current milestone is **M3.6 — Controlled tool integration**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, and M3.6 (controlled tool integration) on 2026-11-05. The current milestone is **M3.7 — Agent communication and coordination**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
