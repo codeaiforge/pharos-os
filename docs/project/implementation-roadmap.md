@@ -458,7 +458,7 @@ Ordering notes:
 
 ### M3.8 — Knowledge service
 
-**Status: Current.** M3.7 gives it agents that talk only on granted channels and work in groups under a supervisor, with delegation that only narrows authority and a verifier on every result. Issues #140–#147. D-025 accepted (#140): a `knowledge` service on its own store namespace, reached by agents only through the runtime; append-only versions; scopes granted as runtime permissions; only the user marks a version verified. Next: the design (#141).
+**Status: Current.** M3.7 gives it agents that talk only on granted channels and work in groups under a supervisor, with delegation that only narrows authority and a verifier on every result. Issues #140–#147. D-025 accepted (#140): a `knowledge` service on its own store namespace, reached by agents only through the runtime; append-only versions; scopes granted as runtime permissions; only the user marks a version verified. Design approved (#141): [knowledge.md](../architecture/knowledge.md). Next: the data model (#142).
 
 - **Where it runs (D-020):** Pharos; data model and provenance logic host-tested.
 - **Objective and scope:** A shared, permission-aware knowledge service with provenance, separate from each agent's private memory.
