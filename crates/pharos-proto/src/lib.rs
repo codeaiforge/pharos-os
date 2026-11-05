@@ -17,6 +17,7 @@ extern crate std;
 pub mod agents;
 pub mod audit;
 pub mod infer;
+pub mod knowledge;
 pub mod manifest;
 pub mod net;
 pub mod permission;

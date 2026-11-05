@@ -8,6 +8,7 @@ pub mod budgets;
 pub mod fp;
 pub mod grants;
 pub mod groups;
+pub mod knowledge;
 pub mod mailbox;
 pub mod models;
 pub mod net;

@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). To be built by: the data model (#142), the service (#143), agent access (#144), private memory and promotion (#145), and the access-control, provenance, staleness, and injection tests (#146).
+**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). **Implemented:** the data model (#142). To be built by: the service (#143), agent access (#144), private memory and promotion (#145), and the access-control, provenance, staleness, and injection tests (#146).
 
 ## 2. Context
 
@@ -39,7 +39,8 @@ What M3.8 builds on:
   - a version is **superseded** when another version replaces it, and **retracted** when that version is a retraction;
   - a version is **stale** when it is superseded, or when any of its evidence is superseded or retracted;
   - a version is **verified** when the scope's marks name its key, number, and hash (below); else **unverified**.
-- **Stored** as one store file per version, `<scope>/<key>/<version>`, written once and never rewritten or deleted (the service is the namespace's only writer, and refuses a version number that exists), and one append-only file per scope, `<scope>/marks`, of verification records. At start, the service lists its namespace and rebuilds each key's version index in memory; unreadable files are counted and left in place, as the runtime's tasks are.
+- **Stored** as one store file per version, `<scope>/<key>/v<n>`, and one per mark, `<scope>/<key>/m<n>`, each written once and never rewritten or deleted (the service is the namespace's only writer, and refuses a version number that exists). At start, the service lists its namespace and rebuilds each key's version index in memory; unreadable files are counted and left in place, as the runtime's tasks are.
+- *Implemented (#142):* `pharos_proto::knowledge` (the version record, format 1: magic `PKV`, every field above, `MAX_RECORD` 5 KiB; the mark, `PKM`, 56 bytes; status bits `flag`), and `pharos_programs::knowledge::Index` (the index, `heads`, `status`, `readable`, `plan` for a write, `plan_mark` and `marked`, `tagged`, and `load`). A key's first version replaces nothing, and every later one must name a version of it (`Replaces`). A version file is used only if it parses, keeps every rule, sits at its own path, and its content matches its hash; a mark only with its version's number. At load, versions go in number order, and one whose predecessor's file is unreadable is still kept (only `plan` checks `replaces`, before anything is written), so one damaged file hides no later version. The design's first draft had one append-only `marks` file per scope; one file per mark keeps every record written once, with no stream to parse.
 
 ### The service (#143)
 
