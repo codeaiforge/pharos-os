@@ -5,7 +5,8 @@
 //! channel, subtasks, other tasks' status, many times each), whose worker
 //! `aide` tries to pass on a delegated model and sends `boss` an injected
 //! instruction and a flood, and which then does what the message says;
-//! then a second goal that tries to read the first's subtasks. Afterwards
+//! then a second goal that tries to read the first's subtasks, and a
+//! third that gives subtasks until refused (32 per goal; M3.7 review F1). Afterwards
 //! the runner checks the audit trail. Runs under UEFI (D-009).
 
 #![no_std]
@@ -56,6 +57,14 @@ fn run(t: &mut TestRun) {
     let Some(runtime) = common::start_runtime(t, &services) else {
         return;
     };
+    // Taken now: the runtime says which manifests it accepted before it
+    // reports ready, and the third goal's 64 lines would push them out of
+    // the kernel's debug buffer.
+    let started: Vec<Vec<u8>> = process::debug_output()
+        .into_iter()
+        .filter(|(id, _)| *id == runtime)
+        .map(|(_, l)| l)
+        .collect();
     let (client, steps) = common::client(t, &services, 12);
     let mut passed: Vec<Vec<u8>> = Vec::new();
     let start = time::uptime();
@@ -72,6 +81,7 @@ fn run(t: &mut TestRun) {
     for step in [
         "a compromised worker, a passed-on delegation, and injected messages gain nothing",
         "a goal reads only its own subtasks",
+        "a goal gets at most 32 subtasks in all",
     ] {
         let want = alloc::format!("ok {step}");
         t.check(step, passed.iter().any(|l| l == want.as_bytes()));
@@ -100,7 +110,7 @@ fn run(t: &mut TestRun) {
         let want = alloc::format!("agents: {name} manifest accepted");
         t.check(
             &alloc::format!("the runtime accepted {name}'s manifest"),
-            said.iter().any(|l| l == want.as_bytes()),
+            started.iter().any(|l| l == want.as_bytes()),
         );
     }
     // Let the runner read the last answer before QEMU exits.

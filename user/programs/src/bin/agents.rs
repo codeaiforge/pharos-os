@@ -150,6 +150,8 @@ mod refusal {
     /// A subtask from an agent that is not its group's supervisor, or for
     /// an agent that is not one of its workers (#134).
     pub const NOT_IN_GROUP: u16 = 16384;
+    /// A subtask past its goal's total (M3.7 review F1).
+    pub const OVER_SUBTASKS: u16 = 32768;
 }
 /// How often the runtime reads a running agent's CPU time, at most.
 const CPU_CHECK_US: u64 = 100_000;
@@ -230,6 +232,9 @@ const APPROVE_US: [u64; 2] = [60_000_000, 5_000_000];
 pub const AGENT_HANDLES: u16 = 16;
 /// Most open subtasks per goal (#134).
 const MAX_SUBTASKS: usize = 8;
+/// Most subtasks per goal in all, so a supervisor cannot fill the task
+/// table (`MAX_TASKS`) and block every submission (M3.7 review F1).
+const MAX_GOAL_SUBTASKS: usize = 32;
 /// Most approval requests waiting at once.
 const MAX_PENDING: usize = 4;
 /// Control clients with an attached buffer.
@@ -2166,6 +2171,10 @@ impl Runtime {
                         return Err(status::NO_ACCESS);
                     }
                 };
+                if self.tasks.children(id) >= MAX_GOAL_SUBTASKS {
+                    self.note(i, refusal::OVER_SUBTASKS, None);
+                    return Err(status::OVER_LIMIT);
+                }
                 if self.tasks.open_children(id) >= MAX_SUBTASKS {
                     return Err(status::BUSY);
                 }
@@ -2551,6 +2560,7 @@ impl Runtime {
             refusal::TOOL_NOT_LISTED => b"tool not listed",
             refusal::OVER_FILES => b"over files",
             refusal::OVER_MESSAGES => b"over messages",
+            refusal::OVER_SUBTASKS => b"over subtasks",
             _ => b"not in group",
         };
         let agent = self.agent_of(task);

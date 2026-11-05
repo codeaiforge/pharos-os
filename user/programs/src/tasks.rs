@@ -392,6 +392,11 @@ impl Tasks {
             .count()
     }
 
+    /// Every subtask of `parent`, ended or not (M3.7 review F1).
+    pub fn children(&self, parent: u32) -> usize {
+        self.list.iter().filter(|t| t.parent == parent).count()
+    }
+
     /// The oldest pending task whose dependencies are done and whose agent
     /// `can_run`. A task with a failed or cancelled dependency fails
     /// first (`dependency failed`).
@@ -693,6 +698,7 @@ mod tests {
             .finish(&mut f, tasks.find(b).unwrap(), State::Done, b"ok")
             .unwrap();
         assert_eq!(tasks.open_children(goal), 1);
+        assert_eq!(tasks.children(goal), 2, "ended ones too");
         // Both kept across a restart.
         let (again, _) = load(&mut f);
         let i = again.find(a).unwrap();

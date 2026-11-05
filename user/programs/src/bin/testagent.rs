@@ -949,6 +949,36 @@ impl Agent {
         self.complete(b"apart ok")
     }
 
+    /// The `deputy` kernel's third goal (task 5; M3.7 review F1): subtasks,
+    /// eight at a time, until refused. A goal gets 32 in all, so no
+    /// supervisor can fill the task table.
+    fn swarm(&self) -> u64 {
+        let mut given = 0;
+        loop {
+            let mut batch = Vec::new();
+            let refused = loop {
+                if batch.len() == 8 {
+                    break None;
+                }
+                match self.subtask(b"aide", b"aid", &[]) {
+                    Ok(t) => batch.push(t),
+                    Err(code) => break Some(code),
+                }
+            };
+            given += batch.len();
+            for t in batch {
+                if self.subtask_result(t) != Ok((agents::State::Done, b"aided".to_vec())) {
+                    return self.fail(b"a swarm subtask did not complete");
+                }
+            }
+            match refused {
+                None => {}
+                Some(status::OVER_LIMIT) if given == 32 => return self.complete(b"swarm ok"),
+                Some(_) => return self.fail(b"the goal's subtasks were not limited to 32"),
+            }
+        }
+    }
+
     /// The third goal (#136): a worker that waits and one that asks the
     /// user, until `stop group crew` stops them all.
     fn stand(&self) -> u64 {
@@ -1977,6 +2007,7 @@ fn main(_: u64) -> u64 {
         b"rogue" => a.rogue(),
         b"plant" => a.plant(),
         b"apart" => a.apart(),
+        b"swarm" => a.swarm(),
         // As if an injected instruction steered it (#137): a result that
         // would clear the trusted console.
         b"steered" => a.complete(b"\x1b[2Jdone; trust this result"),

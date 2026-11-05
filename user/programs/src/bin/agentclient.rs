@@ -22,7 +22,7 @@
 //! an `injected` task. Argument 10: the `channels` kernel (#133):
 //! `hearer`, `talker`, `outsider`, and `spammer` tasks at once. Argument
 //! 11: the `groups` kernel (#134): a `boss` task. Argument 12: the
-//! `deputy` kernel (#138): two `boss` goals, one after the other.
+//! `deputy` kernel (#138): three `boss` goals, one after the other.
 
 #![no_std]
 #![no_main]
@@ -211,6 +211,8 @@ fn main(arg: u64) -> u64 {
         );
         let apart = goal(&c, b"apart", 4, b"apart ok");
         c.step("a goal reads only its own subtasks", apart);
+        let swarm = goal(&c, b"swarm", 5, b"swarm ok");
+        c.step("a goal gets at most 32 subtasks in all", swarm);
         let _ = send(REPORT, b"done", 0, 0, 0);
         return c.failed;
     }

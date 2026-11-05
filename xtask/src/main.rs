@@ -2014,6 +2014,10 @@ fn deputy_audit(image: &Path) -> Result<()> {
         ("Intent submit aide", 0),
         ("Intent submit boss task 1/1", 2),
         ("Event verify boss task 4/1   outcome 1 verified", 1),
+        // M3.7 review F1: 32 subtasks for the third goal, then refused.
+        ("Intent submit boss task 5/1", 32),
+        ("refuse boss task 5/1   outcome 2 over subtasks", 1),
+        ("Event verify boss task 5/1   outcome 1 verified", 1),
         ("not verified", 0),
         ("SYSTEM", 0),
         ("approves", 0),

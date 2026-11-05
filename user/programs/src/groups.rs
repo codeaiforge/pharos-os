@@ -34,7 +34,9 @@ pub fn assigning<'g, 'e>(
 
 /// Each of `wanted` with the deadline it gets: the latest of a grant in
 /// `held` (the supervisor's, at `now`) that allows it. The first one not
-/// held refuses them all.
+/// held refuses them all, and so does `data read` or `data write`: they
+/// name the holder's own files, so a worker would get its own, which no
+/// one granted it (M3.7 review F2).
 pub fn delegable(
     held: &Grants,
     wanted: impl IntoIterator<Item = Permission>,
@@ -42,7 +44,10 @@ pub fn delegable(
 ) -> Result<Vec<(Permission, Option<u64>)>, Permission> {
     wanted
         .into_iter()
-        .map(|p| held.until(&p, now).map(|u| (p, u)).ok_or(p))
+        .map(|p| match p {
+            Permission::DataRead | Permission::DataWrite => Err(p),
+            _ => held.until(&p, now).map(|u| (p, u)).ok_or(p),
+        })
         .collect()
 }
 
@@ -227,18 +232,17 @@ mod tests {
         held.add(Permission::Model(3), Some(500));
         assert_eq!(delegable(&held, [], 0), Ok(Vec::new()), "nothing");
         assert_eq!(
-            delegable(
-                &held,
-                [Permission::Model(2), report, Permission::DataRead],
-                0
-            ),
-            Ok(alloc::vec![
-                (Permission::Model(2), None),
-                (report, None),
-                (Permission::DataRead, None)
-            ]),
-            "a subset, and data read under data write"
+            delegable(&held, [Permission::Model(2), report], 0),
+            Ok(alloc::vec![(Permission::Model(2), None), (report, None)]),
+            "a subset"
         );
+        for data in [Permission::DataRead, Permission::DataWrite] {
+            assert_eq!(
+                delegable(&held, [Permission::Model(2), data], 0),
+                Err(data),
+                "data names the worker's own files, held or not (F2)"
+            );
+        }
         assert_eq!(
             delegable(&held, [Permission::Model(3)], 0),
             Ok(alloc::vec![(Permission::Model(3), Some(500))]),
