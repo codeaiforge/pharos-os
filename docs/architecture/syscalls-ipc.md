@@ -153,6 +153,7 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 24 | `uptime` (M3.2, D-021) | — | microseconds since boot | none |
 | 25 | `process_stop` (M3.3, D-018) | process handle | 0, at once (the process and every process it started end at their next return to user mode; `process_status` shows when; an ended process is not an error) | process, `STOP` (`1 << 9`) |
 | 26 | `process_usage` (M3.5, D-022) | process handle, what: 0 CPU time, 1 pages mapped, 2 live descendants | CPU time in microseconds (so far, or all of it once ended); pages mapped with `mem_map` and `mem_map_cap` (0 once ended); processes it started, they started, and so on, still running; other `what` is `TOO_LARGE` | process, `WAIT` |
+| 27 | `fs_mount` (M4.3, D-028; **planned**, [boot.md](boot.md#the-kernel-call-fsmount)) | filesystem handle with `MOUNT`, `Memory` handle, offset, length (≤ 16 MiB) | a new filesystem handle over a kernel-owned copy | filesystem `MOUNT` (`init` only); memory `READ` |
 
 Error codes (`rax`):
 
@@ -170,6 +171,7 @@ Error codes (`rax`):
 | 10 | `BAD_PROGRAM` | `spawn`: the file is not a valid program (M2.10) |
 | 11 | `WOULD_BLOCK` | Non-blocking `send`: no receiver was waiting; nothing was queued (M2.10) |
 | 12 | `TIMED_OUT` | `receive`, `call`, or `irq_wait`: nothing arrived before the timeout, rounded up to the 10 ms tick plus one ([user-environment.md](user-environment.md#timeouts), M3.0) |
+| 13 | `BAD_IMAGE` | `fs_mount`: the bytes are not a valid filesystem image (M4.3, **planned**) |
 
 ### Programs for tests
 

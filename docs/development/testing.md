@@ -211,6 +211,7 @@ Why the split: the kernel targets bare metal (`x86_64-unknown-none`, decision D-
 | QEMU kernel tests | M2.3 onward | One test kernel per subsystem in `kernel/tests/`; M2.4 added interrupt state, GDT, exceptions, double fault, and APIC timer tests; M2.5 memory tests; M2.6 timer, task, task stack overflow, and preemption tests |
 | Isolation and fuzz tests | M2.7 | Attempt forbidden memory access and invalid syscalls; fuzz syscall argument handling |
 | Agent adversarial tests | M3.4 | Capability bypass attempts, prompt-injection suites, resource exhaustion |
+| Recovery and update tests | M4.3 | Host tests of image verification and slot selection; QEMU boots on one store disk with corrupted, unsigned, and never-ready slots, a corrupted `root` module, updates approved, refused, and rolled back, and a malfunctioning agent ([boot.md](../architecture/boot.md#tests)) |
 | Release matrix | M5.1 | Firmware, memory sizes, CPU models; long-running stability |
 
 QEMU is not used by any test today, and none should be described as passing until it exists.
