@@ -1208,7 +1208,9 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
     let store = iso.with_file_name(STORE_IMAGE);
     match boot_audit(&store) {
         Ok(n) => {
-            println!("boot audit trail: {n} streams, each with a start record for every service")
+            println!(
+                "boot audit trail: {n} streams, each with a start record for every service and the ready state"
+            )
         }
         Err(reason) => return Err(format!("boot audit trail ({}): {reason}", store.display())),
     }
@@ -1217,19 +1219,21 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
 }
 
 /// The boot's services, as `init`'s boot table names them.
-const BOOT_SERVICES: [&str; 7] = [
+const BOOT_SERVICES: [&str; 8] = [
     "virtio-blk",
     "net",
     "store",
     "infer",
     "audit",
+    "knowledge",
     "trust",
     "agents",
 ];
 
 /// Every audit stream the boot checks left verifies, and `init` (client 1)
 /// recorded a start for each boot service in each, including those started
-/// before the audit service was ready (#108). Returns the stream count.
+/// before the audit service was ready (#108), and that the system was
+/// ready with every one of them (#151). Returns the stream count.
 fn boot_audit(store: &Path) -> Result<usize> {
     let streams = store_image::audit(store)?;
     if streams.len() != 2 {
@@ -1241,6 +1245,13 @@ fn boot_audit(store: &Path) -> Result<usize> {
             if !lines.iter().any(|l| l.contains(&want)) {
                 return Err(format!("{name} has no start record for {service}"));
             }
+        }
+        let ready = format!(
+            "client 1 Event service init task 0/0  init outcome 1 ready {} services",
+            BOOT_SERVICES.len()
+        );
+        if !lines.iter().any(|l| l.ends_with(&ready)) {
+            return Err(format!("{name} has no record that the system was ready"));
         }
     }
     Ok(streams.len())

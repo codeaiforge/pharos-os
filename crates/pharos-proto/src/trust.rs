@@ -49,6 +49,105 @@ pub mod op {
     pub const GROUP_USED: u8 = 8;
     /// Confirm one call of a sensitive tool (#128).
     pub const CONFIRM: u8 = 9;
+    /// A service event or the system's ready state, from `init` (#151).
+    pub const SERVICE: u8 = 10;
+}
+
+/// What happened to a service, or to the system (#151, D-026).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Event {
+    /// Exited with `numbers[0]`.
+    Exited = 0,
+    /// Killed by vector `numbers[0]`.
+    Killed = 1,
+    /// Sent no `ready` within 10 s, so stopped.
+    NoReady = 2,
+    /// A service it depends on failed.
+    Skipped = 3,
+    /// Restart `numbers[0]` of `numbers[1]` in `numbers[2]` ms; `names`
+    /// are the services that depend on it.
+    Restarting = 4,
+    /// Not restarted: its restarts are used up.
+    GivenUp = 5,
+    /// Not restarted: its policy is never.
+    Never = 6,
+    /// Stopped by the user; never restarted.
+    Stopped = 7,
+    /// The system is ready: `numbers[0]` services (no name).
+    Ready = 8,
+    /// The system is not ready: `numbers[0]` failed, `names` (no name).
+    NotReady = 9,
+}
+
+impl Event {
+    fn from_code(c: u8) -> Option<Self> {
+        use Event::*;
+        [
+            Exited, Killed, NoReady, Skipped, Restarting, GivenUp, Never, Stopped, Ready, NotReady,
+        ]
+        .get(usize::from(c))
+        .copied()
+    }
+
+    /// True for the system's state, which names no service.
+    pub fn system(self) -> bool {
+        matches!(self, Self::Ready | Self::NotReady)
+    }
+}
+
+/// Most names one `SERVICE` lists.
+pub const MAX_NAMES: usize = 8;
+
+/// A list of names on the wire: a count, then each name's length and
+/// bytes, each a [`valid_name`]. Built with [`Names::build`], read with
+/// [`Names::iter`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Names<'a>(&'a [u8]);
+
+impl<'a> Names<'a> {
+    /// `names` in wire form in `out`; `None` if one is not a valid name,
+    /// there are more than [`MAX_NAMES`], or they do not fit.
+    pub fn build(names: &[&[u8]], out: &'a mut [u8]) -> Option<Self> {
+        if names.len() > MAX_NAMES || !names.iter().all(|n| valid_name(n)) {
+            return None;
+        }
+        let mut w = Writer::new(out);
+        w.bytes(&[names.len() as u8])?;
+        for n in names {
+            w.bytes(&[n.len() as u8])?;
+            w.bytes(n)?;
+        }
+        let len = w.len();
+        Some(Self(&out[..len]))
+    }
+
+    fn read(r: &mut Reader<'a>) -> Option<Self> {
+        let start: &'a [u8] = r.0;
+        let count = usize::from(r.u8()?);
+        if count > MAX_NAMES {
+            return None;
+        }
+        // No names reads back as the default, as it was built.
+        if count == 0 {
+            return Some(Self::default());
+        }
+        for _ in 0..count {
+            let len = usize::from(r.u8()?);
+            r.take(len).filter(|n| valid_name(n))?;
+        }
+        Some(Self(&start[..start.len() - r.0.len()]))
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = &'a [u8]> {
+        let mut rest = self.0.get(1..).unwrap_or(&[]);
+        core::iter::from_fn(move || {
+            let (&len, tail) = rest.split_first()?;
+            let (name, tail) = tail.split_at(usize::from(len));
+            rest = tail;
+            Some(name)
+        })
+    }
 }
 
 /// How an approval request ended.
@@ -146,6 +245,15 @@ pub enum Request<'a> {
         pages: u32,
         tokens: u32,
         bytes: u32,
+    },
+    /// A service event or the system's state, from `init` (#151): `name`
+    /// is the service's table name (empty for the system), and `trust`
+    /// writes the line from these fields.
+    Service {
+        event: Event,
+        name: &'a [u8],
+        numbers: [u32; 3],
+        names: Names<'a>,
     },
 }
 
@@ -250,6 +358,22 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                 outcome,
                 name,
                 permission,
+            })
+        })(),
+        op::SERVICE => (|| {
+            let event = Event::from_code(r.u8()?)?;
+            let len = usize::from(r.u8()?);
+            let name = r.take(len)?;
+            if event.system() != name.is_empty() || !(name.is_empty() || valid_name(name)) {
+                return None;
+            }
+            let numbers = [r.u32()?, r.u32()?, r.u32()?];
+            let names = Names::read(&mut r)?;
+            Some(Request::Service {
+                event,
+                name,
+                numbers,
+                names,
             })
         })(),
         _ => None,
@@ -364,6 +488,22 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             for v in [running, pages, tokens, bytes] {
                 w.u32(v)?;
             }
+        }
+        Request::Service {
+            event,
+            name,
+            numbers,
+            names,
+        } => {
+            if event.system() != name.is_empty() || !(name.is_empty() || valid_name(name)) {
+                return None;
+            }
+            w.bytes(&[VERSION, op::SERVICE, event as u8, name.len() as u8])?;
+            w.bytes(name)?;
+            for v in numbers {
+                w.u32(v)?;
+            }
+            w.bytes(if names.0.is_empty() { &[0] } else { names.0 })?;
         }
     }
     Some(w.len())
@@ -635,6 +775,83 @@ mod tests {
             other[0] = VERSION + 1;
             assert_eq!(parse(&other[..n]), Err(Refused::Version));
         }
+    }
+
+    #[test]
+    fn service_events_round_trip_and_bad_ones_are_refused() {
+        let long = [b'a'; MAX_NAME];
+        let mut wire = [0u8; 300];
+        let eight: [&[u8]; 8] = [
+            &long,
+            &long,
+            &long,
+            b"d",
+            b"e",
+            b"f",
+            b"g",
+            b"after-crasher",
+        ];
+        let names = Names::build(&eight, &mut wire).unwrap();
+        assert_eq!(names.iter().collect::<std::vec::Vec<_>>(), eight);
+        let ev = |event, name, names| Request::Service {
+            event,
+            name,
+            numbers: [1, u32::MAX, 1600],
+            names,
+        };
+        let mut few = [0u8; 40];
+        let two = Names::build(&[b"infer", b"client"], &mut few).unwrap();
+        for req in [
+            ev(Event::Restarting, &b"store"[..], names),
+            ev(Event::Restarting, b"store", two),
+            ev(Event::Killed, &long, Names::default()),
+            ev(Event::Ready, b"", Names::default()),
+            ev(Event::NotReady, b"", two),
+        ] {
+            let mut buf = [0u8; 256];
+            let n = encode(&req, &mut buf).unwrap();
+            assert_eq!(parse(&buf[..n]), Ok(req));
+            assert_eq!(parse(&buf[..n + 1]), Err(Refused::Bad), "{req:?} + byte");
+            for cut in 0..n {
+                assert!(parse(&buf[..cut]).is_err(), "{req:?} cut at {cut}");
+            }
+        }
+        let nine: [&[u8]; 9] = [b"a"; 9];
+        assert_eq!(Names::build(&nine, &mut [0; 40]), None, "nine names");
+        assert_eq!(Names::build(&[b"a b"], &mut [0; 40]), None, "a space");
+        for bad in [
+            ev(Event::Ready, b"store", Names::default()),
+            ev(Event::Exited, b"", Names::default()),
+            ev(Event::Exited, b"a b", Names::default()),
+        ] {
+            assert_eq!(encode(&bad, &mut [0; 256]), None, "{bad:?}");
+        }
+        // On the wire: an unknown event, nine names, and a bad listed name.
+        let msg = |event: u8, list: &[u8]| {
+            let mut m = std::vec![VERSION, op::SERVICE, event, 1, b's'];
+            m.extend_from_slice(&[0; 12]);
+            m.extend_from_slice(list);
+            m
+        };
+        assert!(parse(&msg(4, &[1, 1, b'a'])).is_ok());
+        assert_eq!(parse(&msg(10, &[0])), Err(Refused::Bad), "event 10");
+        let mut many = std::vec![9];
+        for _ in 0..9 {
+            many.extend_from_slice(&[1, b'a']);
+        }
+        assert_eq!(parse(&msg(4, &many)), Err(Refused::Bad), "nine names");
+        assert_eq!(parse(&msg(4, &[1, 3, b'a', b' ', b'b'])), Err(Refused::Bad));
+        crate::fuzz(100_000, 6, |m| {
+            let mut v = std::vec![VERSION, op::SERVICE];
+            v.extend_from_slice(m);
+            if let Ok(Request::Service {
+                event, name, names, ..
+            }) = parse(&v)
+            {
+                assert!(event.system() == name.is_empty());
+                assert!(names.iter().all(valid_name) && names.iter().count() <= MAX_NAMES);
+            }
+        });
     }
 
     #[test]

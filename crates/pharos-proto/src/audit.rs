@@ -83,7 +83,10 @@ pub mod action {
     /// A new knowledge version (#144): key, replaced version, kind, and
     /// length as detail, never the content.
     pub const KNOWLEDGE: u8 = 18;
-    pub const LAST: u8 = KNOWLEDGE;
+    /// A service event from `init` (#151, D-026): a failure, skip,
+    /// restart, or stop, or the system's ready state, as detail.
+    pub const SERVICE: u8 = 19;
+    pub const LAST: u8 = SERVICE;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -106,6 +109,7 @@ pub mod action {
             "message",
             "verify",
             "knowledge",
+            "service",
         ]
         .get(usize::from(code))
         .copied()

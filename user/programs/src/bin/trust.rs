@@ -44,7 +44,8 @@ use pharos_programs::virtio_console::{Console, RX_BUFFER};
 use pharos_proto::knowledge::{self, Author};
 use pharos_proto::permission::Permission;
 use pharos_proto::trust::{
-    self, Command, INIT, Line, Lines, MAX_NAME, Outcome, RUNTIME, Request, SLOTS, parse,
+    self, Command, Event, INIT, Line, Lines, MAX_NAME, MAX_NAMES, Names, Outcome, RUNTIME, Request,
+    SLOTS, parse,
 };
 use pharos_proto::{agents, audit, status};
 use pharos_user::{
@@ -572,6 +573,17 @@ impl Trust {
                     let _ = delete(cap);
                 }
             }
+            Ok(Request::Service {
+                event,
+                name,
+                numbers,
+                names,
+            }) if badge == INIT => {
+                self.service(event, name, numbers, names);
+                if cap != 0 {
+                    let _ = delete(cap);
+                }
+            }
             Ok(Request::Runtime) if badge == INIT && valid => {
                 if let Some(old) = self.runtime.replace(cap) {
                     let _ = delete(old);
@@ -599,6 +611,53 @@ impl Trust {
                 }
             }
         }
+    }
+}
+
+impl Trust {
+    /// A service event or the system's state from `init` (#151), written
+    /// from its fields: names from `init`'s table, numbers, fixed words.
+    fn service(&mut self, event: Event, name: &[u8], n: [u32; 3], names: Names<'_>) {
+        let mut d = [[0u8; 20]; 3];
+        let [a, b, c] = &mut d;
+        let [n0, n1, n2] = n.map(u64::from);
+        // At most 9 fixed parts, then 2 per listed name.
+        let mut parts: [&[u8]; 9 + 2 * MAX_NAMES] = [b""; 9 + 2 * MAX_NAMES];
+        let fixed: &[&[u8]] = match event {
+            Event::Ready => &[b"system ready: ", decimal(n0, a), b" services"],
+            Event::NotReady => &[b"system not ready: ", decimal(n0, a), b" failed"],
+            Event::Exited => &[b"service ", name, b" exited ", decimal(n0, a)],
+            Event::Killed => &[b"service ", name, b" killed ", decimal(n0, a)],
+            Event::NoReady => &[b"service ", name, b" sent no ready within 10 s; stopped"],
+            Event::Skipped => &[b"service ", name, b" skipped: a service it needs failed"],
+            Event::Restarting => &[
+                b"service ",
+                name,
+                b" restarting ",
+                decimal(n0, a),
+                b" of ",
+                decimal(n1, b),
+                b" in ",
+                decimal(n2, c),
+                b" ms",
+            ],
+            Event::GivenUp => &[b"service ", name, b" not restarted: restarts used up"],
+            Event::Never => &[b"service ", name, b" not restarted: restart policy never"],
+            Event::Stopped => &[b"service ", name, b" stopped; not restarted"],
+        };
+        parts[..fixed.len()].copy_from_slice(fixed);
+        let mut k = fixed.len();
+        let lead: &[u8] = if event == Event::Restarting {
+            b"; used by "
+        } else {
+            b": "
+        };
+        for (i, n) in names.iter().enumerate() {
+            parts[k] = if i == 0 { lead } else { b", " };
+            parts[k + 1] = n;
+            k += 2;
+        }
+        self.say(&parts[..k]);
     }
 }
 

@@ -28,11 +28,12 @@ use pharos_proto::audit;
 use pharos_proto::infer::{self, Request as InferRequest};
 use pharos_proto::net::{self, Allowed, Dest, Request as NetRequest};
 use pharos_proto::store::{self, Request as StoreRequest};
+use pharos_proto::trust::{self, Event, Names};
 use pharos_user::rights::{CONFIG, GRANT, IRQ, MAP, READ, RECEIVE, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
     Class, Error, Grant, Handle, Limits, MAX_SPAWN_CAPS, Received, Status, call_timeout,
     config_read, debug_write, endpoint_create, open, process_status, receive_timeout, send,
-    spawn_with, uptime,
+    spawn_with, try_send, uptime,
 };
 
 pharos_user::entry!(main);
@@ -785,6 +786,89 @@ impl Init {
         }
     }
 
+    /// True if the entry running `path` has succeeded.
+    fn up(&self, path: &[u8]) -> bool {
+        (self.table.iter())
+            .position(|s| s.path == path)
+            .is_some_and(|i| matches!(self.state[i], State::Ok(_)))
+    }
+
+    /// A `service` event in the audit trail (#151), once the audit service
+    /// is ready (before then only the services it needs can fail).
+    fn record(&self, actor: &[u8], detail: &[u8]) {
+        if !self.up(b"bin/audit") {
+            return;
+        }
+        let entry = audit::Entry {
+            kind: audit::Kind::Event,
+            refers: 0,
+            actor,
+            task: 0,
+            attempt: 0,
+            action: audit::action::SERVICE,
+            permission: None,
+            service: b"init",
+            outcome: audit::outcome::OK,
+            detail: &detail[..detail.len().min(audit::MAX_DETAIL)],
+        };
+        let mut msg = [0u8; 256];
+        if let Some(n) = audit::encode(&audit::Request::Append(entry), &mut msg) {
+            let mut out = [0u8; 256];
+            let _ = call_timeout(self.audit, &msg[..n], self.reply, &mut out, AUDIT_US);
+        }
+    }
+
+    /// Tells `trust` (#151), if it runs, trying for at most 100 ms: it
+    /// waits in `receive` almost always, and `init` never waits on it.
+    fn tell_trust(&self, req: &trust::Request<'_>) {
+        let mut msg = [0u8; 256];
+        let Some(n) = trust::encode(req, &mut msg).filter(|_| self.up(b"bin/trust")) else {
+            return;
+        };
+        for _ in 0..10 {
+            if try_send(self.trust, &msg[..n]).is_ok() {
+                return;
+            }
+            pharos_user::sleep(10_000);
+        }
+    }
+
+    /// The system's state after the boot sequence (#151): ready if every
+    /// entry succeeded, else what failed; to the trail and `trust`. The
+    /// kernel gets its `[ready, failed]` as before.
+    fn report_ready(&self, ready: usize) {
+        let failed: alloc::vec::Vec<&[u8]> = (self.table.iter().zip(&self.state))
+            .filter(|(_, s)| !matches!(s, State::Ok(_) | State::Done))
+            .map(|(t, _)| t.name.as_bytes())
+            .collect();
+        let mut d = [0u8; 20];
+        let detail = if failed.is_empty() {
+            [&b"ready "[..], decimal(ready as u64, &mut d), b" services"].concat()
+        } else {
+            let mut v = [
+                &b"not ready "[..],
+                decimal(failed.len() as u64, &mut d),
+                b" failed: ",
+            ]
+            .concat();
+            v.extend_from_slice(&failed.join(&b", "[..]));
+            v
+        };
+        self.record(b"init", &detail);
+        let mut wire = [0u8; 200];
+        let shown = &failed[..failed.len().min(trust::MAX_NAMES)];
+        let (event, count) = match failed.len() {
+            0 => (Event::Ready, ready),
+            n => (Event::NotReady, n),
+        };
+        self.tell_trust(&trust::Request::Service {
+            event,
+            name: b"",
+            numbers: [count as u32, 0, 0],
+            names: Names::build(shown, &mut wire).unwrap_or_default(),
+        });
+    }
+
     /// Tells the storage and inference services that service `i`'s
     /// capabilities on them are gone, so they free its slots (#100).
     fn release(&self, i: usize) {
@@ -1068,6 +1152,9 @@ fn main(arg: u64) -> u64 {
         .filter(|s| matches!(s, State::Ok(_) | State::Done))
         .count();
     let failed = table.len().min(MAX_SERVICES) - ready;
+    // The trail and `trust` first: the kernel may end the boot check
+    // once it has the summary.
+    init.report_ready(ready);
     let _ = send(REPORT, &[ready as u8, failed as u8], 0, 0, 0);
 
     // Keep supervising: restarts, and `ready` from restarted daemons.
