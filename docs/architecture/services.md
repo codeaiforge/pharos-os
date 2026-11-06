@@ -3,6 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-28 (M2.10, #59). It follows [D-015](../project/decision-log.md#d-015-network-stack-and-service-model) (as amended on 2026-10-28: badges instead of per-client endpoints), [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism) (IPC), and [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries). Networking is in [networking.md](networking.md).
+- **M4.1 (D-026, #149):** restart policies, the ready state, and failure reporting below are **planned**. Design approved by the maintainer on 2026-11-06 (#149), with a daemon that sends no `ready` in 10 s counted as a crash.
 - **Implementation:** `endpoint_create`, `spawn`, `process_status`, badges, and endpoint notifications are **implemented** (#60: `cap::Capability::derive_badged`, `ipc::Endpoint::signal`, `process::ProcessRecord`, `pharos_user::{spawn, Grant, Received, Status}`; tested by the `spawn` test kernel with the `spawner` and `child` programs). So is `init` (#61: `user/programs/src/bin/init.rs`, `process::init_capabilities`, `ipc::poll` for the kernel's wait on the report; the main kernel starts it at boot, and the `services` test kernel runs its test table with the `svc` program). The boot table has `virtio-blk`, the network service (#63), and the storage service on the second virtio-blk disk with a 1 GiB page limit (#77; entries carry a `limit` and `Cap::SecondDevice` picks the second device with an ID), and the inference service with a 1 GiB limit, its endpoint, and a read-only `models` storage capability (#88, `Cap::InferService` and `Cap::Storage`; [inference.md](inference.md)), and the trusted service `trust` with the virtio-console device (`1af4:1043`, now in `process::INIT_DEVICES`), its endpoint, and the report endpoint (#96, `Cap::TrustService`; [agents.md](agents.md#the-trusted-path-96)), and the agent runtime `agents` after it, with a 64 MiB limit, its endpoint with `RECEIVE`, `SEND`, and `GRANT` (so it can give each agent a badged `SEND`), the root filesystem read-only, inference client 1, and `SEND` on `trust` badged as the runtime (#98, `Cap::AgentsService`, `Cap::Root`, `Cap::Inference`, `Cap::TrustRuntime`), and storage namespace `agents` read-write for its tasks (#99, `Cap::Storage(5)`), so it starts after the storage service. Right after starting the runtime, `init` sends `trust` its process capability with `STOP` and `WAIT` through `init`'s own unbadged handle; if that fails, it stops the runtime. So is `irq_notify` (#62: `irq::Vectors::bind`, kernel-side bindings beside the vector table). So are `call` and non-blocking `send` (#63: `ipc::call`, `ipc::try_send`, `Endpoint::offer_now`, `Endpoint::is_idle`).
 
 ## 2. Context
@@ -134,6 +135,29 @@ That is, for a notification, bits 32–63 hold the 32 notification bits.
 - **The kernel** polls the report endpoint (a kernel task has no inbox, so it uses `Endpoint::try_take`) for up to 30 s, and prints the summary. Under QEMU it then prints `PHAROS: boot ok` and signals success only if no service failed. If no report arrives in 30 s, the boot fails. A boot with a failing service fails the boot check, so CI catches broken services.
 - **Limit:** there are no timeouts. A daemon that never reports ready stalls `init`, and the boot check fails at its 60 s limit instead of passing.
 
+### Supervision and readiness (M4.1, D-026)
+
+Builds on M3.3's supervision (#100): a crashed daemon restarted at once, at most 3 times; one that sends no `ready` within 10 s stopped; one the user stopped never restarted. D-026 (#148) changes what follows.
+
+**Restart policies (#150).**
+- Each table entry gets `restart`: `Never`, or `Up(n)`, up to `n` restarts. One-shot services and `virtio-blk` are `Never`; every boot daemon is `Up(3)`, as today. The rules are a small host-tested module, `pharos_programs::supervise`: `delay(policy, done)` gives the wait before restart `done + 1`, or none once the restarts are used up.
+- **A growing delay:** 100 ms × 4ⁿ (0.1, 0.4, 1.6 s for `Up(3)`). `init` keeps a restart deadline per service beside the `ready` deadlines and starts it when that passes; a crash loop costs at most one start per delay. Meanwhile its clients get timeouts and mark it stalled, as they do now (#117).
+- **Unchanged:** a daemon that sends no `ready` within 10 s is stopped and counted as a crash (so its policy applies; today it is never restarted); a service stopped by the user is never restarted, whatever its policy; restarts count per boot (open question below).
+- **Dependents** (the entries whose `after` names it, directly or through others) are named in the restart's report and keep running; they reach the new instance on the same endpoint (storage, inference, and knowledge clients attach their buffers again on `NO_BUFFER`).
+
+**The ready state (#151).**
+- After the last entry, `init` decides: **ready** if every entry succeeded (a daemon that sent `ready`, a one-shot that exited 0). The agent runtime sends `ready` only after loading its policy table and tasks and giving `trust` its channel, and `trust` only with its console set up, so ready covers the agent platform.
+- **Reported three ways:** to the kernel as now (`[ready, failed]`, which the boot check reads); as an audit record (actor `init`, action `service`, detail `ready <n> services` or `not ready <failed> failed`); and to `trust`, which prints `system ready: <n> services` or `system not ready: <names>` (names cut to fit the line).
+
+**Reporting (#152).**
+- **Events:** `failed` (exited with a code, killed with a vector, or no `ready` in 10 s), `skipped` (a dependency failed), `restarting` (its number, of how many, and the delay), `given up` (restarts used up), and `stopped` (by the user; not restarted).
+- **In the audit trail:** each event is a record with the new action `service` (19): actor the service's table name, detail the event, its numbers, and for a restart the dependents (cut to 64 bytes). Events before the audit service is ready are only on the debug console: only the services the audit service depends on can fail then.
+- **On the trusted console:** `init` sends `trust` a new request, `SERVICE` (badge `trust::INIT` only): the service's name from `init`'s table, the event, and its numbers, never text from the service. `trust` prints `service <name> <event> …`. `init` tries for at most 100 ms (`trust` waits in `receive` almost always) and never waits on it longer; a lost line is still in the audit trail and in `services`.
+- **`services` on the trusted console:** `trust` asks `init` with a call on the report capability it already holds (badged with its table index; `init` answers only that badge), new operation `SERVICES` (from an index, for paging); `init` answers each service's name, state (`starting`, `ready`, `done`, `restarting`, `failed`, `skipped`, `stopped`), restarts done, and its policy's limit. `trust` prints one line each, or `services: init is not answering` after 1 s. `init`'s answer is the authoritative state; `trust` keeps none.
+- **The interface:** `pharos_proto::service` (D-019): `SERVICE`, `SERVICES`, and its reply, version 1, host-tested and fuzzed like the other interfaces.
+
+**The end-to-end test (#153).** A new test kernel, `system`, boots `init` with the boot table and the boot image's disks and devices, and checks ready on the trusted console and in the trail; then kills the knowledge service (restarted after its delay, its dependents named), stops `net` itself (as a stop, never restarted; `trust` stops agents, not services), and kills one service past its restarts (given up); `services` shows each state, and every event is one audit record.
+
 ## 4. Security
 
 - **The trust boundary is unchanged:** every process, `init` included, is untrusted by the kernel. `init` holds the most authority (every device, the root filesystem). It is small, and its service table is reviewed code.
@@ -159,6 +183,10 @@ That is, for a notification, bits 32–63 hold the 32 notification bits.
 | QEMU, `spawn` | A parent starts a child with two capabilities (one badged); the child uses them; the parent gets the exit notification and code. A killed child reports its vector. Refused, with no frame lost: a file without `READ`, a capability without `GRANT`, a malformed program, more than 12 capabilities (12 accepted, #144), the process limit |
 | QEMU, `services` | `init` with a test table: services start in order; a crashing service is reported by name and its dependents skipped, while independent ones still start; a missing program is reported; the summary reaches the kernel |
 | Boot check | The main kernel starts `init`, the boot services succeed, and `PHAROS: boot ok` follows the summary |
+| Host, `pharos_programs::supervise` (#150) | `delay` for `Never` and `Up(n)`: 0.1, 0.4, 1.6 s, then none; dependents through `after`, directly and through others |
+| Host, `pharos_proto::service` (#152) | `SERVICE`, `SERVICES`, and the reply round-trip; truncated, trailing, and unknown fields refused; fuzzed |
+| QEMU, `supervision` (#150, #152) | each policy: `Never` not restarted, `Up(n)` restarted n times no sooner than each delay, then given up; no `ready` in 10 s counted as a crash; a stopped service never restarted; each event one audit record and one `trust` line; mutation-checked |
+| QEMU, `system` (#151, #153) | the boot table to ready (console and trail), a restart with its dependents, a stop, a give-up, `services`; mutation-checked |
 
 ## 6. Alternatives
 
@@ -170,6 +198,6 @@ That is, for a notification, bits 32–63 hold the 32 notification bits.
 ## 7. Open questions
 
 - **Timeouts:** a timer notification source, so `init` can give up on a stuck service.
-- **Restarts** and a supervision policy.
+- **Restart counts per boot** (D-026): a service that crashes once a week gives up after its third crash. Recommended for M4.1: keep per boot, and reset a count once the service has been ready for some time if a real service needs it.
 - **Killing a process** through its capability.
 - **Loading the service table from a file** instead of compiling it in.
