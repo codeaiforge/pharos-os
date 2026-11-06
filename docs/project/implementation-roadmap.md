@@ -501,7 +501,7 @@ Ordering notes:
 
 ### M4.2 — Security model and privilege separation
 
-- **Objective and scope:** Apply the security model system-wide: each service runs with minimal capabilities. **Status: Current.**
+- **Objective and scope:** Apply the security model system-wide: each service runs with minimal capabilities. **Status: Current.** Issues #155–#159. D-027 accepted (#155): the manifest is `init`'s table entry made explicit (each capability's object, rights, and badge) with declared runtime gains, checked by a capability audit test kernel. Next: the design (#156).
 - **Deliverables:** Per-service capability manifests; privilege-separation review.
 - **Prerequisites:** M4.1, M3.4.
 - **Acceptance criteria:** No user-space service holds capabilities beyond its manifest; tests confirm.
@@ -668,6 +668,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-024 | Agent communication and coordination | M3.7 | **Accepted** (#131): channels through the runtime, granted by policy, carrying data only; groups in policy with a supervisor submitting subtasks to its workers; delegation of a subset of the supervisor's grants to a subtask, recorded and revoked with the source; a compiled-in verifier before a goal is done |
 | D-025 | The knowledge service | M3.8 | **Accepted** (#140): a new `knowledge` service on its own store namespace, reached by agents only through the runtime; append-only versions; scopes granted as runtime permissions (`knowledge read`/`write <scope>`), with queries that skip what the caller, or the evidence it cites, cannot read; only the user marks a version verified, on the trusted console |
 | D-026 | Service manager: restart policies, ready state, reporting | M4.1 | **Accepted** (#148): a restart policy per table entry (never, or up to N with a growing delay), dependents reported and not restarted, a stopped service never; ready means every boot service and the agent platform, reported to the kernel, the audit trail, and the trusted console; every failure, skip, and restart audited and shown by `trust` from structured fields, with a `services` command |
+| D-027 | Per-service capability manifests and how they are checked | M4.2 | **Accepted** (#155): the manifest is `init`'s table entry, each capability's object, rights, and badge written out, plus each service's declared runtime gains; enforced by construction and checked by a capability audit test kernel at ready and after faults; no manifest file, no new kernel call |
 
 ## Next milestone
 
