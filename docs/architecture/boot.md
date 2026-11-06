@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** Accepted (2026-10-26), based on decisions [D-001, D-002, D-003](../project/decision-log.md#accepted-decisions-m21).
-- **Recovery and updates (M4.3, D-028, #161):** **proposed**, awaiting the maintainer; [part 8](#8-recovery-and-updates-m43-d-028) is **planned, not implemented**.
+- **Recovery and updates (M4.3, D-028, #161):** design **approved** (2026-11-06); [part 8](#8-recovery-and-updates-m43-d-028) is **planned, not implemented**.
 - **Implementation:** Implemented in [M2.2](../project/implementation-roadmap.md#m22--minimal-bootable-x86-64-kernel) and [M2.3](../project/implementation-roadmap.md#m23--early-serial-output-and-qemu-boot-validation); the kernel boots on UEFI and BIOS and CI checks it. A throwaway prototype validated this design first ([evidence](boot-evaluation.md#prototype-evidence-3)). Exceptions and interrupts: [interrupts.md](interrupts.md).
 
 ## 2. Context
@@ -126,7 +126,7 @@ See the [boot evaluation](boot-evaluation.md#d-001--bootloader-and-boot-protocol
 
 ## 8. Recovery and updates (M4.3, D-028)
 
-**Planned, not implemented.** Design proposed (#161), awaiting the maintainer. It follows [D-028](../project/decision-log.md#d-028-boot-recovery-known-good-images-and-signed-updates): an update replaces only the root image; a factory image on the boot medium is always the fallback; `init` verifies and selects; signature and the user's yes before an update is applied.
+**Planned, not implemented.** Design approved (#161, 2026-11-06). It follows [D-028](../project/decision-log.md#d-028-boot-recovery-known-good-images-and-signed-updates): an update replaces only the root image; a factory image on the boot medium is always the fallback; `init` verifies and selects; signature and the user's yes before an update is applied.
 
 ### Images
 
