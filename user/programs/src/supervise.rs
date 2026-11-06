@@ -44,6 +44,20 @@ pub fn dependents(after: &[&[usize]], i: usize) -> Vec<usize> {
     found
 }
 
+/// `text` cut to at most `max` bytes after a `,` or `;` (then ` ...`), so
+/// a cut list never ends in part of a name (M4.1 review, F1); `text`
+/// itself if it fits, its first `max` bytes if it has no such place.
+pub fn cut_list(text: &[u8], max: usize) -> Vec<u8> {
+    if text.len() <= max {
+        return text.to_vec();
+    }
+    let room = max.saturating_sub(4);
+    match text[..room].iter().rposition(|b| matches!(b, b',' | b';')) {
+        Some(i) => [&text[..=i], b" ..."].concat(),
+        None => text[..max].to_vec(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +83,29 @@ mod tests {
         assert_eq!(dependents(&after, 2), [3]);
         assert_eq!(dependents(&after, 3), [] as [usize; 0]);
         assert_eq!(dependents(&after, 4), [5]);
+    }
+
+    #[test]
+    fn lists_are_cut_after_a_whole_name() {
+        let line = b"restarting 1 of 3 in 100 ms; used by audit, trust, infer, client, holder";
+        let cut = cut_list(line, 64);
+        assert_eq!(
+            cut,
+            b"restarting 1 of 3 in 100 ms; used by audit, trust, infer, ..."
+        );
+        assert!(cut.len() <= 64);
+        assert_eq!(cut_list(b"killed 13", 64), b"killed 13");
+        assert_eq!(cut_list(&line[..64], 64), &line[..64], "exactly the limit");
+        // Only the dependents part is a list.
+        assert_eq!(
+            cut_list(b"used by audit-and-trust-infer", 12),
+            b"used by audi"
+        );
+        assert_eq!(cut_list(b"ab; cdefgh", 8), b"ab; ...");
+        for max in 0..line.len() + 2 {
+            let c = cut_list(line, max);
+            assert!(c.len() <= max.max(0), "{max}");
+            assert!(c.ends_with(b" ...") || line.starts_with(&c) || c.is_empty());
+        }
     }
 }

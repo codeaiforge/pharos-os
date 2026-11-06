@@ -897,7 +897,7 @@ impl Init {
             permission: None,
             service: b"init",
             outcome: audit::outcome::OK,
-            detail: &detail[..detail.len().min(audit::MAX_DETAIL)],
+            detail: &supervise::cut_list(detail, audit::MAX_DETAIL),
         };
         self.append(&entry);
     }
@@ -931,7 +931,7 @@ impl Init {
 
     /// Service `j`'s event (#152): `init: <name> <what>` on the debug
     /// console, an audit record (actor its name, detail `what`, cut to 64
-    /// bytes), and `SERVICE` to `trust`, which writes its own line from
+    /// bytes after a whole name), and `SERVICE` to `trust`, which writes its own line from
     /// `event`, `numbers`, and `names`, never from `what`.
     fn event(&mut self, j: usize, what: &[u8], event: Event, numbers: [u32; 3], names: &[&[u8]]) {
         let name = self.table[j].name.as_bytes();
