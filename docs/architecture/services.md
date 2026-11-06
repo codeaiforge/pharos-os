@@ -169,7 +169,7 @@ Builds on M3.3's supervision (#100): a crashed daemon restarted at once, at most
 
 ### Capability manifests (M4.2, D-027)
 
-**Planned, not implemented** (design for #156, awaiting the maintainer). D-027 (#155): a service's manifest is its `init` table entry, every capability written out, plus what it may gain while it runs; `init` grants exactly it, and a capability audit checks every live service against it.
+**Planned, not implemented.** Design approved (#156, 2026-11-06). D-027 (#155): a service's manifest is its `init` table entry, every capability written out, plus what it may gain while it runs; `init` grants exactly it, and a capability audit checks every live service against it.
 
 **Where the manifests live.** A new crate, `crates/pharos-services` (`no_std`, no dependencies), holds the table types and the tables (boot and test) now in `init`, and `Restart` (from `pharos_programs::supervise`, which keeps `delay` and `dependents`). `init` uses it, and so do the host tests and the audit test kernel, so all three read the same manifests. The kernel uses it only as a dev-dependency of its test kernels: nothing joins the kernel itself.
 
