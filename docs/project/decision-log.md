@@ -841,6 +841,32 @@ Two system calls per direction plus two task switches and two address-space swit
 
 **Consequences.** One new service and store namespace, new runtime requests and two permission kinds, a trusted-console command, and a kernel limit raised. Stale and conflicting entries are derived from versions and provenance (the rules are in the design, #141). A poisoned entry can still mislead an agent that reads it, but it carries its author, source, and unverified status, and gives no authority.
 
+### D-026: Service manager: restart policies, ready state, and reporting
+
+- **Status:** Accepted
+- **Needed by:** M4.1
+- **Date accepted:** 2026-11-06 (issue #148)
+
+**Context.** M4.1 boots into a complete user space under a service manager: services with declared dependencies and restart policies, a defined "ready" state, and each service failure reported. Most of it exists; this decides what `init` adds.
+
+**Evidence (2026-11-06, issue #148):**
+- **`init` (M2.10, #61)** starts a compiled-in table in order, each entry naming the services it depends on; a service whose dependency failed is skipped and reported; after the last one it sends the kernel `[ready, failed]`, and the boot check fails on any failure.
+- **Supervision (M3.3, #100):** a daemon that crashes or exits is restarted at once, at most 3 times, on the same endpoints, so clients reach the new one (the storage, inference, and knowledge clients attach their buffers again on `NO_BUFFER`); one the user stopped is never restarted (safe mode).
+- **A daemon's `ready` already means its part of the platform is up:** the agent runtime sends it only after loading its policy table and tasks and giving `trust` its channel; `trust` after its console is set up.
+- **Reporting today:** a debug-console line per event, and an audit `start` record per service (#108). `init` holds an unbadged capability on `trust` (`trust::INIT`), used only for `RUNTIME`; `trust` writes console lines only from structured fields (D-018).
+
+**Options.** Restarts: a policy per table entry, the global rule kept, or a policy per entry that also restarts dependents. Ready: every boot service and the agent platform, or every boot service only. Reporting: the trusted console and the audit trail, or the debug console and the audit trail.
+
+**Evaluation criteria.** The user sees what failed without a debug console; a crash loop cannot keep the CPU or the trail busy; nothing restarts what the user stopped; no service text on the trusted console; host-testable logic (D-020).
+
+**Decision (the maintainer chose each recommendation):**
+
+1. **A restart policy per table entry:** never, or up to N restarts with a growing delay (for example 0.1, 0.4, 1.6 s), replacing the fixed 3 at once. A restart is reported with the services that depend on it; they are not restarted (they reach the new one on the same endpoint). A service the user stopped is never restarted, whatever its policy. Rejected: the global rule kept (every daemon the same, and a crash loop restarts at once); restarting dependents too (stronger, but every client would need to survive a restart of itself, and one failure would take down the services above it).
+2. **Ready means the services and the agent platform:** every boot service succeeded, which includes the agent runtime with its policy table loaded and `trust` answering. `init` reports it, or what is not ready, to the kernel, the audit trail, and the trusted console. Rejected: services only (the same check today, with nothing to say the platform is up).
+3. **Failures on the trusted console and in the audit trail:** each failure, skip, restart, and restarts used up is an audit record, and `init` tells `trust`, which prints it from structured fields (service name, event, number); a new `services` command lists each service's state. Rejected: the debug console and the audit trail only (the user would need the serial console or the host tool).
+
+**Consequences.** A `trust` request from `init` for service events and a `services` command; new audit actions; the `supervision` kernel covers each policy; an end-to-end test boots the integrated image to ready and kills services. The table stays compiled-in, reviewed code; per-service capability manifests are M4.2.
+
 ## Open and proposed decisions
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.

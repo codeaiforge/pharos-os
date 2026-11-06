@@ -489,7 +489,7 @@ Ordering notes:
 
 ### M4.1 — Integration of kernel and user-space services
 
-- **Objective and scope:** Boot into a complete user space with services started by a service manager. **Status: Current** (partly delivered: M2.10's `init` starts services in a fixed order and reports each failure; M3.3's supervision restarts them).
+- **Objective and scope:** Boot into a complete user space with services started by a service manager. **Status: Current** (partly delivered: M2.10's `init` starts services in a fixed order and reports each failure; M3.3's supervision restarts them). Issues #148–#154. D-026 accepted (#148): a restart policy per service, a ready state for the services and the agent platform, and every failure on the trusted console and in the audit trail. Next: the design (#149).
 - **Deliverables:** Service manager with declared dependencies and restart policies, building on `init`; integrated system image.
 - **Prerequisites:** Phase 2 gate.
 - **Acceptance criteria:** System reaches a defined "ready" state in QEMU; each service failure is reported.
@@ -667,6 +667,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-023 | Tool interface and tool-call validation | M3.6 | **Accepted** (#123): the runtime parses the model's text as a strict JSON subset with a fuzzed `no_std` parser; tools compiled in, one `TOOL` operation, the policy entry listing an agent's tools; `file <name>` grants one file of a read-only `files` namespace; `read_file` and `send`; a sensitive tool confirmed per call on the trusted console, from structured fields |
 | D-024 | Agent communication and coordination | M3.7 | **Accepted** (#131): channels through the runtime, granted by policy, carrying data only; groups in policy with a supervisor submitting subtasks to its workers; delegation of a subset of the supervisor's grants to a subtask, recorded and revoked with the source; a compiled-in verifier before a goal is done |
 | D-025 | The knowledge service | M3.8 | **Accepted** (#140): a new `knowledge` service on its own store namespace, reached by agents only through the runtime; append-only versions; scopes granted as runtime permissions (`knowledge read`/`write <scope>`), with queries that skip what the caller, or the evidence it cites, cannot read; only the user marks a version verified, on the trusted console |
+| D-026 | Service manager: restart policies, ready state, reporting | M4.1 | **Accepted** (#148): a restart policy per table entry (never, or up to N with a growing delay), dependents reported and not restarted, a stopped service never; ready means every boot service and the agent platform, reported to the kernel, the audit trail, and the trusted console; every failure, skip, and restart audited and shown by `trust` from structured fields, with a `services` command |
 
 ## Next milestone
 
