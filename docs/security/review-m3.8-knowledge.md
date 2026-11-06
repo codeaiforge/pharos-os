@@ -10,7 +10,7 @@
   - host-loaded entries (`store_image::host_knowledge`) and the `knowledge`, `knowledge_agents`, and `poison` test kernels (#143–#146), and every new `unsafe` block.
 - **Design under review:** [knowledge.md](../architecture/knowledge.md), D-025, D-012, D-018, D-019, [capabilities.md](../architecture/capabilities.md).
 - **Date:** 2026-11-06, issue #147. Reviewer: AI-assisted (Claude Code), with code reading and a test for each claim. Two findings are fixed, two are recorded.
-- **Status:** **awaiting the maintainer's approval** (M3.8 gate, #147).
+- **Status:** **approved** by the maintainer on 2026-11-06 (M3.8 gate, #147), with F3 and F4 recorded.
 
 ## Method
 

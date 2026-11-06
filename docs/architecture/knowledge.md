@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). **Implemented:** the data model (#142), the service (#143), agent access and verification (#144), private memory and promotion (#145), host-loaded verified entries and the access-control, provenance, staleness, and injection tests (#146). Security review done ([review-m3.8-knowledge.md](../security/review-m3.8-knowledge.md), #147), awaiting the maintainer's approval.
+**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). **Implemented:** the data model (#142), the service (#143), agent access and verification (#144), private memory and promotion (#145), host-loaded verified entries and the access-control, provenance, staleness, and injection tests (#146). Security review done ([review-m3.8-knowledge.md](../security/review-m3.8-knowledge.md), #147), approved by the maintainer on 2026-11-06.
 
 ## 2. Context
 
