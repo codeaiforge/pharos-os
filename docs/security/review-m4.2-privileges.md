@@ -8,7 +8,7 @@
   - each boot service's manifest, one by one, and every new `unsafe` block.
 - **Design under review:** [services.md](../architecture/services.md), D-027, D-015, D-018, D-022, [capabilities.md](../architecture/capabilities.md).
 - **Date:** 2026-11-06, issue #159. Reviewer: AI-assisted (Claude Code), with code reading and a test for each claim. One finding is fixed, three are recorded.
-- **Status:** awaiting the maintainer's approval.
+- **Status:** **approved** by the maintainer on 2026-11-06 (M4.2 gate, #159), with F2, F3, and F4 recorded.
 
 ## Method
 
