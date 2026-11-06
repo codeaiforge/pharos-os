@@ -41,6 +41,14 @@
 //! it to write that mode for the next boot into the slot record (`NEXT`),
 //! recorded as the user's. Answers are written from `init`'s fields.
 //!
+//! Updates (#165): `update` asks `init` to check the incoming images
+//! (`UPDATE`); `init` answers at once and sends an `OFFER` for each, which
+//! `trust` shows as `update #<n>: <file> version <v> (sha256 <16 hex>),
+//! now <image> version <v'>; apply? (apply <n> / discard <n>)` or as
+//! refused with the reason. `apply <n>` and `discard <n>` (`ANSWER`) and
+//! `rollback` (`ROLLBACK`) are recorded as the user's; `init` reports the
+//! outcome as image events. `trust` never waits on the checks.
+//!
 //! Verification (#144, knowledge.md): `verify <scope> <key> <version>
 //! <hash>` asks the knowledge service, with a bounded wait, to mark the
 //! version verified if its content's SHA-256 starts with the 8 typed
@@ -50,7 +58,7 @@
 #![no_std]
 #![no_main]
 
-use pharos_programs::virtio_console::{Console, RX_BUFFER};
+use pharos_programs::virtio_console::{Console, RX_BUFFER, TX_BUFFER};
 use pharos_proto::knowledge::{self, Author};
 use pharos_proto::permission::Permission;
 use pharos_proto::service::{self as listing, Reply, System};
@@ -80,7 +88,7 @@ const INIT_US: u64 = 1_000_000;
 const BASE: u64 = 0x1000_0000;
 const HELP: &[u8] = b"commands: list, stop <agent>, stop group <group>, stop all, \
 revoke <agent> <permission>, yes <n>, no <n>, audit, usage, services, system, safe, \
-recovery, verify <scope> <key> <version> <hash>";
+recovery, update, apply <n>, discard <n>, rollback, verify <scope> <key> <version> <hash>";
 /// How long a stop may take before the answer says it is still running.
 const STOP_WAIT_US: u64 = 1_000_000;
 
@@ -113,7 +121,7 @@ impl Trust {
     /// One line on the trusted console, `\r\n` added. Dropped if the
     /// console is full: output never makes the service wait.
     fn say(&mut self, parts: &[&[u8]]) {
-        let mut line = [0u8; 192];
+        let mut line = [0u8; TX_BUFFER];
         let mut n = 0;
         for p in parts.iter().chain([&&b"\r\n"[..]]) {
             let take = p.len().min(line.len() - n);
@@ -317,6 +325,9 @@ impl Trust {
             Command::Services => self.services(),
             Command::System => self.system(),
             Command::NextBoot(mode) => self.next_boot(mode),
+            Command::Update => self.update(),
+            Command::UpdateAnswer(number, apply) => self.update_answer(number, apply),
+            Command::Rollback => self.rollback(),
             // The runtime's own from the kernel; each attempt's and group's
             // from the runtime, which answers with numbers only (#119).
             Command::Usage => {
@@ -366,6 +377,7 @@ impl Trust {
             2 => b"B",
             _ => b"none",
         };
+        let mut d = [0u8; 20];
         self.say(&[
             b"system: ",
             sys.mode_word(),
@@ -373,6 +385,9 @@ impl Trust {
             trust::image::name(sys.image.into()),
             b", active slot ",
             active,
+            b", ",
+            decimal(sys.incoming.into(), &mut d),
+            b" incoming",
         ]);
         for (name, slot) in [(b"A", sys.slots[0]), (b"B", sys.slots[1])] {
             if slot.state == 0 {
@@ -413,6 +428,121 @@ impl Trust {
             Some(_) => self.say(&[b"next boot: the slot record cannot be written"]),
             None => self.say(&[b"next boot: init is not answering"]),
         }
+    }
+
+    /// Asks `init` to check the incoming images (#165); the offers come
+    /// as `OFFER`s.
+    fn update(&mut self) {
+        let mut out = [0u8; 256];
+        let mut d = [0u8; 20];
+        match self.ask_init(&listing::Request::Update, &mut out) {
+            Some([status::OK, 0]) => self.say(&[b"update: nothing incoming"]),
+            Some([status::OK, n]) => {
+                let n = decimal(u64::from(*n), &mut d);
+                self.say(&[b"update: checking ", n, b" incoming"]);
+            }
+            Some([status::BUSY]) => {
+                self.say(&[b"update: not now (booting, updating, or not in normal mode)"])
+            }
+            Some(_) => self.say(&[b"update: refused"]),
+            None => self.say(&[b"update: init is not answering"]),
+        }
+    }
+
+    /// The user's answer to update offer `number` (#165).
+    fn update_answer(&mut self, number: u16, apply: bool) {
+        let mut out = [0u8; 256];
+        let mut d = [0u8; 20];
+        let n = decimal(u64::from(number), &mut d);
+        let req = listing::Request::Answer { number, apply };
+        match self.ask_init(&req, &mut out) {
+            Some([status::OK]) => {
+                let (word, what): (&[u8], &[u8]) = if apply {
+                    (b"apply #", b": applying; the services start again")
+                } else {
+                    (b"discard #", b": discarded")
+                };
+                self.say(&[b"update #", n, what]);
+                let detail = [word, n].concat();
+                self.record(audit::action::SYSTEM, None, &detail);
+            }
+            Some([status::NOT_FOUND]) => self.say(&[b"update: no offer #", n]),
+            Some([status::CANCELLED]) => self.say(&[
+                b"update #",
+                n,
+                b": not answered within 60 s; not applied (ask again with update)",
+            ]),
+            Some([status::BUSY]) => {
+                self.say(&[b"update: not now (booting, updating, or not in normal mode)"])
+            }
+            Some(_) => self.say(&[b"update: refused"]),
+            None => self.say(&[b"update: init is not answering"]),
+        }
+    }
+
+    /// Back to the other slot (#165).
+    fn rollback(&mut self) {
+        let mut out = [0u8; 256];
+        match self.ask_init(&listing::Request::Rollback, &mut out) {
+            Some([status::OK]) => {
+                self.say(&[b"rollback: the services start again"]);
+                self.record(audit::action::SYSTEM, None, b"rollback");
+            }
+            Some([status::NOT_FOUND]) => self.say(&[b"rollback: no good slot to roll back to"]),
+            Some([status::BUSY]) => {
+                self.say(&[b"rollback: not now (booting, updating, or not in normal mode)"])
+            }
+            Some(_) => self.say(&[b"rollback: the slot record cannot be written"]),
+            None => self.say(&[b"rollback: init is not answering"]),
+        }
+    }
+
+    /// An incoming image `init` checked (#165), written from its fields.
+    fn offer(&mut self, o: trust::Offer<'_>) {
+        let mut d = [[0u8; 20]; 3];
+        let [a, b, c] = &mut d;
+        let n = decimal(u64::from(o.number), a);
+        if let Some(reason) = o.refused {
+            let why = (trust::image::REASONS.get(usize::from(reason)))
+                .copied()
+                .unwrap_or(b"unknown reason");
+            let (lead, n, sep): (&[u8], &[u8], &[u8]) = if o.number == 0 {
+                (b"update: ", b"", b"")
+            } else {
+                (b"update #", n, b": ")
+            };
+            self.say(&[lead, n, sep, o.name, b" refused: ", why]);
+            return;
+        }
+        let mut hex = [0u8; 16];
+        for (i, byte) in o.sha256.iter().enumerate() {
+            hex[2 * i] = b"0123456789abcdef"[usize::from(byte >> 4)];
+            hex[2 * i + 1] = b"0123456789abcdef"[usize::from(byte & 15)];
+        }
+        let (now, of): (&[u8], &[u8]) = if o.image == 1 || o.image == 2 {
+            (b" version ", decimal(o.now, c))
+        } else {
+            (b"", b"")
+        };
+        self.say(&[
+            b"update #",
+            n,
+            b": ",
+            o.name,
+            b" version ",
+            decimal(o.version, b),
+            b" (sha256 ",
+            &hex,
+            b"), now ",
+            trust::image::name(o.image.into()),
+            now,
+            of,
+            b"; apply? (apply ",
+            n,
+            b" / discard ",
+            n,
+            b")",
+        ]);
     }
 
     /// Each service's state, as `init` answers it (#152), one line each.
@@ -714,6 +844,12 @@ impl Trust {
                     let _ = delete(cap);
                 }
             }
+            Ok(Request::Offer(offer)) if badge == INIT => {
+                self.offer(offer);
+                if cap != 0 {
+                    let _ = delete(cap);
+                }
+            }
             Ok(Request::Runtime) if badge == INIT && valid => {
                 if let Some(old) = self.runtime.replace(cap) {
                     let _ = delete(old);
@@ -786,6 +922,8 @@ impl Trust {
                             .copied()
                             .unwrap_or(b"unknown reason"),
                     ],
+                    trust::image::UPDATED => &[b"system: update applied; running ", image],
+                    trust::image::ROLLED_BACK => &[b"system: rolled back; running ", image],
                     trust::image::MODE if n1 == 1 => {
                         &[b"system: safe mode: the agent runtime is not started"]
                     }

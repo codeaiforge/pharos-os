@@ -1,13 +1,13 @@
 //! `init`'s image slots (#163, boot.md section 8): namespace `system` on
 //! its own unbadged storage capability, through one buffer big enough for
 //! a slot file. The same buffer is the `Memory` object `fs_mount` copies
-//! the image from.
+//! the image from. Updates wait in `system/incoming` (#165).
 
 use alloc::vec::Vec;
 
 use pharos_image::HEADER_LEN;
 use pharos_image::slots::{RECORD_LEN, Record, Slot};
-use pharos_programs::system::Refusal;
+use pharos_programs::system::{MAX_INCOMING, Refusal};
 use pharos_proto::store::{self, Request, Status};
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
@@ -19,6 +19,8 @@ const STORE_US: u64 = 10_000_000;
 /// A slot file: the header and an image of at most 16 MiB.
 const BUFFER: u64 = pharos_image::MAX_IMAGE + 4096;
 const RECORD: &[u8] = b"state";
+/// Where updates wait, in namespace `system`.
+pub const INCOMING: &[u8] = b"incoming/";
 
 pub struct Slots {
     store: Handle,
@@ -132,20 +134,18 @@ impl Slots {
         matches!(self.call_buffered(&req), Some((Status::Ok, _)))
     }
 
-    /// Reads `slot`, verifies it with `key` and against the SHA-256 the
-    /// record names, and mounts its image with `MOUNT` on `root`: the new
-    /// filesystem and the image's version. The kernel mounts a copy of
-    /// the buffer, which only the store also maps, and only `init`'s
-    /// requests make it write there.
-    pub fn mount(
+    /// Reads `path` (in namespace `system`) and verifies it with `key`,
+    /// its version at least `min`: its version, SHA-256, and length. The
+    /// checked bytes stay in the buffer, which only the store also maps,
+    /// and only `init`'s requests make it write there.
+    pub fn check(
         &self,
-        root: Handle,
-        slot: Slot,
-        record: &Record,
+        path: &[u8],
         key: Option<&[u8; 32]>,
-    ) -> Result<(Handle, u64), Refusal> {
+        min: u64,
+    ) -> Result<(u64, [u8; 32], u64), Refusal> {
         let key = key.ok_or(Refusal::NoKey)?;
-        let Ok(Some(len)) = self.read(slot.path()) else {
+        let Ok(Some(len)) = self.read(path) else {
             return Err(Refusal::Unreadable);
         };
         let mut file = Vec::new();
@@ -153,14 +153,69 @@ impl Slots {
             .map_err(|_| Refusal::Unreadable)?;
         file.resize(len as usize, 0);
         self.buffer.read_bytes(0, &mut file);
-        let verified = pharos_image::verify(&file, key, 0).map_err(Refusal::Image)?;
-        if verified.sha256 != record.slot(slot).sha256 {
+        let v = pharos_image::verify(&file, key, min).map_err(Refusal::Image)?;
+        Ok((v.version, v.sha256, len))
+    }
+
+    /// Reads `slot`, verifies it with `key` and against the SHA-256 the
+    /// record names, and mounts its image with `MOUNT` on `root`: the new
+    /// filesystem and the image's version. The kernel mounts a copy of
+    /// the buffer.
+    pub fn mount(
+        &self,
+        root: Handle,
+        slot: Slot,
+        record: &Record,
+        key: Option<&[u8; 32]>,
+    ) -> Result<(Handle, u64), Refusal> {
+        let (version, sha256, len) = self.check(slot.path(), key, 0)?;
+        if sha256 != record.slot(slot).sha256 {
             return Err(Refusal::Replaced);
         }
-        let (version, image_len) = (verified.version, verified.image.len() as u64);
-        drop(file);
+        let image_len = len - HEADER_LEN as u64;
         let fs = fs_mount(root, self.memory, HEADER_LEN as u64, image_len)
             .map_err(|_| Refusal::NotMounted)?;
         Ok((fs, version))
+    }
+
+    /// The first [`MAX_INCOMING`] files in `system/incoming`, names only
+    /// (without the directory); `None` if the store did not answer.
+    pub fn incoming(&self) -> Option<Vec<Vec<u8>>> {
+        let (status, out) = self.call(&Request::List {
+            prefix: INCOMING,
+            start: 0,
+        })?;
+        if status != Status::Ok {
+            return None;
+        }
+        let mut names = Vec::new();
+        let mut at = 3;
+        for _ in 0..out[1] {
+            let len = usize::from(*out.get(at)?);
+            let name = out.get(at + 1..at + 1 + len)?;
+            names.push(name.strip_prefix(INCOMING)?.to_vec());
+            at += 1 + len;
+        }
+        names.truncate(MAX_INCOMING);
+        Some(names)
+    }
+
+    /// Writes the buffer's first `len` bytes, as [`Self::check`] left
+    /// them, as `slot`'s file (one store commit).
+    pub fn write_slot(&self, slot: Slot, len: u64) -> bool {
+        let req = Request::Write {
+            path: slot.path(),
+            len,
+            at: 0,
+        };
+        matches!(self.call_buffered(&req), Some((Status::Ok, _)))
+    }
+
+    /// Deletes `path` in namespace `system`.
+    pub fn delete(&self, path: &[u8]) -> bool {
+        matches!(
+            self.call(&Request::Delete { path }),
+            Some((Status::Ok | Status::NotFound, _))
+        )
     }
 }

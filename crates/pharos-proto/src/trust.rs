@@ -26,6 +26,15 @@
 //!   prompt from these fields, never from agent or model text, and the
 //!   answer and `RESOLVED` work as for `APPROVE`.
 //!
+//! And from `init` only:
+//! - `SERVICE` (#151): a service event or the system's state;
+//! - `OFFER` `[version, op, number (2), refused, name length, name,
+//!   version (8), sha256 (8), image, image version (8)]` (#165): an
+//!   incoming image the user may apply (`refused` 0, `number` not 0) or
+//!   one refused (`refused` 1 + an index into [`image::REASONS`], `number`
+//!   0 when it was never offered), with the image running and its version;
+//!   `trust` writes the prompt from these fields.
+//!
 //! The badge says who sends: [`INIT`] or [`RUNTIME`]. There is no reply:
 //! the sender's blocking `send` returns once the service has the message,
 //! and the service never refuses a valid one (it replaces a slot's entry).
@@ -51,6 +60,8 @@ pub mod op {
     pub const CONFIRM: u8 = 9;
     /// A service event or the system's ready state, from `init` (#151).
     pub const SERVICE: u8 = 10;
+    /// An incoming image offered or refused, from `init` (#165).
+    pub const OFFER: u8 = 11;
 }
 
 /// What happened to a service, or to the system (#151, D-026).
@@ -98,6 +109,11 @@ pub mod image {
     pub const NOT_READY: u32 = 2;
     /// The boot's mode (#164), the second number: 1 safe, 2 recovery.
     pub const MODE: u32 = 3;
+    /// An approved update reached ready (#165): it runs.
+    pub const UPDATED: u32 = 4;
+    /// An approved update was not ready, or the user rolled back: the
+    /// image named runs instead.
+    pub const ROLLED_BACK: u32 = 5;
 
     /// Why a slot was refused: read, record, and mount failures, then
     /// `pharos_image::Error::reason` for each signature check.
@@ -115,6 +131,9 @@ pub mod image {
         b"bad signature",
         b"SHA-256 does not match",
         b"version too old",
+        // #165: an update with the image of a bad slot.
+        b"the image of a bad slot",
+        b"changed since it was offered",
     ];
 
     /// The image's name: `factory image`, `slot A`, `slot B`, `recovery
@@ -312,6 +331,25 @@ pub enum Request<'a> {
         numbers: [u32; 3],
         names: Names<'a>,
     },
+    /// An incoming image (#165), from `init`.
+    Offer(Offer<'a>),
+}
+
+/// An incoming image offered to the user, or refused, as `init` checked
+/// it: numbers and its file's name only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Offer<'a> {
+    /// 0 when it was refused before it was offered.
+    pub number: u16,
+    /// `None` if offered, else an index into [`image::REASONS`].
+    pub refused: Option<u8>,
+    pub name: &'a [u8],
+    pub version: u64,
+    pub sha256: [u8; 8],
+    /// What runs now (0 factory, 1 A, 2 B, 3 the recovery copy) and its
+    /// version (0 for the factory image).
+    pub image: u8,
+    pub now: u64,
 }
 
 /// An attempt's usage, as numbers only: `trust` writes the text.
@@ -432,6 +470,26 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                 numbers,
                 names,
             })
+        })(),
+        op::OFFER => (|| {
+            let number = r.u16()?;
+            let refused = match r.u8()? {
+                0 => None,
+                n if usize::from(n) <= image::REASONS.len() => Some(n - 1),
+                _ => return None,
+            };
+            let len = usize::from(r.u8()?);
+            let name = r.take(len).filter(|n| valid_name(n))?;
+            let offer = Offer {
+                number,
+                refused,
+                name,
+                version: r.u64()?,
+                sha256: r.take(8)?.try_into().ok()?,
+                image: r.u8().filter(|i| *i <= 3)?,
+                now: r.u64()?,
+            };
+            (refused.is_some() || number != 0).then_some(Request::Offer(offer))
         })(),
         _ => None,
     };
@@ -562,6 +620,24 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             }
             w.bytes(if names.0.is_empty() { &[0] } else { names.0 })?;
         }
+        Request::Offer(o) => {
+            let refused = match o.refused {
+                None if o.number != 0 => 0,
+                Some(i) if usize::from(i) < image::REASONS.len() => i + 1,
+                _ => return None,
+            };
+            if !valid_name(o.name) || o.image > 3 {
+                return None;
+            }
+            w.bytes(&[VERSION, op::OFFER])?;
+            w.u16(o.number)?;
+            w.bytes(&[refused, o.name.len() as u8])?;
+            w.bytes(o.name)?;
+            w.u64(o.version)?;
+            w.bytes(&o.sha256)?;
+            w.bytes(&[o.image])?;
+            w.u64(o.now)?;
+        }
     }
     Some(w.len())
 }
@@ -603,6 +679,12 @@ pub enum Command<'a> {
     /// `safe` or `recovery`: that mode for the next boot (#164); the
     /// mode's code (1 or 2).
     NextBoot(u8),
+    /// `update`: check and offer the incoming images (#165).
+    Update,
+    /// `apply <n>` or `discard <n>`: the answer to update offer `n`.
+    UpdateAnswer(u16, bool),
+    /// `rollback`: back to the other slot, if it is good.
+    Rollback,
     /// Anything else: the service answers with the commands it knows.
     Help,
 }
@@ -649,6 +731,12 @@ pub fn command(line: &[u8]) -> Command<'_> {
         (Some(b"system"), None, None) => Command::System,
         (Some(b"safe"), None, None) => Command::NextBoot(1),
         (Some(b"recovery"), None, None) => Command::NextBoot(2),
+        (Some(b"update"), None, None) => Command::Update,
+        (Some(b"rollback"), None, None) => Command::Rollback,
+        (Some(word @ (b"apply" | b"discard")), Some(n), None) => match request_number(n) {
+            Some(n) => Command::UpdateAnswer(n, word == b"apply"),
+            None => Command::Help,
+        },
         (Some(b"stop"), Some(b"all"), None) => Command::StopAll,
         (Some(b"stop"), Some(b"group"), Some(name))
             if valid_name(name) && words.next().is_none() =>
@@ -926,6 +1014,67 @@ mod tests {
     }
 
     #[test]
+    fn offers_round_trip_and_bad_ones_are_refused() {
+        let offered = Offer {
+            number: 7,
+            refused: None,
+            name: b"summarize-1",
+            version: u64::MAX,
+            sha256: [0xab; 8],
+            image: 1,
+            now: 6,
+        };
+        let refused = Offer {
+            number: 0,
+            refused: Some(image::REASONS.len() as u8 - 1),
+            ..offered
+        };
+        for o in [offered, refused] {
+            let mut buf = [0u8; 256];
+            let n = encode(&Request::Offer(o), &mut buf).unwrap();
+            assert_eq!(parse(&buf[..n]), Ok(Request::Offer(o)));
+            for cut in 0..n {
+                assert!(parse(&buf[..cut]).is_err(), "cut at {cut}");
+            }
+        }
+        let mut buf = [0u8; 256];
+        for bad in [
+            Offer {
+                number: 0,
+                ..offered
+            },
+            Offer {
+                refused: Some(image::REASONS.len() as u8),
+                ..offered
+            },
+            Offer {
+                name: b"a/b",
+                ..offered
+            },
+            Offer {
+                image: 4,
+                ..offered
+            },
+        ] {
+            assert_eq!(encode(&Request::Offer(bad), &mut buf), None, "{bad:?}");
+        }
+        let n = encode(&Request::Offer(offered), &mut buf).unwrap();
+        // On the wire: a reason past the list, an offer numbered 0, an
+        // unknown image.
+        for (at, value) in [(4, image::REASONS.len() as u8 + 1), (2, 0), (n - 9, 4)] {
+            let mut b = buf;
+            if at == 2 {
+                b[3] = 0;
+            }
+            b[at] = value;
+            assert_eq!(parse(&b[..n]), Err(Refused::Bad), "byte {at} = {value}");
+        }
+        crate::fuzz(100_000, 11, |m| {
+            let _ = parse(m);
+        });
+    }
+
+    #[test]
     fn bad_requests_are_refused() {
         let reg_in = |slot: u8, name: &[u8], group: &[u8]| {
             let mut m = std::vec![VERSION, op::REGISTER, slot, name.len() as u8];
@@ -1010,6 +1159,24 @@ mod tests {
         assert_eq!(command(b"safe"), Command::NextBoot(1));
         assert_eq!(command(b" recovery"), Command::NextBoot(2));
         assert_eq!(command(b"safe mode"), Command::Help);
+        assert_eq!(command(b" update "), Command::Update);
+        assert_eq!(command(b"update 1"), Command::Help);
+        assert_eq!(command(b"rollback"), Command::Rollback);
+        assert_eq!(command(b"rollback A"), Command::Help);
+        assert_eq!(command(b"apply 3"), Command::UpdateAnswer(3, true));
+        assert_eq!(
+            command(b"discard 65535"),
+            Command::UpdateAnswer(65_535, false)
+        );
+        for bad in [
+            &b"apply"[..],
+            b"apply 0",
+            b"apply 01",
+            b"discard x",
+            b"apply 1 2",
+        ] {
+            assert_eq!(command(bad), Command::Help, "{bad:?}");
+        }
         assert_eq!(command(b"stop safe"), Command::Stop(b"safe"));
         assert_eq!(command(b"audit x"), Command::Help);
         assert_eq!(command(b" no  65535"), Command::Answer(65_535, false));

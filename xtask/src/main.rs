@@ -2887,13 +2887,14 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     fs::create_dir_all(&out).map_err(io_err("cannot create", &out))?;
     // The `system` kernel boots what the main kernel boots (#153), and so
     // does `recovery`, with `init` trusting the test key (#163).
-    let programs = if name == recovery::TEST {
+    let slotted = name == recovery::TEST || name == recovery::UPDATE_TEST;
+    let programs = if slotted {
         let public = pharos_image::public_key(&sign::test_seed(paths)?);
         build_user_programs_with(paths, Some(&sign::hex(&public)))?
     } else {
         build_user_programs(paths)?
     };
-    let modules = if name == SYSTEM_TEST || name == recovery::TEST {
+    let modules = if name == SYSTEM_TEST || slotted {
         kernel_modules(paths, &programs)?
     } else {
         test_modules(&programs)
@@ -2956,6 +2957,10 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         let vars = out.join("ovmf-vars.fd");
         recovery::rounds(paths, elf, &programs, &iso, &vars, &logs, &extra)?;
     }
+    if name == recovery::UPDATE_TEST {
+        let vars = out.join("ovmf-vars.fd");
+        recovery::update_rounds(paths, &programs, &iso, &vars, &logs, &extra)?;
+    }
     let (steps, refused): (&'static [console::Step], &[&str]) = match name.as_str() {
         TRUST_TEST => (TRUST_SCRIPT, TRUST_REFUSED),
         PERMISSIONS_TEST => (PERMISSIONS_SCRIPT, PERMISSIONS_REFUSED),
@@ -2973,6 +2978,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
         SUPERVISION_TEST => (SUPERVISION_SCRIPT, &[]),
         SYSTEM_TEST => (SYSTEM_SCRIPT, &[]),
+        recovery::UPDATE_TEST => (recovery::UPDATE_SCRIPT, &[]),
         _ => (&[], &[]),
     };
     let script = if steps.is_empty() {
@@ -3054,6 +3060,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     let typed = typed.and_then(|()| {
         if name == recovery::TEST {
             return recovery::last(&iso, &clean_log(&run.log));
+        }
+        if name == recovery::UPDATE_TEST {
+            return recovery::update_last(&iso, &clean_log(&run.log));
         }
         if name == BUDGETS_TEST && run.status == Some(33) {
             budgets_audit(&out.join(STORE_IMAGE))

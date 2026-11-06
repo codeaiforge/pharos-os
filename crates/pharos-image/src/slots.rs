@@ -240,6 +240,52 @@ impl Record {
         s.attempts = 0;
         self.active = Some(slot);
     }
+
+    /// The lowest version an update may have (#165): above every `Good`
+    /// slot's, so an older image is never installed again.
+    pub fn min_version(&self) -> u64 {
+        (self.slots.iter())
+            .filter(|s| s.state == State::Good)
+            .map(|s| s.version.saturating_add(1))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// True if `sha256` is the image of a `Bad` slot: never offered again,
+    /// so a failing update cannot loop.
+    pub fn was_bad(&self, sha256: &[u8; 32]) -> bool {
+        (self.slots.iter()).any(|s| s.state == State::Bad && s.sha256 == *sha256)
+    }
+
+    /// Stages an approved update (#165) in the slot that is not active
+    /// (A if none) and makes it active, so it is tried first, on this boot
+    /// and after a crash; the previous slot stays the rollback target.
+    pub fn stage(&mut self, version: u64, sha256: [u8; 32]) -> Slot {
+        let slot = self.active.map_or(Slot::A, Slot::other);
+        *self.slot_mut(slot) = SlotInfo {
+            state: State::Staged,
+            attempts: 0,
+            version,
+            sha256,
+        };
+        self.active = Some(slot);
+        slot
+    }
+
+    /// The user's rollback (#165): the active slot becomes `Bad` and the
+    /// other, if `Good`, active. `None` (nothing changed) if there is no
+    /// `Good` slot to roll back to.
+    pub fn rollback(&mut self) -> Option<Slot> {
+        let to = self.active?.other();
+        if self.slot(to).state != State::Good {
+            return None;
+        }
+        if let Some(from) = self.active {
+            self.refuse(from);
+        }
+        self.active = Some(to);
+        Some(to)
+    }
 }
 
 #[cfg(test)]
@@ -403,5 +449,73 @@ mod tests {
         assert_eq!(r.active, Some(Slot::B));
         assert_eq!(*r.slot(Slot::B), info(State::Good, 0, 2));
         assert_eq!(r.candidate([false; 2]), Some(Slot::B));
+    }
+
+    #[test]
+    fn an_update_must_be_newer_than_every_good_slot_and_not_a_bad_one() {
+        assert_eq!(Record::EMPTY.min_version(), 0);
+        let r = record(
+            Some(Slot::A),
+            info(State::Good, 0, 7),
+            info(State::Bad, 0, 9),
+        );
+        // The bad slot's version does not count; its image is refused.
+        assert_eq!(r.min_version(), 8);
+        assert!(r.was_bad(&[9; 32]));
+        assert!(!r.was_bad(&[7; 32]), "a good slot's image");
+        let both = record(None, info(State::Good, 0, 3), info(State::Good, 0, 5));
+        assert_eq!(both.min_version(), 6);
+        let top = record(None, info(State::Good, 0, u64::MAX), SlotInfo::EMPTY);
+        assert_eq!(top.min_version(), u64::MAX, "saturates");
+    }
+
+    #[test]
+    fn a_staged_update_goes_to_the_other_slot_and_is_tried_first() {
+        let mut r = record(Some(Slot::A), info(State::Good, 0, 7), SlotInfo::EMPTY);
+        assert_eq!(r.stage(8, [8; 32]), Slot::B);
+        assert_eq!(r.active, Some(Slot::B));
+        assert_eq!(*r.slot(Slot::B), info(State::Staged, 0, 8));
+        assert_eq!(
+            *r.slot(Slot::A),
+            info(State::Good, 0, 7),
+            "the rollback target"
+        );
+        assert_eq!(r.candidate([false; 2]), Some(Slot::B));
+        // Not ready: the previous slot is next, and the update is bad.
+        r.attempt(Slot::B);
+        assert_eq!(r.candidate([false, true]), Some(Slot::A));
+        r.refuse(Slot::B);
+        r.ready(Slot::A);
+        assert_eq!(r.active, Some(Slot::A));
+        assert!(r.was_bad(&[8; 32]));
+        // With no slot active, A.
+        let mut empty = Record::EMPTY;
+        assert_eq!(empty.stage(1, [1; 32]), Slot::A);
+        assert_eq!(empty.candidate([false; 2]), Some(Slot::A));
+    }
+
+    #[test]
+    fn rollback_needs_a_good_slot_to_go_to() {
+        let mut r = record(
+            Some(Slot::B),
+            info(State::Good, 0, 7),
+            info(State::Good, 0, 8),
+        );
+        assert_eq!(r.rollback(), Some(Slot::A));
+        assert_eq!(
+            (r.active, r.slot(Slot::B).state),
+            (Some(Slot::A), State::Bad)
+        );
+        assert_eq!(r.candidate([false; 2]), Some(Slot::A));
+        // B is bad now: nothing to roll back to, and nothing changes.
+        let before = r;
+        assert_eq!(r.rollback(), None);
+        assert_eq!(r, before);
+        let mut none = Record::EMPTY;
+        assert_eq!(none.rollback(), None);
+        for other in [State::Empty, State::Staged, State::Trying, State::Bad] {
+            let mut r = record(Some(Slot::A), info(State::Good, 0, 7), info(other, 0, 8));
+            assert_eq!(r.rollback(), None, "{other:?}");
+        }
     }
 }

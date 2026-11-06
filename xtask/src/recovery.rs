@@ -420,3 +420,251 @@ pub fn last(iso: &Path, log: &str) -> Result<()> {
     }
     expect_slot("never-ready-4", &record(iso)?, Slot::A, State::Bad, 3)
 }
+
+/// The `update` test kernel (#165): it boots as the `recovery` kernel
+/// does, then keeps running until `init` says how an update ended.
+pub const UPDATE_TEST: &str = "update";
+
+/// A store with `record` and `files` (store paths, contents).
+fn store_with(path: &Path, record: &Record, files: &[(&[u8], &[u8])]) -> Result<()> {
+    let record = record.encode();
+    let mut all: Vec<(&[u8], &[u8])> = vec![(b"system/state", &record)];
+    all.extend_from_slice(files);
+    store_image::with_room(path, &all)
+}
+
+/// Boots once with a fresh trusted console that `steps` play; returns
+/// the serial log and what `trust` said.
+#[allow(clippy::too_many_arguments)]
+fn boot_typed(
+    iso: &Path,
+    vars: &Path,
+    logs: &Path,
+    extra: &[OsString],
+    round: &str,
+    steps: &'static [console::Step],
+) -> Result<(String, String)> {
+    let dir = iso.parent().unwrap_or(Path::new("."));
+    // New FIFOs: an earlier round's script still reads the old ones.
+    fresh_fifos(dir)?;
+    let base = console::fifos(dir)?;
+    let script = console::Script::start(&base, steps)?;
+    let log = boot(iso, vars, logs, extra, round, None)?;
+    let said = script
+        .finish(&[])
+        .map_err(|e| format!("{UPDATE_TEST} {round}: {e}"))?;
+    Ok((log, said))
+}
+
+/// Removes the trusted console's FIFOs, so the next script gets its own.
+pub fn fresh_fifos(dir: &Path) -> Result<()> {
+    for end in ["in", "out"] {
+        let _ = fs::remove_file(dir.join(console::PIPE).with_extension(end));
+    }
+    Ok(())
+}
+
+fn expect_active(round: &str, r: &Record, slot: Slot) -> Result<()> {
+    if r.active != Some(slot) {
+        return Err(format!(
+            "{UPDATE_TEST} {round}: active slot {:?}, expected {}",
+            r.active,
+            slot.name()
+        ));
+    }
+    Ok(())
+}
+
+/// What the record says of `file` once it is in a slot in `state`.
+fn info(file: &[u8], state: State) -> SlotInfo {
+    SlotInfo {
+        state,
+        ..good(file)
+    }
+}
+
+const APPLY: &[console::Step] = &[
+    ("system ready: 8 services", "update\n"),
+    ("update #1: host-1 version 7", "apply 1\n"),
+    ("update #1: applying", ""),
+    ("system: update applied; running slot B", ""),
+];
+const FAILING: &[console::Step] = &[
+    ("system ready: 8 services", "update\n"),
+    ("update #1: host-2 version 8", "apply 1\n"),
+    (
+        "system: slot B not ready within 20 s; its services stopped",
+        "",
+    ),
+    ("system: rolled back; running slot A", ""),
+];
+const ROLLBACK: &[console::Step] = &[
+    ("system ready: 8 services", "rollback\n"),
+    ("rollback: the services start again", ""),
+    ("system: rolled back; running slot A", ""),
+];
+/// The runner's own boot: refusals, then a discard.
+pub const UPDATE_SCRIPT: &[console::Step] = &[
+    ("system ready: 8 services", "system\n"),
+    ("active slot A, 4 incoming", "update\n"),
+    ("update: checking 4 incoming", ""),
+    ("update: forged refused: bad signature", ""),
+    ("update: old refused: version too old", ""),
+    ("update: was-bad refused: the image of a bad slot", ""),
+    ("update #1: newer version 11", "discard 1\n"),
+    ("update #1: discarded", ""),
+];
+
+/// The `update` kernel's boots before the runner's last one: an update
+/// applied, one not ready and rolled back, and the user's rollback. Then
+/// it prepares the last boot's store: refusals and a discard.
+#[allow(clippy::too_many_arguments)]
+pub fn update_rounds(
+    paths: &Paths,
+    programs: &[ImageFile],
+    iso: &Path,
+    vars: &Path,
+    logs: &Path,
+    extra: &[OsString],
+) -> Result<()> {
+    let seed = sign::test_seed(paths)?;
+    let dir = paths.root.join("kernel").join("root");
+    let root = fs_image::pack_with(&dir, programs)?;
+    let svc = programs
+        .iter()
+        .find(|(p, _)| p == "bin/svc")
+        .ok_or("no bin/svc")?;
+    let never_ready: Vec<ImageFile> = (programs.iter())
+        .map(|(p, b)| match p.as_str() {
+            "bin/agents" => (p.clone(), svc.1.clone()),
+            _ => (p.clone(), b.clone()),
+        })
+        .collect();
+    let never_ready = fs_image::pack_with(&dir, &never_ready)?;
+    let store_path = iso.with_file_name(STORE_IMAGE);
+    let v6 = signed(&root, 6, &seed);
+    let a_active = |b: SlotInfo| Record {
+        active: Some(Slot::A),
+        next: Mode::Normal,
+        slots: [good(&v6), b],
+    };
+
+    // An approved update: copied into slot B, tried in place, kept.
+    let v7 = signed(&root, 7, &seed);
+    let files: [(&[u8], &[u8]); 2] = [(b"system/a", &v6), (b"system/incoming/host-1", &v7)];
+    store_with(&store_path, &a_active(SlotInfo::EMPTY), &files)?;
+    let (log, _) = boot_typed(iso, vars, logs, extra, "apply", APPLY)?;
+    expect(
+        "apply",
+        &log,
+        &[
+            "init: system: offered #1: incoming host-1 version 7",
+            "init: system: staged version 7 in slot B; trying it",
+            "init: system: running slot B version 7",
+            "update: init: system: update applied: running slot B version 7",
+        ],
+    )?;
+    let r = record(iso)?;
+    expect_active("apply", &r, Slot::B)?;
+    expect_slot("apply", &r, Slot::B, State::Good, 0)?;
+    expect_slot("apply", &r, Slot::A, State::Good, 0)?;
+    if store_image::read(&store_path, b"system/incoming/host-1")?.is_some() {
+        return Err(format!("{UPDATE_TEST} apply: the incoming file was kept"));
+    }
+
+    // An update whose agent runtime never sends ready: bad, and slot A
+    // runs again in place.
+    let v8 = signed(&never_ready, 8, &seed);
+    let files: [(&[u8], &[u8]); 2] = [(b"system/a", &v6), (b"system/incoming/host-2", &v8)];
+    store_with(&store_path, &a_active(SlotInfo::EMPTY), &files)?;
+    let (log, _) = boot_typed(iso, vars, logs, extra, "failing", FAILING)?;
+    expect(
+        "failing",
+        &log,
+        &[
+            "init: system: staged version 8 in slot B; trying it",
+            "init: system: slot B version 8 not ready within 20 s; its services stopped",
+            "init: system: running slot A version 6",
+            "update: init: system: update failed: slot B bad; rolled back: running slot A",
+        ],
+    )?;
+    let r = record(iso)?;
+    expect_active("failing", &r, Slot::A)?;
+    expect_slot("failing", &r, Slot::A, State::Good, 0)?;
+    expect_slot("failing", &r, Slot::B, State::Bad, 1)?;
+
+    // The user's rollback: B, active, becomes bad; A runs.
+    let record_b = Record {
+        active: Some(Slot::B),
+        ..a_active(good(&v7))
+    };
+    let files: [(&[u8], &[u8]); 2] = [(b"system/a", &v6), (b"system/b", &v7)];
+    store_with(&store_path, &record_b, &files)?;
+    let (log, _) = boot_typed(iso, vars, logs, extra, "rollback", ROLLBACK)?;
+    expect(
+        "rollback",
+        &log,
+        &[
+            "init: system: running slot B version 7",
+            "init: system: rollback: trying slot A",
+            "init: system: running slot A version 6",
+            "update: init: system: update rolled back by the user: running slot A",
+        ],
+    )?;
+    let r = record(iso)?;
+    expect_active("rollback", &r, Slot::A)?;
+    expect_slot("rollback", &r, Slot::B, State::Bad, 0)?;
+
+    // The last boot's store: an older image, one signed with another key,
+    // the image of the bad slot B, and a newer one, which is discarded.
+    let old = signed(&root, 5, &seed);
+    let forged = signed(&root, 9, &[7; 32]);
+    // Another image than the others: the check compares SHA-256s.
+    let was_bad = signed(&never_ready, 10, &seed);
+    let newer = signed(&root, 11, &seed);
+    let files: [(&[u8], &[u8]); 6] = [
+        (b"system/a", &v6),
+        (b"system/b", &was_bad),
+        (b"system/incoming/old", &old),
+        (b"system/incoming/forged", &forged),
+        (b"system/incoming/was-bad", &was_bad),
+        (b"system/incoming/newer", &newer),
+    ];
+    store_with(&store_path, &a_active(info(&was_bad, State::Bad)), &files)?;
+    fresh_fifos(iso.parent().unwrap_or(Path::new(".")))
+}
+
+/// After the runner's own boot: nothing was applied, the refused files
+/// are kept, and the discarded one is gone.
+pub fn update_last(iso: &Path, log: &str) -> Result<()> {
+    expect(
+        "discard",
+        log,
+        &[
+            "init: system: incoming forged refused: bad signature",
+            "init: system: incoming old refused: version too old",
+            "init: system: incoming was-bad refused: the image of a bad slot",
+            "init: system: offered #1: incoming newer version 11",
+            "update: init: system: update discarded: incoming newer",
+        ],
+    )?;
+    let r = record(iso)?;
+    expect_active("discard", &r, Slot::A)?;
+    expect_slot("discard", &r, Slot::A, State::Good, 0)?;
+    expect_slot("discard", &r, Slot::B, State::Bad, 0)?;
+    let store = iso.with_file_name(STORE_IMAGE);
+    for (name, kept) in [
+        ("old", true),
+        ("forged", true),
+        ("was-bad", true),
+        ("newer", false),
+    ] {
+        let path = format!("system/incoming/{name}");
+        if store_image::read(&store, path.as_bytes())?.is_some() != kept {
+            return Err(format!(
+                "{UPDATE_TEST} discard: {path} kept: expected {kept}"
+            ));
+        }
+    }
+    Ok(())
+}

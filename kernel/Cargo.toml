@@ -69,6 +69,10 @@ name = "recovery"
 harness = false
 
 [[test]]
+name = "update"
+harness = false
+
+[[test]]
 name = "fs"
 harness = false
 

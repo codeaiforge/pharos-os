@@ -9,13 +9,26 @@
 //!   message; `trust` asks again from `from + count` until `total`.
 //!
 //! - `SYSTEM` `[version, op]` (#164): the reply `[OK, mode, image,
-//!   active, slot A, slot B]`, each slot `[state, attempts, version (u64),
+//!   active, incoming, slot A, slot B]` (incoming: how many files wait in
+//!   `system/incoming`, #165), each slot `[state, attempts, version (u64),
 //!   first 8 bytes of its SHA-256]`; codes as in `pharos_image::slots`
 //!   (mode 0 normal, 1 safe, 2 recovery; image 0 factory, 1 A, 2 B, 3 the
 //!   recovery copy; active 0 none, 1 A, 2 B; state 0 empty to 4 bad);
 //! - `NEXT` `[version, op, mode]` (#164): the next boot's mode (1 safe or
 //!   2 recovery) written to the slot record; the reply `[OK]`, or
 //!   `[INTERNAL]` if the record could not be written.
+//!
+//! Updates (#165, boot.md section 8):
+//! - `UPDATE` `[version, op]`: the reply `[OK, count]`, the incoming
+//!   images `init` checks; it then sends `trust` an `OFFER` for each
+//!   (`crate::trust`), so `trust` never waits for the checks;
+//! - `ANSWER` `[version, op, number (2), apply]`: the user's answer to
+//!   offer `number`, 1 apply, 0 discard; the reply `[OK]` (applying or
+//!   discarded), `[NOT_FOUND]` (no such offer), `[CANCELLED]` (not
+//!   answered within 60 s), or `[BUSY]` (`init` is booting or applying,
+//!   or the mode is not normal);
+//! - `ROLLBACK` `[version, op]`: the reply `[OK]` (rolling back),
+//!   `[NOT_FOUND]` (no good slot to roll back to), or `[BUSY]`.
 //!
 //! Names are `init`'s table names ([`crate::trust::valid_name`]), never
 //! text from a service.
@@ -29,6 +42,9 @@ pub mod op {
     pub const SERVICES: u8 = 1;
     pub const SYSTEM: u8 = 2;
     pub const NEXT: u8 = 3;
+    pub const UPDATE: u8 = 4;
+    pub const ANSWER: u8 = 5;
+    pub const ROLLBACK: u8 = 6;
 }
 
 /// A service's state, as `init` holds it.
@@ -90,6 +106,12 @@ pub enum Request {
     Next {
         mode: u8,
     },
+    Update,
+    Answer {
+        number: u16,
+        apply: bool,
+    },
+    Rollback,
 }
 
 pub fn parse(msg: &[u8]) -> Result<Request, Refused> {
@@ -97,6 +119,12 @@ pub fn parse(msg: &[u8]) -> Result<Request, Refused> {
         (op::SERVICES, [from]) => Ok(Request::Services { from: *from }),
         (op::SYSTEM, []) => Ok(Request::System),
         (op::NEXT, [mode @ (1 | 2)]) => Ok(Request::Next { mode: *mode }),
+        (op::UPDATE, []) => Ok(Request::Update),
+        (op::ANSWER, [a, b, apply @ (0 | 1)]) => Ok(Request::Answer {
+            number: u16::from_le_bytes([*a, *b]),
+            apply: *apply == 1,
+        }),
+        (op::ROLLBACK, []) => Ok(Request::Rollback),
         _ => Err(Refused::Bad),
     }
 }
@@ -107,6 +135,13 @@ pub fn encode(req: &Request, out: &mut [u8]) -> Option<usize> {
         Request::Services { from } => w.bytes(&[VERSION, op::SERVICES, from])?,
         Request::System => w.bytes(&[VERSION, op::SYSTEM])?,
         Request::Next { mode } => w.bytes(&[VERSION, op::NEXT, mode])?,
+        Request::Update => w.bytes(&[VERSION, op::UPDATE])?,
+        Request::Answer { number, apply } => {
+            w.bytes(&[VERSION, op::ANSWER])?;
+            w.u16(number)?;
+            w.bytes(&[u8::from(apply)])?
+        }
+        Request::Rollback => w.bytes(&[VERSION, op::ROLLBACK])?,
     }
     Some(w.len())
 }
@@ -142,16 +177,24 @@ pub struct System {
     pub image: u8,
     /// 0 none, 1 A, 2 B.
     pub active: u8,
+    /// Files waiting in `system/incoming` (#165).
+    pub incoming: u8,
     pub slots: [Slot; 2],
 }
 
 /// Length of a `SYSTEM` reply.
-pub const SYSTEM_LEN: usize = 4 + 2 * 18;
+pub const SYSTEM_LEN: usize = 5 + 2 * 18;
 
 impl System {
     pub fn write(&self, out: &mut [u8]) -> Option<usize> {
         let mut w = Writer::new(out);
-        w.bytes(&[status::OK, self.mode, self.image, self.active])?;
+        w.bytes(&[
+            status::OK,
+            self.mode,
+            self.image,
+            self.active,
+            self.incoming,
+        ])?;
         for s in &self.slots {
             w.bytes(&[s.state, s.attempts])?;
             w.u64(s.version)?;
@@ -166,7 +209,7 @@ impl System {
         if r.u8()? != status::OK {
             return None;
         }
-        let (mode, image, active) = (r.u8()?, r.u8()?, r.u8()?);
+        let (mode, image, active, incoming) = (r.u8()?, r.u8()?, r.u8()?, r.u8()?);
         if mode > 2 || image > 3 || active > 2 {
             return None;
         }
@@ -181,6 +224,7 @@ impl System {
             mode,
             image,
             active,
+            incoming,
             slots,
         })
     }
@@ -292,6 +336,16 @@ mod tests {
             Request::System,
             Request::Next { mode: 1 },
             Request::Next { mode: 2 },
+            Request::Update,
+            Request::Rollback,
+            Request::Answer {
+                number: 1,
+                apply: true,
+            },
+            Request::Answer {
+                number: 0xbeef,
+                apply: false,
+            },
         ] {
             let mut buf = [0u8; 8];
             let n = encode(&req, &mut buf).unwrap();
@@ -305,6 +359,11 @@ mod tests {
                 "mode {mode}"
             );
         }
+        assert_eq!(parse(&[VERSION, op::UPDATE, 0]), Err(Refused::Bad));
+        assert_eq!(parse(&[VERSION, op::ROLLBACK, 0]), Err(Refused::Bad));
+        assert_eq!(parse(&[VERSION, op::ANSWER, 1, 0]), Err(Refused::Bad));
+        assert_eq!(parse(&[VERSION, op::ANSWER, 1, 0, 2]), Err(Refused::Bad));
+        assert_eq!(parse(&[VERSION, op::ANSWER, 1, 0, 1, 0]), Err(Refused::Bad));
         assert_eq!(parse(&[2, op::SERVICES, 0]), Err(Refused::Version));
         crate::fuzz(100_000, 4, |m| {
             let _ = parse(m);
@@ -317,6 +376,7 @@ mod tests {
             mode: 1,
             image: 2,
             active: 2,
+            incoming: 4,
             slots: [
                 Slot {
                     state: 4,
@@ -340,7 +400,7 @@ mod tests {
             assert_eq!(System::parse(&out[..cut]), None, "cut at {cut}");
         }
         assert_eq!(System::parse(&out[..n + 1]), None, "a trailing byte");
-        for (at, bad) in [(0, 1), (1, 3), (2, 4), (3, 3), (4, 5), (22, 5)] {
+        for (at, bad) in [(0, 1), (1, 3), (2, 4), (3, 3), (5, 5), (23, 5)] {
             let mut b = out;
             b[at] = bad;
             assert_eq!(System::parse(&b[..n]), None, "byte {at} = {bad}");

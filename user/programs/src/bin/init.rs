@@ -40,6 +40,17 @@
 //! not ready in normal mode, its services are stopped and it starts again
 //! in recovery. `trust`'s `system` asks for the mode, image, and slots
 //! (`SYSTEM`); `safe` and `recovery` set the next boot's mode (`NEXT`).
+//!
+//! Updates (#165): `trust`'s `update` (`UPDATE`) makes `init` check each
+//! file in `system/incoming` (signature, a version above every good
+//! slot's, not a bad slot's image) and send `trust` an `OFFER` for each.
+//! `apply <n>` (`ANSWER`, within 60 s) checks the file again, copies it
+//! into the slot that is not active, deletes it, and tries it in place:
+//! every service but the storage service and `trust` is stopped and the
+//! slots are tried as at boot, so an update that is not ready is bad and
+//! the previous slot runs again. `discard <n>` deletes the file.
+//! `rollback` (`ROLLBACK`) makes the active slot bad and the other, if
+//! good, run in place. Only in normal mode, and never during another.
 
 #![no_std]
 #![no_main]
@@ -54,6 +65,7 @@ use alloc::vec::Vec;
 
 use pharos_image::slots::{Mode, Record, Slot, State as SlotState};
 use pharos_programs::supervise;
+use pharos_programs::system::{Gone, Offers, Refusal};
 use pharos_proto::infer::{self, Request as InferRequest};
 use pharos_proto::net::{self, Allowed, Request as NetRequest};
 use pharos_proto::service::{self as listing, Entry, Reply, State as Shown, System};
@@ -215,6 +227,13 @@ struct Init {
     /// never written), and the record as `init` last wrote or read it.
     slots: Option<system::Slots>,
     record: Record,
+    /// The public key slots and updates are verified with.
+    key: Option<[u8; 32]>,
+    /// The updates offered since the last `update` (#165).
+    offers: Offers,
+    /// Booting, or applying an update or a rollback: `trust`'s update
+    /// requests get `BUSY` (they would start one inside the other).
+    busy: bool,
 }
 
 impl Init {
@@ -776,6 +795,11 @@ impl Init {
                         listing::Request::Services { from } => self.list(from, cap),
                         listing::Request::System => self.show_system(cap),
                         listing::Request::Next { mode } => self.next_boot(mode, cap),
+                        listing::Request::Update => self.update(cap),
+                        listing::Request::Answer { number, apply } => {
+                            self.answer(number, apply, cap)
+                        }
+                        listing::Request::Rollback => self.roll_back(cap),
                     }
                 } else if let (Some(service), Some(State::Running(p))) =
                     (self.table.get(i), self.state.get(i).copied())
@@ -1086,10 +1110,14 @@ impl Init {
                 sha256,
             }
         };
+        let incoming = (self.slots.as_ref())
+            .and_then(system::Slots::incoming)
+            .map_or(0, |n| n.len() as u8);
         let answer = System {
             mode: self.mode as u8,
             image: self.image_number,
             active: self.record.active.map_or(0, |s| 1 + s as u8),
+            incoming,
             slots: [slot(Slot::A), slot(Slot::B)],
         };
         let mut out = [0u8; listing::SYSTEM_LEN];
@@ -1120,6 +1148,286 @@ impl Init {
             b" mode not written"
         };
         self.system(&[b"next boot: ", mode_word(mode), what].concat(), None);
+    }
+}
+
+impl Init {
+    /// The image running and its version, for an `OFFER`.
+    fn running(&self) -> (u8, u64) {
+        let version = match self.image_number {
+            n @ (1 | 2) => self.record.slots[usize::from(n - 1)].version,
+            _ => 0,
+        };
+        (self.image_number, version)
+    }
+
+    /// Sends `trust` an `OFFER`, trying for at most 100 ms, as
+    /// [`Self::tell_trust`].
+    fn tell_offer(
+        &self,
+        number: u16,
+        refused: Option<Refusal>,
+        name: &[u8],
+        found: (u64, [u8; 32]),
+    ) {
+        let (image, now) = self.running();
+        let mut sha256 = [0u8; 8];
+        sha256.copy_from_slice(&found.1[..8]);
+        let offer = trust::Offer {
+            number,
+            refused: refused.map(|r| r.code() as u8),
+            name,
+            version: found.0,
+            sha256,
+            image,
+            now,
+        };
+        let mut msg = [0u8; 256];
+        let Some(n) = trust::encode(&trust::Request::Offer(offer), &mut msg) else {
+            return;
+        };
+        for _ in 0..10 {
+            if try_send(self.trust, &msg[..n]).is_ok() {
+                return;
+            }
+            pharos_user::sleep(10_000);
+        }
+    }
+
+    /// Whether `trust`'s update request may run now; else `BUSY` is sent.
+    fn idle(&self, reply: Handle) -> bool {
+        let idle = !self.busy && self.mode == Mode::Normal && self.slots.is_some();
+        if !idle {
+            let _ = try_send(reply, &[status::BUSY]);
+        }
+        idle
+    }
+
+    /// `trust`'s `UPDATE` (#165): answers how many files wait, then checks
+    /// each and sends `trust` an `OFFER`: numbered if it may be applied,
+    /// else refused with the reason.
+    fn update(&mut self, reply: Handle) {
+        if !self.idle(reply) {
+            return;
+        }
+        let names = (self.slots.as_ref())
+            .and_then(system::Slots::incoming)
+            .unwrap_or_default();
+        let _ = try_send(reply, &[status::OK, names.len() as u8]);
+        self.offers.clear();
+        let mut d = [0u8; 20];
+        for name in &names {
+            let path = [system::INCOMING, name].concat();
+            let checked = (self.slots.as_ref())
+                .map_or(Err(Refusal::Unreadable), |s| {
+                    s.check(&path, self.key.as_ref(), self.record.min_version())
+                })
+                .and_then(|(version, sha256, _)| {
+                    if self.record.was_bad(&sha256) {
+                        Err(Refusal::WasBad)
+                    } else {
+                        Ok((version, sha256))
+                    }
+                });
+            match checked {
+                Ok((version, sha256)) => {
+                    let Some(number) = self.offers.offer(name, sha256, uptime()) else {
+                        continue;
+                    };
+                    self.tell_offer(number, None, name, (version, sha256));
+                    let n = decimal(number.into(), &mut d).to_vec();
+                    let v = decimal(version, &mut d).to_vec();
+                    self.system(
+                        &[
+                            &b"offered #"[..],
+                            &n,
+                            b": incoming ",
+                            name,
+                            b" version ",
+                            &v,
+                        ]
+                        .concat(),
+                        None,
+                    );
+                }
+                Err(why) => {
+                    if pharos_proto::trust::valid_name(name) {
+                        self.tell_offer(0, Some(why), name, (0, [0; 32]));
+                    }
+                    self.system(
+                        &[&b"incoming "[..], name, b" refused: ", why.text()].concat(),
+                        None,
+                    );
+                }
+            }
+        }
+    }
+
+    /// `trust`'s `ANSWER` (#165): discards offer `number`'s file, or checks
+    /// it again (it must be the image offered), copies it into the slot
+    /// that is not active, and tries it in place.
+    fn answer(&mut self, number: u16, apply: bool, reply: Handle) {
+        if !self.idle(reply) {
+            return;
+        }
+        let offer = match self.offers.take(number, uptime()) {
+            Ok(offer) => offer,
+            Err(gone) => {
+                let code = match gone {
+                    Gone::Unknown => status::NOT_FOUND,
+                    Gone::Expired => status::CANCELLED,
+                };
+                let _ = try_send(reply, &[code]);
+                return;
+            }
+        };
+        let _ = try_send(reply, &[status::OK]);
+        let name = offer.name();
+        let path = [system::INCOMING, name].concat();
+        let Some(slots) = self.slots.take() else {
+            return;
+        };
+        if !apply {
+            let deleted = slots.delete(&path);
+            self.slots = Some(slots);
+            let what: &[u8] = if deleted { b"" } else { b" (not deleted)" };
+            self.system(&[b"update discarded: incoming ", name, what].concat(), None);
+            return;
+        }
+        let checked = slots
+            .check(&path, self.key.as_ref(), self.record.min_version())
+            .and_then(|(version, sha256, len)| match sha256 == offer.sha256 {
+                true if self.record.was_bad(&sha256) => Err(Refusal::WasBad),
+                true => Ok((version, sha256, len)),
+                false => Err(Refusal::Changed),
+            });
+        let (version, sha256, len) = match checked {
+            Ok(found) => found,
+            Err(why) => {
+                self.slots = Some(slots);
+                self.tell_offer(number, Some(why), name, (0, [0; 32]));
+                self.system(
+                    &[b"update refused: incoming ", name, b": ", why.text()].concat(),
+                    None,
+                );
+                return;
+            }
+        };
+        let mut record = self.record;
+        let slot = record.stage(version, sha256);
+        let slot_name = shown::name(1 + slot as u32);
+        // The file first, then the record that names it: a crash between
+        // leaves the record as it was.
+        if !slots.write_slot(slot, len) || !slots.save(&record) {
+            self.slots = Some(slots);
+            self.system(
+                &[b"update failed: ", slot_name, b" cannot be written"].concat(),
+                None,
+            );
+            return;
+        }
+        let _ = slots.delete(&path);
+        self.slots = Some(slots);
+        self.record = record;
+        let mut d = [0u8; 20];
+        let v = decimal(version, &mut d).to_vec();
+        self.system(
+            &[
+                &b"staged version "[..],
+                &v,
+                b" in ",
+                slot_name,
+                b"; trying it",
+            ]
+            .concat(),
+            None,
+        );
+        self.switch();
+        let running = u32::from(self.image_number);
+        if running == 1 + slot as u32 {
+            let numbers = [shown::UPDATED, running, 0];
+            self.system(
+                &[b"update applied: running ", slot_name, b" version ", &v].concat(),
+                Some(numbers),
+            );
+            return;
+        }
+        // Not ready: never tried again, and its image never offered again.
+        self.record.refuse(slot);
+        if let Some(slots) = self.slots.as_ref() {
+            let _ = slots.save(&self.record);
+        }
+        let numbers = [shown::ROLLED_BACK, running, 0];
+        self.system(
+            &[
+                b"update failed: ",
+                slot_name,
+                b" bad; rolled back: running ",
+                shown::name(running),
+            ]
+            .concat(),
+            Some(numbers),
+        );
+    }
+
+    /// `trust`'s `ROLLBACK` (#165): the active slot bad, the other active,
+    /// and the slots tried again in place.
+    fn roll_back(&mut self, reply: Handle) {
+        if !self.idle(reply) {
+            return;
+        }
+        let mut record = self.record;
+        let Some(to) = record.rollback() else {
+            let _ = try_send(reply, &[status::NOT_FOUND]);
+            return;
+        };
+        let saved = self.slots.as_ref().is_some_and(|s| s.save(&record));
+        if !saved {
+            let _ = try_send(reply, &[status::INTERNAL]);
+            return;
+        }
+        let _ = try_send(reply, &[status::OK]);
+        self.record = record;
+        let to = shown::name(1 + to as u32);
+        self.system(&[b"rollback: trying ", to].concat(), None);
+        self.switch();
+        let running = u32::from(self.image_number);
+        self.system(
+            &[
+                b"update rolled back by the user: running ",
+                shown::name(running),
+            ]
+            .concat(),
+            Some([shown::ROLLED_BACK, running, 0]),
+        );
+    }
+
+    /// Stops the image's services and boots again in place from the slot
+    /// record, as at boot: the slots, then the factory image.
+    fn switch(&mut self) {
+        self.busy = true;
+        self.stop_image();
+        if self.image != ROOT {
+            let _ = pharos_user::delete(self.image);
+        }
+        self.image = ROOT;
+        self.image_number = 0;
+        let slots = self.slots.take();
+        let mut record = self.record;
+        self.boot_slots(&slots, &mut record, self.key);
+        self.slots = slots;
+        self.record = record;
+        if self.image_number == 0 {
+            self.boot_factory(false);
+        }
+        self.report_ready(self.ready_count());
+        self.busy = false;
+    }
+
+    fn ready_count(&self) -> usize {
+        (self.state.iter())
+            .filter(|s| matches!(s, State::Ok(_) | State::Done))
+            .count()
     }
 }
 
@@ -1183,22 +1491,23 @@ fn main(arg: u64) -> u64 {
         safe: false,
         slots: None,
         record: Record::EMPTY,
+        key: pharos_programs::system::parse_key(option_env!("PHAROS_IMAGE_KEY")),
+        offers: Offers::new(),
+        busy: true,
     };
     // Only the boot table boots from an image; the test tables run from
     // the root filesystem.
     if table_number == 0 {
-        let key = pharos_programs::system::parse_key(option_env!("PHAROS_IMAGE_KEY"));
-        init.boot_image(key, kernel_mode, copy);
+        init.boot_image(init.key, kernel_mode, copy);
     } else {
         init.start_all(|_| true, u64::MAX);
     }
-    let ready = init
-        .state
-        .iter()
-        .filter(|s| matches!(s, State::Ok(_) | State::Done))
-        .count();
+    let ready = init.ready_count();
     let off = init.state.iter().filter(|s| **s == State::Off).count();
     let failed = table.len().min(MAX_SERVICES) - ready - off;
+    // Idle before `trust` hears the system is ready, so an `update`
+    // typed at once is answered.
+    init.busy = false;
     // The trail and `trust` first: the kernel may end the boot check
     // once it has the summary.
     init.report_ready(ready);
