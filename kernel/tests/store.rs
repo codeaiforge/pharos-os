@@ -173,7 +173,7 @@ fn run(t: &mut TestRun) {
     passed(
         t,
         &strangers,
-        &["badge 0 and an unknown namespace: NO_ACCESS"],
+        &["badge 0 sees only system, an unknown namespace NO_ACCESS"],
     );
     t.check(
         "the service is still running",

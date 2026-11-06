@@ -45,7 +45,7 @@ pub fn sign(
     Ok(())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut s, b| {
         let _ = write!(s, "{b:02x}");
         s
@@ -74,7 +74,7 @@ fn read_seed(path: &Path) -> Result<[u8; 32]> {
 }
 
 /// The test key: made from the system's random source on first use.
-fn test_seed(paths: &Paths) -> Result<[u8; 32]> {
+pub fn test_seed(paths: &Paths) -> Result<[u8; 32]> {
     let dir = paths.target.join("xtask").join("keys");
     let path = dir.join("test.key");
     if path.exists() {

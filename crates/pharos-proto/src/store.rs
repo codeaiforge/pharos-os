@@ -92,9 +92,17 @@ pub const NAMESPACES: &[(u16, &[u8])] = &[
     (8, b"knowledge"),
 ];
 
+/// The namespace `init` reaches on its own unbadged capability (badge 0,
+/// which no other process holds, services.md): the image slots and the
+/// slot record (#163, boot.md section 8).
+pub const SYSTEM: &[u8] = b"system";
+
 /// The namespace prefix for `badge` and whether it is read-only; `None`
-/// for badge 0 or an unknown namespace.
+/// for an unknown namespace. Badge 0 is `init`'s: [`SYSTEM`], read-write.
 pub fn namespace(badge: u32) -> Option<(&'static [u8], bool)> {
+    if badge == 0 {
+        return Some((SYSTEM, false));
+    }
     let number = (badge & 0xffff) as u16;
     let (_, prefix) = NAMESPACES.iter().find(|(n, _)| *n == number && *n != 0)?;
     Some((prefix, badge & READ_ONLY != 0))
@@ -382,7 +390,8 @@ mod tests {
     fn namespaces_paths_and_statuses() {
         assert_eq!(namespace(1), Some((&b"test"[..], false)));
         assert_eq!(namespace(1 | READ_ONLY), Some((&b"test"[..], true)));
-        assert_eq!(namespace(0), None, "badge 0");
+        assert_eq!(namespace(0), Some((SYSTEM, false)), "init's own");
+        assert_eq!(namespace(READ_ONLY), None, "number 0, read-only");
         assert_eq!(namespace(99), None, "unknown");
         let mut out = [0u8; 104];
         let n = full_path(b"test", b"a/b.txt", &mut out).unwrap();

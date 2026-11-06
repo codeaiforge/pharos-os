@@ -1,0 +1,166 @@
+//! `init`'s image slots (#163, boot.md section 8): namespace `system` on
+//! its own unbadged storage capability, through one buffer big enough for
+//! a slot file. The same buffer is the `Memory` object `fs_mount` copies
+//! the image from.
+
+use alloc::vec::Vec;
+
+use pharos_image::HEADER_LEN;
+use pharos_image::slots::{RECORD_LEN, Record, Slot};
+use pharos_programs::system::Refusal;
+use pharos_proto::store::{self, Request, Status};
+use pharos_user::rights::{READ, WRITE};
+use pharos_user::{
+    Handle, Mapped, Received, call_timeout, fs_mount, mem_map_buffer, mem_share, send,
+};
+
+/// A 16 MiB image takes about a second to read under QEMU.
+const STORE_US: u64 = 10_000_000;
+/// A slot file: the header and an image of at most 16 MiB.
+const BUFFER: u64 = pharos_image::MAX_IMAGE + 4096;
+const RECORD: &[u8] = b"state";
+
+pub struct Slots {
+    store: Handle,
+    reply: Handle,
+    buffer: Mapped,
+    /// `READ | WRITE | GRANT` on the buffer, kept for `fs_mount`.
+    memory: Handle,
+}
+
+/// What `system/state` held.
+pub enum Loaded {
+    Record(Record),
+    Missing,
+    Corrupt,
+    Unreadable,
+}
+
+fn u64_at(b: &[u8], at: usize) -> u64 {
+    b.get(at..at + 8)
+        .and_then(|s| s.try_into().ok())
+        .map_or(0, u64::from_le_bytes)
+}
+
+impl Slots {
+    /// Maps and shares the buffer and attaches it at the store.
+    pub fn open(store: Handle, reply: Handle) -> Option<Self> {
+        let buffer = mem_map_buffer(BUFFER).ok()?;
+        let memory = mem_share(buffer.addr(), buffer.len() as u64).ok()?;
+        let slots = Self {
+            store,
+            reply,
+            buffer,
+            memory,
+        };
+        slots.attach().then_some(slots)
+    }
+
+    fn attach(&self) -> bool {
+        let len = self.buffer.len() as u64;
+        let mut msg = [0u8; 16];
+        let sent = store::encode(&Request::Attach { len }, &mut msg)
+            .is_some_and(|n| send(self.store, &msg[..n], self.memory, READ | WRITE, 0).is_ok());
+        sent && matches!(self.call(&Request::Buffer), Some((Status::Ok, out)) if u64_at(&out, 1) == len)
+    }
+
+    fn call(&self, req: &Request<'_>) -> Option<(Status, [u8; 256])> {
+        let mut msg = [0u8; 256];
+        let n = store::encode(req, &mut msg)?;
+        let mut out = [0u8; 256];
+        match call_timeout(self.store, &msg[..n], self.reply, &mut out, STORE_US) {
+            Ok(Received::Message { len, .. }) if len >= 1 => Some((Status::from_code(out[0]), out)),
+            _ => None,
+        }
+    }
+
+    /// A request that uses the buffer, attaching it again once if the
+    /// store lost it (it restarted).
+    fn call_buffered(&self, req: &Request<'_>) -> Option<(Status, [u8; 256])> {
+        match self.call(req)? {
+            (Status::NoBuffer, _) if self.attach() => self.call(req),
+            answer => Some(answer),
+        }
+    }
+
+    /// Reads `path` into the buffer: its length, `None` if there is no
+    /// such file, `Err` if the store failed.
+    fn read(&self, path: &[u8]) -> Result<Option<u64>, ()> {
+        let (status, out) = self.call(&Request::Stat { path }).ok_or(())?;
+        match status {
+            Status::NotFound => return Ok(None),
+            Status::Ok => {}
+            _ => return Err(()),
+        }
+        let len = u64_at(&out, 2);
+        if len > self.buffer.len() as u64 {
+            return Err(());
+        }
+        let req = Request::Read {
+            path,
+            offset: 0,
+            len,
+            at: 0,
+        };
+        match self.call_buffered(&req) {
+            Some((Status::Ok, out)) if u64_at(&out, 1) == len => Ok(Some(len)),
+            _ => Err(()),
+        }
+    }
+
+    pub fn load(&self) -> Loaded {
+        match self.read(RECORD) {
+            Err(()) => Loaded::Unreadable,
+            Ok(None) => Loaded::Missing,
+            Ok(Some(len)) if len == RECORD_LEN as u64 => {
+                let mut bytes = [0u8; RECORD_LEN];
+                self.buffer.read_bytes(0, &mut bytes);
+                Record::decode(&bytes).map_or(Loaded::Corrupt, Loaded::Record)
+            }
+            Ok(Some(_)) => Loaded::Corrupt,
+        }
+    }
+
+    /// Writes `record` (one store commit: the old record or the new).
+    pub fn save(&self, record: &Record) -> bool {
+        self.buffer.write_bytes(0, &record.encode());
+        let req = Request::Write {
+            path: RECORD,
+            len: RECORD_LEN as u64,
+            at: 0,
+        };
+        matches!(self.call_buffered(&req), Some((Status::Ok, _)))
+    }
+
+    /// Reads `slot`, verifies it with `key` and against the SHA-256 the
+    /// record names, and mounts its image with `MOUNT` on `root`: the new
+    /// filesystem and the image's version. The kernel mounts a copy of
+    /// the buffer, which only the store also maps, and only `init`'s
+    /// requests make it write there.
+    pub fn mount(
+        &self,
+        root: Handle,
+        slot: Slot,
+        record: &Record,
+        key: Option<&[u8; 32]>,
+    ) -> Result<(Handle, u64), Refusal> {
+        let key = key.ok_or(Refusal::NoKey)?;
+        let Ok(Some(len)) = self.read(slot.path()) else {
+            return Err(Refusal::Unreadable);
+        };
+        let mut file = Vec::new();
+        file.try_reserve_exact(len as usize)
+            .map_err(|_| Refusal::Unreadable)?;
+        file.resize(len as usize, 0);
+        self.buffer.read_bytes(0, &mut file);
+        let verified = pharos_image::verify(&file, key, 0).map_err(Refusal::Image)?;
+        if verified.sha256 != record.slot(slot).sha256 {
+            return Err(Refusal::Replaced);
+        }
+        let (version, image_len) = (verified.version, verified.image.len() as u64);
+        drop(file);
+        let fs = fs_mount(root, self.memory, HEADER_LEN as u64, image_len)
+            .map_err(|_| Refusal::NotMounted)?;
+        Ok((fs, version))
+    }
+}

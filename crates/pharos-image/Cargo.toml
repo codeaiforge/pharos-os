@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+pharos-fs = { path = "../pharos-fs" }
 pharos-store = { path = "../pharos-store" }
 # Ed25519 (D-028). MIT, no dependencies with default features off; one
 # `unsafe` block (a volatile wipe of key memory).

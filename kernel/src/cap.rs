@@ -40,6 +40,9 @@ pub const CONFIG: Rights = 1 << 7;
 pub const WAIT: Rights = 1 << 8;
 /// Stop a process (and the processes it started; agents.md).
 pub const STOP: Rights = 1 << 9;
+/// Mount an image with `fs_mount` (on a filesystem; only `init`'s root,
+/// boot.md section 8).
+pub const MOUNT: Rights = 1 << 10;
 
 /// Badges are 24 bits (services.md).
 pub const BADGE_MASK: u32 = 0xff_ffff;

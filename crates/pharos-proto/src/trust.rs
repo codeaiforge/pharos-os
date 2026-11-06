@@ -81,6 +81,48 @@ pub enum Event {
     /// Could not be started (#152): `numbers[0]` is a [`not_started`]
     /// reason, and for a spawn error `numbers[1]` its code.
     NotStarted = 10,
+    /// The image the system runs (#163, no name): `numbers` are an
+    /// [`image`] step, the image, and for a refusal its reason.
+    Image = 11,
+}
+
+/// What [`Event::Image`] reports (boot.md section 8): `numbers[0]` a step,
+/// `numbers[1]` the image (0 factory, 1 slot A, 2 slot B), `numbers[2]`
+/// for [`REFUSED`](image::REFUSED) an index into [`REASONS`](image::REASONS).
+pub mod image {
+    /// The services run from the image.
+    pub const RUNNING: u32 = 0;
+    /// The image failed its checks.
+    pub const REFUSED: u32 = 1;
+    /// Not every service was ready within 20 s: its services were stopped.
+    pub const NOT_READY: u32 = 2;
+
+    /// Why a slot was refused: read, record, and mount failures, then
+    /// `pharos_image::Error::reason` for each signature check.
+    pub const REASONS: &[&[u8]] = &[
+        b"cannot be read",
+        b"not the image the record names",
+        b"filesystem check failed",
+        b"no key to verify it with",
+        b"truncated",
+        b"not a Pharos image",
+        b"unknown header version",
+        b"reserved bytes set",
+        b"image over 16 MiB",
+        b"length does not match",
+        b"bad signature",
+        b"SHA-256 does not match",
+        b"version too old",
+    ];
+
+    /// The image's name: `factory image`, `slot A`, `slot B`.
+    pub fn name(image: u32) -> &'static [u8] {
+        match image {
+            1 => b"slot A",
+            2 => b"slot B",
+            _ => b"factory image",
+        }
+    }
 }
 
 /// Why a service could not be started ([`Event::NotStarted`]).
@@ -95,7 +137,7 @@ impl Event {
         use Event::*;
         [
             Exited, Killed, NoReady, Skipped, Restarting, GivenUp, Never, Stopped, Ready, NotReady,
-            NotStarted,
+            NotStarted, Image,
         ]
         .get(usize::from(c))
         .copied()
@@ -103,7 +145,7 @@ impl Event {
 
     /// True for the system's state, which names no service.
     pub fn system(self) -> bool {
-        matches!(self, Self::Ready | Self::NotReady)
+        matches!(self, Self::Ready | Self::NotReady | Self::Image)
     }
 }
 
@@ -822,6 +864,7 @@ mod tests {
             ev(Event::Ready, b"", Names::default()),
             ev(Event::NotReady, b"", two),
             ev(Event::NotStarted, b"missing", Names::default()),
+            ev(Event::Image, b"", Names::default()),
         ] {
             let mut buf = [0u8; 256];
             let n = encode(&req, &mut buf).unwrap();

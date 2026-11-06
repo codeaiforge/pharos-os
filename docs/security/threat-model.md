@@ -24,7 +24,7 @@
 
 - Developer host ↔ the repository's code and scripts.
 - Repository ↔ CI runners (if the repository is hosted).
-- Workspace ↔ third-party crates: two, `libm` (user programs only, D-016) and `ed25519-compact` (`pharos-image`, D-028: today `xtask` only; from #163 also `init`).
+- Workspace ↔ third-party crates: two, `libm` (user programs only, D-016) and `ed25519-compact` (`pharos-image`, D-028: `xtask`, and since #163 `init`, which verifies slots with it).
 - QEMU guest ↔ host network: slirp user-mode networking in tests only; the host side is the `cargo xtask` echo server on localhost.
 
 ### Threats and mitigations
@@ -71,7 +71,7 @@ Design: [storage.md](../architecture/storage.md) and [D-007](../project/decision
 | A corrupt or hostile filesystem image crashes or corrupts the kernel | The image is untrusted input. One safe `no_std` parser (`unsafe` forbidden) checks every offset, size, path, and CRC-32 before use, with fixed limits; it is fuzzed on the host, and a QEMU test boots one corrupted image per check. A bad image fails to mount and the kernel keeps running |
 | A process reads files it was not given | Files only through capabilities: a filesystem capability with `READ` opens files, file capabilities narrow rights, pass over IPC only with `GRANT`, and are revoked through the derivation tree |
 | An image is replaced or tampered with | **Limit:** CRC-32 detects corruption only; images are not authenticated until secure boot |
-| A corrupted, unsigned, or failing system image leaves the system unbootable, or an update is applied without the user | D-028 (#160): the factory image on the read-only boot medium is always the fallback; `init` and the store start from it and verify each update slot's Ed25519 signature and version before the kernel mounts it; 3 attempts without the ready state, or its time limit, mark a slot bad and fall back; recovery and safe mode need no agent, model, or slot; an update is applied only with a valid signature and the user's yes on the trusted console, and an agent can only propose one (planned, M4.3) |
+| A corrupted, unsigned, or failing system image leaves the system unbootable, or an update is applied without the user | D-028 (#160): the factory image on the read-only boot medium is always the fallback; `init` and the store start from it and verify each update slot's Ed25519 signature and version before the kernel mounts it; 3 attempts without the ready state, or its time limit, mark a slot bad and fall back; recovery and safe mode need no agent, model, or slot; an update is applied only with a valid signature and the user's yes on the trusted console, and an agent can only propose one (slots, verification, and fallback implemented in #163; recovery, safe mode, and updates planned, M4.3) |
 
 ### Drivers and devices (M2.9)
 

@@ -53,8 +53,9 @@ fn audited(t: &mut TestRun, when: &str, audit: Option<&manifests::Audit<'_>>) {
 
 /// The vector a killed service's end reports.
 const KILLED: u64 = 13;
-/// The boot table's 8 entries, all succeeded.
-const SUMMARY: [u8; 2] = [8, 0];
+/// The boot table's 8 entries, all succeeded, from the factory image (the
+/// store has no slots).
+const SUMMARY: [u8; 3] = [8, 0, 0];
 const VIRTIO_NET: u16 = 0x1041;
 /// `trust` holds the virtio-console.
 const VIRTIO_CONSOLE: u16 = 0x1043;
@@ -259,7 +260,7 @@ fn run(t: &mut TestRun) {
     audited(t, "after the faults", audit.as_ref());
 
     t.check(
-        "init reported every boot service ready: [8, 0]",
+        "init reported every boot service ready: [8, 0, 0]",
         summary.as_deref() == Some(&SUMMARY[..]),
     );
     for (what, line) in [

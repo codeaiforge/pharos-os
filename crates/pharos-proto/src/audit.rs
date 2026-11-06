@@ -86,7 +86,10 @@ pub mod action {
     /// A service event from `init` (#151, D-026): a failure, skip,
     /// restart, or stop, or the system's ready state, as detail.
     pub const SERVICE: u8 = 19;
-    pub const LAST: u8 = SERVICE;
+    /// The image `init` boots from (#163): each candidate, refusal,
+    /// fallback, and the image that runs, as detail.
+    pub const SYSTEM: u8 = 20;
+    pub const LAST: u8 = SYSTEM;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -110,6 +113,7 @@ pub mod action {
             "verify",
             "knowledge",
             "service",
+            "system",
         ]
         .get(usize::from(code))
         .copied()

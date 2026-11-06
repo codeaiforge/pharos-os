@@ -126,7 +126,7 @@ See the [boot evaluation](boot-evaluation.md#d-001--bootloader-and-boot-protocol
 
 ## 8. Recovery and updates (M4.3, D-028)
 
-**Planned, not implemented.** Design approved (#161, 2026-11-06). It follows [D-028](../project/decision-log.md#d-028-boot-recovery-known-good-images-and-signed-updates): an update replaces only the root image; a factory image on the boot medium is always the fallback; `init` verifies and selects; signature and the user's yes before an update is applied.
+**Partly implemented:** signed images (#162), and `fs_mount` and booting from a slot with fallback (#163); recovery and safe mode (#164) and updates (#165) are planned. Design approved (#161, 2026-11-06). It follows [D-028](../project/decision-log.md#d-028-boot-recovery-known-good-images-and-signed-updates): an update replaces only the root image; a factory image on the boot medium is always the fallback; `init` verifies and selects; signature and the user's yes before an update is applied.
 
 ### Images
 
@@ -176,6 +176,19 @@ One file, `system/state` (each write is one store commit, so it is always old or
 
 Every step is an audit record (`system` action: candidate, verified or refused with the reason, ready, fallback, mode) once the audit service runs, and a `trust` line from structured fields: `system: slot A version 7 failed (not ready in 20 s), trying factory`. Records before the audit service starts are kept and sent when it is ready, as today.
 
+**Implemented (#163),** with the boot table (argument 0; the test tables run from the root as before). Where it differs from the steps above:
+
+- **Code:** the record and the choice of candidate are `pharos_image::slots` (`Record`, `candidate`, `attempt`, `refuse`, `ready`), host-tested, so `xtask` writes test records with the same code; `init`'s store client is `user/programs/src/bin/init/system.rs`; the reasons it reports are `pharos_programs::system::Refusal`.
+- **Record layout:** magic `PHAROSSR`, format version 1, active (0 none, 1 A, 2 B), next mode, 2 reserved bytes, then per slot 48 bytes (state, attempts, 6 reserved, version, SHA-256), and the CRC-32 of the first 112 bytes: 116 bytes. Any wrong field is corrupt. A missing record is reported and left missing; a corrupt one is reported and rewritten empty.
+- **Namespace `system`** is reached on `init`'s own unbadged storage capability: the store maps badge 0, which the table rules give no service, to it (no new namespace number).
+- **Step 1:** the storage service starts first, from the factory image; `trust`'s program comes from the factory image too, but it starts in table order, after the audit and knowledge services it needs, and keeps running across a fallback.
+- **Step 2:** modes are #164; `next` is kept but not read yet, and the kernel has no `recovery` module yet.
+- **Step 3:** the other slot is a candidate if `good` or `trying` with attempts left (not only `good`), so a rollback target that once failed to start is not lost before it is bad. A slot that was tried in this boot is not tried again in it; attempts count across boots. A slot at 3 attempts becomes `bad` when it is passed over, and that is written.
+- **Step 5:** `init` reads the slot through one 16 MiB + 4 KiB buffer, copies it to its heap, verifies it with the key it was built with (none: `no key to verify it with`), checks the SHA-256 against the record's (`not the image the record names`), and mounts from the buffer at offset 128. Between the check and the mount only the store, which comes from the factory image and writes only when `init` asks, could change the buffer.
+- **Step 7:** the deadline covers starting every service; a service given up earlier ends the attempt at once. Stopped services are waited for (up to 1 s) so the next image's drivers find their devices free.
+- **Reporting:** `init: system: <detail>` on the debug console, a `system` audit record (action 20, actor `init`), and `trust`'s event `IMAGE` (`pharos_proto::trust::image`: running, refused with a reason code, not ready), shown as `system: running slot B`, `system: slot A refused: bad signature`, `system: slot A not ready within 20 s; its services stopped`. `trust` sees only what happens while it runs. The kernel prints `services: 8 ready, 0 failed, from slot B`.
+- **Tested** by the host tests of `pharos_image::slots` (every state to its candidate, attempts counted and used up, any changed byte of the record refused, 100,000 mutated records) and the `recovery` test kernel (below). Mutations caught: the attempt not written before the slot is used (`never-ready-2`), and a slot mounted without verification (`corrupt`).
+
 ### The kernel call `fs_mount`
 
 | No. | Call | Arguments | Result | Capability needed |
@@ -185,6 +198,7 @@ Every step is an audit record (`system` action: candidate, verified or refused w
 - The kernel **copies** the range into frames it owns (charged to the caller's page limit), then mounts the copy with `pharos_fs::Image::mount`, so the caller cannot change the bytes after the checks. The copy is mapped nowhere in user space and freed when the last capability on it goes.
 - **Only `init` holds `MOUNT`:** the kernel gives it on `init`'s root capability; every `Give(Root, …)` in `pharos-services` is `READ` only (an existing rule), so the capability audit (D-027) fails if any service gets `MOUNT`.
 - At most two mounted images at once besides the boot modules (`NO_MEMORY` past that); `TOO_LARGE` over 16 MiB; a failed check is the new error `BAD_IMAGE` (13) with nothing kept. The fuzz test of `syscall::decode` covers it. No new `unsafe`: the copy uses the existing `mm::raw` frame slices.
+- **Implemented (#163, the kernel part).** `fs::Disk` is a boot module or a `fs::Copy`; the copy's frames are mapped in an address space of its own that no process runs in, and every byte goes in and out through the existing safe `read_user` (the source frames are mapped there one page at a time while they are read), so no new `unsafe` (not `mm::raw`, as planned above: it has no slices of arbitrary frames). The copy's pages and tables are charged to the caller until it ends; a failed mount gives them back. The offset may be any byte (a slot's image starts after its 128-byte header). The `fsmount` test kernel runs the cases in the table below; removing the `MOUNT` check fails it.
 
 ### Recovery and safe mode
 
@@ -224,6 +238,6 @@ Every step is an audit record (`system` action: candidate, verified or refused w
 | Host, `init`'s selection (in `pharos-services` or `pharos_programs::system`) | Every record state and mode to its candidate; attempts counted before use; a corrupt record means factory; staging rules (version, `bad` hashes, 4 incoming) |
 | Host, `syscall` | The fuzz test covers `fs_mount` |
 | QEMU, `fsmount` | `fs_mount` with and without `MOUNT`, a corrupt image (`BAD_IMAGE`), 17 MiB (`TOO_LARGE`), a third mount (`NO_MEMORY`); the caller changes its buffer after mounting and reads the old bytes |
-| QEMU, `recovery` (boot image, several boots on one store disk, as `store_crash`) | A corrupted slot, an unsigned slot, and a slot whose agent runtime never sends ready each end on the other slot or the factory image with `boot ok`; a slot killed mid-boot (QEMU killed) counts an attempt and is `bad` after 3; a corrupted `root` module boots `recovery`; `safe` and `recovery` entries start no agent runtime |
+| QEMU, `recovery` (boot image, several boots on one store disk, as `store_crash`; **implemented for #163**: the corrupted, unsigned, and never-ready slots and the killed boot) | A corrupted slot, an unsigned slot, and a slot whose agent runtime never sends ready each end on the other slot or the factory image with `boot ok`; a slot killed mid-boot (QEMU killed) counts an attempt and is `bad` after 3; a corrupted `root` module boots `recovery`; `safe` and `recovery` entries start no agent runtime |
 | QEMU, `update` | A host-staged update approved with `yes` becomes active; one that is not ready is rolled back in place; `no` and no answer leave it unapplied; an agent's `PROPOSE` is not applied without `yes`; a malfunctioning agent (spinning, flooding `PROPOSE`, trying `MOUNT` and the `system` namespace) cannot stop `stop all`, `recovery`, or the fallback |
 | Mutations (gate, #167) | Skipping the attempt write, or accepting an unsigned slot, fails CI |

@@ -21,21 +21,35 @@
 //! Each time the network service reports ready, `init` sends it every
 //! network client's destinations (`ALLOW`, #109), on its own unbadged
 //! capability: a client can send only where its entry lists.
+//!
+//! With the boot table, `init` boots from an image (#163, boot.md section
+//! 8): the storage service and `trust` always come from the factory image
+//! (the root filesystem); the slot record `system/state` names the slot
+//! to try. Each attempt is written before the slot is used; the slot is
+//! read, verified against the public key `init` was built with
+//! (`PHAROS_IMAGE_KEY`), and mounted with `fs_mount`, and every other
+//! service starts from it. If they are not all ready within 20 s, they are
+//! stopped and the next candidate is tried in place: the other slot, then
+//! the factory image. The kernel gets `[ready, failed, image]`.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+#[path = "init/system.rs"]
+mod system;
+
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+use pharos_image::slots::{Record, Slot, State as SlotState};
 use pharos_programs::supervise;
 use pharos_proto::infer::{self, Request as InferRequest};
 use pharos_proto::net::{self, Allowed, Request as NetRequest};
 use pharos_proto::service::{self as listing, Entry, Reply, State as Shown};
 use pharos_proto::store::{self, Request as StoreRequest};
-use pharos_proto::trust::{self, Event, Names, not_started};
+use pharos_proto::trust::{self, Event, Names, image as shown, not_started};
 use pharos_proto::{audit, status};
 use pharos_services::{
     Ep, Give, Kind, MAX_SERVICES, Object, RUNTIME_HANDLES, RUNTIME_PATH, Restart, Service,
@@ -146,6 +160,11 @@ const AUDIT_RETRY_MAX_US: u64 = 60_000_000;
 const MAX_UNSENT: usize = 32;
 /// How long a service may take to answer `RELEASE`.
 const RELEASE_US: u64 = 1_000_000;
+/// How long an image's services may take to be ready (boot.md section 8).
+const IMAGE_READY_US: u64 = 20_000_000;
+/// Programs always started from the factory image: a slot cannot break
+/// the code that falls back, or the trusted path.
+const FACTORY: [&[u8]; 2] = [b"bin/store", b"bin/trust"];
 
 struct Init {
     table: &'static [Service],
@@ -172,6 +191,12 @@ struct Init {
     /// When to try them again, and the wait after the next failure.
     retry_at: u64,
     retry_us: u64,
+    /// The filesystem services start from (but [`FACTORY`]'s), and which
+    /// image it is: 0 factory, 1 slot A, 2 slot B.
+    image: Handle,
+    image_number: u8,
+    /// When the wait in `step` must end at the latest.
+    wake_by: u64,
 }
 
 impl Init {
@@ -179,7 +204,7 @@ impl Init {
     fn handle(&self, object: Object) -> Option<Handle> {
         Some(match object {
             Object::DebugConsole => CONSOLE,
-            Object::Root => ROOT,
+            Object::Root => self.image,
             Object::Endpoint(e) => match e {
                 Ep::Events => self.events,
                 Ep::Net => self.net,
@@ -218,7 +243,12 @@ impl Init {
     fn start(&mut self, i: usize) {
         let service = &self.table[i];
         self.state[i] = State::Failed;
-        let Ok(file) = open(ROOT, service.path) else {
+        let fs = if FACTORY.contains(&service.path) {
+            ROOT
+        } else {
+            self.image
+        };
+        let Ok(file) = open(fs, service.path) else {
             let numbers = [not_started::MISSING_PROGRAM, 0, 0];
             self.event(i, b"missing program", Event::NotStarted, numbers, &[]);
             return;
@@ -711,6 +741,7 @@ impl Init {
         self.record_starts();
         self.flush();
         let mut wait = self.check_ready();
+        wait = wait.min(self.wake_by.saturating_sub(uptime()));
         if !self.unsent.is_empty() {
             wait = wait.min(self.retry_at.saturating_sub(uptime()).max(10_000));
         }
@@ -747,6 +778,213 @@ impl Init {
             }
             _ => {}
         }
+    }
+
+    /// Starts every pending entry `which` selects, in table order, each
+    /// once the entries it needs have succeeded, and waits until each has
+    /// succeeded or failed. False if `deadline` (an `uptime`) passed first.
+    fn start_all(&mut self, which: impl Fn(&Service) -> bool, deadline: u64) -> bool {
+        for i in 0..self.table.len().min(MAX_SERVICES) {
+            if self.state[i] != State::Pending || !which(&self.table[i]) {
+                continue;
+            }
+            let met = (self.table[i].after.iter())
+                .all(|&a| matches!(self.state[a], State::Ok(_) | State::Done));
+            if !met {
+                self.state[i] = State::Skipped;
+                self.event(i, b"skipped", Event::Skipped, [0; 3], &[]);
+                continue;
+            }
+            self.start(i);
+            self.wake_by = deadline;
+            // Until this service succeeds or fails; others' events too.
+            while matches!(self.state[i], State::Running(_) | State::Restarting(_)) {
+                if uptime() >= deadline {
+                    self.wake_by = u64::MAX;
+                    return false;
+                }
+                self.step();
+            }
+        }
+        self.wake_by = u64::MAX;
+        true
+    }
+
+    /// True if every entry succeeded.
+    fn all_ready(&self) -> bool {
+        (self.state[..self.table.len().min(MAX_SERVICES)].iter())
+            .all(|s| matches!(s, State::Ok(_) | State::Done))
+    }
+
+    /// Stops every service the image started, so the next image's start
+    /// afresh; a [`FACTORY`] service that runs keeps running.
+    fn stop_image(&mut self) {
+        let mut stopped = Vec::new();
+        for j in 0..self.table.len().min(MAX_SERVICES) {
+            let factory = FACTORY.contains(&self.table[j].path);
+            match self.state[j] {
+                State::Running(_) | State::Ok(_) | State::Restarting(_) if factory => continue,
+                State::Running(p) | State::Ok(p) => {
+                    let _ = pharos_user::process_stop(p);
+                    self.release(j);
+                    stopped.push(p);
+                }
+                _ => {}
+            }
+            self.state[j] = State::Pending;
+            self.restarts[j] = 0;
+            self.recorded[j] = false;
+        }
+        // A stop ends a process at its next return to user mode: wait (up
+        // to 1 s) until they have, so the next image's drivers find their
+        // devices free.
+        for _ in 0..100 {
+            if stopped
+                .iter()
+                .all(|&p| process_status(p) != Ok(Status::Running))
+            {
+                break;
+            }
+            pharos_user::sleep(10_000);
+        }
+        for p in stopped {
+            let _ = pharos_user::delete(p);
+        }
+    }
+
+    /// An image event (#163): `init: system: <detail>` on the debug
+    /// console, a `system` audit record, and, with `numbers`, an `IMAGE`
+    /// to `trust`, which writes its own line from them.
+    fn system(&mut self, detail: &[u8], numbers: Option<[u32; 3]>) {
+        let _ = debug_write(CONSOLE, &[&b"init: system: "[..], detail].concat());
+        let entry = audit::Entry {
+            kind: audit::Kind::Event,
+            refers: 0,
+            actor: b"init",
+            task: 0,
+            attempt: 0,
+            action: audit::action::SYSTEM,
+            permission: None,
+            service: b"init",
+            outcome: audit::outcome::OK,
+            detail: &supervise::cut_list(detail, audit::MAX_DETAIL),
+        };
+        self.append(&entry);
+        if let Some(numbers) = numbers {
+            self.tell_trust(Event::Image, b"", numbers, &[]);
+        }
+    }
+
+    /// Boots from an image (#163, boot.md section 8): the storage service
+    /// from the factory image, then each candidate the slot record names
+    /// in turn, then the factory image; `image` is then the one that runs.
+    fn boot_image(&mut self, key: Option<[u8; 32]>) {
+        self.start_all(|s| s.path == b"bin/store", u64::MAX);
+        let slots = if self.up(b"bin/store") {
+            system::Slots::open(self.store, self.reply)
+        } else {
+            None
+        };
+        let mut record = Record::EMPTY;
+        let loaded = match slots.as_ref().map(system::Slots::load) {
+            Some(system::Loaded::Record(r)) => {
+                record = r;
+                r
+            }
+            Some(system::Loaded::Missing) => {
+                self.system(b"no slot record", None);
+                record
+            }
+            Some(system::Loaded::Corrupt) => {
+                let rewritten = slots.as_ref().is_some_and(|s| s.save(&Record::EMPTY));
+                self.system(
+                    if rewritten {
+                        b"slot record corrupt; rewritten empty"
+                    } else {
+                        b"slot record corrupt; not rewritten"
+                    },
+                    None,
+                );
+                record
+            }
+            Some(system::Loaded::Unreadable) | None => {
+                self.system(b"slot record unreadable", None);
+                record
+            }
+        };
+        let mut tried = [false; 2];
+        let mut d = [0u8; 20];
+        while let (Some(slots), Some(slot)) = (slots.as_ref(), record.candidate(tried)) {
+            let number = 1 + slot as u32;
+            let name = shown::name(number);
+            tried[slot as usize] = true;
+            // The attempt is on the disk before the slot is used, so a
+            // crash or a hang during it counts on the next boot.
+            record.attempt(slot);
+            if !slots.save(&record) {
+                self.system(
+                    &[name, b": the attempt cannot be written; not tried"].concat(),
+                    None,
+                );
+                break;
+            }
+            let attempt = decimal(record.slot(slot).attempts.into(), &mut d).to_vec();
+            self.system(&[name, b": attempt ", &attempt].concat(), None);
+            let (fs, version) = match slots.mount(ROOT, slot, &record, key.as_ref()) {
+                Ok(mounted) => mounted,
+                Err(why) => {
+                    record.refuse(slot);
+                    let _ = slots.save(&record);
+                    let numbers = [shown::REFUSED, number, why.code()];
+                    self.system(&[name, b" refused: ", why.text()].concat(), Some(numbers));
+                    continue;
+                }
+            };
+            let version = decimal(version, &mut d).to_vec();
+            self.image = fs;
+            self.image_number = number as u8;
+            let deadline = uptime().saturating_add(IMAGE_READY_US);
+            if self.start_all(|_| true, deadline) && self.all_ready() {
+                record.ready(slot);
+                let saved = slots.save(&record);
+                let what: &[u8] = if saved { b"" } else { b" (record not written)" };
+                let numbers = [shown::RUNNING, number, 0];
+                self.system(
+                    &[b"running ", name, b" version ", &version, what].concat(),
+                    Some(numbers),
+                );
+                return;
+            }
+            let numbers = [shown::NOT_READY, number, 0];
+            let what = b" not ready within 20 s; its services stopped";
+            self.system(
+                &[name, b" version ", &version, what].concat(),
+                Some(numbers),
+            );
+            self.stop_image();
+            let _ = pharos_user::delete(fs);
+            self.image = ROOT;
+            self.image_number = 0;
+        }
+        // Slots whose attempts ran out became bad when they were passed
+        // over; that is written too.
+        for slot in [Slot::A, Slot::B] {
+            let (was, is) = (loaded.slot(slot).state, record.slot(slot).state);
+            if was == SlotState::Trying && is == SlotState::Bad {
+                let name = shown::name(1 + slot as u32);
+                self.system(&[name, b": attempts used up; bad"].concat(), None);
+            }
+        }
+        if record != loaded {
+            if let Some(slots) = slots.as_ref() {
+                let _ = slots.save(&record);
+            }
+        }
+        self.image = ROOT;
+        self.image_number = 0;
+        self.start_all(|_| true, u64::MAX);
+        let numbers = [shown::RUNNING, 0, 0];
+        self.system(b"running factory image", Some(numbers));
     }
 }
 
@@ -794,22 +1032,17 @@ fn main(arg: u64) -> u64 {
         unsent: VecDeque::new(),
         retry_at: 0,
         retry_us: AUDIT_US,
+        image: ROOT,
+        image_number: 0,
+        wake_by: u64::MAX,
     };
-    for (i, service) in table.iter().enumerate().take(MAX_SERVICES) {
-        let met = service
-            .after
-            .iter()
-            .all(|&a| matches!(init.state[a], State::Ok(_) | State::Done));
-        if !met {
-            init.state[i] = State::Skipped;
-            init.event(i, b"skipped", Event::Skipped, [0; 3], &[]);
-            continue;
-        }
-        init.start(i);
-        // Until this service succeeds or fails; others' events too.
-        while matches!(init.state[i], State::Running(_) | State::Restarting(_)) {
-            init.step();
-        }
+    // Only the boot table boots from an image; the test tables run from
+    // the root filesystem.
+    if arg == 0 {
+        let key = pharos_programs::system::parse_key(option_env!("PHAROS_IMAGE_KEY"));
+        init.boot_image(key);
+    } else {
+        init.start_all(|_| true, u64::MAX);
     }
     let ready = init
         .state
@@ -820,7 +1053,8 @@ fn main(arg: u64) -> u64 {
     // The trail and `trust` first: the kernel may end the boot check
     // once it has the summary.
     init.report_ready(ready);
-    let _ = send(REPORT, &[ready as u8, failed as u8], 0, 0, 0);
+    let summary = [ready as u8, failed as u8, init.image_number];
+    let _ = send(REPORT, &summary, 0, 0, 0);
 
     // Keep supervising: restarts, and `ready` from restarted daemons.
     loop {

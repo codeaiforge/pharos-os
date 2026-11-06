@@ -12,6 +12,8 @@ publish.workspace = true
 # dependencies, maintained in rust-lang/compiler-builtins).
 libm = "0.2.16"
 pharos-fs = { path = "../../crates/pharos-fs" }
+# Signed images (D-028, #163): `init` verifies a slot before it mounts it.
+pharos-image = { path = "../../crates/pharos-image" }
 pharos-infer = { path = "../../crates/pharos-infer" }
 pharos-proto = { path = "../../crates/pharos-proto" }
 pharos-services = { path = "../../crates/pharos-services" }

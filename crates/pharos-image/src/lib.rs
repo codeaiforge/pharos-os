@@ -13,7 +13,8 @@
 //!
 //! [`verify`] checks every field and never panics; [`sign`] is for the host
 //! (`cargo xtask image sign`). The kernel checks the `pharos-fs` image
-//! itself when it is mounted.
+//! itself when it is mounted. [`slots`] is the slot record `init` keeps in
+//! the store and how it picks the image to boot (#163).
 //!
 //! `no_std`, `unsafe` forbidden (workspace lint).
 
@@ -24,6 +25,8 @@ extern crate std;
 
 #[cfg(test)]
 mod tests;
+
+pub mod slots;
 
 use ed25519_compact::{KeyPair, PublicKey, Seed, Signature};
 

@@ -7,7 +7,8 @@
 //!   listing, deletion, bad paths and ranges, and `NO_SPACE`.
 //! - 2: namespace 1, read-only: reads what 1 left, every write refused.
 //! - 3: namespace 2: sees nothing of namespace 1.
-//! - 4: badge 0 (handle 2) and an unknown namespace (handle 3): refused.
+//! - 4: badge 0 (handle 2), `init`'s own, sees only namespace `system`
+//!   (#163); an unknown namespace (handle 3) is refused.
 //! - 5: namespace 3, read-only, for the `large_file` test kernel (#78):
 //!   reads `model.gguf` (676 MB) into private memory through a 16 MiB
 //!   window, checks it against `model.sha256`, and parses it as GGUF.
@@ -328,8 +329,8 @@ fn strangers(f: &mut u64) {
     let unknown = Client::new(3);
     report(
         f,
-        "badge 0 and an unknown namespace: NO_ACCESS",
-        unbadged.status(Request::Stat { path: b"keep.txt" }) == Status::NoAccess
+        "badge 0 sees only system, an unknown namespace NO_ACCESS",
+        unbadged.status(Request::Stat { path: b"keep.txt" }) == Status::NotFound
             && unknown.status(Request::Stat { path: b"keep.txt" }) == Status::NoAccess,
     );
 }

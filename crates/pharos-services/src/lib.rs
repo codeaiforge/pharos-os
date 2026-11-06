@@ -30,6 +30,8 @@ pub mod rights {
     pub const CONFIG: u32 = 1 << 7;
     pub const WAIT: u32 = 1 << 8;
     pub const STOP: u32 = 1 << 9;
+    /// `fs_mount`: `init`'s own, never given (only `READ` on the root).
+    pub const MOUNT: u32 = 1 << 10;
     /// What a driver gets on its device.
     pub const DEVICE: u32 = MAP | CONFIG | IRQ;
 }
@@ -328,7 +330,7 @@ mod tests {
         const BLK: Give = device(VIRTIO_BLK, 0);
         // BOOT: 0 virtio-blk, 1 net, 2 store, 3 infer, 4 audit, 5
         // knowledge, 6 trust, 7 agents.
-        const CASES: [(usize, &[Give], Broken); 11] = [
+        const CASES: [(usize, &[Give], Broken); 12] = [
             // `init`'s own badge on the store.
             (
                 3,
@@ -371,6 +373,17 @@ mod tests {
                     receive(Ep::Infer),
                     REPORT,
                     give(Object::Root, READ | WRITE, Badge::None),
+                ],
+                Broken::Rights,
+            ),
+            // The right to mount images (#163): `init`'s only.
+            (
+                3,
+                &[
+                    CONSOLE,
+                    receive(Ep::Infer),
+                    REPORT,
+                    give(Object::Root, READ | MOUNT, Badge::None),
                 ],
                 Broken::Rights,
             ),

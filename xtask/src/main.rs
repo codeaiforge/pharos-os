@@ -20,6 +20,7 @@ mod bench;
 mod console;
 mod echo;
 mod fs_image;
+mod recovery;
 mod sign;
 mod store_image;
 
@@ -631,6 +632,8 @@ const DISK_IMAGE: &str = "disk.img";
 /// The writable store disk written next to every ISO: an empty, formatted
 /// store (storage.md part 8), fresh for each image.
 const STORE_IMAGE: &str = "store.img";
+/// The public key `init` is built to trust for image slots (#163).
+const IMAGE_KEY_ENV: &str = "PHAROS_IMAGE_KEY";
 /// Its size in 4 KiB blocks (16 MiB, a sparse file).
 const STORE_BLOCKS: u64 = 4096;
 
@@ -646,7 +649,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 28] = [
+const USER_PROGRAMS: [&str; 29] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -675,6 +678,7 @@ const USER_PROGRAMS: [&str; 28] = [
     "auditclient",
     "knowledge",
     "knowledgeclient",
+    "mountprobe",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -702,10 +706,21 @@ fn user_rustflags(root: &Path) -> String {
 /// each is a static program the kernel can load, and returns them as
 /// `bin/<name>` files.
 fn build_user_programs(paths: &Paths) -> Result<Vec<ImageFile>> {
+    build_user_programs_with(paths, None)
+}
+
+/// [`build_user_programs`], with `init` trusting the public `key` (64 hex
+/// digits) for image slots (#163); without one it trusts none.
+fn build_user_programs_with(paths: &Paths, key: Option<&str>) -> Result<Vec<ImageFile>> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let target_dir = paths.target.join("user");
+    let mut command = Command::new(cargo);
+    match key {
+        Some(key) => command.env(IMAGE_KEY_ENV, key),
+        None => command.env_remove(IMAGE_KEY_ENV),
+    };
     run(
-        Command::new(cargo)
+        command
             .current_dir(&paths.root)
             .env("CARGO_TARGET_DIR", &target_dir)
             .env("RUSTFLAGS", user_rustflags(&paths.root))
@@ -2828,9 +2843,15 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     };
     let out = paths.runner_dir(&name);
     fs::create_dir_all(&out).map_err(io_err("cannot create", &out))?;
-    // The `system` kernel boots what the main kernel boots (#153).
-    let programs = build_user_programs(paths)?;
-    let modules = if name == SYSTEM_TEST {
+    // The `system` kernel boots what the main kernel boots (#153), and so
+    // does `recovery`, with `init` trusting the test key (#163).
+    let programs = if name == recovery::TEST {
+        let public = pharos_image::public_key(&sign::test_seed(paths)?);
+        build_user_programs_with(paths, Some(&sign::hex(&public)))?
+    } else {
+        build_user_programs(paths)?
+    };
+    let modules = if name == SYSTEM_TEST || name == recovery::TEST {
         kernel_modules(paths, &programs)?
     } else {
         test_modules(&programs)
@@ -2888,6 +2909,10 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         if name == c.test {
             crash_rounds(c, &iso, &out.join("ovmf-vars.fd"), &logs, &extra)?;
         }
+    }
+    if name == recovery::TEST {
+        let vars = out.join("ovmf-vars.fd");
+        recovery::rounds(paths, &programs, &iso, &vars, &logs, &extra)?;
     }
     let (steps, refused): (&'static [console::Step], &[&str]) = match name.as_str() {
         TRUST_TEST => (TRUST_SCRIPT, TRUST_REFUSED),
@@ -2985,6 +3010,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         })
     });
     let typed = typed.and_then(|()| {
+        if name == recovery::TEST {
+            return recovery::last(&iso, &clean_log(&run.log));
+        }
         if name == BUDGETS_TEST && run.status == Some(33) {
             budgets_audit(&out.join(STORE_IMAGE))
         } else {

@@ -214,10 +214,18 @@ extern "C" fn kernel_main() -> ! {
         Ok(id) => kprintln!("  init:       started (process {id})"),
         Err(error) => fail(format_args!("cannot start init: {error}")),
     }
-    match ipc::poll(&report, core::time::Duration::from_secs(30)) {
-        Some(m) if m.len == 2 => {
+    // Enough for two slots that are not ready in 20 s and the factory
+    // image (boot.md section 8, #163).
+    match ipc::poll(&report, core::time::Duration::from_secs(75)) {
+        Some(m) if m.len == 3 => {
             let (ready, failed) = (m.data[0], m.data[1]);
-            kprintln!("  services:   {ready} ready, {failed} failed");
+            let image = match m.data[2] {
+                0 => "the factory image",
+                1 => "slot A",
+                2 => "slot B",
+                _ => "an unknown image",
+            };
+            kprintln!("  services:   {ready} ready, {failed} failed, from {image}");
             if failed != 0 {
                 fail(format_args!(
                     "{failed} service(s) failed (see init's lines above)"
@@ -225,7 +233,7 @@ extern "C" fn kernel_main() -> ! {
             }
         }
         Some(_) => fail(format_args!("init sent a malformed report")),
-        None => fail(format_args!("init did not report within 30 s")),
+        None => fail(format_args!("init did not report within 75 s")),
     }
 
     kprintln!("PHAROS: boot ok");

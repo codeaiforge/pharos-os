@@ -676,10 +676,10 @@ pub fn init_capabilities(
     report: Arc<crate::ipc::Endpoint>,
     devices: bool,
 ) -> Vec<Arc<Capability>> {
-    use crate::cap::{CONFIG, GRANT, IRQ, MAP, Object, READ, SEND, WRITE};
+    use crate::cap::{CONFIG, GRANT, IRQ, MAP, MOUNT, Object, READ, SEND, WRITE};
     let mut caps = alloc::vec![
         Capability::new(Object::DebugConsole, WRITE | GRANT),
-        Capability::new(Object::Filesystem(fs), READ | GRANT),
+        Capability::new(Object::Filesystem(fs), READ | GRANT | MOUNT),
         Capability::new(Object::Endpoint(report), SEND),
     ];
     let wanted = crate::pci::devices()

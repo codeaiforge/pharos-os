@@ -39,6 +39,7 @@ pub mod number {
     pub const UPTIME: u64 = 24;
     pub const PROCESS_STOP: u64 = 25;
     pub const PROCESS_USAGE: u64 = 26;
+    pub const FS_MOUNT: u64 = 27;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -53,6 +54,8 @@ pub mod rights {
     pub const CONFIG: u32 = 1 << 7;
     pub const WAIT: u32 = 1 << 8;
     pub const STOP: u32 = 1 << 9;
+    /// `fs_mount` on a filesystem: only `init`'s root has it.
+    pub const MOUNT: u32 = 1 << 10;
 }
 
 /// A capability handle in this process's table.
@@ -74,6 +77,8 @@ pub enum Error {
     WouldBlock,
     /// Nothing arrived before the timeout.
     TimedOut,
+    /// `fs_mount`: the image failed a filesystem check.
+    BadImage,
     /// A code this library does not know.
     Other(u64),
 }
@@ -93,6 +98,7 @@ impl Error {
             10 => Self::BadProgram,
             11 => Self::WouldBlock,
             12 => Self::TimedOut,
+            13 => Self::BadImage,
             other => Self::Other(other),
         }
     }
@@ -112,6 +118,7 @@ impl Error {
             Self::BadProgram => 10,
             Self::WouldBlock => 11,
             Self::TimedOut => 12,
+            Self::BadImage => 13,
             Self::Other(code) => code,
         }
     }
@@ -563,6 +570,15 @@ pub fn mem_share(addr: u64, len: u64) -> Result<Handle, Error> {
 pub fn mem_map_cap(memory: Handle, writable: bool, len: u64) -> Result<Mapped, Error> {
     let addr = call(number::MEM_MAP_CAP, [memory, writable.into(), len, 0, 0, 0])?;
     Ok(Mapped::new(addr, len.div_ceil(4096) * 4096))
+}
+
+/// Mounts a copy of the `len` bytes at `offset` of the shared memory behind
+/// `memory` (needs `READ`) as a new filesystem (`READ | GRANT`); needs
+/// `MOUNT` on `fs`. [`Error::BadImage`] if the copy fails a check,
+/// [`Error::TooLarge`] over 16 MiB or past the memory's end,
+/// [`Error::NoMemory`] with two copies mounted already.
+pub fn fs_mount(fs: Handle, memory: Handle, offset: u64, len: u64) -> Result<Handle, Error> {
+    call(number::FS_MOUNT, [fs, memory, offset, len, 0, 0])
 }
 
 /// Exit code a program's panic ends it with.

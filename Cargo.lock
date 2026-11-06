@@ -31,6 +31,7 @@ name = "pharos-image"
 version = "0.2.0"
 dependencies = [
  "ed25519-compact",
+ "pharos-fs",
  "pharos-store",
 ]
 
@@ -53,6 +54,7 @@ version = "0.2.0"
 dependencies = [
  "libm",
  "pharos-fs",
+ "pharos-image",
  "pharos-infer",
  "pharos-proto",
  "pharos-services",

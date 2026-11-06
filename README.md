@@ -81,7 +81,7 @@ pharos 0.2.0
 $ cargo run -q -p pharos-cli -- info
 Pharos OS 0.2.0
 Project of: CodeAIForge
-Stage:      Phase 4 - Full Operating System (M4.2 complete, M4.3 next)
+Stage:      Phase 4 - Full Operating System (M4.2 complete, M4.3 in progress)
 ...
 
 $ cargo run -q -p pharos-cli -- doctor

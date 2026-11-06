@@ -693,6 +693,25 @@ impl Trust {
             Event::GivenUp => &[b"service ", name, b" not restarted: restarts used up"],
             Event::Never => &[b"service ", name, b" not restarted: restart policy never"],
             Event::Stopped => &[b"service ", name, b" stopped; not restarted"],
+            Event::Image => {
+                let image = trust::image::name(n[1]);
+                match n[0] {
+                    trust::image::RUNNING => &[b"system: running ", image],
+                    trust::image::REFUSED => &[
+                        b"system: ",
+                        image,
+                        b" refused: ",
+                        (trust::image::REASONS.get(n2 as usize))
+                            .copied()
+                            .unwrap_or(b"unknown reason"),
+                    ],
+                    _ => &[
+                        b"system: ",
+                        image,
+                        b" not ready within 20 s; its services stopped",
+                    ],
+                }
+            }
             Event::NotStarted => match n[0] {
                 trust::not_started::MISSING_PROGRAM => {
                     &[b"service ", name, b" not started: missing program"]

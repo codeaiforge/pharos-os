@@ -40,6 +40,7 @@ pub mod number {
     pub const UPTIME: u64 = 24;
     pub const PROCESS_STOP: u64 = 25;
     pub const PROCESS_USAGE: u64 = 26;
+    pub const FS_MOUNT: u64 = 27;
 }
 
 /// What `process_usage` reports (its second argument).
@@ -84,6 +85,8 @@ pub enum Error {
     BadProgram = 10,
     WouldBlock = 11,
     TimedOut = 12,
+    /// `fs_mount`: the image failed a `pharos-fs` check.
+    BadImage = 13,
 }
 
 impl From<CapError> for Error {
@@ -254,6 +257,13 @@ pub enum Call {
         /// Must equal the shared object's size (so the caller knows its
         /// bounds).
         pages: u64,
+    },
+    /// Mounts a copy of `len` bytes at `offset` of a `Memory` object.
+    FsMount {
+        handle: Handle,
+        memory: Handle,
+        offset: u64,
+        len: u64,
     },
 }
 
@@ -470,6 +480,17 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             },
             pages: map_pages(args[2]).ok_or(Error::TooLarge)?,
         }),
+        number::FS_MOUNT => match (args[2], args[3]) {
+            (offset, len @ 1..=pharos_fs::MAX_IMAGE) if offset.checked_add(len).is_some() => {
+                Ok(Call::FsMount {
+                    handle: args[0],
+                    memory: args[1],
+                    offset,
+                    len,
+                })
+            }
+            _ => Err(Error::TooLarge),
+        },
         _ => Err(Error::UnknownCall),
     }
 }
@@ -489,6 +510,7 @@ pub fn needed_rights(call: &Call) -> cap::Rights {
         | Call::ProcessUsage { .. }
         | Call::IrqNotify { .. } => cap::WAIT,
         Call::ProcessStop { .. } => cap::STOP,
+        Call::FsMount { .. } => cap::MOUNT,
         Call::Spawn { .. } => cap::READ,
         _ => 0,
     }
@@ -899,6 +921,52 @@ mod kernel {
         Ok(start)
     }
 
+    /// `fs_mount` (#163, boot.md section 8): copies the range into frames
+    /// the kernel owns, then mounts the copy, so the caller cannot change
+    /// the bytes after the checks. The copy's pages are charged to the
+    /// caller until it ends; a failed mount gives them back.
+    fn fs_mount(
+        process: &process::Process,
+        handle: Handle,
+        memory: Handle,
+        offset: u64,
+        len: u64,
+    ) -> Result<u64, Error> {
+        let parent = process.caps.lock().get(handle, cap::MOUNT)?;
+        if !matches!(parent.object(), Object::Filesystem(_)) {
+            return Err(Error::MissingRight);
+        }
+        let via = process.caps.lock().get(memory, cap::READ)?;
+        let Object::Memory(memory) = via.object() else {
+            return Err(Error::MissingRight);
+        };
+        if offset + len > memory.frames().len() as u64 * 4096 {
+            return Err(Error::TooLarge);
+        }
+        if process.caps.lock().full() {
+            return Err(Error::NoMemory);
+        }
+        // Its pages, their tables, and the copy's top-level tables.
+        let pages = len.div_ceil(4096);
+        let charge = pages + pages.div_ceil(512) + 4;
+        if !process.memory.lock().take(charge, true) {
+            return Err(Error::NoMemory);
+        }
+        let give_back = || process.memory.lock().charged -= charge;
+        let pause = || crate::arch::x86_64::interrupt_window();
+        let Some(copy) = crate::fs::Copy::new(memory.frames(), offset, len, pause) else {
+            give_back();
+            return Err(Error::NoMemory);
+        };
+        let Ok(image) = pharos_fs::Image::mount(crate::fs::Disk::Copy(copy)) else {
+            give_back();
+            return Err(Error::BadImage);
+        };
+        let fs = alloc::sync::Arc::new(image);
+        let cap = cap::Capability::new(Object::Filesystem(fs), cap::READ | cap::GRANT);
+        Ok(process.caps.lock().insert(cap)?)
+    }
+
     /// `spawn`: every handle and the limits are checked before anything is
     /// allocated; then the program is loaded and checked.
     #[allow(clippy::too_many_arguments)]
@@ -1279,6 +1347,12 @@ mod kernel {
                 Ok(0)
             }
             Call::MemShare { addr, pages } => mem_share(&process, addr, pages),
+            Call::FsMount {
+                handle,
+                memory,
+                offset,
+                len,
+            } => fs_mount(&process, handle, memory, offset, len),
             Call::MemMapCap {
                 handle,
                 writable,
@@ -1361,13 +1435,33 @@ mod tests {
             decode(5, [3, 0, 0, 0, 0, 0]),
             Ok(Call::Delete { handle: 3 })
         );
+        assert_eq!(
+            decode(27, [2, 5, 128, 16 << 20, 0, 0]),
+            Ok(Call::FsMount {
+                handle: 2,
+                memory: 5,
+                offset: 128,
+                len: 16 << 20
+            })
+        );
+        assert_eq!(
+            needed_rights(&decode(27, [2, 5, 0, 1, 0, 0]).unwrap()),
+            cap::MOUNT
+        );
+    }
+
+    #[test]
+    fn fs_mount_refuses_empty_huge_and_wrapping_ranges() {
+        for (offset, len) in [(0, 0), (0, (16 << 20) + 1), (u64::MAX, 1), (1, u64::MAX)] {
+            assert_eq!(decode(27, [2, 5, offset, len, 0, 0]), Err(Error::TooLarge));
+        }
     }
 
     #[test]
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(27, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(28, [0; 6]), Err(Error::UnknownCall));
         let region = crate::process::MAP_REGION;
         assert_eq!(
             decode(22, [region.start, 8192, 9, 9, 9, 9]),
@@ -1682,7 +1776,7 @@ mod tests {
         let mut accepted = 0;
         for _ in 0..200_000 {
             // Small numbers and lengths often, huge ones sometimes.
-            let number = next() % 25;
+            let number = next() % 29;
             let args: [u64; 6] = core::array::from_fn(|_| next() >> (next() % 64));
             match decode(number, args) {
                 Ok(
@@ -1743,11 +1837,15 @@ mod tests {
                     assert!(len <= MAX_MESSAGE && max <= MAX_MESSAGE);
                     assert!(user_range_ok(addr, len as u64) && user_range_ok(addr, max as u64));
                 }
+                Ok(Call::FsMount { offset, len, .. }) => {
+                    assert!((1..=pharos_fs::MAX_IMAGE).contains(&len));
+                    assert!(offset.checked_add(len).is_some());
+                }
                 Ok(_) => assert!(matches!(
                     number,
-                    0 | 1 | 5 | 6 | 13 | 14 | 16 | 21 | 24 | 25
+                    0 | 1 | 5 | 6 | 13 | 14 | 16 | 21 | 24 | 25 | 26
                 )),
-                Err(error) => assert!(error as u64 >= 1 && error as u64 <= 12),
+                Err(error) => assert!(error as u64 >= 1 && error as u64 <= 13),
             }
         }
         assert!(accepted > 0, "the generator must reach valid buffers");

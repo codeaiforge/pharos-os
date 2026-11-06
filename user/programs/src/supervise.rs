@@ -60,7 +60,8 @@ mod tests {
                 m::IRQ,
                 m::CONFIG,
                 m::WAIT,
-                m::STOP
+                m::STOP,
+                m::MOUNT
             ],
             [
                 k::SEND,
@@ -72,7 +73,8 @@ mod tests {
                 k::IRQ,
                 k::CONFIG,
                 k::WAIT,
-                k::STOP
+                k::STOP,
+                k::MOUNT
             ]
         );
     }

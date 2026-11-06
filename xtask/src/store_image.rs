@@ -379,6 +379,35 @@ fn write_files(path: &Path, files: &[(&[u8], &[u8])]) -> Result<()> {
     Ok(())
 }
 
+/// Writes a store holding `files` and room for the boot services' own
+/// (the audit trail, the knowledge service): 16 MiB more (#163).
+pub fn with_room(path: &Path, files: &[(&[u8], &[u8])]) -> Result<()> {
+    let len: usize = files.iter().map(|(_, d)| d.len()).sum();
+    let blocks = (len as u64).div_ceil(BLOCK as u64) + 4096;
+    let mut store = Store::format(FileDevice::create(path, blocks)?)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    for (name, bytes) in files {
+        store
+            .write(name, bytes)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// The file at `path` in the store `image`, if there is one.
+pub fn read(image: &Path, path: &[u8]) -> Result<Option<Vec<u8>>> {
+    let mut store =
+        Store::mount(FileDevice::open(image)?).map_err(|e| format!("{}: {e}", image.display()))?;
+    let Ok(info) = store.stat(path) else {
+        return Ok(None);
+    };
+    let mut bytes = vec![0; info.len as usize];
+    store
+        .read(path, 0, &mut bytes)
+        .map_err(|e| format!("{}: {e}", String::from_utf8_lossy(path)))?;
+    Ok(Some(bytes))
+}
+
 /// `pharos-infer`'s math functions from `libm`, as user programs supply
 /// them (`pharos_programs::fp::Libm`), so the host's reference output
 /// comes from the same arithmetic as Pharos's.
