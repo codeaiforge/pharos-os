@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 pharos-elf = { path = "../crates/pharos-elf" }
 pharos-fs = { path = "../crates/pharos-fs" }
+pharos-image = { path = "../crates/pharos-image" }
 pharos-infer = { path = "../crates/pharos-infer" }
 pharos-proto = { path = "../crates/pharos-proto" }
 pharos-store = { path = "../crates/pharos-store" }

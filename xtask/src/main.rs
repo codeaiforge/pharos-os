@@ -20,6 +20,7 @@ mod bench;
 mod console;
 mod echo;
 mod fs_image;
+mod sign;
 mod store_image;
 
 /// Pinned Limine release (D-001). To update the pin, follow
@@ -71,6 +72,12 @@ COMMANDS:
                             Adds kernel/root/ as the filesystem module `root`;
                             with --kernel (a test kernel), the test modules
                             instead (also for `run --kernel`).
+    image sign <IMAGE> <OUT> --version <N> [--key <FILE>]
+                            Write OUT: the filesystem image IMAGE with a signed
+                            header (boot.md part 8). FILE holds an Ed25519 seed
+                            as 64 hex digits; without --key, the test key in
+                            target/xtask/keys/ (made on first use). Prints the
+                            public key, for PHAROS_IMAGE_KEY.
     run [--bios] [--gdb] [--kernel <ELF>]
                             Build, make the image, and boot it in QEMU with serial
                             output on this terminal. UEFI (OVMF) by default; --bios
@@ -131,6 +138,12 @@ enum Task {
     Image {
         kernel: Option<PathBuf>,
     },
+    ImageSign {
+        image: PathBuf,
+        out: PathBuf,
+        version: u64,
+        key: Option<PathBuf>,
+    },
     Run {
         bios: bool,
         gdb: bool,
@@ -172,10 +185,35 @@ enum Task {
 }
 
 fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
     let task = match args.next().as_deref() {
         None | Some("help" | "-h" | "--help") => return Ok(Task::Help),
         Some("build") => Task::Build,
+        Some("image") if args.peek().map(String::as_str) == Some("sign") => {
+            args.next();
+            let usage = "image sign needs <IMAGE> <OUT> --version <N> [--key <FILE>]";
+            let image = args.next().ok_or(usage)?;
+            let out = args.next().ok_or(usage)?;
+            let (mut version, mut key) = (None, None);
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--version" => {
+                        let value = args.next().ok_or("--version needs a number")?;
+                        version = Some(value.parse().map_err(|_| {
+                            format!("--version must be a whole number, got '{value}'")
+                        })?);
+                    }
+                    "--key" => key = Some(PathBuf::from(args.next().ok_or("--key needs a path")?)),
+                    other => return Err(format!("unexpected argument '{other}'")),
+                }
+            }
+            return Ok(Task::ImageSign {
+                image: PathBuf::from(image),
+                out: PathBuf::from(out),
+                version: version.ok_or(usage)?,
+                key,
+            });
+        }
         Some("image") => {
             let mut kernel = None;
             while let Some(arg) = args.next() {
@@ -2981,6 +3019,12 @@ fn main() -> ExitCode {
             }
             Task::Build => build(&paths),
             Task::Image { kernel } => main_image(&paths, kernel).map(|_| ()),
+            Task::ImageSign {
+                image,
+                out,
+                version,
+                key,
+            } => sign::sign(&paths, &image, &out, version, key.as_deref()),
             Task::Run { bios, gdb, kernel } => run_qemu(&paths, bios, gdb, kernel),
             Task::Test { timeout } => test(&paths, timeout),
             Task::Runner { elf } => runner(&paths, &elf),
@@ -3020,6 +3064,27 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn image_sign_parses() {
+        let sign = |list: &[&str]| parse(args(list));
+        assert_eq!(
+            sign(&["image", "sign", "a", "b", "--version", "7"]),
+            Ok(Task::ImageSign {
+                image: "a".into(),
+                out: "b".into(),
+                version: 7,
+                key: None
+            })
+        );
+        assert!(matches!(
+            sign(&["image", "sign", "a", "b", "--key", "k", "--version", "1"]),
+            Ok(Task::ImageSign { key: Some(_), .. })
+        ));
+        assert!(sign(&["image", "sign", "a", "b"]).is_err());
+        assert!(sign(&["image", "sign", "a", "b", "--version", "-1"]).is_err());
+        assert_eq!(sign(&["image"]), Ok(Task::Image { kernel: None }));
     }
 
     #[test]

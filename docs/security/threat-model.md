@@ -24,14 +24,14 @@
 
 - Developer host ↔ the repository's code and scripts.
 - Repository ↔ CI runners (if the repository is hosted).
-- Workspace ↔ third-party crates: one, `libm` (user programs only, D-016).
+- Workspace ↔ third-party crates: two, `libm` (user programs only, D-016) and `ed25519-compact` (`pharos-image`, D-028: today `xtask` only; from #163 also `init`).
 - QEMU guest ↔ host network: slirp user-mode networking in tests only; the host side is the `cargo xtask` echo server on localhost.
 
 ### Threats and mitigations
 
 | Threat | Mitigation |
 | --- | --- |
-| A dependency is malicious or compromised | One third-party crate, `libm` 0.2.16 (MIT, no dependencies of its own, maintained by the Rust project), used only by user programs, never the kernel; reviewed under AGENTS.md section 6 (#74); `Cargo.lock` committed with its checksum; CI uses `--locked`; dependency policy in AGENTS.md. |
+| A dependency is malicious or compromised | Two third-party crates, neither in the kernel: `libm` 0.2.16 (MIT, no dependencies of its own, maintained by the Rust project), used only by user programs, reviewed under AGENTS.md section 6 (#74); `ed25519-compact` 2.6.0 (MIT, no dependencies with default features off, one `unsafe` block that wipes key memory, maintained by Frank Denis), used by `pharos-image` to verify update signatures, reviewed in #162 ([boot.md](../architecture/boot.md#signed-image-format)), its output pinned by an RFC 8032 test vector; `Cargo.lock` committed with its checksum; CI uses `--locked`; dependency policy in AGENTS.md. |
 | CI workflow is abused to write to the repository or leak tokens | `permissions: contents: read`; `persist-credentials: false`; `actions/checkout` pinned to a verified commit SHA; no secrets used; no publish or deploy steps. The QEMU job installs Ubuntu packages on the disposable runner only. |
 | Tooling damages the host | The CLI is read-only: no external commands, no privileges, no file writes. `xtask` runs build tools and QEMU without privileges and writes only under `target/`. Scripts policy forbids `sudo` and device writes. |
 | Vulnerabilities disclosed publicly before a fix | GitHub private vulnerability reporting is enabled; [SECURITY.md](../../SECURITY.md) directs reporters to it. |

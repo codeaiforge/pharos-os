@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** Accepted (2026-10-26), based on decisions [D-001, D-002, D-003](../project/decision-log.md#accepted-decisions-m21).
-- **Recovery and updates (M4.3, D-028, #161):** design **approved** (2026-11-06); [part 8](#8-recovery-and-updates-m43-d-028) is **planned, not implemented**.
+- **Recovery and updates (M4.3, D-028, #161):** design **approved** (2026-11-06); [part 8](#8-recovery-and-updates-m43-d-028) is **planned, not implemented**, except signed images (#162: `crates/pharos-image`, `cargo xtask image sign`), **implemented**.
 - **Implementation:** Implemented in [M2.2](../project/implementation-roadmap.md#m22--minimal-bootable-x86-64-kernel) and [M2.3](../project/implementation-roadmap.md#m23--early-serial-output-and-qemu-boot-validation); the kernel boots on UEFI and BIOS and CI checks it. A throwaway prototype validated this design first ([evidence](boot-evaluation.md#prototype-evidence-3)). Exceptions and interrupts: [interrupts.md](interrupts.md).
 
 ## 2. Context
@@ -154,7 +154,9 @@ A slot or incoming file is a 128-byte header followed by a `pharos-fs` image (at
 | 64 | 64 | Ed25519 signature of bytes 0–63 |
 
 - **Verification** (new crate `crates/pharos-image`, `no_std`, `unsafe` forbidden): every field checked, the length against the file, the SHA-256 recomputed (the `pharos-store` implementation), the signature checked with `ed25519-compact` (verify only, `default-features = false`) against one public key compiled into the factory `init`. Any failure is a typed error; it never panics; fuzzed on the host. The kernel then runs the existing `pharos-fs` checks on the mount.
-- **Signing on the host:** `cargo xtask image sign <image> --version <n> --key <file>`. No private key is in the repository. Release keys stay with the maintainer, offline. Test images are signed with a key `xtask` generates under `target/xtask/keys/` on first use; test kernels' `init` is built with that public key (an environment variable read at build time, `PHAROS_IMAGE_KEY`; the default build without it trusts no key, so every slot is refused and the factory image runs).
+- **Implemented (#162).** `pharos_image::verify(file, key, min_version)` checks in this order: length of the header, magic, header version, reserved, length over 16 MiB, length against the file, signature, SHA-256, version; each refusal is an `Error` with a short `reason()`.
+- **Dependency review (#162, AGENTS.md section 6):** `ed25519-compact` 2.6.0, MIT (compatible with Apache-2.0), by Frank Denis, maintained (releases through 2026); with `default-features = false` it has no dependencies, so the transitive count is 0. It has one `unsafe` block, a volatile write that wipes key memory. Its signing code is compiled too, but only the host (`xtask`) calls `pharos_image::sign`. An RFC 8032 test vector pins its output.
+- **Signing on the host:** `cargo xtask image sign <IMAGE> <OUT> --version <N> [--key <FILE>]` writes the header and the image to `OUT`, checks the result with `verify`, and prints the public key. `FILE` holds an Ed25519 seed as 64 hex digits; without `--key`, the test key. No private key is in the repository. Release keys stay with the maintainer, offline. Test images are signed with a key `xtask` generates under `target/xtask/keys/` (`test.key`, `test.pub`) on first use, from `/dev/urandom`; test kernels' `init` is built with that public key (an environment variable read at build time, `PHAROS_IMAGE_KEY`; the default build without it trusts no key, so every slot is refused and the factory image runs).
 - **Versions:** an incoming image is accepted only if its version is higher than every slot's that is `good`. Booting an existing slot needs no version check: it was checked when it was staged. So a rollback to the previous slot is allowed and an older image cannot be installed again.
 
 ### The slot record
