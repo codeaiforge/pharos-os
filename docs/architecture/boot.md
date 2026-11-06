@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** Accepted (2026-10-26), based on decisions [D-001, D-002, D-003](../project/decision-log.md#accepted-decisions-m21).
-- **Recovery and updates (M4.3, D-028, #161):** design **approved** (2026-11-06); [part 8](#8-recovery-and-updates-m43-d-028) is **planned, not implemented**, except signed images (#162: `crates/pharos-image`, `cargo xtask image sign`), **implemented**.
+- **Recovery and updates (M4.3, D-028, #161):** design **approved** (2026-11-06); [part 8](#8-recovery-and-updates-m43-d-028) is **implemented** except updates (#165), which are **planned**: signed images (#162: `crates/pharos-image`, `cargo xtask image sign`), booting from a slot with fallback (#163), and safe mode and recovery (#164).
 - **Implementation:** Implemented in [M2.2](../project/implementation-roadmap.md#m22--minimal-bootable-x86-64-kernel) and [M2.3](../project/implementation-roadmap.md#m23--early-serial-output-and-qemu-boot-validation); the kernel boots on UEFI and BIOS and CI checks it. A throwaway prototype validated this design first ([evidence](boot-evaluation.md#prototype-evidence-3)). Exceptions and interrupts: [interrupts.md](interrupts.md).
 
 ## 2. Context
@@ -126,7 +126,7 @@ See the [boot evaluation](boot-evaluation.md#d-001--bootloader-and-boot-protocol
 
 ## 8. Recovery and updates (M4.3, D-028)
 
-**Partly implemented:** signed images (#162), and `fs_mount` and booting from a slot with fallback (#163); recovery and safe mode (#164) and updates (#165) are planned. Design approved (#161, 2026-11-06). It follows [D-028](../project/decision-log.md#d-028-boot-recovery-known-good-images-and-signed-updates): an update replaces only the root image; a factory image on the boot medium is always the fallback; `init` verifies and selects; signature and the user's yes before an update is applied.
+**Partly implemented:** signed images (#162), `fs_mount` and booting from a slot with fallback (#163), and recovery and safe mode (#164); updates (#165) are planned. Design approved (#161, 2026-11-06). It follows [D-028](../project/decision-log.md#d-028-boot-recovery-known-good-images-and-signed-updates): an update replaces only the root image; a factory image on the boot medium is always the fallback; `init` verifies and selects; signature and the user's yes before an update is applied.
 
 ### Images
 
@@ -182,7 +182,7 @@ Every step is an audit record (`system` action: candidate, verified or refused w
 - **Record layout:** magic `PHAROSSR`, format version 1, active (0 none, 1 A, 2 B), next mode, 2 reserved bytes, then per slot 48 bytes (state, attempts, 6 reserved, version, SHA-256), and the CRC-32 of the first 112 bytes: 116 bytes. Any wrong field is corrupt. A missing record is reported and left missing; a corrupt one is reported and rewritten empty.
 - **Namespace `system`** is reached on `init`'s own unbadged storage capability: the store maps badge 0, which the table rules give no service, to it (no new namespace number).
 - **Step 1:** the storage service starts first, from the factory image; `trust`'s program comes from the factory image too, but it starts in table order, after the audit and knowledge services it needs, and keeps running across a fallback.
-- **Step 2:** modes are #164; `next` is kept but not read yet, and the kernel has no `recovery` module yet.
+- **Step 2:** modes are #164 (below).
 - **Step 3:** the other slot is a candidate if `good` or `trying` with attempts left (not only `good`), so a rollback target that once failed to start is not lost before it is bad. A slot that was tried in this boot is not tried again in it; attempts count across boots. A slot at 3 attempts becomes `bad` when it is passed over, and that is written.
 - **Step 5:** `init` reads the slot through one 16 MiB + 4 KiB buffer, copies it to its heap, verifies it with the key it was built with (none: `no key to verify it with`), checks the SHA-256 against the record's (`not the image the record names`), and mounts from the buffer at offset 128. Between the check and the mount only the store, which comes from the factory image and writes only when `init` asks, could change the buffer.
 - **Step 7:** the deadline covers starting every service; a service given up earlier ends the attempt at once. Stopped services are waited for (up to 1 s) so the next image's drivers find their devices free.
@@ -212,6 +212,15 @@ Every step is an audit record (`system` action: candidate, verified or refused w
 - **Ready in safe mode and recovery** means every service started; the agent platform is reported as not started.
 - **`stop all`** and every `trust` command work in every mode; `trust` and `init` never come from a slot.
 
+**Implemented (#164).** Where it differs from the above, or adds to it:
+
+- **Kernel:** the mode is read before bootloader memory is reclaimed (`boot_info::boot_mode`, host-tested) and passed in `init`'s argument, bits 8 and up (bits 0–7 still select the table): 0 normal, 1 safe, 2 recovery, 3 recovery because `root` failed and the copy runs. `fs::mount_root` mounts `recovery` when `root` fails and says why. The kernel prints `mode: safe (from the command line)`, and the report is `[ready, failed, image, mode]` (image 3: the recovery copy), shown as `services: 7 ready, 0 failed, from the factory image, recovery mode`.
+- **Choosing the mode** (`Record::take_mode`, host-tested): the kernel's mode if it is not normal; else the record's `next`, which is cleared and written at once, before any slot is tried. A record that cannot be read is never written in this boot, so `safe` and `recovery` then answer that it cannot be written.
+- **Safe mode:** the agent runtime gets the new state `off` (`services: agents off (safe mode), …`, `init: agents not started: safe mode`), counted neither ready nor failed; ready means every other service is. Nothing depends on the runtime, so nothing else is skipped.
+- **"No candidate reaches ready"** means the factory image is not ready in normal mode: its services are stopped (`init: system: factory image not ready; its services stopped; recovery mode`) and it starts again in recovery, in place. In safe mode or recovery that already happened, so the failure is reported as before.
+- **`trust`:** a `MODE` image event after the boot (`system: safe mode: the agent runtime is not started`). `system` asks `init` with `SYSTEM` (`pharos_proto::service`) and shows `system: <mode> mode, running <image>, active slot <A, B, or none>`, then per slot `system: slot A good, version 7, attempts 0, sha256 <16 hex>` or `system: slot B empty`; no incoming count yet (#165). `safe` and `recovery` send `NEXT`; `init` writes `next` (a `system` audit record, `next boot: safe mode (asked on the trusted path)`) and `trust` shows `next boot: safe mode` and records the user's command (action `system`). The mode applies once; there is no command to clear it before the boot.
+- **Images:** `cargo xtask image` and `run` write the three entries with `timeout: 3`; the test runner writes one entry with the tested command line.
+
 ### Updates
 
 1. **Staging.** An image reaches `incoming` from the host (`cargo xtask store build` with an `incoming/` directory, as for models) or from an agent: a new runtime permission, `update propose`, lets an agent call a new runtime operation `PROPOSE` naming one of its data files; the runtime copies it to `incoming/<agent>-<n>` (the runtime gains `WRITE` on `incoming` only) and audits it. A proposal does nothing else.
@@ -238,6 +247,6 @@ Every step is an audit record (`system` action: candidate, verified or refused w
 | Host, `init`'s selection (in `pharos-services` or `pharos_programs::system`) | Every record state and mode to its candidate; attempts counted before use; a corrupt record means factory; staging rules (version, `bad` hashes, 4 incoming) |
 | Host, `syscall` | The fuzz test covers `fs_mount` |
 | QEMU, `fsmount` | `fs_mount` with and without `MOUNT`, a corrupt image (`BAD_IMAGE`), 17 MiB (`TOO_LARGE`), a third mount (`NO_MEMORY`); the caller changes its buffer after mounting and reads the old bytes |
-| QEMU, `recovery` (boot image, several boots on one store disk, as `store_crash`; **implemented for #163**: the corrupted, unsigned, and never-ready slots and the killed boot) | A corrupted slot, an unsigned slot, and a slot whose agent runtime never sends ready each end on the other slot or the factory image with `boot ok`; a slot killed mid-boot (QEMU killed) counts an attempt and is `bad` after 3; a corrupted `root` module boots `recovery`; `safe` and `recovery` entries start no agent runtime |
+| QEMU, `recovery` (boot image, several boots on one store disk, as `store_crash`; **implemented**: #163 the corrupted, unsigned, and never-ready slots and the killed boot; #164 safe mode from `next`, the `recovery` entry, a corrupt `root`, and a factory image that is not ready) | A corrupted slot, an unsigned slot, and a slot whose agent runtime never sends ready each end on the other slot or the factory image with `boot ok`; a slot killed mid-boot (QEMU killed) counts an attempt and is `bad` after 3; a corrupted `root` module boots `recovery`; `safe` and `recovery` entries start no agent runtime |
 | QEMU, `update` | A host-staged update approved with `yes` becomes active; one that is not ready is rolled back in place; `no` and no answer leave it unapplied; an agent's `PROPOSE` is not applied without `yes`; a malfunctioning agent (spinning, flooding `PROPOSE`, trying `MOUNT` and the `system` namespace) cannot stop `stop all`, `recovery`, or the fallback |
 | Mutations (gate, #167) | Skipping the attempt write, or accepting an unsigned slot, fails CI |

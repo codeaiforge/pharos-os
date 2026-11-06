@@ -185,13 +185,17 @@ mod kernel {
             .map_err(MountError::Fs)
     }
 
-    /// Mounts the module `root` as the root filesystem. Returns the number
-    /// of files.
-    pub fn mount_root() -> Result<usize, MountError> {
-        let fs = mount("root")?;
+    /// Mounts the module `root` as the root filesystem, or, if it fails,
+    /// its copy `recovery` (#164, boot.md section 8). Returns the number
+    /// of files and, if the copy was mounted, why `root` was not.
+    pub fn mount_root() -> Result<(usize, Option<MountError>), MountError> {
+        let (fs, why) = match mount("root") {
+            Ok(fs) => (fs, None),
+            Err(why) => (mount("recovery").map_err(|_| why)?, Some(why)),
+        };
         let files = fs.entries().count();
         *ROOT.lock() = Some(fs);
-        Ok(files)
+        Ok((files, why))
     }
 
     /// The root filesystem, once mounted.

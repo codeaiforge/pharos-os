@@ -8,6 +8,15 @@
 //!   name, state, restarts done, restart limit]`, as many as fit in one
 //!   message; `trust` asks again from `from + count` until `total`.
 //!
+//! - `SYSTEM` `[version, op]` (#164): the reply `[OK, mode, image,
+//!   active, slot A, slot B]`, each slot `[state, attempts, version (u64),
+//!   first 8 bytes of its SHA-256]`; codes as in `pharos_image::slots`
+//!   (mode 0 normal, 1 safe, 2 recovery; image 0 factory, 1 A, 2 B, 3 the
+//!   recovery copy; active 0 none, 1 A, 2 B; state 0 empty to 4 bad);
+//! - `NEXT` `[version, op, mode]` (#164): the next boot's mode (1 safe or
+//!   2 recovery) written to the slot record; the reply `[OK]`, or
+//!   `[INTERNAL]` if the record could not be written.
+//!
 //! Names are `init`'s table names ([`crate::trust::valid_name`]), never
 //! text from a service.
 
@@ -18,6 +27,8 @@ pub const VERSION: u8 = 1;
 
 pub mod op {
     pub const SERVICES: u8 = 1;
+    pub const SYSTEM: u8 = 2;
+    pub const NEXT: u8 = 3;
 }
 
 /// A service's state, as `init` holds it.
@@ -40,13 +51,15 @@ pub enum State {
     Skipped = 6,
     /// Stopped by the user; never restarted.
     Stopped = 7,
+    /// Not started in safe mode or recovery (#164).
+    Off = 8,
 }
 
 impl State {
     fn from_code(c: u8) -> Option<Self> {
         use State::*;
         [
-            Pending, Starting, Ready, Done, Restarting, Failed, Skipped, Stopped,
+            Pending, Starting, Ready, Done, Restarting, Failed, Skipped, Stopped, Off,
         ]
         .get(usize::from(c))
         .copied()
@@ -62,27 +75,123 @@ impl State {
             Self::Failed => b"failed",
             Self::Skipped => b"skipped",
             Self::Stopped => b"stopped",
+            Self::Off => b"off (safe mode)",
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request {
-    Services { from: u8 },
+    Services {
+        from: u8,
+    },
+    System,
+    /// 1 safe or 2 recovery.
+    Next {
+        mode: u8,
+    },
 }
 
 pub fn parse(msg: &[u8]) -> Result<Request, Refused> {
     match split(msg, VERSION)? {
         (op::SERVICES, [from]) => Ok(Request::Services { from: *from }),
+        (op::SYSTEM, []) => Ok(Request::System),
+        (op::NEXT, [mode @ (1 | 2)]) => Ok(Request::Next { mode: *mode }),
         _ => Err(Refused::Bad),
     }
 }
 
 pub fn encode(req: &Request, out: &mut [u8]) -> Option<usize> {
-    let Request::Services { from } = *req;
     let mut w = Writer::new(out);
-    w.bytes(&[VERSION, op::SERVICES, from])?;
+    match *req {
+        Request::Services { from } => w.bytes(&[VERSION, op::SERVICES, from])?,
+        Request::System => w.bytes(&[VERSION, op::SYSTEM])?,
+        Request::Next { mode } => w.bytes(&[VERSION, op::NEXT, mode])?,
+    }
     Some(w.len())
+}
+
+/// A slot in the `SYSTEM` reply.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Slot {
+    /// 0 empty, 1 staged, 2 trying, 3 good, 4 bad.
+    pub state: u8,
+    pub attempts: u8,
+    pub version: u64,
+    pub sha256: [u8; 8],
+}
+
+impl Slot {
+    pub fn word(self) -> &'static [u8] {
+        match self.state {
+            0 => b"empty",
+            1 => b"staged",
+            2 => b"trying",
+            3 => b"good",
+            _ => b"bad",
+        }
+    }
+}
+
+/// The `SYSTEM` reply: what runs and what the slot record holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct System {
+    /// 0 normal, 1 safe, 2 recovery.
+    pub mode: u8,
+    /// 0 factory, 1 slot A, 2 slot B, 3 the recovery copy.
+    pub image: u8,
+    /// 0 none, 1 A, 2 B.
+    pub active: u8,
+    pub slots: [Slot; 2],
+}
+
+/// Length of a `SYSTEM` reply.
+pub const SYSTEM_LEN: usize = 4 + 2 * 18;
+
+impl System {
+    pub fn write(&self, out: &mut [u8]) -> Option<usize> {
+        let mut w = Writer::new(out);
+        w.bytes(&[status::OK, self.mode, self.image, self.active])?;
+        for s in &self.slots {
+            w.bytes(&[s.state, s.attempts])?;
+            w.u64(s.version)?;
+            w.bytes(&s.sha256)?;
+        }
+        Some(w.len())
+    }
+
+    /// The reply, or `None` if any field is out of range.
+    pub fn parse(reply: &[u8]) -> Option<Self> {
+        let mut r = Reader::new(reply);
+        if r.u8()? != status::OK {
+            return None;
+        }
+        let (mode, image, active) = (r.u8()?, r.u8()?, r.u8()?);
+        if mode > 2 || image > 3 || active > 2 {
+            return None;
+        }
+        let mut slots = [Slot::default(); 2];
+        for s in &mut slots {
+            s.state = r.u8().filter(|&v| v <= 4)?;
+            s.attempts = r.u8()?;
+            s.version = r.u64()?;
+            s.sha256 = r.take(8)?.try_into().ok()?;
+        }
+        r.is_empty().then_some(Self {
+            mode,
+            image,
+            active,
+            slots,
+        })
+    }
+
+    pub fn mode_word(&self) -> &'static [u8] {
+        match self.mode {
+            0 => b"normal",
+            1 => b"safe",
+            _ => b"recovery",
+        }
+    }
 }
 
 /// One service in the reply.
@@ -178,10 +287,68 @@ mod tests {
             assert_eq!(parse(&buf[..n - 1]), Err(Refused::Bad), "no index");
             assert_eq!(parse(&[VERSION, op::SERVICES, from, 0]), Err(Refused::Bad));
         }
-        assert_eq!(parse(&[VERSION, 2, 0]), Err(Refused::Bad), "unknown op");
+        assert_eq!(parse(&[VERSION, 9, 0]), Err(Refused::Bad), "unknown op");
+        for req in [
+            Request::System,
+            Request::Next { mode: 1 },
+            Request::Next { mode: 2 },
+        ] {
+            let mut buf = [0u8; 8];
+            let n = encode(&req, &mut buf).unwrap();
+            assert_eq!(parse(&buf[..n]), Ok(req));
+        }
+        assert_eq!(parse(&[VERSION, op::SYSTEM, 0]), Err(Refused::Bad));
+        for mode in [0, 3, 255] {
+            assert_eq!(
+                parse(&[VERSION, op::NEXT, mode]),
+                Err(Refused::Bad),
+                "mode {mode}"
+            );
+        }
         assert_eq!(parse(&[2, op::SERVICES, 0]), Err(Refused::Version));
         crate::fuzz(100_000, 4, |m| {
             let _ = parse(m);
+        });
+    }
+
+    #[test]
+    fn the_system_reply_round_trips_and_refuses_bad_fields() {
+        let sys = System {
+            mode: 1,
+            image: 2,
+            active: 2,
+            slots: [
+                Slot {
+                    state: 4,
+                    attempts: 3,
+                    version: 7,
+                    sha256: [0xab; 8],
+                },
+                Slot {
+                    state: 3,
+                    attempts: 0,
+                    version: u64::MAX,
+                    sha256: [1, 2, 3, 4, 5, 6, 7, 8],
+                },
+            ],
+        };
+        let mut out = [0u8; 64];
+        let n = sys.write(&mut out).unwrap();
+        assert_eq!(n, SYSTEM_LEN);
+        assert_eq!(System::parse(&out[..n]), Some(sys));
+        for cut in 0..n {
+            assert_eq!(System::parse(&out[..cut]), None, "cut at {cut}");
+        }
+        assert_eq!(System::parse(&out[..n + 1]), None, "a trailing byte");
+        for (at, bad) in [(0, 1), (1, 3), (2, 4), (3, 3), (4, 5), (22, 5)] {
+            let mut b = out;
+            b[at] = bad;
+            assert_eq!(System::parse(&b[..n]), None, "byte {at} = {bad}");
+        }
+        assert_eq!(sys.mode_word(), b"safe");
+        assert_eq!(sys.slots[0].word(), b"bad");
+        crate::fuzz(100_000, 6, |m| {
+            let _ = System::parse(m);
         });
     }
 
@@ -235,7 +402,7 @@ mod tests {
         };
         assert_eq!(Reply::write(1, &[bad], &mut out), None, "a bad name");
         // On the wire: an unknown state and a bad name.
-        assert_eq!(Reply::parse(&[0, 1, 1, 1, b'a', 8, 0, 0]), None);
+        assert_eq!(Reply::parse(&[0, 1, 1, 1, b'a', 9, 0, 0]), None);
         assert_eq!(Reply::parse(&[0, 1, 1, 1, b' ', 2, 0, 0]), None);
         assert!(Reply::parse(&[0, 1, 1, 1, b'a', 7, 0, 0]).is_some());
         crate::fuzz(100_000, 9, |m| {

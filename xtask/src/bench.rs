@@ -78,7 +78,7 @@ pub fn ipc(paths: &Paths, runs: u32) -> Result<()> {
     let out = paths.runner_dir("bench-ipc");
     std::fs::create_dir_all(&out).map_err(|e| format!("cannot create {}: {e}", out.display()))?;
     let modules = test_modules(&build_user_programs(paths)?);
-    let iso = image(paths, Some(elf), &modules, &out)?;
+    let iso = image(paths, Some(elf), &modules, &out, Some(""))?;
     let kvm = ["-enable-kvm".into(), "-cpu".into(), "host".into()];
     let timeout = Duration::from_secs(60);
     let mut times = Vec::new();
@@ -173,7 +173,7 @@ pub fn infer(paths: &Paths, runs: u32) -> Result<()> {
     let out = paths.runner_dir("bench-infer");
     std::fs::create_dir_all(&out).map_err(|e| format!("cannot create {}: {e}", out.display()))?;
     let modules = test_modules(&build_user_programs(paths)?);
-    let iso = image(paths, Some(elf), &modules, &out)?;
+    let iso = image(paths, Some(elf), &modules, &out, Some(""))?;
     store_image::s1(&out.join(STORE_IMAGE), &model)?;
     let qemu = [
         "-enable-kvm".into(),

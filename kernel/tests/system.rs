@@ -7,8 +7,8 @@
 //! dependents named and still running), stops the network service (a
 //! stop, never restarted), and kills the inference service four times
 //! (restarted three times, then given up). The runner types `services` on
-//! the trusted console once `trust` shows the give-up; the kernel waits
-//! until `init` answered it. The runner then checks the trusted console
+//! the trusted console once `trust` shows the give-up, then `system` and
+//! `safe` (#164); the kernel waits until `init` answered them. The runner then checks the trusted console
 //! and the audit trail: ready, each event one line and one record, and
 //! each service's state. Runs under UEFI (D-009).
 
@@ -55,8 +55,10 @@ fn audited(t: &mut TestRun, when: &str, audit: Option<&manifests::Audit<'_>>) {
 const KILLED: u64 = 13;
 /// The boot table's 8 entries, all succeeded, from the factory image (the
 /// store has no slots).
-const SUMMARY: [u8; 3] = [8, 0, 0];
+const SUMMARY: [u8; 4] = [8, 0, 0, 0];
 const VIRTIO_NET: u16 = 0x1041;
+/// `init`'s line for the trusted console's `safe` (#164).
+const NEXT_BOOT: &str = "init: system: next boot: safe mode (asked on the trusted path)";
 /// `trust` holds the virtio-console.
 const VIRTIO_CONSOLE: u16 = 0x1043;
 /// Namespace 3 read-only: the inference service's storage badge.
@@ -137,6 +139,8 @@ enum Step {
     /// Kill the inference service; this many kills done.
     KillInfer(u8),
     Listed,
+    /// `init` wrote safe mode for the next boot (#164).
+    NextBoot,
     Done,
 }
 
@@ -247,6 +251,11 @@ fn run(t: &mut TestRun) {
             }
             Step::Listed => {
                 if w.has("init: services listed for trust") {
+                    step = Step::NextBoot;
+                }
+            }
+            Step::NextBoot => {
+                if w.has(NEXT_BOOT) {
                     step = Step::Done;
                 }
             }
@@ -260,7 +269,7 @@ fn run(t: &mut TestRun) {
     audited(t, "after the faults", audit.as_ref());
 
     t.check(
-        "init reported every boot service ready: [8, 0, 0]",
+        "init reported every boot service ready: [8, 0, 0, 0]",
         summary.as_deref() == Some(&SUMMARY[..]),
     );
     for (what, line) in [
@@ -297,6 +306,7 @@ fn run(t: &mut TestRun) {
             "init: infer not restarted: restarts used up",
         ),
         ("init answered services", "init: services listed for trust"),
+        ("init wrote the next boot's mode", NEXT_BOOT),
     ] {
         t.check(&alloc::format!("{what}: {line}"), w.has(line));
     }

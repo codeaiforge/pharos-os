@@ -96,6 +96,8 @@ pub mod image {
     pub const REFUSED: u32 = 1;
     /// Not every service was ready within 20 s: its services were stopped.
     pub const NOT_READY: u32 = 2;
+    /// The boot's mode (#164), the second number: 1 safe, 2 recovery.
+    pub const MODE: u32 = 3;
 
     /// Why a slot was refused: read, record, and mount failures, then
     /// `pharos_image::Error::reason` for each signature check.
@@ -115,11 +117,13 @@ pub mod image {
         b"version too old",
     ];
 
-    /// The image's name: `factory image`, `slot A`, `slot B`.
+    /// The image's name: `factory image`, `slot A`, `slot B`, `recovery
+    /// copy`.
     pub fn name(image: u32) -> &'static [u8] {
         match image {
             1 => b"slot A",
             2 => b"slot B",
+            3 => b"recovery copy",
             _ => b"factory image",
         }
     }
@@ -593,6 +597,12 @@ pub enum Command<'a> {
     },
     /// `services`: each service's state, from `init` (#152).
     Services,
+    /// `system`: the mode, the image running, and each slot, from `init`
+    /// (#164).
+    System,
+    /// `safe` or `recovery`: that mode for the next boot (#164); the
+    /// mode's code (1 or 2).
+    NextBoot(u8),
     /// Anything else: the service answers with the commands it knows.
     Help,
 }
@@ -636,6 +646,9 @@ pub fn command(line: &[u8]) -> Command<'_> {
         (Some(b"audit"), None, None) => Command::Audit,
         (Some(b"usage"), None, None) => Command::Usage,
         (Some(b"services"), None, None) => Command::Services,
+        (Some(b"system"), None, None) => Command::System,
+        (Some(b"safe"), None, None) => Command::NextBoot(1),
+        (Some(b"recovery"), None, None) => Command::NextBoot(2),
         (Some(b"stop"), Some(b"all"), None) => Command::StopAll,
         (Some(b"stop"), Some(b"group"), Some(name))
             if valid_name(name) && words.next().is_none() =>
@@ -992,6 +1005,12 @@ mod tests {
         assert_eq!(command(b"usage all"), Command::Help);
         assert_eq!(command(b" services "), Command::Services);
         assert_eq!(command(b"services x"), Command::Help);
+        assert_eq!(command(b" system "), Command::System);
+        assert_eq!(command(b"system a"), Command::Help);
+        assert_eq!(command(b"safe"), Command::NextBoot(1));
+        assert_eq!(command(b" recovery"), Command::NextBoot(2));
+        assert_eq!(command(b"safe mode"), Command::Help);
+        assert_eq!(command(b"stop safe"), Command::Stop(b"safe"));
         assert_eq!(command(b"audit x"), Command::Help);
         assert_eq!(command(b" no  65535"), Command::Answer(65_535, false));
         assert_eq!(

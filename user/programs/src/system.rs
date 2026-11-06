@@ -2,6 +2,7 @@
 //! that can be tested on the host: the public key it was built with, and
 //! the reason codes it sends `trust`.
 
+use pharos_image::slots::Mode;
 use pharos_proto::trust::image::REASONS;
 
 /// Why a slot was refused, as an index into [`REASONS`].
@@ -34,6 +35,19 @@ impl Refusal {
             Self::Image(e) => e.reason().as_bytes(),
         }
     }
+}
+
+/// `init`'s argument (#164): the service table (bits 0–7), the kernel's
+/// mode (bits 8 and up: 0 normal, 1 safe, 2 recovery, 3 recovery because
+/// `root` failed and its copy was mounted), and whether that copy runs.
+/// An unknown mode is normal.
+pub fn split_arg(arg: u64) -> (u64, Mode, bool) {
+    let mode = match arg >> 8 {
+        1 => Mode::Safe,
+        2 | 3 => Mode::Recovery,
+        _ => Mode::Normal,
+    };
+    (arg & 0xff, mode, arg >> 8 == 3)
 }
 
 /// The public key in 64 hex digits, as `PHAROS_IMAGE_KEY` holds it when
@@ -78,6 +92,16 @@ mod tests {
             assert_eq!(r.code(), i as u32, "{r:?}");
             assert_eq!(REASONS[i], r.text());
         }
+    }
+
+    #[test]
+    fn the_argument_holds_the_table_and_the_kernels_mode() {
+        assert_eq!(split_arg(0), (0, Mode::Normal, false));
+        assert_eq!(split_arg(3), (3, Mode::Normal, false));
+        assert_eq!(split_arg(0x100), (0, Mode::Safe, false));
+        assert_eq!(split_arg(0x200), (0, Mode::Recovery, false));
+        assert_eq!(split_arg(0x300), (0, Mode::Recovery, true));
+        assert_eq!(split_arg(0x900), (0, Mode::Normal, false));
     }
 
     #[test]

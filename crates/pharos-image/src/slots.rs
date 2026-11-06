@@ -221,6 +221,18 @@ impl Record {
         self.slot_mut(slot).state = State::Bad;
     }
 
+    /// This boot's mode (#164): the kernel's if it asked for one, else
+    /// the record's one-shot `next`, which is cleared either way only if
+    /// it was used. Returns the mode and whether the record changed.
+    pub fn take_mode(&mut self, kernel: Mode) -> (Mode, bool) {
+        if kernel != Mode::Normal || self.next == Mode::Normal {
+            return (kernel, false);
+        }
+        let next = self.next;
+        self.next = Mode::Normal;
+        (next, true)
+    }
+
     /// `slot` reached ready: `Good`, attempts 0, and active.
     pub fn ready(&mut self, slot: Slot) {
         let s = self.slot_mut(slot);
@@ -358,6 +370,21 @@ mod tests {
         // Bad stays bad, whatever its attempts.
         r.slots[0].attempts = 0;
         assert_eq!(r.candidate([false; 2]), None);
+    }
+
+    #[test]
+    fn the_kernels_mode_wins_and_next_is_used_once() {
+        let mut r = Record {
+            next: Mode::Safe,
+            ..Record::EMPTY
+        };
+        assert_eq!(r.take_mode(Mode::Recovery), (Mode::Recovery, false));
+        assert_eq!(r.next, Mode::Safe, "kept for a boot that uses it");
+        assert_eq!(r.take_mode(Mode::Normal), (Mode::Safe, true));
+        assert_eq!(r.next, Mode::Normal);
+        assert_eq!(r.take_mode(Mode::Normal), (Mode::Normal, false));
+        r.next = Mode::Recovery;
+        assert_eq!(r.take_mode(Mode::Normal), (Mode::Recovery, true));
     }
 
     #[test]

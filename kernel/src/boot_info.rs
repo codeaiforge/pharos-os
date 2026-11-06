@@ -100,6 +100,47 @@ impl MemoryMapCopy {
     }
 }
 
+/// The mode the kernel boots `init` in (#164, boot.md section 8), passed
+/// in bits 8 and up of its argument (bits 0–7 select the service table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootMode {
+    Normal = 0,
+    /// Every boot service but the agent runtime.
+    Safe = 1,
+    /// The factory image in safe mode; the slots are ignored.
+    Recovery = 2,
+    /// Recovery, because `root` failed its checks and the `recovery`
+    /// copy was mounted.
+    RecoveryCopy = 3,
+}
+
+impl BootMode {
+    /// `init`'s argument for the boot table in this mode.
+    pub fn init_arg(self) -> u64 {
+        (self as u64) << 8
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Safe => "safe",
+            Self::Recovery | Self::RecoveryCopy => "recovery",
+        }
+    }
+}
+
+/// The mode a Limine entry's command line asks for: empty (or none),
+/// `safe`, or `recovery`, spaces around it ignored. Anything else is
+/// `Err`, which the kernel reports and boots as normal.
+pub fn boot_mode(cmdline: Option<&str>) -> Result<BootMode, &str> {
+    match cmdline.unwrap_or("").trim() {
+        "" => Ok(BootMode::Normal),
+        "safe" => Ok(BootMode::Safe),
+        "recovery" => Ok(BootMode::Recovery),
+        other => Err(other),
+    }
+}
+
 /// Converts bytes to whole mebibytes (rounded down).
 pub fn mib(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
@@ -142,6 +183,19 @@ mod tests {
         assert_eq!(summarize([]), MemorySummary::default());
         let huge = summarize([(MEMMAP_USABLE, u64::MAX), (MEMMAP_USABLE, 1)]);
         assert_eq!(huge.usable_bytes, u64::MAX);
+    }
+
+    #[test]
+    fn reads_the_boot_mode_from_the_command_line() {
+        assert_eq!(boot_mode(None), Ok(BootMode::Normal));
+        assert_eq!(boot_mode(Some("")), Ok(BootMode::Normal));
+        assert_eq!(boot_mode(Some(" safe ")), Ok(BootMode::Safe));
+        assert_eq!(boot_mode(Some("recovery")), Ok(BootMode::Recovery));
+        assert_eq!(boot_mode(Some("Safe")), Err("Safe"));
+        assert_eq!(boot_mode(Some("safe recovery")), Err("safe recovery"));
+        assert_eq!(BootMode::Normal.init_arg(), 0);
+        assert_eq!(BootMode::Safe.init_arg(), 0x100);
+        assert_eq!(BootMode::RecoveryCopy.init_arg(), 0x300);
     }
 
     #[test]

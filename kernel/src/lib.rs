@@ -74,7 +74,7 @@ macro_rules! kprintln {
 
 /// Declares the kernel's Limine requests as a module named `requests` in the
 /// calling crate: the base-revision tag plus bootloader info, firmware type,
-/// HHDM, memory map, executable address, and module requests, between the
+/// HHDM, memory map, executable address, command line, and module requests, between the
 /// start and end markers in the `.limine_requests*` sections (kept by
 /// `linker.ld`).
 ///
@@ -89,10 +89,10 @@ macro_rules! limine_requests {
         mod requests {
             use $crate::limine::{
                 BaseRevisionTag, BootloaderInfoResponse, ExecutableAddressResponse,
-                FirmwareTypeResponse, HhdmResponse, MemmapResponse, ModuleResponse,
-                REQUESTS_END_MARKER, REQUESTS_START_MARKER, Request, bootloader_info_request,
-                executable_address_request, firmware_type_request, hhdm_request, memmap_request,
-                module_request,
+                ExecutableCmdlineResponse, FirmwareTypeResponse, HhdmResponse, MemmapResponse,
+                ModuleResponse, REQUESTS_END_MARKER, REQUESTS_START_MARKER, Request,
+                bootloader_info_request, executable_address_request, executable_cmdline_request,
+                firmware_type_request, hhdm_request, memmap_request, module_request,
             };
 
             #[used]
@@ -123,6 +123,10 @@ macro_rules! limine_requests {
             #[unsafe(link_section = ".limine_requests")]
             pub static EXECUTABLE_ADDRESS: Request<ExecutableAddressResponse> =
                 executable_address_request();
+
+            #[used]
+            #[unsafe(link_section = ".limine_requests")]
+            pub static CMDLINE: Request<ExecutableCmdlineResponse> = executable_cmdline_request();
 
             #[used]
             #[unsafe(link_section = ".limine_requests")]

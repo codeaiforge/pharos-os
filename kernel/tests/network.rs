@@ -82,7 +82,7 @@ fn run(t: &mut TestRun) {
     let summary = ipc::poll(&report, Duration::from_secs(10));
     t.check(
         "every service and client succeeded: 4 ready, 0 failed",
-        summary.is_some_and(|m| m.bytes() == [4, 0, 0]),
+        summary.is_some_and(|m| m.bytes() == [4, 0, 0, 0]),
     );
     let lines: Vec<Vec<u8>> = process::debug_output()
         .into_iter()

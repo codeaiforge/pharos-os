@@ -16,7 +16,7 @@ use core::panic::PanicInfo;
 use pharos_kernel::arch::x86_64::{
     _print_panic, QemuExit, apic, gdt, halt, idt, paging, qemu_exit, run_on_kernel_stack,
 };
-use pharos_kernel::boot_info::{firmware_name, mib, summarize};
+use pharos_kernel::boot_info::{BootMode, boot_mode, firmware_name, mib, summarize};
 use pharos_kernel::limine::BASE_REVISION;
 use pharos_kernel::mm;
 use pharos_kernel::storage;
@@ -136,6 +136,18 @@ extern "C" fn kernel_main() -> ! {
         Err(error) => fail(format_args!("timer calibration failed: {error}")),
     }
 
+    // The Limine entry's mode (#164): read now, while its string exists.
+    let mut mode = match boot_mode(requests::CMDLINE.response().and_then(|r| r.cmdline())) {
+        Ok(mode) => mode,
+        Err(other) => {
+            kprintln!("  mode:       command line \"{other}\" not known; normal mode");
+            BootMode::Normal
+        }
+    };
+    if mode != BootMode::Normal {
+        kprintln!("  mode:       {} (from the command line)", mode.name());
+    }
+
     // Module records live in kernel memory; Limine's list does not survive
     // the reclaim below.
     let (modules, skipped) = storage::record_modules(requests::MODULES.response(), hhdm.offset);
@@ -169,9 +181,16 @@ extern "C" fn kernel_main() -> ! {
         ),
         None => kprintln!("  storage:    none ({modules} modules, {skipped} skipped)"),
     }
-    // A bad or missing image is reported; the kernel runs on without it.
+    // A bad `root` falls back to its copy `recovery`, in recovery mode
+    // (#164); if both fail, it is reported and `init` cannot start.
     match fs::mount_root() {
-        Ok(files) => kprintln!("  filesystem: root mounted, files: {files}"),
+        Ok((files, None)) => kprintln!("  filesystem: root mounted, files: {files}"),
+        Ok((files, Some(why))) => {
+            kprintln!(
+                "  filesystem: root not mounted: {why}; recovery copy mounted, files: {files}"
+            );
+            mode = BootMode::RecoveryCopy;
+        }
         Err(error) => kprintln!("  filesystem: root not mounted: {error}"),
     }
 
@@ -210,22 +229,34 @@ extern "C" fn kernel_main() -> ! {
     };
     let report = ipc::Endpoint::new();
     let caps = process::init_capabilities(root.clone(), report.clone(), true);
-    match process::spawn_elf_limited(&root, b"bin/init", 0, caps, process::INIT_MEMORY_LIMIT) {
+    match process::spawn_elf_limited(
+        &root,
+        b"bin/init",
+        mode.init_arg(),
+        caps,
+        process::INIT_MEMORY_LIMIT,
+    ) {
         Ok(id) => kprintln!("  init:       started (process {id})"),
         Err(error) => fail(format_args!("cannot start init: {error}")),
     }
     // Enough for two slots that are not ready in 20 s and the factory
     // image (boot.md section 8, #163).
     match ipc::poll(&report, core::time::Duration::from_secs(75)) {
-        Some(m) if m.len == 3 => {
+        Some(m) if m.len == 4 => {
             let (ready, failed) = (m.data[0], m.data[1]);
             let image = match m.data[2] {
                 0 => "the factory image",
                 1 => "slot A",
                 2 => "slot B",
+                3 => "the recovery copy",
                 _ => "an unknown image",
             };
-            kprintln!("  services:   {ready} ready, {failed} failed, from {image}");
+            let mode = match m.data[3] {
+                0 => "",
+                1 => ", safe mode",
+                _ => ", recovery mode",
+            };
+            kprintln!("  services:   {ready} ready, {failed} failed, from {image}{mode}");
             if failed != 0 {
                 fail(format_args!(
                     "{failed} service(s) failed (see init's lines above)"

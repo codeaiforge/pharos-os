@@ -36,6 +36,11 @@
 //! service's state (`pharos_proto::service`, on the report capability),
 //! waiting at most 1 s. `trust` keeps no state of its own about services.
 //!
+//! Recovery (#164, boot.md section 8): `system` asks `init` for the mode,
+//! the image running, and each slot (`SYSTEM`); `safe` and `recovery` ask
+//! it to write that mode for the next boot into the slot record (`NEXT`),
+//! recorded as the user's. Answers are written from `init`'s fields.
+//!
 //! Verification (#144, knowledge.md): `verify <scope> <key> <version>
 //! <hash>` asks the knowledge service, with a bounded wait, to mark the
 //! version verified if its content's SHA-256 starts with the 8 typed
@@ -48,7 +53,7 @@
 use pharos_programs::virtio_console::{Console, RX_BUFFER};
 use pharos_proto::knowledge::{self, Author};
 use pharos_proto::permission::Permission;
-use pharos_proto::service::{self as listing, Reply};
+use pharos_proto::service::{self as listing, Reply, System};
 use pharos_proto::trust::{
     self, Command, Event, INIT, Line, Lines, MAX_NAME, MAX_NAMES, Names, Outcome, RUNTIME, Request,
     SLOTS, parse,
@@ -74,8 +79,8 @@ const AUDIT_US: u64 = 1_000_000;
 const INIT_US: u64 = 1_000_000;
 const BASE: u64 = 0x1000_0000;
 const HELP: &[u8] = b"commands: list, stop <agent>, stop group <group>, stop all, \
-revoke <agent> <permission>, yes <n>, no <n>, audit, usage, services, \
-verify <scope> <key> <version> <hash>";
+revoke <agent> <permission>, yes <n>, no <n>, audit, usage, services, system, safe, \
+recovery, verify <scope> <key> <version> <hash>";
 /// How long a stop may take before the answer says it is still running.
 const STOP_WAIT_US: u64 = 1_000_000;
 
@@ -310,6 +315,8 @@ impl Trust {
             }
             Command::Audit => self.audit(),
             Command::Services => self.services(),
+            Command::System => self.system(),
+            Command::NextBoot(mode) => self.next_boot(mode),
             // The runtime's own from the kernel; each attempt's and group's
             // from the runtime, which answers with numbers only (#119).
             Command::Usage => {
@@ -331,6 +338,80 @@ impl Trust {
                 prefix,
             } => self.verify(scope, key, version, prefix),
             Command::Help => self.say(&[HELP]),
+        }
+    }
+
+    /// Asks `init` (on the report capability) and returns its answer.
+    fn ask_init<'a>(&self, req: &listing::Request, out: &'a mut [u8; 256]) -> Option<&'a [u8]> {
+        let mut msg = [0u8; 8];
+        let n = listing::encode(req, &mut msg)?;
+        match call_timeout(REPORT, &msg[..n], self.reply?, out, INIT_US) {
+            Ok(Received::Message { len, .. }) => Some(&out[..len.min(256)]),
+            _ => None,
+        }
+    }
+
+    /// The mode, the image running, and each slot, from `init` (#164).
+    fn system(&mut self) {
+        let mut out = [0u8; 256];
+        let Some(sys) = self
+            .ask_init(&listing::Request::System, &mut out)
+            .and_then(System::parse)
+        else {
+            self.say(&[b"system: init is not answering"]);
+            return;
+        };
+        let active: &[u8] = match sys.active {
+            1 => b"A",
+            2 => b"B",
+            _ => b"none",
+        };
+        self.say(&[
+            b"system: ",
+            sys.mode_word(),
+            b" mode, running ",
+            trust::image::name(sys.image.into()),
+            b", active slot ",
+            active,
+        ]);
+        for (name, slot) in [(b"A", sys.slots[0]), (b"B", sys.slots[1])] {
+            if slot.state == 0 {
+                self.say(&[b"system: slot ", name, b" empty"]);
+                continue;
+            }
+            let mut d = [[0u8; 20]; 2];
+            let [a, b] = &mut d;
+            let mut hex = [0u8; 16];
+            for (i, byte) in slot.sha256.iter().enumerate() {
+                hex[2 * i] = b"0123456789abcdef"[usize::from(byte >> 4)];
+                hex[2 * i + 1] = b"0123456789abcdef"[usize::from(byte & 15)];
+            }
+            self.say(&[
+                b"system: slot ",
+                name,
+                b" ",
+                slot.word(),
+                b", version ",
+                decimal(slot.version, a),
+                b", attempts ",
+                decimal(slot.attempts.into(), b),
+                b", sha256 ",
+                &hex,
+            ]);
+        }
+    }
+
+    /// Asks `init` to boot the next time in `mode` (1 safe, 2 recovery).
+    fn next_boot(&mut self, mode: u8) {
+        let word: &[u8] = if mode == 1 { b"safe" } else { b"recovery" };
+        let mut out = [0u8; 256];
+        match self.ask_init(&listing::Request::Next { mode }, &mut out) {
+            Some([status::OK]) => {
+                self.say(&[b"next boot: ", word, b" mode"]);
+                self.record(audit::action::SYSTEM, None, &[b"next boot ", word].concat());
+            }
+            Some(_) => self.say(&[b"next boot: the slot record cannot be written"]),
+            None => self.say(&[b"next boot: init is not answering"]),
         }
     }
 
@@ -704,6 +785,12 @@ impl Trust {
                         (trust::image::REASONS.get(n2 as usize))
                             .copied()
                             .unwrap_or(b"unknown reason"),
+                    ],
+                    trust::image::MODE if n1 == 1 => {
+                        &[b"system: safe mode: the agent runtime is not started"]
+                    }
+                    trust::image::MODE => &[
+                        b"system: recovery mode: the agent runtime is not started, slots not used",
                     ],
                     _ => &[
                         b"system: ",

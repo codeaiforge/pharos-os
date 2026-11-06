@@ -74,7 +74,7 @@ fn run(t: &mut TestRun) {
     let summary = ipc::poll(&report, Duration::from_secs(10));
     t.check(
         "the summary reaches the kernel: 3 ready, 4 failed",
-        summary.is_some_and(|m| m.bytes() == [3, 4, 0]),
+        summary.is_some_and(|m| m.bytes() == [3, 4, 0, 0]),
     );
     let lines: Vec<Vec<u8>> = process::debug_output()
         .into_iter()

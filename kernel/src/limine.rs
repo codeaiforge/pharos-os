@@ -247,6 +247,25 @@ pub const fn executable_address_request() -> Request<ExecutableAddressResponse> 
     Request::new([0x71ba76863cc55f63, 0xb2644a48c516a487])
 }
 
+/// "Executable Command Line Feature": the entry's `cmdline` (#164).
+#[repr(C)]
+pub struct ExecutableCmdlineResponse {
+    revision: u64,
+    cmdline: *const c_char,
+}
+
+impl ExecutableCmdlineResponse {
+    /// The command line; empty when the entry sets none.
+    pub fn cmdline(&self) -> Option<&'static str> {
+        boot_str(self.cmdline)
+    }
+}
+
+/// A request for [`ExecutableCmdlineResponse`].
+pub const fn executable_cmdline_request() -> Request<ExecutableCmdlineResponse> {
+    Request::new([0x4b161536e598651e, 0xb390ad4a2f1f303a])
+}
+
 /// "File Structure": a file the bootloader loaded, such as a module.
 #[repr(C)]
 pub struct File {
@@ -328,11 +347,18 @@ mod tests {
         assert_eq!(size_of::<FirmwareTypeResponse>(), 16);
         assert_eq!(size_of::<BootloaderInfoResponse>(), 24);
         assert_eq!(size_of::<ExecutableAddressResponse>(), 24);
+        assert_eq!(size_of::<ExecutableCmdlineResponse>(), 16);
         // 5 x u64 + 6 x u32 + 3 UUIDs of 16 bytes.
         assert_eq!(size_of::<File>(), 112);
         assert_eq!(core::mem::offset_of!(File, string), 32);
         assert_eq!(core::mem::offset_of!(File, gpt_disk_uuid), 64);
         assert_eq!(size_of::<ModuleResponse>(), 24);
+    }
+
+    #[test]
+    fn cmdline_request_id() {
+        let request = executable_cmdline_request();
+        assert_eq!(&request.id[2..], &[0x4b161536e598651e, 0xb390ad4a2f1f303a]);
     }
 
     #[test]

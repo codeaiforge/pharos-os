@@ -758,11 +758,11 @@ fn check_user_program(bytes: &[u8]) -> Result<()> {
 
 /// Modules for the kernel: the filesystem image `root`, packed from
 /// `kernel/root/` plus the user `programs` (storage.md, drivers.md).
+/// The factory image goes in twice: `root`, and its copy `recovery`,
+/// which the kernel mounts if `root` fails its checks (#164).
 fn kernel_modules(paths: &Paths, programs: &[ImageFile]) -> Result<Vec<Module>> {
-    Ok(vec![(
-        "root",
-        fs_image::pack_with(&paths.root.join("kernel").join("root"), programs)?,
-    )])
+    let root = fs_image::pack_with(&paths.root.join("kernel").join("root"), programs)?;
+    Ok(vec![("root", root.clone()), ("recovery", root)])
 }
 
 /// Modules for test kernels, with contents the test kernels know. Must
@@ -789,24 +789,45 @@ fn modules_for(paths: &Paths, kernel: &Option<PathBuf>) -> Result<Vec<Module>> {
     }
 }
 
-/// `limine.conf` with a `module_path` and `module_string` per module.
-fn limine_conf(modules: &[Module]) -> String {
-    let mut conf = LIMINE_CONF.to_owned();
-    for (name, _) in modules {
+/// `limine.conf` (#164): with no `cmdline`, a release image's three
+/// entries (normal, safe mode, recovery) and a 3 s menu; with one, a
+/// single entry with that command line and no menu, for tests. Each entry
+/// has a `module_path` and `module_string` per module.
+fn limine_conf(modules: &[Module], cmdline: Option<&str>) -> String {
+    let entries = match cmdline {
+        None => vec![
+            ("Pharos OS", ""),
+            ("Pharos OS (safe mode)", "safe"),
+            ("Pharos OS (recovery)", "recovery"),
+        ],
+        Some(c) => vec![("Pharos OS", c)],
+    };
+    let timeout = if cmdline.is_none() { 3 } else { 0 };
+    let mut conf = format!("{LIMINE_CONF}timeout: {timeout}\n");
+    for (title, cmd) in entries {
         conf.push_str(&format!(
-            "    module_path: boot():/boot/modules/{name}\n    module_string: {name}\n"
+            "\n/{title}\n    protocol: limine\n    path: boot():/boot/kernel\n"
         ));
+        if !cmd.is_empty() {
+            conf.push_str(&format!("    cmdline: {cmd}\n"));
+        }
+        for (name, _) in modules {
+            conf.push_str(&format!(
+                "    module_path: boot():/boot/modules/{name}\n    module_string: {name}\n"
+            ));
+        }
     }
     conf
 }
 
 /// Builds the ISO for `kernel` (default: the built kernel) with `modules`
-/// in `out` and returns its path.
+/// in `out` and returns its path. `cmdline`: see [`limine_conf`].
 fn image(
     paths: &Paths,
     kernel: Option<PathBuf>,
     modules: &[Module],
     out: &Path,
+    cmdline: Option<&str>,
 ) -> Result<PathBuf> {
     let kernel = kernel.unwrap_or_else(|| paths.kernel_elf());
     if !kernel.is_file() {
@@ -833,8 +854,11 @@ fn image(
         let path = module_dir.join(name);
         fs::write(&path, bytes).map_err(io_err("cannot write", &path))?;
     }
-    fs::write(boot_limine.join("limine.conf"), limine_conf(modules))
-        .map_err(io_err("cannot write", &boot_limine))?;
+    fs::write(
+        boot_limine.join("limine.conf"),
+        limine_conf(modules, cmdline),
+    )
+    .map_err(io_err("cannot write", &boot_limine))?;
     for name in [
         "limine-bios.sys",
         "limine-bios-cd.bin",
@@ -885,7 +909,7 @@ fn image(
 /// Builds the main image and prints its path and hash.
 fn main_image(paths: &Paths, kernel: Option<PathBuf>) -> Result<PathBuf> {
     let modules = modules_for(paths, &kernel)?;
-    let iso = image(paths, kernel, &modules, &paths.image_dir())?;
+    let iso = image(paths, kernel, &modules, &paths.image_dir(), None)?;
     println!("Image: {}", iso.display());
     println!("SHA-256: {}", sha256(&iso)?);
     Ok(iso)
@@ -1024,7 +1048,7 @@ fn run_qemu(paths: &Paths, bios: bool, gdb: bool, kernel: Option<PathBuf>) -> Re
             paths.kernel_elf()
         }
     };
-    let iso = image(paths, Some(elf.clone()), &modules, &paths.image_dir())?;
+    let iso = image(paths, Some(elf.clone()), &modules, &paths.image_dir(), None)?;
     let out = paths.image_dir();
     let vars = out.join("ovmf-vars.fd");
     prepare_firmware(&vars, bios)?;
@@ -1372,7 +1396,14 @@ const SYSTEM_SCRIPT: &[console::Step] = &[
         "service infer not restarted: restarts used up",
         "services\n",
     ),
-    ("services: agents ready, restarts 0 of 3", ""),
+    ("services: agents ready, restarts 0 of 3", "system\n"),
+    // #164: no slot record yet, so no slots; `safe` writes one.
+    (
+        "system: normal mode, running factory image, active slot none",
+        "",
+    ),
+    ("system: slot B empty", "safe\n"),
+    ("next boot: safe mode", ""),
 ];
 /// Each service event the `system` kernel causes, as [`SUPERVISION_EVENTS`].
 const SYSTEM_EVENTS: &[(&str, &str, &str, usize)] = &[
@@ -1868,6 +1899,17 @@ fn supervision_checks(image: &Path, console: &str) -> Result<()> {
 /// and each fault the kernel caused is reported and recovered as its
 /// policy says ([`event_checks`]).
 fn system_checks(image: &Path, console: &str) -> Result<()> {
+    // `safe` wrote the next boot's mode (#164).
+    let record = store_image::read(image, b"system/state")?
+        .and_then(|b| pharos_image::slots::Record::decode(&b))
+        .ok_or("system: `safe` left no slot record")?;
+    if record.next != pharos_image::slots::Mode::Safe {
+        return Err(format!(
+            "system: the record's next mode is {:?}, not safe",
+            record.next
+        ));
+    }
+    println!("  the slot record asks for safe mode next");
     event_checks(
         "system",
         image,
@@ -2856,7 +2898,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     } else {
         test_modules(&programs)
     };
-    let iso = image(paths, Some(elf.to_path_buf()), &modules, &out)?;
+    let iso = image(paths, Some(elf.to_path_buf()), &modules, &out, Some(""))?;
     let logs = paths.logs_dir();
     fs::create_dir_all(&logs).map_err(io_err("cannot create", &logs))?;
     let log = logs.join(format!("test-{name}.log"));
@@ -2912,7 +2954,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     }
     if name == recovery::TEST {
         let vars = out.join("ovmf-vars.fd");
-        recovery::rounds(paths, &programs, &iso, &vars, &logs, &extra)?;
+        recovery::rounds(paths, elf, &programs, &iso, &vars, &logs, &extra)?;
     }
     let (steps, refused): (&'static [console::Step], &[&str]) = match name.as_str() {
         TRUST_TEST => (TRUST_SCRIPT, TRUST_REFUSED),
@@ -3118,12 +3160,33 @@ mod tests {
     #[test]
     fn limine_conf_lists_each_module() {
         let modules = [("root", vec![1]), ("odd", vec![])];
-        let conf = limine_conf(&modules);
+        let conf = limine_conf(&modules, Some(""));
         assert!(conf.starts_with(LIMINE_CONF));
+        assert!(conf.contains("timeout: 0\n"));
+        assert_eq!(conf.matches("protocol: limine").count(), 1);
+        assert!(!conf.contains("cmdline"));
         assert!(conf.ends_with(
             "    module_path: boot():/boot/modules/root\n    module_string: root\n\
              \x20   module_path: boot():/boot/modules/odd\n    module_string: odd\n"
         ));
+        let test = limine_conf(&modules, Some("recovery"));
+        assert!(test.contains("    path: boot():/boot/kernel\n    cmdline: recovery\n"));
+    }
+
+    #[test]
+    fn release_images_get_three_entries_and_a_menu() {
+        let conf = limine_conf(&[("root", vec![1])], None);
+        assert!(conf.contains("timeout: 3\n"));
+        for entry in [
+            "/Pharos OS\n",
+            "/Pharos OS (safe mode)\n",
+            "/Pharos OS (recovery)\n",
+        ] {
+            assert!(conf.contains(entry), "{entry}");
+        }
+        assert_eq!(conf.matches("module_string: root").count(), 3);
+        assert_eq!(conf.matches("cmdline: safe\n").count(), 1);
+        assert_eq!(conf.matches("cmdline: recovery\n").count(), 1);
     }
 
     #[test]
@@ -3157,6 +3220,8 @@ mod tests {
     fn kernel_root_packs() {
         let programs = [("bin/hello".to_owned(), vec![1, 2, 3])];
         let modules = kernel_modules(&Paths::new(), &programs).unwrap();
+        assert_eq!((modules[0].0, modules[1].0), ("root", "recovery"));
+        assert_eq!(modules[0].1, modules[1].1, "the copy is the same image");
         let image = pharos_fs::Image::mount(&modules[0].1[..]).unwrap();
         assert!(image.lookup(b"etc/motd").is_ok());
         assert!(image.lookup(b"bin/hello").is_ok());
@@ -3481,8 +3546,9 @@ mod tests {
     #[test]
     fn pinned_values_are_well_formed() {
         assert_eq!(parse_sha256sum(LIMINE_SHA256), Ok(LIMINE_SHA256.to_owned()));
-        assert!(LIMINE_CONF.contains("protocol: limine"));
-        assert!(LIMINE_CONF.contains("path: boot():/boot/kernel"));
+        let conf = limine_conf(&[], None);
+        assert!(conf.contains("protocol: limine"));
+        assert!(conf.contains("path: boot():/boot/kernel"));
     }
 
     #[test]

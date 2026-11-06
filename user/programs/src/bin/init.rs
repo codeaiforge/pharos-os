@@ -30,7 +30,16 @@
 //! (`PHAROS_IMAGE_KEY`), and mounted with `fs_mount`, and every other
 //! service starts from it. If they are not all ready within 20 s, they are
 //! stopped and the next candidate is tried in place: the other slot, then
-//! the factory image. The kernel gets `[ready, failed, image]`.
+//! the factory image. The kernel gets `[ready, failed, image, mode]`.
+//!
+//! Modes (#164): the argument's bits 8 and up are the kernel's mode (from
+//! the Limine command line, or recovery when `root` failed and its copy
+//! runs); in normal mode the record's one-shot `next` is used and cleared.
+//! Safe mode starts every boot service but the agent runtime; recovery is
+//! safe mode on the factory image, slots ignored. If the factory image is
+//! not ready in normal mode, its services are stopped and it starts again
+//! in recovery. `trust`'s `system` asks for the mode, image, and slots
+//! (`SYSTEM`); `safe` and `recovery` set the next boot's mode (`NEXT`).
 
 #![no_std]
 #![no_main]
@@ -43,11 +52,11 @@ mod system;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use pharos_image::slots::{Record, Slot, State as SlotState};
+use pharos_image::slots::{Mode, Record, Slot, State as SlotState};
 use pharos_programs::supervise;
 use pharos_proto::infer::{self, Request as InferRequest};
 use pharos_proto::net::{self, Allowed, Request as NetRequest};
-use pharos_proto::service::{self as listing, Entry, Reply, State as Shown};
+use pharos_proto::service::{self as listing, Entry, Reply, State as Shown, System};
 use pharos_proto::store::{self, Request as StoreRequest};
 use pharos_proto::trust::{self, Event, Names, image as shown, not_started};
 use pharos_proto::{audit, status};
@@ -148,6 +157,8 @@ enum State {
     Skipped,
     /// Stopped by the user; never restarted.
     Stopped,
+    /// The agent runtime in safe mode and recovery (#164): not started.
+    Off,
 }
 
 /// How long a daemon may take to send `ready` (#100).
@@ -197,6 +208,13 @@ struct Init {
     image_number: u8,
     /// When the wait in `step` must end at the latest.
     wake_by: u64,
+    /// This boot's mode, and whether the agent runtime is left off (#164).
+    mode: Mode,
+    safe: bool,
+    /// The slot store, `None` if the record cannot be read (then it is
+    /// never written), and the record as `init` last wrote or read it.
+    slots: Option<system::Slots>,
+    record: Record,
 }
 
 impl Init {
@@ -492,6 +510,7 @@ impl Init {
                     State::Failed => Shown::Failed,
                     State::Skipped => Shown::Skipped,
                     State::Stopped => Shown::Stopped,
+                    State::Off => Shown::Off,
                 },
                 restarts: self.restarts[i],
                 limit: self.table[i].restart.limit(),
@@ -509,7 +528,7 @@ impl Init {
     /// kernel gets its `[ready, failed]` as before.
     fn report_ready(&mut self, ready: usize) {
         let failed: alloc::vec::Vec<&[u8]> = (self.table.iter().zip(&self.state))
-            .filter(|(_, s)| !matches!(s, State::Ok(_) | State::Done))
+            .filter(|(_, s)| !matches!(s, State::Ok(_) | State::Done | State::Off))
             .map(|(t, _)| t.name.as_bytes())
             .collect();
         let mut d = [0u8; 20];
@@ -752,8 +771,12 @@ impl Init {
                 // `trust`'s `services` (#152); only its badge is answered.
                 let from_trust = self.table.get(i).is_some_and(|s| s.path == b"bin/trust");
                 let asked = listing::parse(&buf[..len.min(buf.len())]);
-                if let (true, Ok(listing::Request::Services { from })) = (from_trust, asked) {
-                    self.list(from, cap);
+                if let (true, Ok(asked)) = (from_trust, asked) {
+                    match asked {
+                        listing::Request::Services { from } => self.list(from, cap),
+                        listing::Request::System => self.show_system(cap),
+                        listing::Request::Next { mode } => self.next_boot(mode, cap),
+                    }
                 } else if let (Some(service), Some(State::Running(p))) =
                     (self.table.get(i), self.state.get(i).copied())
                 {
@@ -788,6 +811,11 @@ impl Init {
             if self.state[i] != State::Pending || !which(&self.table[i]) {
                 continue;
             }
+            if self.safe && self.table[i].path == RUNTIME_PATH {
+                self.state[i] = State::Off;
+                say(self.table[i].name, "not started: safe mode", None);
+                continue;
+            }
             let met = (self.table[i].after.iter())
                 .all(|&a| matches!(self.state[a], State::Ok(_) | State::Done));
             if !met {
@@ -810,10 +838,10 @@ impl Init {
         true
     }
 
-    /// True if every entry succeeded.
+    /// True if every entry succeeded (or is off in safe mode).
     fn all_ready(&self) -> bool {
         (self.state[..self.table.len().min(MAX_SERVICES)].iter())
-            .all(|s| matches!(s, State::Ok(_) | State::Done))
+            .all(|s| matches!(s, State::Ok(_) | State::Done | State::Off))
     }
 
     /// Stops every service the image started, so the next image's start
@@ -875,26 +903,22 @@ impl Init {
         }
     }
 
-    /// Boots from an image (#163, boot.md section 8): the storage service
-    /// from the factory image, then each candidate the slot record names
-    /// in turn, then the factory image; `image` is then the one that runs.
-    fn boot_image(&mut self, key: Option<[u8; 32]>) {
+    /// Boots from an image (#163, boot.md section 8) in the kernel's mode
+    /// `kernel` (#164): the storage service from the factory image, then
+    /// each candidate the slot record names in turn (none in recovery),
+    /// then the factory image; `image` is then the one that runs. `copy`:
+    /// the root filesystem is the `recovery` copy.
+    fn boot_image(&mut self, key: Option<[u8; 32]>, kernel: Mode, copy: bool) {
         self.start_all(|s| s.path == b"bin/store", u64::MAX);
-        let slots = if self.up(b"bin/store") {
+        let mut slots = if self.up(b"bin/store") {
             system::Slots::open(self.store, self.reply)
         } else {
             None
         };
         let mut record = Record::EMPTY;
-        let loaded = match slots.as_ref().map(system::Slots::load) {
-            Some(system::Loaded::Record(r)) => {
-                record = r;
-                r
-            }
-            Some(system::Loaded::Missing) => {
-                self.system(b"no slot record", None);
-                record
-            }
+        match slots.as_ref().map(system::Slots::load) {
+            Some(system::Loaded::Record(r)) => record = r,
+            Some(system::Loaded::Missing) => self.system(b"no slot record", None),
             Some(system::Loaded::Corrupt) => {
                 let rewritten = slots.as_ref().is_some_and(|s| s.save(&Record::EMPTY));
                 self.system(
@@ -905,13 +929,54 @@ impl Init {
                     },
                     None,
                 );
-                record
             }
             Some(system::Loaded::Unreadable) | None => {
                 self.system(b"slot record unreadable", None);
-                record
+                // Never written over: it may hold slots.
+                slots = None;
             }
-        };
+        }
+        let (mode, from_record) = record.take_mode(kernel);
+        if from_record {
+            let saved = slots.as_ref().is_some_and(|s| s.save(&record));
+            let what: &[u8] = if saved {
+                b" (from the slot record, now cleared)"
+            } else {
+                b" (from the slot record, not cleared)"
+            };
+            self.system(&[mode_word(mode), b" mode", what].concat(), None);
+        } else if mode != Mode::Normal {
+            let why: &[u8] = if copy {
+                b" mode (root failed its checks; the recovery copy runs)"
+            } else {
+                b" mode (from the kernel)"
+            };
+            self.system(&[mode_word(mode), why].concat(), None);
+        }
+        self.mode = mode;
+        self.safe = mode != Mode::Normal;
+        if mode != Mode::Recovery {
+            self.boot_slots(&slots, &mut record, key);
+        }
+        if self.image_number == 0 {
+            self.boot_factory(copy);
+        }
+        if self.mode != Mode::Normal {
+            self.tell_trust(Event::Image, b"", [shown::MODE, self.mode as u32, 0], &[]);
+        }
+        self.slots = slots;
+        self.record = record;
+    }
+
+    /// Tries each candidate slot in turn; `image_number` is the one that
+    /// is ready, or 0.
+    fn boot_slots(
+        &mut self,
+        slots: &Option<system::Slots>,
+        record: &mut Record,
+        key: Option<[u8; 32]>,
+    ) {
+        let loaded = *record;
         let mut tried = [false; 2];
         let mut d = [0u8; 20];
         while let (Some(slots), Some(slot)) = (slots.as_ref(), record.candidate(tried)) {
@@ -921,7 +986,7 @@ impl Init {
             // The attempt is on the disk before the slot is used, so a
             // crash or a hang during it counts on the next boot.
             record.attempt(slot);
-            if !slots.save(&record) {
+            if !slots.save(record) {
                 self.system(
                     &[name, b": the attempt cannot be written; not tried"].concat(),
                     None,
@@ -930,11 +995,11 @@ impl Init {
             }
             let attempt = decimal(record.slot(slot).attempts.into(), &mut d).to_vec();
             self.system(&[name, b": attempt ", &attempt].concat(), None);
-            let (fs, version) = match slots.mount(ROOT, slot, &record, key.as_ref()) {
+            let (fs, version) = match slots.mount(ROOT, slot, record, key.as_ref()) {
                 Ok(mounted) => mounted,
                 Err(why) => {
                     record.refuse(slot);
-                    let _ = slots.save(&record);
+                    let _ = slots.save(record);
                     let numbers = [shown::REFUSED, number, why.code()];
                     self.system(&[name, b" refused: ", why.text()].concat(), Some(numbers));
                     continue;
@@ -946,7 +1011,7 @@ impl Init {
             let deadline = uptime().saturating_add(IMAGE_READY_US);
             if self.start_all(|_| true, deadline) && self.all_ready() {
                 record.ready(slot);
-                let saved = slots.save(&record);
+                let saved = slots.save(record);
                 let what: &[u8] = if saved { b"" } else { b" (record not written)" };
                 let numbers = [shown::RUNNING, number, 0];
                 self.system(
@@ -975,21 +1040,100 @@ impl Init {
                 self.system(&[name, b": attempts used up; bad"].concat(), None);
             }
         }
-        if record != loaded {
+        if *record != loaded {
             if let Some(slots) = slots.as_ref() {
-                let _ = slots.save(&record);
+                let _ = slots.save(record);
             }
         }
+    }
+
+    /// Starts the factory image (or the recovery copy); if it is not
+    /// ready in normal mode, its services are stopped and it starts again
+    /// in recovery (#164).
+    fn boot_factory(&mut self, copy: bool) {
         self.image = ROOT;
-        self.image_number = 0;
+        self.image_number = if copy { 3 } else { 0 };
         self.start_all(|_| true, u64::MAX);
-        let numbers = [shown::RUNNING, 0, 0];
-        self.system(b"running factory image", Some(numbers));
+        if !self.all_ready() && !self.safe {
+            self.system(
+                b"factory image not ready; its services stopped; recovery mode",
+                None,
+            );
+            self.stop_image();
+            self.mode = Mode::Recovery;
+            self.safe = true;
+            self.start_all(|_| true, u64::MAX);
+        }
+        let numbers = [shown::RUNNING, u32::from(self.image_number), 0];
+        let what: &[u8] = if copy {
+            b"running recovery copy"
+        } else {
+            b"running factory image"
+        };
+        self.system(what, Some(numbers));
+    }
+
+    /// Answers `trust`'s `SYSTEM` on `reply` without waiting (#164).
+    fn show_system(&self, reply: Handle) {
+        let slot = |s: Slot| {
+            let info = self.record.slot(s);
+            let mut sha256 = [0u8; 8];
+            sha256.copy_from_slice(&info.sha256[..8]);
+            listing::Slot {
+                state: info.state as u8,
+                attempts: info.attempts,
+                version: info.version,
+                sha256,
+            }
+        };
+        let answer = System {
+            mode: self.mode as u8,
+            image: self.image_number,
+            active: self.record.active.map_or(0, |s| 1 + s as u8),
+            slots: [slot(Slot::A), slot(Slot::B)],
+        };
+        let mut out = [0u8; listing::SYSTEM_LEN];
+        if let Some(n) = answer.write(&mut out) {
+            let _ = try_send(reply, &out[..n]);
+        }
+    }
+
+    /// `trust`'s `NEXT` (#164): writes the next boot's mode to the record
+    /// and answers on `reply` whether it was written.
+    fn next_boot(&mut self, mode: u8, reply: Handle) {
+        let mode = if mode == 1 {
+            Mode::Safe
+        } else {
+            Mode::Recovery
+        };
+        let mut record = self.record;
+        record.next = mode;
+        let saved = self.slots.as_ref().is_some_and(|s| s.save(&record));
+        if saved {
+            self.record = record;
+        }
+        let answer = if saved { status::OK } else { status::INTERNAL };
+        let _ = try_send(reply, &[answer]);
+        let what: &[u8] = if saved {
+            b" mode (asked on the trusted path)"
+        } else {
+            b" mode not written"
+        };
+        self.system(&[b"next boot: ", mode_word(mode), what].concat(), None);
+    }
+}
+
+fn mode_word(mode: Mode) -> &'static [u8] {
+    match mode {
+        Mode::Normal => b"normal",
+        Mode::Safe => b"safe",
+        Mode::Recovery => b"recovery",
     }
 }
 
 fn main(arg: u64) -> u64 {
-    let table = pharos_services::table(arg);
+    let (table_number, kernel_mode, copy) = pharos_programs::system::split_arg(arg);
+    let table = pharos_services::table(table_number);
     let mut handles = [0; 9];
     for h in handles.iter_mut() {
         match endpoint_create() {
@@ -1035,12 +1179,16 @@ fn main(arg: u64) -> u64 {
         image: ROOT,
         image_number: 0,
         wake_by: u64::MAX,
+        mode: Mode::Normal,
+        safe: false,
+        slots: None,
+        record: Record::EMPTY,
     };
     // Only the boot table boots from an image; the test tables run from
     // the root filesystem.
-    if arg == 0 {
+    if table_number == 0 {
         let key = pharos_programs::system::parse_key(option_env!("PHAROS_IMAGE_KEY"));
-        init.boot_image(key);
+        init.boot_image(key, kernel_mode, copy);
     } else {
         init.start_all(|_| true, u64::MAX);
     }
@@ -1049,11 +1197,17 @@ fn main(arg: u64) -> u64 {
         .iter()
         .filter(|s| matches!(s, State::Ok(_) | State::Done))
         .count();
-    let failed = table.len().min(MAX_SERVICES) - ready;
+    let off = init.state.iter().filter(|s| **s == State::Off).count();
+    let failed = table.len().min(MAX_SERVICES) - ready - off;
     // The trail and `trust` first: the kernel may end the boot check
     // once it has the summary.
     init.report_ready(ready);
-    let summary = [ready as u8, failed as u8, init.image_number];
+    let summary = [
+        ready as u8,
+        failed as u8,
+        init.image_number,
+        init.mode as u8,
+    ];
     let _ = send(REPORT, &summary, 0, 0, 0);
 
     // Keep supervising: restarts, and `ready` from restarted daemons.
