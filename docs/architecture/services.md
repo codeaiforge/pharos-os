@@ -165,6 +165,8 @@ Builds on M3.3's supervision (#100): a crashed daemon restarted at once, at most
 
 **The end-to-end test (#153).** A new test kernel, `system`, boots `init` with the boot table and the boot image's disks and devices, and checks ready on the trusted console and in the trail; then kills the knowledge service (restarted after its delay, its dependents named), stops `net` itself (as a stop, never restarted; `trust` stops agents, not services), and kills one service past its restarts (given up); `services` shows each state, and every event is one audit record.
 
+- *Implemented (#153):* `kernel/tests/system.rs`; `cargo xtask runner` gives it the boot image's modules (`root`) instead of the test modules. The service killed past its restarts is `infer` (four kills: restarts 1–3, then given up; `used by agents`). The runner checks the trusted console and the trail with the same check as `supervision` (`event_checks`). About 7 s; two mutations caught (restart policy ignored, no ready report).
+
 ## 4. Security
 
 - **The trust boundary is unchanged:** every process, `init` included, is untrusted by the kernel. `init` holds the most authority (every device, the root filesystem). It is small, and its service table is reviewed code.

@@ -1308,6 +1308,55 @@ const SUPERVISION_SCRIPT: &[console::Step] = &[
     ("system not ready: ", "services\n"),
     ("services: holder done, restarts 0 of 0", ""),
 ];
+/// The integrated system (#153): the boot table and the boot image.
+const SYSTEM_TEST: &str = "system";
+/// Once `trust` shows the inference service given up, the runner types
+/// `services`; the last entry is `agents`.
+const SYSTEM_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("system ready: 8 services", ""),
+    (
+        "service infer not restarted: restarts used up",
+        "services\n",
+    ),
+    ("services: agents ready, restarts 0 of 3", ""),
+];
+/// Each service event the `system` kernel causes, as [`SUPERVISION_EVENTS`].
+const SYSTEM_EVENTS: &[(&str, &str, &str, usize)] = &[
+    ("knowledge", "killed 13", "killed 13", 1),
+    (
+        "knowledge",
+        "restarting 1 of 3 in 100 ms; used by trust, agents",
+        "restarting 1 of 3 in 100 ms; used by trust, agents",
+        1,
+    ),
+    ("net", "stopped; not restarted", "stopped; not restarted", 1),
+    ("infer", "killed 13", "killed 13", 4),
+    (
+        "infer",
+        "restarting 1 of 3 in 100 ms; used by agents",
+        "restarting 1 of 3 in 100 ms; used by agents",
+        1,
+    ),
+    (
+        "infer",
+        "restarting 2 of 3 in 400 ms; used by agents",
+        "restarting 2 of 3 in 400 ms; used by agents",
+        1,
+    ),
+    (
+        "infer",
+        "restarting 3 of 3 in 1600 ms; used by agents",
+        "restarting 3 of 3 in 1600 ms; used by agents",
+        1,
+    ),
+    (
+        "infer",
+        "not restarted: restarts used up",
+        "not restarted: restarts used up",
+        1,
+    ),
+];
 /// Each service event in the `supervision` kernel (#152): the service, the
 /// audit record's detail, the trusted console's line, and how many times.
 /// The storage service's own events are left out: the trail is written
@@ -1734,11 +1783,67 @@ fn audit_checks(image: &Path, console: &str) -> Result<()> {
     Ok(())
 }
 
-/// After the `supervision` test kernel (#152): each event in
-/// [`SUPERVISION_EVENTS`] is that many `trust` lines and audit records
-/// (actor the service, from `init`), the system's state is both, and
-/// `services` listed each service's state.
+/// After the `supervision` test kernel (#152): see [`event_checks`].
 fn supervision_checks(image: &Path, console: &str) -> Result<()> {
+    let not_ready = "4 failed: silent, flaky, brittle, steady";
+    event_checks(
+        "supervision",
+        image,
+        console,
+        SUPERVISION_EVENTS,
+        (
+            &format!("not ready {not_ready}"),
+            &format!("system not ready: {not_ready}"),
+        ),
+        &[
+            "services: store ready, restarts 1 of 3",
+            "services: trust ready, restarts 0 of 3",
+            "services: silent failed, restarts 1 of 1",
+            "services: flaky failed, restarts 3 of 3",
+            "services: brittle failed, restarts 0 of 0",
+            "services: steady stopped, restarts 0 of 3",
+            "services: infer ready, restarts 1 of 3",
+            "services: client done, restarts 0 of 0",
+        ],
+    )
+}
+
+/// After the `system` test kernel (#153): the boot table reached ready,
+/// and each fault the kernel caused is reported and recovered as its
+/// policy says ([`event_checks`]).
+fn system_checks(image: &Path, console: &str) -> Result<()> {
+    event_checks(
+        "system",
+        image,
+        console,
+        SYSTEM_EVENTS,
+        ("ready 8 services", "system ready: 8 services"),
+        &[
+            "services: virtio-blk done, restarts 0 of 0",
+            "services: net stopped, restarts 0 of 3",
+            "services: store ready, restarts 0 of 3",
+            "services: infer failed, restarts 3 of 3",
+            "services: audit ready, restarts 0 of 3",
+            "services: knowledge ready, restarts 1 of 3",
+            "services: trust ready, restarts 0 of 3",
+            "services: agents ready, restarts 0 of 3",
+        ],
+    )
+}
+
+/// Each of `events` (service, audit detail, `trust` line, times) is that
+/// many `trust` lines and audit records (actor the service, from `init`),
+/// in the store's one audit stream; the system's state (`init`'s detail,
+/// `trust`'s line) is one of each; and `services` showed each of `listed`
+/// once.
+fn event_checks(
+    test: &str,
+    image: &Path,
+    console: &str,
+    events: &[(&str, &str, &str, usize)],
+    system: (&str, &str),
+    listed: &[&str],
+) -> Result<()> {
     let streams = store_image::audit(image)?;
     let [(_, records)] = &streams[..] else {
         return Err(format!("expected one audit stream, got {}", streams.len()));
@@ -1748,48 +1853,34 @@ fn supervision_checks(image: &Path, console: &str) -> Result<()> {
         records.iter().filter(|l| l.ends_with(&want)).count()
     };
     let shown = |line: &str| console.matches(&format!("{line}\r\n")).count();
-    let not_ready = "4 failed: silent, flaky, brittle, steady";
-    let mut checks: Vec<(String, String, usize)> = SUPERVISION_EVENTS
+    let mut checks: Vec<(String, String, String, usize)> = events
         .iter()
         .map(|&(name, detail, line, times)| {
             (
-                format!("{name} {detail}"),
+                name.to_owned(),
+                detail.to_owned(),
                 format!("service {name} {line}"),
                 times,
             )
         })
         .collect();
-    checks.push((
-        format!("init not ready {not_ready}"),
-        format!("system not ready: {not_ready}"),
-        1,
-    ));
-    for (what, line, times) in &checks {
-        let (actor, detail) = what.split_once(' ').unwrap_or_default();
+    checks.push(("init".into(), system.0.into(), system.1.into(), 1));
+    for (actor, detail, line, times) in &checks {
         let (r, c) = (record(actor, detail), shown(line));
         if (r, c) != (*times, *times) {
             return Err(format!(
-                "{what:?}: {r} audit records and {c} trusted console lines, expected {times} each"
+                "\"{actor} {detail}\": {r} audit records and {c} trusted console lines, expected {times} each"
             ));
         }
     }
-    for line in [
-        "services: store ready, restarts 1 of 3",
-        "services: trust ready, restarts 0 of 3",
-        "services: silent failed, restarts 1 of 1",
-        "services: flaky failed, restarts 3 of 3",
-        "services: brittle failed, restarts 0 of 0",
-        "services: steady stopped, restarts 0 of 3",
-        "services: infer ready, restarts 1 of 3",
-        "services: client done, restarts 0 of 0",
-    ] {
+    for line in listed {
         if shown(line) != 1 {
             return Err(format!("`services` did not show {line:?}"));
         }
     }
     println!(
-        "  supervision: {} events, each one audit record and one trusted console line; `services` showed every state",
-        checks.iter().map(|c| c.2).sum::<usize>()
+        "  {test}: {} events, each one audit record and one trusted console line; `services` showed every state",
+        checks.iter().map(|c| c.3).sum::<usize>()
     );
     Ok(())
 }
@@ -2673,7 +2764,13 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     };
     let out = paths.runner_dir(&name);
     fs::create_dir_all(&out).map_err(io_err("cannot create", &out))?;
-    let modules = test_modules(&build_user_programs(paths)?);
+    // The `system` kernel boots what the main kernel boots (#153).
+    let programs = build_user_programs(paths)?;
+    let modules = if name == SYSTEM_TEST {
+        kernel_modules(paths, &programs)?
+    } else {
+        test_modules(&programs)
+    };
     let iso = image(paths, Some(elf.to_path_buf()), &modules, &out)?;
     let logs = paths.logs_dir();
     fs::create_dir_all(&logs).map_err(io_err("cannot create", &logs))?;
@@ -2744,6 +2841,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         EXHAUSTION_TEST => (EXHAUSTION_SCRIPT, &[]),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
         SUPERVISION_TEST => (SUPERVISION_SCRIPT, &[]),
+        SYSTEM_TEST => (SYSTEM_SCRIPT, &[]),
         _ => (&[], &[]),
     };
     let script = if steps.is_empty() {
@@ -2772,6 +2870,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == SUPERVISION_TEST {
                 supervision_checks(&out.join(STORE_IMAGE), &output)?;
+            }
+            if name == SYSTEM_TEST {
+                system_checks(&out.join(STORE_IMAGE), &output)?;
             }
             if name == PERMISSIONS_TEST {
                 permissions_audit(&out.join(STORE_IMAGE))?;
