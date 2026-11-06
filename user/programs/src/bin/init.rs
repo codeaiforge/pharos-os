@@ -30,14 +30,17 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use pharos_programs::supervise::{self, Restart};
+use pharos_programs::supervise;
 use pharos_proto::infer::{self, Request as InferRequest};
-use pharos_proto::net::{self, Allowed, Dest, Request as NetRequest};
+use pharos_proto::net::{self, Allowed, Request as NetRequest};
 use pharos_proto::service::{self as listing, Entry, Reply, State as Shown};
 use pharos_proto::store::{self, Request as StoreRequest};
 use pharos_proto::trust::{self, Event, Names, not_started};
 use pharos_proto::{audit, status};
-use pharos_user::rights::{CONFIG, GRANT, IRQ, MAP, READ, RECEIVE, SEND, STOP, WAIT, WRITE};
+use pharos_services::{
+    Ep, Give, Kind, MAX_SERVICES, Object, RUNTIME_HANDLES, RUNTIME_PATH, Restart, Service,
+};
+use pharos_user::rights::{RECEIVE, SEND, STOP, WAIT};
 use pharos_user::{
     Class, Error, Grant, Handle, Limits, MAX_SPAWN_CAPS, Received, Status, call_timeout,
     config_read, debug_write, endpoint_create, open, process_status, receive_timeout, send,
@@ -51,517 +54,9 @@ const ROOT: Handle = 2;
 const REPORT: Handle = 3;
 const FIRST_DEVICE: Handle = 4;
 
-const VIRTIO_BLK: u32 = 0x1042_1af4;
-const VIRTIO_NET: u32 = 0x1041_1af4;
-const VIRTIO_CONSOLE: u32 = 0x1043_1af4;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    /// Succeeds by exiting with code 0.
-    OneShot,
-    /// Succeeds by sending `ready`; must not end.
-    Daemon,
-}
-
-/// A capability a service gets, in handle order.
-#[derive(Clone, Copy)]
-enum Cap {
-    Console,
-    /// The device with this PCI vendor and device ID.
-    Device(u32),
-    /// The second device with this ID (the writable store disk comes after
-    /// the read-only one).
-    SecondDevice(u32),
-    /// The storage service's endpoint, to receive on (the service itself).
-    StoreService,
-    /// `init`'s endpoint, badged with the service's number (daemons).
-    Report,
-    /// The network service's endpoint, to receive on (the service itself).
-    NetService,
-    /// A network capability: `SEND` on the service endpoint, badged with
-    /// this UDP port, and the destinations it may send to (#109). Never
-    /// badge 0: that is `init`'s own, which may send `ALLOW`.
-    Network(u32, &'static [Dest]),
-    /// A storage capability: `SEND` on the storage service, badged with a
-    /// namespace and the read-only bit (`pharos_proto::store`).
-    Storage(u32),
-    /// The inference service's endpoint, to receive on (the service).
-    InferService,
-    /// The trusted service's endpoint, to receive on (the service).
-    TrustService,
-    /// The agent runtime's endpoint: `RECEIVE`, and `SEND` with `GRANT`
-    /// so it can hand each agent a badged `SEND` (the runtime itself).
-    AgentsService,
-    /// The root filesystem, read-only.
-    Root,
-    /// `SEND` on the inference service, badged as this client number.
-    Inference(u32),
-    /// `SEND` on the trusted service, badged as the agent runtime.
-    TrustRuntime,
-    /// The audit service's endpoint, to receive on (the service, #107).
-    AuditService,
-    /// `SEND` on the audit service, badged as this client
-    /// (`pharos_proto::audit::client`).
-    Audit(u32),
-    /// The knowledge service's endpoint, to receive on (the service, #144).
-    KnowledgeService,
-    /// `SEND` on the knowledge service, badged as this client
-    /// (`pharos_proto::knowledge::client`).
-    Knowledge(u32),
-}
-
-struct Service {
-    name: &'static str,
-    path: &'static [u8],
-    arg: u64,
-    kind: Kind,
-    /// What happens when it crashes, exits, or sends no `ready` in time
-    /// (#150, D-026).
-    restart: Restart,
-    caps: &'static [Cap],
-    /// Indexes of services that must have succeeded first.
-    after: &'static [usize],
-    /// Pages it may `mem_map` (0: none).
-    limit: u32,
-}
-
-const NET: Service = Service {
-    name: "net",
-    path: b"bin/net",
-    arg: 0,
-    kind: Kind::Daemon,
-    restart: Restart::Up(3),
-    caps: &[
-        Cap::Console,
-        Cap::Device(VIRTIO_NET),
-        Cap::NetService,
-        Cap::Report,
-    ],
-    after: &[],
-    limit: 0,
-};
-
-/// The agent runtime's handles: a full table for itself, and 16 for each
-/// of its 16 agents.
-const RUNTIME_HANDLES: u16 = 64 + 16 * 16;
-
-/// 1 GiB: up to 16 clients' buffers of at most 32 MiB each, and the heap.
-const STORE_LIMIT: u32 = 1 << 18;
-/// 1 GiB (D-011): one S1 model, its 16 MiB read window, cache, and heap.
-const INFER_LIMIT: u32 = 1 << 18;
-/// The knowledge service (#144): its heap (each key's version index) and
-/// up to 4 clients' buffers of at most 64 KiB each.
-const KNOWLEDGE_LIMIT: u32 = 1024;
-/// The agent runtime (#98): its own heap and buffers; agents' limits come
-/// from its policy table, each at most this.
-const AGENTS_LIMIT: u32 = 1 << 14;
-/// The program `init` registers with `trust` as the agent runtime.
-const RUNTIME_PATH: &[u8] = b"bin/agents";
 /// `pharos_proto::trust`: `RUNTIME`, sent through `init`'s own unbadged
 /// handle (badge 0, `trust::INIT`).
 const TRUST_RUNTIME: [u8; 2] = [1, 1];
-const TRUST_RUNTIME_BADGE: u32 = 2;
-/// Namespace 5, `agents`, read-write: the runtime's tasks (#99).
-const AGENTS_TASKS: u32 = 5;
-/// Namespace 3, `models`, read-only (`pharos_proto::store`).
-const MODELS_READ_ONLY: u32 = 3 | 1 << 16;
-/// Namespace 6, `audit`, read-write: the audit trail (#107).
-const AUDIT_TRAIL: u32 = 6;
-/// Namespace 7, `files`, read-only: the files the user gives agents (#127).
-const FILES_READ_ONLY: u32 = 7 | 1 << 16;
-/// Namespace 8, `knowledge`, read-write: shared knowledge (#144).
-const KNOWLEDGE_STORE: u32 = 8;
-/// The knowledge service's client numbers
-/// (`pharos_proto::knowledge::client`).
-const KNOWLEDGE_RUNTIME: u32 = 1;
-const KNOWLEDGE_TRUST: u32 = 2;
-/// The audit service's client numbers (`pharos_proto::audit::client`).
-const AUDIT_TRUST: u32 = 2;
-const AUDIT_RUNTIME: u32 = 3;
-/// The runtime's UDP port, for its agents' datagrams (#109).
-const RUNTIME_PORT: u32 = 40_100;
-/// The slirp gateway, where `cargo xtask` runs the host echo server.
-const HOST_ECHO: Dest = ([10, 0, 2, 2], 47_000);
-const OUR_IP: [u8; 4] = [10, 0, 2, 15];
-
-const BOOT: &[Service] = &[
-    Service {
-        name: "virtio-blk",
-        path: b"bin/virtio-blk",
-        arg: 0,
-        kind: Kind::OneShot,
-        restart: Restart::Never,
-        caps: &[Cap::Console, Cap::Device(VIRTIO_BLK)],
-        after: &[],
-        limit: 0,
-    },
-    NET,
-    Service {
-        name: "store",
-        path: b"bin/store",
-        arg: 0,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[
-            Cap::Console,
-            Cap::SecondDevice(VIRTIO_BLK),
-            Cap::StoreService,
-            Cap::Report,
-        ],
-        after: &[],
-        limit: STORE_LIMIT,
-    },
-    // The inference service (#88): only `models`, read-only. It reports
-    // ready without loading a model. Clients get no capability from `init`
-    // in M3.2.
-    Service {
-        name: "infer",
-        path: b"bin/infer",
-        arg: 0,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[
-            Cap::Console,
-            Cap::InferService,
-            Cap::Report,
-            Cap::Storage(MODELS_READ_ONLY),
-        ],
-        after: &[2],
-        limit: INFER_LIMIT,
-    },
-    // The audit service (#107): the only writer of the audit trail, in
-    // namespace `audit`; before every service that writes records.
-    Service {
-        name: "audit",
-        path: b"bin/audit",
-        arg: 0,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[
-            Cap::Console,
-            Cap::AuditService,
-            Cap::Report,
-            Cap::Storage(AUDIT_TRAIL),
-        ],
-        after: &[2],
-        limit: 0,
-    },
-    // The knowledge service (#144): the only writer of namespace
-    // `knowledge`; before `trust` and the runtime, its two clients.
-    Service {
-        name: "knowledge",
-        path: b"bin/knowledge",
-        arg: 0,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[
-            Cap::Console,
-            Cap::KnowledgeService,
-            Cap::Report,
-            Cap::Storage(KNOWLEDGE_STORE),
-        ],
-        after: &[2],
-        limit: KNOWLEDGE_LIMIT,
-    },
-    // The trusted service (#96, D-018): the trusted path's device and its
-    // endpoint, the audit service, whose chain head it shows (#107), and
-    // the knowledge service, to mark versions verified (#144).
-    Service {
-        name: "trust",
-        path: b"bin/trust",
-        arg: 0,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[
-            Cap::Device(VIRTIO_CONSOLE),
-            Cap::TrustService,
-            Cap::Report,
-            Cap::Audit(AUDIT_TRUST),
-            Cap::Knowledge(KNOWLEDGE_TRUST),
-        ],
-        after: &[4, 5],
-        limit: 0,
-    },
-    // The agent runtime (#98), after `trust`, which `init` then sends its
-    // `STOP` capability: the runtime never decides whether it can be
-    // stopped. Inference client 1. Its boot policy table is empty.
-    Service {
-        name: "agents",
-        path: RUNTIME_PATH,
-        arg: 0,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[
-            Cap::Console,
-            Cap::AgentsService,
-            Cap::Report,
-            Cap::Root,
-            Cap::Inference(1),
-            Cap::TrustRuntime,
-            Cap::Storage(AGENTS_TASKS),
-            Cap::Audit(AUDIT_RUNTIME),
-            // The union of its policy table's destinations: none.
-            Cap::Network(RUNTIME_PORT, &[]),
-            Cap::Storage(FILES_READ_ONLY),
-            Cap::Knowledge(KNOWLEDGE_RUNTIME),
-        ],
-        after: &[2, 3, 5, 6],
-        limit: AGENTS_LIMIT,
-    },
-];
-
-const NETWORK: &[Service] = &[
-    NET,
-    Service {
-        name: "echoer",
-        path: b"bin/netclient",
-        arg: 2,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[
-            Cap::Console,
-            Cap::Network(40001, &[(OUR_IP, 40000)]),
-            Cap::Report,
-        ],
-        after: &[0],
-        limit: 0,
-    },
-    Service {
-        name: "sender",
-        path: b"bin/netclient",
-        arg: 1,
-        kind: Kind::OneShot,
-        restart: Restart::Never,
-        caps: &[
-            Cap::Console,
-            Cap::Network(40000, &[HOST_ECHO, (OUR_IP, 40001), (OUR_IP, 40999)]),
-        ],
-        after: &[1],
-        limit: 0,
-    },
-    // A badge over 16 bits is no port.
-    Service {
-        name: "unported",
-        path: b"bin/netclient",
-        arg: 3,
-        kind: Kind::OneShot,
-        restart: Restart::Never,
-        caps: &[Cap::Console, Cap::Network(1 << 16, &[HOST_ECHO])],
-        after: &[0],
-        limit: 0,
-    },
-];
-
-const TEST: &[Service] = &[
-    Service {
-        name: "first",
-        path: b"bin/svc",
-        arg: 0,
-        kind: Kind::OneShot,
-        restart: Restart::Never,
-        caps: &[Cap::Console],
-        after: &[],
-        limit: 0,
-    },
-    Service {
-        name: "daemon",
-        path: b"bin/svc",
-        arg: 1,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[Cap::Console, Cap::Report],
-        after: &[0],
-        limit: 0,
-    },
-    Service {
-        name: "crasher",
-        path: b"bin/svc",
-        arg: 2,
-        kind: Kind::OneShot,
-        restart: Restart::Never,
-        caps: &[Cap::Console],
-        after: &[],
-        limit: 0,
-    },
-    Service {
-        name: "after-crasher",
-        path: b"bin/svc",
-        arg: 0,
-        kind: Kind::OneShot,
-        restart: Restart::Never,
-        caps: &[Cap::Console],
-        after: &[2],
-        limit: 0,
-    },
-    Service {
-        name: "independent",
-        path: b"bin/svc",
-        arg: 0,
-        kind: Kind::OneShot,
-        restart: Restart::Never,
-        caps: &[Cap::Console],
-        after: &[],
-        limit: 0,
-    },
-    Service {
-        name: "missing",
-        path: b"bin/no-such-program",
-        arg: 0,
-        kind: Kind::OneShot,
-        restart: Restart::Never,
-        caps: &[Cap::Console],
-        after: &[],
-        limit: 0,
-    },
-    Service {
-        name: "virtio-blk",
-        path: b"bin/virtio-blk",
-        arg: 0,
-        kind: Kind::OneShot,
-        restart: Restart::Never,
-        caps: &[Cap::Console, Cap::Device(VIRTIO_BLK)],
-        after: &[],
-        limit: 0,
-    },
-];
-
-/// The `supervision` test kernel's table (#100): the storage, audit,
-/// trusted (#152), and inference services, a daemon that never reports ready (restarted once), one
-/// that crashes after each start (restarted 3 times, with growing
-/// delays), one that crashes and is never restarted, one the kernel stops, an inference client the kernel
-/// kills services under, and a one-shot that holds a storage buffer and
-/// exits.
-const SUPERVISE: &[Service] = &[
-    Service {
-        name: "store",
-        path: b"bin/store",
-        arg: 0,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[
-            Cap::Console,
-            Cap::SecondDevice(VIRTIO_BLK),
-            Cap::StoreService,
-            Cap::Report,
-        ],
-        after: &[],
-        limit: STORE_LIMIT,
-    },
-    // Every later event is an audit record and a `trust` line (#152).
-    Service {
-        name: "audit",
-        path: b"bin/audit",
-        arg: 0,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[
-            Cap::Console,
-            Cap::AuditService,
-            Cap::Report,
-            Cap::Storage(AUDIT_TRAIL),
-        ],
-        after: &[0],
-        limit: 0,
-    },
-    Service {
-        name: "trust",
-        path: b"bin/trust",
-        arg: 0,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[
-            Cap::Device(VIRTIO_CONSOLE),
-            Cap::TrustService,
-            Cap::Report,
-            Cap::Audit(AUDIT_TRUST),
-        ],
-        after: &[1],
-        limit: 0,
-    },
-    Service {
-        name: "infer",
-        path: b"bin/infer",
-        arg: 0,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[
-            Cap::Console,
-            Cap::InferService,
-            Cap::Report,
-            Cap::Storage(MODELS_READ_ONLY),
-        ],
-        after: &[0],
-        limit: INFER_LIMIT,
-    },
-    Service {
-        name: "silent",
-        path: b"bin/svc",
-        arg: 3,
-        kind: Kind::Daemon,
-        // One restart: no `ready` in 10 s counts as a crash (#150).
-        restart: Restart::Up(1),
-        caps: &[Cap::Console, Cap::Report],
-        after: &[],
-        limit: 0,
-    },
-    Service {
-        name: "flaky",
-        path: b"bin/svc",
-        arg: 4,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[Cap::Console, Cap::Report],
-        after: &[],
-        limit: 0,
-    },
-    // Crashes as `flaky` does, and is never restarted (#150).
-    Service {
-        name: "brittle",
-        path: b"bin/svc",
-        arg: 4,
-        kind: Kind::Daemon,
-        restart: Restart::Never,
-        caps: &[Cap::Console, Cap::Report],
-        after: &[],
-        limit: 0,
-    },
-    Service {
-        name: "steady",
-        path: b"bin/svc",
-        arg: 6,
-        kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &[Cap::Console, Cap::Report],
-        after: &[],
-        limit: 0,
-    },
-    // Inference client 2; `models` read-write, to put the model in place.
-    Service {
-        name: "client",
-        path: b"bin/inferclient",
-        arg: 4,
-        kind: Kind::OneShot,
-        restart: Restart::Never,
-        caps: &[Cap::Console, Cap::Inference(2), Cap::Storage(3)],
-        after: &[0, 3],
-        limit: 1024,
-    },
-    // Namespace 1, `test`, read-write. Last, so nothing else attaches to
-    // the store while the kernel measures it.
-    Service {
-        name: "holder",
-        path: b"bin/svc",
-        arg: 5,
-        kind: Kind::OneShot,
-        restart: Restart::Never,
-        caps: &[Cap::Console, Cap::Storage(1)],
-        after: &[0],
-        limit: 2048,
-    },
-];
-
-/// Most services in a table (one notification bit each).
-const MAX_SERVICES: usize = 32;
 
 /// Prints `init: <name> <what>[ <number>]`.
 fn say(name: &str, what: &str, number: Option<u64>) {
@@ -680,42 +175,43 @@ struct Init {
 }
 
 impl Init {
-    /// The capability `cap` for service `i`, if `init` has it.
-    fn grant(&self, i: usize, cap: &Cap) -> Option<Grant> {
-        let g = |handle, rights, badge| {
-            Some(Grant {
-                handle,
-                rights,
-                badge,
-            })
-        };
-        match cap {
-            Cap::Console => g(CONSOLE, WRITE, 0),
-            Cap::Report => g(self.events, SEND, i as u32 + 1),
-            Cap::NetService => g(self.net, RECEIVE, 0),
-            Cap::StoreService => g(self.store, RECEIVE, 0),
-            Cap::Storage(badge) => g(self.store, SEND, *badge),
-            Cap::InferService => g(self.infer, RECEIVE, 0),
-            Cap::TrustService => g(self.trust, RECEIVE, 0),
-            Cap::AgentsService => g(self.agents, RECEIVE | SEND | GRANT, 0),
-            Cap::Root => g(ROOT, READ, 0),
-            Cap::Inference(badge) => g(self.infer, SEND, *badge),
-            Cap::TrustRuntime => g(self.trust, SEND, TRUST_RUNTIME_BADGE),
-            Cap::AuditService => g(self.audit, RECEIVE, 0),
-            Cap::Audit(badge) => g(self.audit, SEND, *badge),
-            Cap::KnowledgeService => g(self.knowledge, RECEIVE, 0),
-            Cap::Knowledge(badge) => g(self.knowledge, SEND, *badge),
-            Cap::Network(0, _) => None,
-            Cap::Network(port, _) => g(self.net, SEND, *port),
-            Cap::Device(id) | Cap::SecondDevice(id) => {
-                let nth = usize::from(matches!(cap, Cap::SecondDevice(_)));
-                let &(handle, _) = self.devices[..self.device_count]
-                    .iter()
-                    .filter(|d| d.1 == *id)
-                    .nth(nth)?;
-                g(handle, MAP | CONFIG | IRQ, 0)
+    /// `init`'s handle for `object`, if it has it.
+    fn handle(&self, object: Object) -> Option<Handle> {
+        Some(match object {
+            Object::DebugConsole => CONSOLE,
+            Object::Root => ROOT,
+            Object::Endpoint(e) => match e {
+                Ep::Events => self.events,
+                Ep::Net => self.net,
+                Ep::Store => self.store,
+                Ep::Infer => self.infer,
+                Ep::Trust => self.trust,
+                Ep::Agents => self.agents,
+                Ep::Audit => self.audit,
+                Ep::Knowledge => self.knowledge,
+            },
+            Object::Device(id, nth) => {
+                (self.devices[..self.device_count].iter())
+                    .filter(|d| d.1 == id)
+                    .nth(usize::from(nth))?
+                    .0
             }
+        })
+    }
+
+    /// Service `i`'s capability `give`, exactly as its entry writes it
+    /// (D-027). Never a `SEND` with badge 0 on another service's endpoint:
+    /// that is `init`'s own (the host-tested rules refuse such a table).
+    fn grant(&self, i: usize, give: &Give) -> Option<Grant> {
+        let badge = give.badge.value(i);
+        if give.rights & SEND != 0 && give.rights & RECEIVE == 0 && badge == 0 {
+            return None;
         }
+        Some(Grant {
+            handle: self.handle(give.object)?,
+            rights: give.rights,
+            badge,
+        })
     }
 
     /// Starts service `i` with exactly what its entry lists.
@@ -732,13 +228,23 @@ impl Init {
             rights: 0,
             badge: 0,
         }; MAX_SPAWN_CAPS];
-        for (grant, cap) in grants.iter_mut().zip(service.caps) {
-            match self.grant(i, cap) {
+        for (grant, give) in grants.iter_mut().zip(service.caps) {
+            match self.grant(i, give) {
                 Some(g) => *grant = g,
                 None => {
                     let _ = pharos_user::delete(file);
-                    let numbers = [not_started::NO_DEVICE, 0, 0];
-                    self.event(i, b"no device", Event::NotStarted, numbers, &[]);
+                    let (what, numbers): (&[u8], _) = match give.object {
+                        Object::Device(..) => (b"no device", [not_started::NO_DEVICE, 0, 0]),
+                        _ => (
+                            b"capability refused",
+                            [
+                                not_started::SPAWN_ERROR,
+                                Error::MissingRight.code() as u32,
+                                0,
+                            ],
+                        ),
+                    };
+                    self.event(i, what, Event::NotStarted, numbers, &[]);
                     return;
                 }
             }
@@ -1000,17 +506,24 @@ impl Init {
     /// Tells the storage and inference services that service `i`'s
     /// capabilities on them are gone, so they free its slots (#100).
     fn release(&self, i: usize) {
-        for cap in self.table[i].caps {
-            let (endpoint, client, msg) = match cap {
-                Cap::Storage(badge) => {
+        for give in self.table[i].caps {
+            // Only a client's `SEND`: the service itself receives there.
+            let pharos_services::Badge::Fixed(badge) = give.badge else {
+                continue;
+            };
+            if give.rights & RECEIVE != 0 {
+                continue;
+            }
+            let (endpoint, client, msg) = match give.object {
+                Object::Endpoint(Ep::Store) => {
                     let mut msg = [0u8; 16];
-                    let n = store::encode(&StoreRequest::Release { client: *badge }, &mut msg);
-                    (self.store, *badge, n.map(|n| (msg, n)))
+                    let n = store::encode(&StoreRequest::Release { client: badge }, &mut msg);
+                    (self.store, badge, n.map(|n| (msg, n)))
                 }
-                Cap::Inference(badge) => {
+                Object::Endpoint(Ep::Infer) => {
                     let mut msg = [0u8; 16];
-                    let n = infer::encode(&InferRequest::Release { client: *badge }, &mut msg);
-                    (self.infer, *badge, n.map(|n| (msg, n)))
+                    let n = infer::encode(&InferRequest::Release { client: badge }, &mut msg);
+                    (self.infer, badge, n.map(|n| (msg, n)))
                 }
                 _ => continue,
             };
@@ -1031,14 +544,17 @@ impl Init {
 
     /// Sends the network service every client's destinations (#109).
     fn allow(&self) {
-        for (service, cap) in self
-            .table
-            .iter()
-            .flat_map(|s| s.caps.iter().map(move |c| (s, c)))
+        for (service, give) in (self.table.iter()).flat_map(|s| s.caps.iter().map(move |g| (s, g)))
         {
-            let Cap::Network(port, dests) = *cap else {
+            let (Object::Endpoint(Ep::Net), pharos_services::Badge::Fixed(port)) =
+                (give.object, give.badge)
+            else {
                 continue;
             };
+            if give.rights & SEND == 0 {
+                continue;
+            }
+            let dests = service.net;
             let req = Allowed::new(dests)
                 .zip(u16::try_from(port).ok())
                 .map(|(dests, client)| NetRequest::Allow { client, dests });
@@ -1235,13 +751,7 @@ impl Init {
 }
 
 fn main(arg: u64) -> u64 {
-    let table = match arg {
-        0 => BOOT,
-        1 => TEST,
-        2 => NETWORK,
-        3 => SUPERVISE,
-        _ => &[],
-    };
+    let table = pharos_services::table(arg);
     let mut handles = [0; 9];
     for h in handles.iter_mut() {
         match endpoint_create() {

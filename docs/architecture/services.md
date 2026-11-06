@@ -206,6 +206,8 @@ A call's one-shot reply capability is revoked when the call returns, so it needs
 
 A mutation in which `init` grants one service one capability more than its entry must fail it, and one in which a manifest gives `GRANT` must fail a host rule.
 
+- *Implemented (#157, step 1):* `crates/pharos-services` with the types, the four tables written out (`BOOT`, `TEST`, `NETWORK`, `SUPERVISE`, chosen by `table(arg)`), and `check`, the rules above; `Restart` moved there (`pharos_programs::supervise` re-exports it). `Own` gains are implicit, so `gains` lists only `Processes` and `RuntimeChannel`. `init`'s `grant` copies each `Give` and refuses a `SEND` with badge 0 on another service's endpoint (`capability refused`). Every test kernel passed unchanged. Next: narrowing each boot service (step 2).
+
 **Not covered.** `init` itself (the kernel gives it every boot capability; it is reviewed code). Agents (their manifests are D-012's, and the `hostile` and `deputy` kernels test them). Memory mappings, bounded by page limits. Processes the runtime starts that are not agents: there are none.
 
 ## 4. Security

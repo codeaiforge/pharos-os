@@ -14,6 +14,7 @@ libm = "0.2.16"
 pharos-fs = { path = "../../crates/pharos-fs" }
 pharos-infer = { path = "../../crates/pharos-infer" }
 pharos-proto = { path = "../../crates/pharos-proto" }
+pharos-services = { path = "../../crates/pharos-services" }
 pharos-store = { path = "../../crates/pharos-store" }
 pharos-user = { path = "../pharos-user" }
 

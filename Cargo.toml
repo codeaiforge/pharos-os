@@ -2,10 +2,10 @@
 # Resolver "3" is the default for edition 2024 packages; virtual workspaces
 # must state it explicitly.
 resolver = "3"
-members = ["crates/pharos-elf", "crates/pharos-fs", "crates/pharos-infer", "crates/pharos-proto", "crates/pharos-store", "kernel", "tools/pharos-cli", "user/pharos-user", "user/programs", "xtask"]
+members = ["crates/pharos-elf", "crates/pharos-fs", "crates/pharos-infer", "crates/pharos-proto", "crates/pharos-services", "crates/pharos-store", "kernel", "tools/pharos-cli", "user/pharos-user", "user/programs", "xtask"]
 # Host-only defaults: plain `cargo build`/`cargo test` skip the kernel, which
 # targets bare metal (D-003). Check it with `--target x86_64-unknown-none`.
-default-members = ["crates/pharos-elf", "crates/pharos-fs", "crates/pharos-infer", "crates/pharos-proto", "crates/pharos-store", "tools/pharos-cli", "user/pharos-user", "xtask"]
+default-members = ["crates/pharos-elf", "crates/pharos-fs", "crates/pharos-infer", "crates/pharos-proto", "crates/pharos-services", "crates/pharos-store", "tools/pharos-cli", "user/pharos-user", "xtask"]
 
 [workspace.package]
 version = "0.2.0"

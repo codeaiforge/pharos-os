@@ -1,0 +1,13 @@
+[package]
+name = "pharos-services"
+description = "Pharos OS service tables (D-027): each service's capability manifest, written out, and the rules every table must keep."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

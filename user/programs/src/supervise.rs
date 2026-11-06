@@ -3,24 +3,7 @@
 
 use alloc::vec::Vec;
 
-/// What happens when a service crashes, exits, or sends no `ready` in
-/// time. A service the user stopped is never restarted, whatever this says.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Restart {
-    Never,
-    /// Up to this many restarts per boot.
-    Up(u8),
-}
-
-impl Restart {
-    /// Most restarts it allows.
-    pub fn limit(self) -> u8 {
-        match self {
-            Self::Never => 0,
-            Self::Up(n) => n,
-        }
-    }
-}
+pub use pharos_services::Restart;
 
 /// The first restart's delay; each later one is 4 times the one before.
 pub const FIRST_DELAY_US: u64 = 100_000;
@@ -61,6 +44,38 @@ pub fn cut_list(text: &[u8], max: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_rights_are_the_kernels() {
+        use pharos_services::rights as m;
+        use pharos_user::rights as k;
+        assert_eq!(
+            [
+                m::SEND,
+                m::RECEIVE,
+                m::GRANT,
+                m::WRITE,
+                m::READ,
+                m::MAP,
+                m::IRQ,
+                m::CONFIG,
+                m::WAIT,
+                m::STOP
+            ],
+            [
+                k::SEND,
+                k::RECEIVE,
+                k::GRANT,
+                k::WRITE,
+                k::READ,
+                k::MAP,
+                k::IRQ,
+                k::CONFIG,
+                k::WAIT,
+                k::STOP
+            ]
+        );
+    }
 
     #[test]
     fn delays_grow_and_end() {
