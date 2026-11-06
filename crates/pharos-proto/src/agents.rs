@@ -42,6 +42,12 @@
 //! Content is data, never instructions. `PROMOTE` (#145) takes the put
 //! the same way, a claim with no content, and the runtime makes the
 //! agent's own file `file` its content, with the source `promoted <file>`.
+//!
+//! Updates (#165, boot.md section 8): `PROPOSE` copies the agent's own file
+//! `file` to `system/incoming` as `<agent>-<n>` (needs `update propose`);
+//! the reply is `[OK, n]`, or `OVER_LIMIT` if 4 files already wait there.
+//! A proposal does nothing else: only the user's `apply` on the trusted
+//! console applies it, and `init` checks its signature first.
 
 use crate::{Reader, Refused, Writer, op as common, split, status};
 
@@ -87,6 +93,8 @@ pub mod op {
     pub const KNOWLEDGE_HISTORY: u8 = 30;
     pub const KNOWLEDGE_QUERY: u8 = 31;
     pub const PROMOTE: u8 = 32;
+    /// A system update (#165).
+    pub const PROPOSE: u8 = 33;
 }
 
 /// The `ASK` reply's outcome, after `OK` (#106).
@@ -393,6 +401,11 @@ pub enum Request<'a> {
         file: &'a [u8],
         len: u16,
     },
+    /// Agent: its file `file` as a proposed system update (needs `update
+    /// propose`).
+    Propose {
+        file: &'a [u8],
+    },
     /// Agent: a version of `key` (0: its heads) into its buffer (needs
     /// `knowledge read <scope>`), as the service's `GET`.
     KnowledgeGet {
@@ -560,6 +573,9 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             op::PROMOTE => Request::Promote {
                 file: name(&mut r)?,
                 len: r.u16()?,
+            },
+            op::PROPOSE => Request::Propose {
+                file: name(&mut r)?,
             },
             op::KNOWLEDGE_GET => Request::KnowledgeGet {
                 scope: scope(&mut r)?,
@@ -736,6 +752,10 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             head(&mut w, op::PROMOTE)?;
             write_name(&mut w, file)?;
             w.u16(len)?;
+        }
+        Request::Propose { file } => {
+            head(&mut w, op::PROPOSE)?;
+            write_name(&mut w, file)?;
         }
         Request::KnowledgeGet {
             scope,
@@ -1062,6 +1082,7 @@ mod tests {
                 file: &[b'f'; 32],
                 len: 60,
             },
+            Request::Propose { file: b"image" },
             Request::KnowledgeGet {
                 scope: 0,
                 key: b"vendor",

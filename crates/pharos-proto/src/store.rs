@@ -90,6 +90,10 @@ pub const NAMESPACES: &[(u16, &[u8])] = &[
     // Shared knowledge (#143, knowledge.md), held only by the knowledge
     // service.
     (8, b"knowledge"),
+    // Proposed system updates (#165, boot.md section 8), inside `init`'s
+    // `system`: the agent runtime's, read-write, to add a file; only the
+    // user's `apply` makes `init` use one.
+    (9, b"system/incoming"),
 ];
 
 /// The namespace `init` reaches on its own unbadged capability (badge 0,

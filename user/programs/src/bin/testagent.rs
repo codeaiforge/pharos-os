@@ -54,6 +54,9 @@
 //!   `yes`, and then sending there works; once the user revokes
 //!   `10.0.2.2:47000`, the `late` echo is never delivered and sending
 //!   there is refused; completes with `talk ok`.
+//! - `propose` (agent `proposer`, the `tools` kernel, #165): `PROPOSE`
+//!   of a missing file is `NOT_FOUND`, of its own file `OK` four times
+//!   (numbered 1 to 4), and `OVER_LIMIT` the fifth time;
 //! - `hostile` (agent `hostile`, the `hostile` kernel, #110): logs `check
 //!   me` (the kernel inspects what it holds), then tries what it must not
 //!   be able to do, each refused as listed in testing.md: every other
@@ -236,6 +239,9 @@ const INJECTED: &[(&[u8], u8)] = &[
 ];
 /// Where `TOOL` results go in the buffer (#126).
 const TOOL_RESULT: u32 = 8192;
+/// What agent `proposer` proposes (#165): not an image, so `init` would
+/// refuse it, but the runtime copies it unread.
+const PROPOSED: &[u8] = b"proposed by an agent";
 /// The `tools` kernel's granted files, as `cargo xtask` writes them
 /// (`store_image::tools`).
 const REPORT: &[u8] = b"Quarterly report: all systems nominal.\n\
@@ -426,6 +432,34 @@ impl Agent {
             alloc::vec![0u8; len.min((BUFFER as usize).saturating_sub(TOOL_RESULT as usize))];
         self.buffer.read_bytes(TOOL_RESULT as usize, &mut bytes);
         (code, bytes)
+    }
+
+    /// `PROPOSE file` (#165): the status and the number of the file.
+    fn propose(&self, file: &[u8]) -> (u8, u8) {
+        let mut out = [0u8; 256];
+        let (code, n) = self.call(&Request::Propose { file }, &mut out);
+        (code, if n >= 2 { out[1] } else { 0 })
+    }
+
+    /// Agent `proposer` (#165): a file it does not have is not found; its
+    /// own file is proposed four times, numbered 1 to 4; a fifth is over
+    /// the limit.
+    fn proposer(&self) -> u64 {
+        if self.put(b"image", PROPOSED) != status::OK {
+            return self.fail(b"writing its file failed");
+        }
+        if self.propose(b"missing").0 != status::NOT_FOUND {
+            return self.fail(b"a missing file was proposed");
+        }
+        for n in 1..=4 {
+            if self.propose(b"image") != (status::OK, n) {
+                return self.fail(b"a proposal was refused");
+            }
+        }
+        if self.propose(b"image").0 != status::OVER_LIMIT {
+            return self.fail(b"a fifth proposal was not refused");
+        }
+        self.complete(b"propose ok")
     }
 
     /// `read_file name`, as a model writes it.
@@ -2466,10 +2500,14 @@ fn main(_: u64) -> u64 {
         b"poison" => a.poison(task.task),
         b"outside" => a.outside(),
         b"spam" => a.spam(),
-        b"tools-plain" if a.read_file("report.txt").0 == status::NO_ACCESS => {
+        b"tools-plain"
+            if a.read_file("report.txt").0 == status::NO_ACCESS
+                && a.propose(b"image").0 == status::NO_ACCESS =>
+        {
             a.complete(b"plain ok")
         }
-        b"tools-plain" => a.fail(b"a tool not listed was not refused"),
+        b"propose" => a.proposer(),
+        b"tools-plain" => a.fail(b"a tool or a proposal was not refused"),
         b"flood" => a.flood(),
         b"tick" => a.tick(),
         b"rate" => a.rate(),

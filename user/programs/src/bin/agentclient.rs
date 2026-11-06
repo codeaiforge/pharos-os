@@ -290,7 +290,7 @@ fn main(arg: u64) -> u64 {
             |c: &Client, t: u32| c.status(t).is_some_and(|s| s.state == State::Cancelled);
         let idle = |c: &Client, out: &mut [u8; 256]| {
             let (_, n) = c.call(&Request::Info, out);
-            Info::parse(&out[..n]).is_some_and(|i| i.details == [20, 0])
+            Info::parse(&out[..n]).is_some_and(|i| i.details == [21, 0])
         };
         let refused = c.submit(b"boss", b"falter").ok() == Some(13)
             && c.wait(13, 90).is_some_and(|(s, result)| {
@@ -365,8 +365,8 @@ fn main(arg: u64) -> u64 {
     let (_, n) = c.call(&Request::Info, &mut out);
     let info = Info::parse(&out[..n]);
     c.step(
-        "INFO: interface agents, twenty agents accepted, none running",
-        info.is_some_and(|i| i.name == NAME && i.details == [20, 0]),
+        "INFO: interface agents, twenty-one agents accepted, none running",
+        info.is_some_and(|i| i.name == NAME && i.details == [21, 0]),
     );
     let refused = [&b"greedy"[..], b"absent", b"noentry"]
         .iter()
@@ -460,7 +460,7 @@ fn main(arg: u64) -> u64 {
         .iter()
         .all(|&t| c.status(t).is_some_and(|s| s.state == State::Cancelled));
     let (_, n) = c.call(&Request::Info, &mut out);
-    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [20, 0]);
+    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [21, 0]);
     c.step(
         "cancelling running and pending tasks stops their agents",
         cancelled && all && idle,
@@ -684,6 +684,11 @@ fn tools(mut c: Client) -> u64 {
     c.step(
         "an agent that may use no tool is refused one",
         ended(&c, plain, b"plain ok"),
+    );
+    let proposer = c.submit(b"proposer", b"propose");
+    c.step(
+        "an agent with update propose proposes its file, at most 4 times",
+        ended(&c, proposer, b"propose ok"),
     );
     let _ = send(REPORT, b"done", 0, 0, 0);
     c.failed

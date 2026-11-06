@@ -21,6 +21,9 @@
 //! runtime (capabilities.md, #105); `write` includes reading.
 //! `net` lists UDP destinations, `address:port`, comma-separated, at most
 //! [`MAX_NET`], or is empty for none (#109).
+//! The optional `update = propose` (#165) asks for `update propose`:
+//! proposing one of its files as a system update, which only the user's
+//! `apply` on the trusted console can make run.
 //! A manifest is untrusted: [`parse`] refuses unknown, repeated, and
 //! missing keys and values out of range, and never panics. It only asks:
 //! [`Manifest::within`] checks it against the runtime's reviewed policy
@@ -149,6 +152,8 @@ pub struct Manifest<'a> {
     /// Optional (#144): the knowledge scopes it may read and write.
     pub knowledge_read: Files<'a>,
     pub knowledge_write: Files<'a>,
+    /// Optional (#165): `update = propose`.
+    pub propose: bool,
 }
 
 /// What the runtime's policy table allows one agent: the most it may get.
@@ -187,6 +192,8 @@ pub struct Entry {
     pub knowledge_read: &'static [&'static [u8]],
     pub knowledge_write: &'static [&'static [u8]],
     pub ask_knowledge: &'static [&'static [u8]],
+    /// May get `update propose` (#165; not askable).
+    pub propose: bool,
 }
 
 /// What one attempt of an agent may use (D-022, resources.md). Each limit
@@ -289,8 +296,8 @@ pub struct Refusal {
     pub why: Why,
 }
 
-/// The keys; the last five are optional.
-const KEYS: [&[u8]; 15] = [
+/// The keys; the last six are optional.
+const KEYS: [&[u8]; 16] = [
     b"manifest",
     b"name",
     b"program",
@@ -306,6 +313,7 @@ const KEYS: [&[u8]; 15] = [
     b"channels",
     b"knowledge_read",
     b"knowledge_write",
+    b"update",
 ];
 const REQUIRED: usize = 10;
 
@@ -424,7 +432,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
     if text.len() > MAX_SIZE {
         return Err(whole(Why::TooLarge));
     }
-    let mut values: [Option<&[u8]>; 15] = [None; 15];
+    let mut values: [Option<&[u8]>; 16] = [None; 16];
     for (i, line) in text.split(|b| *b == b'\n').enumerate() {
         let at = |why| Refusal { line: i + 1, why };
         if !line.iter().all(|b| (b' '..=b'~').contains(b)) {
@@ -447,7 +455,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
             return Err(at(Why::RepeatedKey));
         }
     }
-    let mut v = [&b""[..]; 15];
+    let mut v = [&b""[..]; 16];
     for (k, (out, value)) in v.iter_mut().zip(values).enumerate() {
         *out = match value {
             Some(value) => value,
@@ -471,6 +479,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
         channel_list,
         read_list,
         write_list,
+        update,
     ] = v;
     let bad = whole(Why::BadValue);
     if number(version, u32::MAX) != Some(VERSION) {
@@ -497,6 +506,11 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
         // Scopes follow agent-name rules, as channels do.
         knowledge_read: channels(read_list).ok_or(bad)?,
         knowledge_write: channels(write_list).ok_or(bad)?,
+        propose: match update {
+            b"" => false,
+            b"propose" => true,
+            _ => return Err(bad),
+        },
     };
     if m.progress_ms > m.task_ms {
         return Err(whole(Why::ProgressOverTask));
@@ -546,7 +560,8 @@ impl Manifest<'_> {
                 .iter()
                 .all(|c| e.channels.contains(c))
             && (self.knowledge_read.as_slice().iter()).all(|k| e.knowledge_read.contains(k))
-            && (self.knowledge_write.as_slice().iter()).all(|k| e.knowledge_write.contains(k));
+            && (self.knowledge_write.as_slice().iter()).all(|k| e.knowledge_write.contains(k))
+            && (!self.propose || e.propose);
         if fits { Ok(e) } else { Err(Why::OverPolicy) }
     }
 
@@ -617,6 +632,9 @@ impl Manifest<'_> {
                 sep = b", ";
             }
         }
+        if self.propose {
+            w.bytes(b"\nupdate = propose")?;
+        }
         w.bytes(b"\n")?;
         Some(w.len())
     }
@@ -650,6 +668,7 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
         knowledge_read: &[b"notes", b"ops"],
         knowledge_write: &[b"notes"],
         ask_knowledge: &[],
+        propose: false,
     }];
 
     fn with(key: &str, value: &str) -> std::string::String {
@@ -694,6 +713,7 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
                 channels: Files::default(),
                 knowledge_read: Files::default(),
                 knowledge_write: Files::default(),
+                propose: false,
             }
         );
         let text = plus("tools = send , read_file\nfiles = report.txt,a-b_c.1");
@@ -980,6 +1000,27 @@ knowledge_read = notes, ops\nknowledge_write = notes\n",
             "readable is not writable"
         );
         assert_eq!(check("knowledge_read = hr"), Err(Why::OverPolicy));
+        assert_eq!(
+            check("update = propose"),
+            Err(Why::OverPolicy),
+            "not in the entry"
+        );
+        let mut entry = TABLE[0];
+        entry.propose = true;
+        let text = plus("update = propose");
+        let m = parse(text.as_bytes()).unwrap();
+        assert!(m.propose);
+        assert_eq!(m.within(&[entry]).map(|_| ()), Ok(()));
+        let mut out = [0u8; MAX_SIZE];
+        let n = m.encode(&mut out).unwrap();
+        assert_eq!(parse(&out[..n]), Ok(m));
+        for bad in [
+            "update = yes",
+            "update = propose propose",
+            "update = Propose",
+        ] {
+            assert_eq!(why(plus(bad).as_bytes()), Some(Why::BadValue), "{bad}");
+        }
         assert_eq!(
             why(plus("knowledge_read = a.b").as_bytes()),
             Some(Why::BadValue)

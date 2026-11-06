@@ -139,6 +139,7 @@ mod tests {
             knowledge_read: &[],
             knowledge_write: &[],
             ask_knowledge: &[],
+            propose: false,
             channels: &[],
         }
     }

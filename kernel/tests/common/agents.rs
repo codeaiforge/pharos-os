@@ -36,6 +36,9 @@ const AUDIT_RUNTIME: u32 = 3;
 /// Namespace 7, `files`, read-only (#127): the runtime's handle 10, given
 /// after the network service's handle 9.
 const FILES_READ_ONLY: u32 = 7 | 1 << 16;
+/// Namespace 9, `system/incoming`, read-write (#165): the runtime's handle
+/// 12, after `knowledge`, for `PROPOSE`.
+pub const INCOMING: u32 = 9;
 /// Namespace 8, `knowledge`, read-write, and the knowledge service's
 /// clients (#144): the runtime's handle 11, after `files`, and `trust`'s 5.
 const KNOWLEDGE_STORE: u32 = 8;
@@ -308,6 +311,7 @@ pub fn start_runtime_table(t: &mut TestRun, s: &Services, table: u64) -> Option<
             Capability::new(Object::Endpoint(s.knowledge.clone()), SEND)
                 .derive_badged(SEND, KNOWLEDGE_RUNTIME),
         );
+        caps.push(store_send.derive_badged(SEND, INCOMING));
     }
     let runtime = start(
         t,

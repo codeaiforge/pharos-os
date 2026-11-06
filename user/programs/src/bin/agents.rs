@@ -12,7 +12,9 @@
 //! badged for namespace `files`, read-only (the files the user gives
 //! agents, #127; optional: without it `read_file` finds nothing), 11 the
 //! knowledge service (`SEND`, client 1; #144; optional: without it every
-//! knowledge request is `INTERNAL`). The
+//! knowledge request is `INTERNAL`), 12 the storage service, badged for
+//! namespace `system/incoming`, read-write (#165; optional: without it
+//! every `PROPOSE` is `INTERNAL`). The
 //! argument selects the policy table (0: boot, empty; 1: the `agents` and
 //! `agents_crash` test kernels).
 //!
@@ -81,6 +83,13 @@
 //! answers is copied to the agent's buffer, exactly its length. `PROMOTE`
 //! (#145) also needs `data read`: the runtime reads the agent's file
 //! itself and puts it with the source `promoted <file>`.
+//!
+//! Updates (#165, boot.md section 8): `PROPOSE` needs `update propose`.
+//! The runtime reads the agent's own file (at most 64 KiB, as every data
+//! file) and, audited first, writes it to `system/incoming/<agent>-<n>`,
+//! the first free `n`; with 4 files there it answers `OVER_LIMIT`. That is
+//! all it can do: it holds nothing on `init`, the slots, or the record,
+//! and only the user's `apply` on the trusted console applies a file.
 
 #![no_std]
 #![no_main]
@@ -130,6 +139,7 @@ const AUDIT: Handle = 8;
 const NET: Handle = 9;
 const FILES: Handle = 10;
 const KNOWLEDGE: Handle = 11;
+const INCOMING: Handle = 12;
 /// How long the knowledge service may take to answer.
 const KNOWLEDGE_US: u64 = 10_000_000;
 /// The runtime's buffer at the storage service for granted files: the
@@ -436,6 +446,7 @@ const fn budget_entry(name: &'static [u8], budget: Budget, pages: u32) -> Entry 
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     }
 }
@@ -464,6 +475,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     Entry {
@@ -486,6 +498,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     Entry {
@@ -508,6 +521,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     Entry {
@@ -530,6 +544,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     // The `permissions` kernel's (#105).
@@ -553,6 +568,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     // Gets nothing; may ask for model 2 and data access (#106).
@@ -576,6 +592,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     // The `agents_net` kernel's (#109): gets the host echo server, may
@@ -600,6 +617,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     // The same grant as `netter`, which the user's `revoke netter` leaves.
@@ -623,6 +641,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     // The `hostile` kernel's (#110): its own files, and five models to ask
@@ -647,6 +666,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     // The `tools` kernel's (#126, #127): both tools, `report.txt` and
@@ -676,6 +696,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     // The `injection` kernel's (#129): both tools, `report.txt` with its
@@ -700,6 +721,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     // The `channels` kernel's (#133): `talker` may send to `hearer` (and
@@ -725,6 +747,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[b"hearer"],
     },
     Entry {
@@ -747,6 +770,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     Entry {
@@ -769,6 +793,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     Entry {
@@ -794,6 +819,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[b"outsider"],
     },
     // The `groups` kernel's (#134): `boss` supervises `helper` and `aide`
@@ -822,6 +848,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     Entry {
@@ -848,6 +875,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         channels: &[],
     },
     Entry {
@@ -873,6 +901,7 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
         // Its one channel, for the `deputy` kernel (#138).
         channels: &[b"boss"],
     },
@@ -896,6 +925,31 @@ const TEST: &[Entry] = &[
         knowledge_read: &[],
         knowledge_write: &[],
         ask_knowledge: &[],
+        propose: false,
+        channels: &[],
+    },
+    // The `tools` kernel's too (#165): proposes its own file as an update.
+    Entry {
+        name: b"proposer",
+        program: b"bin/testagent",
+        pages: 256,
+        models: 0,
+        attempts: 1,
+        progress_ms: 10_000,
+        task_ms: 60_000,
+        data: Data::Write,
+        ask_models: 0,
+        ask_data: Data::None,
+        net: &[],
+        ask_net: &[],
+        budget: Budget::UNLIMITED,
+        tools: 0,
+        files: &[],
+        ask_files: &[],
+        knowledge_read: &[],
+        knowledge_write: &[],
+        ask_knowledge: &[],
+        propose: true,
         channels: &[],
     },
     KNOWLEDGE_AGENTS[0],
@@ -924,6 +978,7 @@ const KNOWLEDGE_AGENTS: [Entry; 2] = [
         knowledge_read: &[b"notes", b"ops"],
         knowledge_write: &[b"notes", b"ops"],
         ask_knowledge: &[b"read hr", b"write hr"],
+        propose: false,
         ..knowledge_entry(b"scribe")
     },
     Entry {
@@ -957,6 +1012,8 @@ struct Limits {
     task_us: u64,
     data: Data,
     net: manifest::Net,
+    /// `update propose` (#165).
+    propose: bool,
     /// The tools it may call and the files it gets (#126, #127), as the
     /// entry's names.
     tools: u32,
@@ -1234,6 +1291,8 @@ struct Runtime {
     files: Option<Store>,
     /// Shared knowledge (#144), if `init` gave the runtime handle 11.
     knowledge: Option<Knowledge>,
+    /// Proposed updates (#165), if `init` gave the runtime handle 12.
+    incoming: Option<Store>,
     /// Messages waiting for agents, by name (#133).
     mailboxes: Mailboxes,
     slots: [Option<Slot>; SLOTS],
@@ -1286,8 +1345,9 @@ fn askable(entry: &Entry, p: &Permission) -> bool {
         Permission::DataWrite => entry.ask_data == Data::Write,
         Permission::Net { addr, port } => entry.ask_net.contains(&(addr, port)),
         Permission::File { .. } => p.file_name().is_some_and(|f| entry.ask_files.contains(&f)),
-        // Channels are not askable in M3.7 (coordination.md).
-        Permission::Channel { .. } => false,
+        // Channels are not askable in M3.7 (coordination.md), nor is
+        // proposing an update (#165).
+        Permission::Channel { .. } | Permission::UpdatePropose => false,
         // As typed after `knowledge `: `read <scope>` or `write <scope>`.
         Permission::KnowledgeRead { .. } | Permission::KnowledgeWrite { .. } => {
             p.knowledge_scope().is_some_and(|(scope, write)| {
@@ -1426,6 +1486,7 @@ fn load(e: &'static Entry, table: &'static [Entry]) -> Result<Limits, &'static [
         task_us: u64::from(m.task_ms) * 1000,
         data: m.data,
         net: m.net,
+        propose: m.propose,
     })
 }
 
@@ -1658,6 +1719,9 @@ impl Runtime {
             channels,
             limits.knowledge,
         );
+        if limits.propose {
+            g.add(Permission::UpdatePropose, None);
+        }
         for (_, p, until) in self.approved.iter().filter(|(t, ..)| *t == id) {
             g.add(*p, *until);
         }
@@ -2220,6 +2284,7 @@ impl Runtime {
                 out[1..5].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
                 Ok(5)
             }
+            Request::Propose { file } => self.propose(i, id, &limits, file, now, out),
             Request::KnowledgePut { .. }
             | Request::Promote { .. }
             | Request::KnowledgeGet { .. }
@@ -2505,6 +2570,55 @@ impl Runtime {
     /// already checked: charged, audited as `how` (action, service,
     /// detail), and sent on the runtime's port (`SEND_TO`, #109, and the
     /// `send` tool, #128).
+    /// `PROPOSE` (#165): slot `i`'s file `file` copied, audited first, to
+    /// `system/incoming/<agent>-<n>`; the reply `[OK, n]`.
+    fn propose(
+        &mut self,
+        i: usize,
+        id: u32,
+        limits: &Limits,
+        file: &[u8],
+        now: u64,
+        out: &mut [u8; 256],
+    ) -> Result<usize, u8> {
+        let p = Permission::UpdatePropose;
+        let allowed = (self.slots[i].as_ref()).is_some_and(|s| s.grants.allows(&p, now));
+        if !allowed {
+            return Err(status::NO_ACCESS);
+        }
+        self.store.health.ready()?;
+        let incoming = self.incoming.as_mut().ok_or(status::INTERNAL)?;
+        incoming.health.ready()?;
+        let waiting = incoming.list(b"").map_err(|_| status::INTERNAL)?;
+        if waiting.len() >= pharos_programs::system::MAX_INCOMING {
+            return Err(status::OVER_LIMIT);
+        }
+        let agent = limits.entry.name;
+        // The first free `<agent>-<n>`, a valid name for `trust` to show.
+        let mut d = [0u8; 20];
+        let (n, name) = (1..=pharos_programs::system::MAX_INCOMING as u64)
+            .map(|n| (n, [agent, b"-", decimal(n, &mut d)].concat()))
+            .find(|(_, name)| !waiting.contains(name))
+            .ok_or(status::OVER_LIMIT)?;
+        if !trust::valid_name(&name) {
+            return Err(status::BAD_REQUEST);
+        }
+        let bytes = (self.store.read(&data_path(agent, file)))
+            .map_err(|_| status::INTERNAL)?
+            .ok_or(status::NOT_FOUND)?;
+        let detail = [&b"propose "[..], file, b" as ", &name].concat();
+        let detail = &detail[..detail.len().min(audit::MAX_DETAIL)];
+        let seq = self.intent(agent, id, action::SYSTEM, Some(p), b"store", detail)?;
+        let written = (self.incoming.as_mut()).is_some_and(|s| s.write(&name, &bytes).is_ok());
+        self.outcome(seq, agent, id, action::SYSTEM, written, detail);
+        if !written {
+            return Err(status::INTERNAL);
+        }
+        out[0] = status::OK;
+        out[1] = n as u8;
+        Ok(2)
+    }
+
     /// A knowledge request from slot `i`, task `id` (#144).
     fn knowledge(
         &mut self,
@@ -3728,6 +3842,7 @@ fn needed(req: &Request<'_>) -> Option<Permission> {
         Request::Infer { model, .. } => Some(Permission::Model(model)),
         Request::DataPut { .. } => Some(Permission::DataWrite),
         Request::DataGet { .. } => Some(Permission::DataRead),
+        Request::Propose { .. } => Some(Permission::UpdatePropose),
         Request::SendTo { addr, port, .. } => Some(Permission::Net { addr, port }),
         Request::MessageSend { to, .. } => Permission::channel(to),
         Request::KnowledgeGet { scope, .. }
@@ -3808,6 +3923,19 @@ fn main(arg: u64) -> u64 {
         };
         files.attach().then_some(files)
     });
+    // Proposed updates (#165): optional, as handle 12 is; one data file
+    // at a time goes through it.
+    let incoming = mem_map_buffer(u64::from(agents::MAX_DATA))
+        .ok()
+        .and_then(|buffer| {
+            let s = Store {
+                handle: INCOMING,
+                buffer,
+                reply,
+                health: Health::default(),
+            };
+            s.attach().then_some(s)
+        });
     // Shared knowledge (#144): optional, as handle 11 is.
     let knowledge = mem_map_buffer(knowledge::MIN_BUFFER)
         .ok()
@@ -3846,6 +3974,7 @@ fn main(arg: u64) -> u64 {
         store,
         files,
         knowledge,
+        incoming,
         mailboxes: Mailboxes::default(),
         slots: Default::default(),
         controls: Default::default(),

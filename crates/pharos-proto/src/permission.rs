@@ -55,6 +55,10 @@ pub enum Permission {
         name: [u8; MAX_FILE],
         len: u8,
     },
+    /// Proposing a system update (#165, boot.md section 8): copying one of
+    /// the agent's own files to `system/incoming`, where only the user's
+    /// `apply` on the trusted console can make it run.
+    UpdatePropose,
 }
 
 /// A file name: 1 to [`MAX_FILE`] letters, digits, `-`, `_`, or `.`, not
@@ -76,6 +80,7 @@ mod kind {
     pub const CHANNEL: u8 = 6;
     pub const KNOWLEDGE_READ: u8 = 7;
     pub const KNOWLEDGE_WRITE: u8 = 8;
+    pub const UPDATE_PROPOSE: u8 = 9;
 }
 
 /// A name of agent-name rules, at most [`MAX_FILE`] bytes, zero-padded.
@@ -164,7 +169,7 @@ impl Permission {
         match *self {
             Self::Model(n) => (1..=MAX_MODEL).contains(&n),
             Self::Net { port, .. } => port != 0,
-            Self::DataRead | Self::DataWrite => true,
+            Self::DataRead | Self::DataWrite | Self::UpdatePropose => true,
             Self::File { name, len } => {
                 let n = usize::from(len);
                 n <= MAX_FILE && valid_file(&name[..n]) && name[n..].iter().all(|b| *b == 0)
@@ -195,6 +200,7 @@ impl Permission {
             Self::Model(n) => b[..2].copy_from_slice(&[kind::MODEL, n]),
             Self::DataRead => b[0] = kind::DATA_READ,
             Self::DataWrite => b[0] = kind::DATA_WRITE,
+            Self::UpdatePropose => b[0] = kind::UPDATE_PROPOSE,
             Self::Net { addr, port } => {
                 b[0] = kind::NET;
                 b[1..5].copy_from_slice(&addr);
@@ -226,6 +232,7 @@ impl Permission {
             kind::MODEL if zero(2) => Self::Model(b[1]),
             kind::DATA_READ if zero(1) => Self::DataRead,
             kind::DATA_WRITE if zero(1) => Self::DataWrite,
+            kind::UPDATE_PROPOSE if zero(1) => Self::UpdatePropose,
             kind::NET => Self::Net {
                 addr: [b[1], b[2], b[3], b[4]],
                 port: u16::from_le_bytes([b[5], b[6]]),
@@ -236,13 +243,14 @@ impl Permission {
     }
 
     /// Parses the typed form: `model <n>`, `data read`, `data write`,
-    /// `net <a.b.c.d>:<port>`, `file <name>`, `channel <agent>`, or
+    /// `update propose`, `net <a.b.c.d>:<port>`, `file <name>`, `channel <agent>`, or
     /// `knowledge read <scope>` or `knowledge write <scope>`.
     pub fn parse(words: &[&[u8]]) -> Option<Self> {
         let p = match words {
             [b"model", n] => Self::Model(u8::try_from(number(n, u32::from(MAX_MODEL))?).ok()?),
             [b"data", b"read"] => Self::DataRead,
             [b"data", b"write"] => Self::DataWrite,
+            [b"update", b"propose"] => Self::UpdatePropose,
             [b"file", name] => Self::file(name)?,
             [b"channel", agent] => Self::channel(agent)?,
             [b"knowledge", b"read", scope] => Self::knowledge(scope, false)?,
@@ -272,6 +280,7 @@ impl Permission {
             Self::Model(n) => w.bytes(b"model ").and_then(|()| decimal(&mut w, n.into())),
             Self::DataRead => w.bytes(b"data read"),
             Self::DataWrite => w.bytes(b"data write"),
+            Self::UpdatePropose => w.bytes(b"update propose"),
             Self::File { .. } => w.bytes(b"file ").and_then(|()| w.bytes(self.file_name()?)),
             Self::Channel { .. } => w
                 .bytes(b"channel ")
@@ -342,7 +351,7 @@ fn decimal(w: &mut Writer<'_>, mut n: u32) -> Option<()> {
 mod tests {
     use super::*;
 
-    const ALL: [Permission; 9] = [
+    const ALL: [Permission; 10] = [
         Permission::Model(1),
         Permission::Model(MAX_MODEL),
         Permission::DataRead,
@@ -367,6 +376,7 @@ mod tests {
             name: *b"notes\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
             len: 5,
         },
+        Permission::UpdatePropose,
     ];
 
     fn words(s: &str) -> std::vec::Vec<&[u8]> {
@@ -464,8 +474,10 @@ mod tests {
             Permission::Model(0).write(&mut Writer::new(&mut [0; WIRE])),
             None
         );
+        assert_eq!(ALL[9].text(&mut [0u8; TEXT]), b"update propose");
         for b in [
-            [9, 0, 0, 0, 0, 0, 0],
+            [10, 0, 0, 0, 0, 0, 0],
+            [9, 1, 0, 0, 0, 0, 0],
             [1, 0, 0, 0, 0, 0, 0],
             [1, 1, 1, 0, 0, 0, 0],
             [2, 1, 0, 0, 0, 0, 0],
