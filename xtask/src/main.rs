@@ -1301,6 +1301,82 @@ const SERVICE_TEST: &str = "inference";
 const AGENTS_TEST: &str = "agents";
 /// `init` supervising services (#100): the test model staged elsewhere.
 const SUPERVISION_TEST: &str = "supervision";
+/// Once `trust` shows the system's state, the runner types `services`
+/// (#152); the last entry is `holder`.
+const SUPERVISION_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("system not ready: ", "services\n"),
+    ("services: holder done, restarts 0 of 0", ""),
+];
+/// Each service event in the `supervision` kernel (#152): the service, the
+/// audit record's detail, the trusted console's line, and how many times.
+/// The storage service's own events are left out: the trail is written
+/// through it.
+const SUPERVISION_EVENTS: &[(&str, &str, &str, usize)] = &[
+    (
+        "silent",
+        "no ready within 10 s; stopped",
+        "sent no ready within 10 s; stopped",
+        2,
+    ),
+    (
+        "silent",
+        "restarting 1 of 1 in 100 ms",
+        "restarting 1 of 1 in 100 ms",
+        1,
+    ),
+    (
+        "silent",
+        "not restarted: restarts used up",
+        "not restarted: restarts used up",
+        1,
+    ),
+    ("flaky", "killed 14", "killed 14", 4),
+    (
+        "flaky",
+        "restarting 1 of 3 in 100 ms",
+        "restarting 1 of 3 in 100 ms",
+        1,
+    ),
+    (
+        "flaky",
+        "restarting 2 of 3 in 400 ms",
+        "restarting 2 of 3 in 400 ms",
+        1,
+    ),
+    (
+        "flaky",
+        "restarting 3 of 3 in 1600 ms",
+        "restarting 3 of 3 in 1600 ms",
+        1,
+    ),
+    (
+        "flaky",
+        "not restarted: restarts used up",
+        "not restarted: restarts used up",
+        1,
+    ),
+    ("brittle", "killed 14", "killed 14", 1),
+    (
+        "brittle",
+        "not restarted: restart policy never",
+        "not restarted: restart policy never",
+        1,
+    ),
+    (
+        "steady",
+        "stopped; not restarted",
+        "stopped; not restarted",
+        1,
+    ),
+    ("infer", "killed 13", "killed 13", 1),
+    (
+        "infer",
+        "restarting 1 of 3 in 100 ms; used by client",
+        "restarting 1 of 3 in 100 ms; used by client",
+        1,
+    ),
+];
 /// The test kernel whose trusted console the runner types into (#96).
 const TRUST_TEST: &str = "trust";
 /// What the runner waits for on the trusted console, and types then.
@@ -1655,6 +1731,66 @@ fn audit_checks(image: &Path, console: &str) -> Result<()> {
         return Err("the typed `audit` command showed nothing".into());
     }
     println!("  the anchor trust showed matches the image");
+    Ok(())
+}
+
+/// After the `supervision` test kernel (#152): each event in
+/// [`SUPERVISION_EVENTS`] is that many `trust` lines and audit records
+/// (actor the service, from `init`), the system's state is both, and
+/// `services` listed each service's state.
+fn supervision_checks(image: &Path, console: &str) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, records)] = &streams[..] else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    let record = |actor: &str, detail: &str| {
+        let want = format!("client 1 Event service {actor} task 0/0  init outcome 1 {detail}");
+        records.iter().filter(|l| l.ends_with(&want)).count()
+    };
+    let shown = |line: &str| console.matches(&format!("{line}\r\n")).count();
+    let not_ready = "4 failed: silent, flaky, brittle, steady";
+    let mut checks: Vec<(String, String, usize)> = SUPERVISION_EVENTS
+        .iter()
+        .map(|&(name, detail, line, times)| {
+            (
+                format!("{name} {detail}"),
+                format!("service {name} {line}"),
+                times,
+            )
+        })
+        .collect();
+    checks.push((
+        format!("init not ready {not_ready}"),
+        format!("system not ready: {not_ready}"),
+        1,
+    ));
+    for (what, line, times) in &checks {
+        let (actor, detail) = what.split_once(' ').unwrap_or_default();
+        let (r, c) = (record(actor, detail), shown(line));
+        if (r, c) != (*times, *times) {
+            return Err(format!(
+                "{what:?}: {r} audit records and {c} trusted console lines, expected {times} each"
+            ));
+        }
+    }
+    for line in [
+        "services: store ready, restarts 1 of 3",
+        "services: trust ready, restarts 0 of 3",
+        "services: silent failed, restarts 1 of 1",
+        "services: flaky failed, restarts 3 of 3",
+        "services: brittle failed, restarts 0 of 0",
+        "services: steady stopped, restarts 0 of 3",
+        "services: infer ready, restarts 1 of 3",
+        "services: client done, restarts 0 of 0",
+    ] {
+        if shown(line) != 1 {
+            return Err(format!("`services` did not show {line:?}"));
+        }
+    }
+    println!(
+        "  supervision: {} events, each one audit record and one trusted console line; `services` showed every state",
+        checks.iter().map(|c| c.2).sum::<usize>()
+    );
     Ok(())
 }
 
@@ -2607,6 +2743,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         BUDGETS_TEST => (BUDGETS_SCRIPT, &[]),
         EXHAUSTION_TEST => (EXHAUSTION_SCRIPT, &[]),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
+        SUPERVISION_TEST => (SUPERVISION_SCRIPT, &[]),
         _ => (&[], &[]),
     };
     let script = if steps.is_empty() {
@@ -2632,6 +2769,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == AUDIT_TEST {
                 audit_checks(&out.join(STORE_IMAGE), &output)?;
+            }
+            if name == SUPERVISION_TEST {
+                supervision_checks(&out.join(STORE_IMAGE), &output)?;
             }
             if name == PERMISSIONS_TEST {
                 permissions_audit(&out.join(STORE_IMAGE))?;

@@ -12,8 +12,12 @@
 //! stopped one is not restarted; and both killed services are
 //! restarted, their dependents named. The client's steps check that its
 //! services served again, and the kernel that the storage and inference
-//! services freed the slots of clients that ended. Runs under UEFI
-//! (D-009).
+//! services freed the slots of clients that ended. The table also runs
+//! the audit and trusted services (#152): `cargo xtask runner` types
+//! `services` on the trusted console once the system's state is shown,
+//! the kernel waits until `init` answered it, and the runner then checks
+//! that each event was one `trust` line and one audit record. Runs under
+//! UEFI (D-009).
 
 #![no_std]
 #![no_main]
@@ -50,8 +54,14 @@ fn service(init: TaskId, f: impl Fn(&Object, u32) -> bool) -> Option<TaskId> {
     })
 }
 
+/// The virtio-blk device ID; `trust` holds the virtio-console.
+const VIRTIO_BLK: u16 = 0x1042;
+
 fn store_of(init: TaskId) -> Option<TaskId> {
-    service(init, |o, _| matches!(o, Object::Device(_)))
+    service(
+        init,
+        |o, _| matches!(o, Object::Device(d) if d.pci.device == VIRTIO_BLK),
+    )
 }
 
 fn infer_of(init: TaskId) -> Option<TaskId> {
@@ -179,6 +189,7 @@ fn run(t: &mut TestRun) {
         }
         let finished = w.has("init: holder done") || w.has("init: holder exited");
         if finished
+            && w.has("init: services listed for trust")
             && w.has("init: flaky not restarted: restarts used up")
             && w.has("init: silent not restarted: restarts used up")
         {
@@ -225,7 +236,7 @@ fn run(t: &mut TestRun) {
         ),
         (
             "and restarted, its dependents named",
-            "init: store restarting 1 of 3 in 100 ms; used by infer, client, holder",
+            "init: store restarting 1 of 3 in 100 ms; used by audit, trust, infer, client, holder",
         ),
         (
             "the killed inference service is reported",
@@ -249,6 +260,10 @@ fn run(t: &mut TestRun) {
         t.check(&alloc::format!("{what}: {line}"), w.has(line));
     }
     t.check("the kernel stopped steady", steady_stopped);
+    t.check(
+        "init answered the trusted console's services",
+        w.has("init: services listed for trust"),
+    );
     t.check(
         "the kernel killed both services",
         store_killed && infer_killed,

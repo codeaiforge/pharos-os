@@ -12,6 +12,10 @@
 //! supervising (#100): a daemon that crashes or exits is restarted, at
 //! most 3 times, with the same capabilities on the same endpoints, so its
 //! clients reach the new one; one that was stopped is never restarted.
+//! Every failure, skip, restart, give-up, and stop (#152) is a line here,
+//! an audit record, and a `SERVICE` to `trust`, which writes its own line;
+//! `trust`'s `services` asks `init` for each service's state (`SERVICES`,
+//! `pharos_proto::service`), on its report capability.
 //! When any service ends, `init` sends the storage and inference services
 //! `RELEASE` for the badges it gave it, so they free its slots.
 //! Each time the network service reports ready, `init` sends it every
@@ -23,12 +27,16 @@
 
 extern crate alloc;
 
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+
 use pharos_programs::supervise::{self, Restart};
-use pharos_proto::audit;
 use pharos_proto::infer::{self, Request as InferRequest};
 use pharos_proto::net::{self, Allowed, Dest, Request as NetRequest};
+use pharos_proto::service::{self as listing, Entry, Reply, State as Shown};
 use pharos_proto::store::{self, Request as StoreRequest};
-use pharos_proto::trust::{self, Event, Names};
+use pharos_proto::trust::{self, Event, Names, not_started};
+use pharos_proto::{audit, status};
 use pharos_user::rights::{CONFIG, GRANT, IRQ, MAP, READ, RECEIVE, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
     Class, Error, Grant, Handle, Limits, MAX_SPAWN_CAPS, Received, Status, call_timeout,
@@ -417,8 +425,8 @@ const TEST: &[Service] = &[
     },
 ];
 
-/// The `supervision` test kernel's table (#100): the storage and inference
-/// services, a daemon that never reports ready (restarted once), one
+/// The `supervision` test kernel's table (#100): the storage, audit,
+/// trusted (#152), and inference services, a daemon that never reports ready (restarted once), one
 /// that crashes after each start (restarted 3 times, with growing
 /// delays), one that crashes and is never restarted, one the kernel stops, an inference client the kernel
 /// kills services under, and a one-shot that holds a storage buffer and
@@ -438,6 +446,37 @@ const SUPERVISE: &[Service] = &[
         ],
         after: &[],
         limit: STORE_LIMIT,
+    },
+    // Every later event is an audit record and a `trust` line (#152).
+    Service {
+        name: "audit",
+        path: b"bin/audit",
+        arg: 0,
+        kind: Kind::Daemon,
+        restart: Restart::Up(3),
+        caps: &[
+            Cap::Console,
+            Cap::AuditService,
+            Cap::Report,
+            Cap::Storage(AUDIT_TRAIL),
+        ],
+        after: &[0],
+        limit: 0,
+    },
+    Service {
+        name: "trust",
+        path: b"bin/trust",
+        arg: 0,
+        kind: Kind::Daemon,
+        restart: Restart::Up(3),
+        caps: &[
+            Cap::Device(VIRTIO_CONSOLE),
+            Cap::TrustService,
+            Cap::Report,
+            Cap::Audit(AUDIT_TRUST),
+        ],
+        after: &[1],
+        limit: 0,
     },
     Service {
         name: "infer",
@@ -504,7 +543,7 @@ const SUPERVISE: &[Service] = &[
         kind: Kind::OneShot,
         restart: Restart::Never,
         caps: &[Cap::Console, Cap::Inference(2), Cap::Storage(3)],
-        after: &[0, 1],
+        after: &[0, 3],
         limit: 1024,
     },
     // Namespace 1, `test`, read-write. Last, so nothing else attaches to
@@ -596,12 +635,20 @@ enum State {
     /// A one-shot service that exited with 0.
     Done,
     Failed,
+    /// A service it needs failed (#152).
+    Skipped,
+    /// Stopped by the user; never restarted.
+    Stopped,
 }
 
 /// How long a daemon may take to send `ready` (#100).
 const READY_US: u64 = 10_000_000;
-/// How long `init` waits for an audit record.
+/// How long `init` waits for an audit record, and first waits before
+/// trying one again (doubling to [`AUDIT_RETRY_MAX_US`]).
 const AUDIT_US: u64 = 1_000_000;
+const AUDIT_RETRY_MAX_US: u64 = 60_000_000;
+/// Most records waiting for the audit service; the oldest is dropped.
+const MAX_UNSENT: usize = 32;
 /// How long a service may take to answer `RELEASE`.
 const RELEASE_US: u64 = 1_000_000;
 
@@ -624,6 +671,12 @@ struct Init {
     restarts: [u8; MAX_SERVICES],
     /// Whether each start is in the audit trail yet (#108).
     recorded: [bool; MAX_SERVICES],
+    /// Records the audit service has not taken yet, oldest first (#152):
+    /// it may be starting, or blocked on a restarting store.
+    unsent: VecDeque<Vec<u8>>,
+    /// When to try them again, and the wait after the next failure.
+    retry_at: u64,
+    retry_us: u64,
 }
 
 impl Init {
@@ -670,7 +723,8 @@ impl Init {
         let service = &self.table[i];
         self.state[i] = State::Failed;
         let Ok(file) = open(ROOT, service.path) else {
-            say(service.name, "missing program", None);
+            let numbers = [not_started::MISSING_PROGRAM, 0, 0];
+            self.event(i, b"missing program", Event::NotStarted, numbers, &[]);
             return;
         };
         let mut grants = [Grant {
@@ -683,7 +737,8 @@ impl Init {
                 Some(g) => *grant = g,
                 None => {
                     let _ = pharos_user::delete(file);
-                    say(service.name, "no device", None);
+                    let numbers = [not_started::NO_DEVICE, 0, 0];
+                    self.event(i, b"no device", Event::NotStarted, numbers, &[]);
                     return;
                 }
             }
@@ -716,7 +771,10 @@ impl Init {
         let process = match spawned {
             Ok(process) => process,
             Err(e) => {
-                say(service.name, "spawn failed, error", Some(e.code()));
+                let mut d = [0u8; 20];
+                let what = [&b"spawn failed, error "[..], decimal(e.code(), &mut d)].concat();
+                let numbers = [not_started::SPAWN_ERROR, e.code() as u32, 0];
+                self.event(i, &what, Event::NotStarted, numbers, &[]);
                 return;
             }
         };
@@ -737,8 +795,7 @@ impl Init {
 
     /// Records every start not yet in the audit trail (#108): a `start`
     /// event per service, with how many capabilities its entry lists.
-    /// Starts before the audit service was ready are recorded once it is;
-    /// a record that fails is not tried again.
+    /// Starts before the audit service was ready are recorded once it is.
     fn record_starts(&mut self) {
         let ready = self
             .table
@@ -776,13 +833,47 @@ impl Init {
                 outcome: audit::outcome::OK,
                 detail: &detail[..k + 13],
             };
-            let mut msg = [0u8; 256];
-            if let Some(n) = audit::encode(&audit::Request::Append(entry), &mut msg) {
-                // The request is sent from this buffer too.
-                let mut out = [0u8; 256];
-                // No badge: the audit service knows `init` by that.
-                let _ = call_timeout(self.audit, &msg[..n], self.reply, &mut out, AUDIT_US);
+            self.append(&entry);
+        }
+    }
+
+    /// Queues `entry` for the audit trail and sends what it can.
+    fn append(&mut self, entry: &audit::Entry<'_>) {
+        let mut msg = [0u8; 256];
+        if let Some(n) = audit::encode(&audit::Request::Append(*entry), &mut msg) {
+            if self.unsent.len() == MAX_UNSENT {
+                self.unsent.pop_front();
             }
+            self.unsent.push_back(msg[..n].to_vec());
+            self.flush();
+        }
+    }
+
+    /// Sends queued records, oldest first, once the audit service is ready
+    /// and the retry time has passed; stops at the first it does not take.
+    /// At least once: a record written just before the store or audit
+    /// service failed, or answered after 1 s, is sent again, so it may be
+    /// in the trail twice (seen when the store is killed mid-write).
+    /// ponytail: a number per record from `init` would let the reader
+    /// drop the copy.
+    fn flush(&mut self) {
+        if !self.up(b"bin/audit") || uptime() < self.retry_at {
+            return;
+        }
+        while let Some(msg) = self.unsent.front() {
+            // The request is sent from this buffer too.
+            let mut out = [0u8; 256];
+            // No badge: the audit service knows `init` by that.
+            let taken = call_timeout(self.audit, msg, self.reply, &mut out, AUDIT_US)
+                .is_ok_and(|r| matches!(r, Received::Message { len, .. } if len >= 1))
+                && out[0] == status::OK;
+            if !taken {
+                self.retry_at = uptime().saturating_add(self.retry_us);
+                self.retry_us = (self.retry_us * 2).min(AUDIT_RETRY_MAX_US);
+                return;
+            }
+            self.unsent.pop_front();
+            self.retry_us = AUDIT_US;
         }
     }
 
@@ -793,12 +884,9 @@ impl Init {
             .is_some_and(|i| matches!(self.state[i], State::Ok(_)))
     }
 
-    /// A `service` event in the audit trail (#151), once the audit service
-    /// is ready (before then only the services it needs can fail).
-    fn record(&self, actor: &[u8], detail: &[u8]) {
-        if !self.up(b"bin/audit") {
-            return;
-        }
+    /// A `service` event in the audit trail (#151): queued until the audit
+    /// service takes it.
+    fn record(&mut self, actor: &[u8], detail: &[u8]) {
         let entry = audit::Entry {
             kind: audit::Kind::Event,
             refers: 0,
@@ -811,20 +899,28 @@ impl Init {
             outcome: audit::outcome::OK,
             detail: &detail[..detail.len().min(audit::MAX_DETAIL)],
         };
-        let mut msg = [0u8; 256];
-        if let Some(n) = audit::encode(&audit::Request::Append(entry), &mut msg) {
-            let mut out = [0u8; 256];
-            let _ = call_timeout(self.audit, &msg[..n], self.reply, &mut out, AUDIT_US);
-        }
+        self.append(&entry);
     }
 
-    /// Tells `trust` (#151), if it runs, trying for at most 100 ms: it
-    /// waits in `receive` almost always, and `init` never waits on it.
-    fn tell_trust(&self, req: &trust::Request<'_>) {
-        let mut msg = [0u8; 256];
-        let Some(n) = trust::encode(req, &mut msg).filter(|_| self.up(b"bin/trust")) else {
+    /// Tells `trust` a `SERVICE` (#151), with as many of `names` as fit,
+    /// if it runs, trying for at most 100 ms: it waits in `receive` almost
+    /// always, and `init` never waits on it longer.
+    fn tell_trust(&self, event: Event, name: &[u8], numbers: [u32; 3], names: &[&[u8]]) {
+        if !self.up(b"bin/trust") {
             return;
-        };
+        }
+        let (mut wire, mut msg) = ([0u8; 256], [0u8; 256]);
+        let fits = (0..=names.len().min(trust::MAX_NAMES)).rev().find_map(|k| {
+            let names = Names::build(&names[..k], &mut wire)?;
+            let req = trust::Request::Service {
+                event,
+                name,
+                numbers,
+                names,
+            };
+            trust::encode(&req, &mut msg)
+        });
+        let Some(n) = fits else { return };
         for _ in 0..10 {
             if try_send(self.trust, &msg[..n]).is_ok() {
                 return;
@@ -833,10 +929,49 @@ impl Init {
         }
     }
 
+    /// Service `j`'s event (#152): `init: <name> <what>` on the debug
+    /// console, an audit record (actor its name, detail `what`, cut to 64
+    /// bytes), and `SERVICE` to `trust`, which writes its own line from
+    /// `event`, `numbers`, and `names`, never from `what`.
+    fn event(&mut self, j: usize, what: &[u8], event: Event, numbers: [u32; 3], names: &[&[u8]]) {
+        let name = self.table[j].name.as_bytes();
+        let _ = debug_write(CONSOLE, &[&b"init: "[..], name, b" ", what].concat());
+        self.record(name, what);
+        self.tell_trust(event, name, numbers, names);
+    }
+
+    /// Answers `trust`'s `SERVICES` on `reply` without waiting (#152):
+    /// each entry from `from`, as many as fit.
+    fn list(&self, from: u8, reply: Handle) {
+        let count = self.table.len().min(MAX_SERVICES);
+        let entries: alloc::vec::Vec<Entry<'_>> = (usize::from(from)..count)
+            .map(|i| Entry {
+                name: self.table[i].name.as_bytes(),
+                state: match self.state[i] {
+                    State::Pending => Shown::Pending,
+                    State::Running(_) => Shown::Starting,
+                    State::Ok(_) => Shown::Ready,
+                    State::Restarting(_) => Shown::Restarting,
+                    State::Done => Shown::Done,
+                    State::Failed => Shown::Failed,
+                    State::Skipped => Shown::Skipped,
+                    State::Stopped => Shown::Stopped,
+                },
+                restarts: self.restarts[i],
+                limit: self.table[i].restart.limit(),
+            })
+            .collect();
+        let mut out = [0u8; 256];
+        if let Some((n, _)) = Reply::write(count as u8, &entries, &mut out) {
+            let _ = try_send(reply, &out[..n]);
+            let _ = debug_write(CONSOLE, b"init: services listed for trust");
+        }
+    }
+
     /// The system's state after the boot sequence (#151): ready if every
     /// entry succeeded, else what failed; to the trail and `trust`. The
     /// kernel gets its `[ready, failed]` as before.
-    fn report_ready(&self, ready: usize) {
+    fn report_ready(&mut self, ready: usize) {
         let failed: alloc::vec::Vec<&[u8]> = (self.table.iter().zip(&self.state))
             .filter(|(_, s)| !matches!(s, State::Ok(_) | State::Done))
             .map(|(t, _)| t.name.as_bytes())
@@ -855,18 +990,11 @@ impl Init {
             v
         };
         self.record(b"init", &detail);
-        let mut wire = [0u8; 200];
-        let shown = &failed[..failed.len().min(trust::MAX_NAMES)];
         let (event, count) = match failed.len() {
             0 => (Event::Ready, ready),
             n => (Event::NotReady, n),
         };
-        self.tell_trust(&trust::Request::Service {
-            event,
-            name: b"",
-            numbers: [count as u32, 0, 0],
-            names: Names::build(shown, &mut wire).unwrap_or_default(),
-        });
+        self.tell_trust(event, b"", [count as u32, 0, 0], &failed);
     }
 
     /// Tells the storage and inference services that service `i`'s
@@ -945,30 +1073,38 @@ impl Init {
         }
         let _ = pharos_user::delete(p);
         self.release(j);
-        let crashed = match status {
+        let mut d = [0u8; 20];
+        // Its state first: the audit service's own end is not sent to it.
+        let (what, event, number) = match status {
             Ok(Status::Exited(0)) if service.kind == Kind::OneShot => {
                 say(service.name, "done", None);
                 self.state[j] = State::Done;
                 return;
             }
-            Ok(Status::Exited(code)) => {
-                say(service.name, "exited", Some(code));
-                true
-            }
-            Ok(Status::Killed(vector)) => {
-                say(service.name, "killed", Some(vector));
-                true
-            }
+            Ok(Status::Exited(code)) => (
+                [&b"exited "[..], decimal(code, &mut d)],
+                Event::Exited,
+                code,
+            ),
+            Ok(Status::Killed(vector)) => (
+                [&b"killed "[..], decimal(vector, &mut d)],
+                Event::Killed,
+                vector,
+            ),
             Ok(Status::Stopped) => {
-                say(service.name, "stopped; not restarted", None);
-                false
+                self.state[j] = State::Stopped;
+                let what = b"stopped; not restarted";
+                self.event(j, what, Event::Stopped, [0; 3], &[]);
+                return;
             }
-            _ => false,
+            _ => {
+                self.state[j] = State::Failed;
+                return;
+            }
         };
         self.state[j] = State::Failed;
-        if crashed {
-            self.crashed(j);
-        }
+        self.event(j, &what.concat(), event, [number as u32, 0, 0], &[]);
+        self.crashed(j);
     }
 
     /// Service `j` crashed, exited, or sent no `ready` in time: restarted
@@ -977,35 +1113,41 @@ impl Init {
     fn crashed(&mut self, j: usize) {
         let service = &self.table[j];
         let Some(wait) = supervise::delay(service.restart, self.restarts[j]) else {
-            let why = match service.restart {
-                Restart::Never => "not restarted: restart policy never",
-                Restart::Up(_) => "not restarted: restarts used up",
+            let (why, event): (&[u8], _) = match service.restart {
+                Restart::Never => (b"not restarted: restart policy never", Event::Never),
+                Restart::Up(_) => (b"not restarted: restarts used up", Event::GivenUp),
             };
-            say(service.name, why, None);
+            self.event(j, why, event, [0; 3], &[]);
             return;
         };
         self.restarts[j] += 1;
         self.state[j] = State::Restarting(uptime().saturating_add(wait));
+        let numbers = [
+            u32::from(self.restarts[j]),
+            u32::from(service.restart.limit()),
+            (wait / 1000) as u32,
+        ];
         let mut d = [[0u8; 20]; 3];
         let [a, b, c] = &mut d;
-        let mut line = [
-            &b"init: "[..],
-            service.name.as_bytes(),
-            b" restarting ",
-            decimal(u64::from(self.restarts[j]), a),
+        let mut what = [
+            &b"restarting "[..],
+            decimal(numbers[0].into(), a),
             b" of ",
-            decimal(u64::from(service.restart.limit()), b),
+            decimal(numbers[1].into(), b),
             b" in ",
-            decimal(wait / 1000, c),
+            decimal(numbers[2].into(), c),
             b" ms",
         ]
         .concat();
         let after: alloc::vec::Vec<&[usize]> = self.table.iter().map(|s| s.after).collect();
-        for (k, d) in supervise::dependents(&after, j).into_iter().enumerate() {
-            line.extend_from_slice(if k == 0 { b"; used by " } else { b", " });
-            line.extend_from_slice(self.table[d].name.as_bytes());
+        let users: alloc::vec::Vec<&[u8]> = (supervise::dependents(&after, j).into_iter())
+            .map(|d| self.table[d].name.as_bytes())
+            .collect();
+        for (k, name) in users.iter().enumerate() {
+            what.extend_from_slice(if k == 0 { b"; used by " } else { b", " });
+            what.extend_from_slice(name);
         }
-        let _ = debug_write(CONSOLE, &line);
+        self.event(j, &what, Event::Restarting, numbers, &users);
     }
 
     /// Starts services whose restart delay has passed, and stops daemons
@@ -1030,11 +1172,12 @@ impl Init {
                 continue;
             }
             if now >= self.deadline[j] {
-                say(self.table[j].name, "no ready within 10 s; stopped", None);
                 let _ = pharos_user::process_stop(p);
                 let _ = pharos_user::delete(p);
                 self.release(j);
                 self.state[j] = State::Failed;
+                let what = b"no ready within 10 s; stopped";
+                self.event(j, what, Event::NoReady, [0; 3], &[]);
                 // Counted as a crash (D-026 design, #149).
                 self.crashed(j);
                 if let State::Restarting(at) = self.state[j] {
@@ -1050,15 +1193,21 @@ impl Init {
     /// Waits for one event (a `ready`, an end, or a deadline) and handles it.
     fn step(&mut self) {
         self.record_starts();
-        let wait = self.check_ready();
+        self.flush();
+        let mut wait = self.check_ready();
+        if !self.unsent.is_empty() {
+            wait = wait.min(self.retry_at.saturating_sub(uptime()).max(10_000));
+        }
         let mut buf = [0u8; 16];
         match receive_timeout(self.events, &mut buf, wait) {
-            Ok(Received::Message { badge, cap, .. }) => {
-                if cap != 0 {
-                    let _ = pharos_user::delete(cap);
-                }
+            Ok(Received::Message { badge, cap, len }) => {
                 let i = (badge as usize).wrapping_sub(1);
-                if let (Some(service), Some(State::Running(p))) =
+                // `trust`'s `services` (#152); only its badge is answered.
+                let from_trust = self.table.get(i).is_some_and(|s| s.path == b"bin/trust");
+                let asked = listing::parse(&buf[..len.min(buf.len())]);
+                if let (true, Ok(listing::Request::Services { from })) = (from_trust, asked) {
+                    self.list(from, cap);
+                } else if let (Some(service), Some(State::Running(p))) =
                     (self.table.get(i), self.state.get(i).copied())
                 {
                     if service.kind == Kind::Daemon {
@@ -1068,6 +1217,9 @@ impl Init {
                             self.allow();
                         }
                     }
+                }
+                if cap != 0 {
+                    let _ = pharos_user::delete(cap);
                 }
             }
             Ok(Received::Notification(bits)) => {
@@ -1129,6 +1281,9 @@ fn main(arg: u64) -> u64 {
         deadline: [0; MAX_SERVICES],
         restarts: [0; MAX_SERVICES],
         recorded: [false; MAX_SERVICES],
+        unsent: VecDeque::new(),
+        retry_at: 0,
+        retry_us: AUDIT_US,
     };
     for (i, service) in table.iter().enumerate().take(MAX_SERVICES) {
         let met = service
@@ -1136,8 +1291,8 @@ fn main(arg: u64) -> u64 {
             .iter()
             .all(|&a| matches!(init.state[a], State::Ok(_) | State::Done));
         if !met {
-            say(service.name, "skipped", None);
-            init.state[i] = State::Failed;
+            init.state[i] = State::Skipped;
+            init.event(i, b"skipped", Event::Skipped, [0; 3], &[]);
             continue;
         }
         init.start(i);

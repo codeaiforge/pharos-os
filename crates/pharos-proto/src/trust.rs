@@ -78,6 +78,16 @@ pub enum Event {
     Ready = 8,
     /// The system is not ready: `numbers[0]` failed, `names` (no name).
     NotReady = 9,
+    /// Could not be started (#152): `numbers[0]` is a [`not_started`]
+    /// reason, and for a spawn error `numbers[1]` its code.
+    NotStarted = 10,
+}
+
+/// Why a service could not be started ([`Event::NotStarted`]).
+pub mod not_started {
+    pub const MISSING_PROGRAM: u32 = 0;
+    pub const NO_DEVICE: u32 = 1;
+    pub const SPAWN_ERROR: u32 = 2;
 }
 
 impl Event {
@@ -85,6 +95,7 @@ impl Event {
         use Event::*;
         [
             Exited, Killed, NoReady, Skipped, Restarting, GivenUp, Never, Stopped, Ready, NotReady,
+            NotStarted,
         ]
         .get(usize::from(c))
         .copied()
@@ -538,6 +549,8 @@ pub enum Command<'a> {
         version: u32,
         prefix: [u8; 4],
     },
+    /// `services`: each service's state, from `init` (#152).
+    Services,
     /// Anything else: the service answers with the commands it knows.
     Help,
 }
@@ -580,6 +593,7 @@ pub fn command(line: &[u8]) -> Command<'_> {
         (Some(b"list"), None, None) => Command::List,
         (Some(b"audit"), None, None) => Command::Audit,
         (Some(b"usage"), None, None) => Command::Usage,
+        (Some(b"services"), None, None) => Command::Services,
         (Some(b"stop"), Some(b"all"), None) => Command::StopAll,
         (Some(b"stop"), Some(b"group"), Some(name))
             if valid_name(name) && words.next().is_none() =>
@@ -807,6 +821,7 @@ mod tests {
             ev(Event::Killed, &long, Names::default()),
             ev(Event::Ready, b"", Names::default()),
             ev(Event::NotReady, b"", two),
+            ev(Event::NotStarted, b"missing", Names::default()),
         ] {
             let mut buf = [0u8; 256];
             let n = encode(&req, &mut buf).unwrap();
@@ -834,7 +849,7 @@ mod tests {
             m
         };
         assert!(parse(&msg(4, &[1, 1, b'a'])).is_ok());
-        assert_eq!(parse(&msg(10, &[0])), Err(Refused::Bad), "event 10");
+        assert_eq!(parse(&msg(11, &[0])), Err(Refused::Bad), "event 11");
         let mut many = std::vec![9];
         for _ in 0..9 {
             many.extend_from_slice(&[1, b'a']);
@@ -932,6 +947,8 @@ mod tests {
         assert_eq!(command(b"audit"), Command::Audit);
         assert_eq!(command(b" usage "), Command::Usage);
         assert_eq!(command(b"usage all"), Command::Help);
+        assert_eq!(command(b" services "), Command::Services);
+        assert_eq!(command(b"services x"), Command::Help);
         assert_eq!(command(b"audit x"), Command::Help);
         assert_eq!(command(b" no  65535"), Command::Answer(65_535, false));
         assert_eq!(

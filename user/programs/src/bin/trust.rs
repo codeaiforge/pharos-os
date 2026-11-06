@@ -31,6 +31,11 @@
 //! `yes <n>` or `no <n>`. The runtime decides the outcome (including the
 //! timeout) and says so with `RESOLVED`, which `trust` shows.
 //!
+//! Services (#152): `init` sends each service event as `SERVICE`, which
+//! `trust` writes from its fields; `services` asks `init` for each
+//! service's state (`pharos_proto::service`, on the report capability),
+//! waiting at most 1 s. `trust` keeps no state of its own about services.
+//!
 //! Verification (#144, knowledge.md): `verify <scope> <key> <version>
 //! <hash>` asks the knowledge service, with a bounded wait, to mark the
 //! version verified if its content's SHA-256 starts with the 8 typed
@@ -43,6 +48,7 @@
 use pharos_programs::virtio_console::{Console, RX_BUFFER};
 use pharos_proto::knowledge::{self, Author};
 use pharos_proto::permission::Permission;
+use pharos_proto::service::{self as listing, Reply};
 use pharos_proto::trust::{
     self, Command, Event, INIT, Line, Lines, MAX_NAME, MAX_NAMES, Names, Outcome, RUNTIME, Request,
     SLOTS, parse,
@@ -64,9 +70,11 @@ const KNOWLEDGE: Handle = 5;
 const KNOWLEDGE_US: u64 = 1_000_000;
 /// How long `trust` waits for the audit service's `HEAD`.
 const AUDIT_US: u64 = 1_000_000;
+/// How long `trust` waits for each page of `init`'s `SERVICES`.
+const INIT_US: u64 = 1_000_000;
 const BASE: u64 = 0x1000_0000;
 const HELP: &[u8] = b"commands: list, stop <agent>, stop group <group>, stop all, \
-revoke <agent> <permission>, yes <n>, no <n>, audit, usage, \
+revoke <agent> <permission>, yes <n>, no <n>, audit, usage, services, \
 verify <scope> <key> <version> <hash>";
 /// How long a stop may take before the answer says it is still running.
 const STOP_WAIT_US: u64 = 1_000_000;
@@ -301,6 +309,7 @@ impl Trust {
                 }
             }
             Command::Audit => self.audit(),
+            Command::Services => self.services(),
             // The runtime's own from the kernel; each attempt's and group's
             // from the runtime, which answers with numbers only (#119).
             Command::Usage => {
@@ -322,6 +331,46 @@ impl Trust {
                 prefix,
             } => self.verify(scope, key, version, prefix),
             Command::Help => self.say(&[HELP]),
+        }
+    }
+
+    /// Each service's state, as `init` answers it (#152), one line each.
+    fn services(&mut self) {
+        let mut from = 0u8;
+        loop {
+            let (mut msg, mut out) = ([0u8; 8], [0u8; 256]);
+            let req = listing::Request::Services { from };
+            let answer = match (self.reply, listing::encode(&req, &mut msg)) {
+                (Some(reply), Some(n)) => {
+                    match call_timeout(REPORT, &msg[..n], reply, &mut out, INIT_US) {
+                        Ok(Received::Message { len, .. }) => Reply::parse(&out[..len.min(256)]),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let Some(page) = answer else {
+                self.say(&[b"services: init is not answering"]);
+                return;
+            };
+            for e in page.iter() {
+                let mut d = [[0u8; 20]; 2];
+                let [a, b] = &mut d;
+                self.say(&[
+                    b"services: ",
+                    e.name,
+                    b" ",
+                    e.state.word(),
+                    b", restarts ",
+                    decimal(e.restarts.into(), a),
+                    b" of ",
+                    decimal(e.limit.into(), b),
+                ]);
+            }
+            from = from.saturating_add(page.count);
+            if page.count == 0 || from >= page.total {
+                return;
+            }
         }
     }
 
@@ -644,6 +693,18 @@ impl Trust {
             Event::GivenUp => &[b"service ", name, b" not restarted: restarts used up"],
             Event::Never => &[b"service ", name, b" not restarted: restart policy never"],
             Event::Stopped => &[b"service ", name, b" stopped; not restarted"],
+            Event::NotStarted => match n[0] {
+                trust::not_started::MISSING_PROGRAM => {
+                    &[b"service ", name, b" not started: missing program"]
+                }
+                trust::not_started::NO_DEVICE => &[b"service ", name, b" not started: no device"],
+                _ => &[
+                    b"service ",
+                    name,
+                    b" not started: spawn error ",
+                    decimal(n1, b),
+                ],
+            },
         };
         parts[..fixed.len()].copy_from_slice(fixed);
         let mut k = fixed.len();
