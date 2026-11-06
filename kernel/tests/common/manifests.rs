@@ -13,7 +13,7 @@
 //! or to a gain: an endpoint or memory object no other process holds (one
 //! it created), an interrupt of one of its devices, a file it opened from
 //! its root, a process capability (`Gain::Processes`, at most `STOP |
-//! WAIT`), or `trust`'s channel to the runtime (`Gain::RuntimeChannel`).
+//! WAIT`, and `GRANT` on one it started), or `trust`'s channel to the runtime (`Gain::RuntimeChannel`).
 //! A one-shot reply capability lives only during a call, so a capability
 //! is a finding only if it is in each of three snapshots 100 ms apart.
 
@@ -253,10 +253,16 @@ impl<'a> Audit<'a> {
                         }),
                         "its device's interrupt",
                     ),
-                    Object::Process(_) => (
-                        s.gains.contains(&Gain::Processes) && r & !(cap::STOP | cap::WAIT) == 0,
-                        "process",
-                    ),
+                    // `GRANT` only on a process it started (the runtime gives
+                    // `trust` each agent's `STOP | WAIT`; M4.2 review F1).
+                    Object::Process(p) => {
+                        let mine = process::by_id(p.id).is_some_and(|q| q.parent == Some(id));
+                        let allowed = cap::STOP | cap::WAIT | if mine { cap::GRANT } else { 0 };
+                        (
+                            s.gains.contains(&Gain::Processes) && r & !allowed == 0,
+                            "process",
+                        )
+                    }
                     Object::File { .. } => (
                         r & !cap::READ == 0 && s.caps.iter().any(|g| g.object == Is::Root),
                         "file from its root",
