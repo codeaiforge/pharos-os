@@ -167,6 +167,47 @@ Builds on M3.3's supervision (#100): a crashed daemon restarted at once, at most
 
 - *Implemented (#153):* `kernel/tests/system.rs`; `cargo xtask runner` gives it the boot image's modules (`root`) instead of the test modules. The service killed past its restarts is `infer` (four kills: restarts 1–3, then given up; `used by agents`). The runner checks the trusted console and the trail with the same check as `supervision` (`event_checks`). About 7 s; two mutations caught (restart policy ignored, no ready report).
 
+### Capability manifests (M4.2, D-027)
+
+**Planned, not implemented** (design for #156, awaiting the maintainer). D-027 (#155): a service's manifest is its `init` table entry, every capability written out, plus what it may gain while it runs; `init` grants exactly it, and a capability audit checks every live service against it.
+
+**Where the manifests live.** A new crate, `crates/pharos-services` (`no_std`, no dependencies), holds the table types and the tables (boot and test) now in `init`, and `Restart` (from `pharos_programs::supervise`, which keeps `delay` and `dependents`). `init` uses it, and so do the host tests and the audit test kernel, so all three read the same manifests. The kernel uses it only as a dev-dependency of its test kernels: nothing joins the kernel itself.
+
+**A capability, written out.** Each entry's `caps` lists, in handle order, a `Give { object, rights, badge }`:
+- `object`: `DebugConsole`, `Root`, `Device(id, nth)` (the `nth` device with that PCI ID), or `Endpoint(e)`, one of `init`'s endpoints: `Events` (its report endpoint), `Net`, `Store`, `Infer`, `Trust`, `Agents`, `Audit`, `Knowledge`;
+- `rights`: exactly the rights the service gets (`SEND`, `RECEIVE`, `READ`, `WRITE`, `MAP | CONFIG | IRQ`, `GRANT`), no longer implied by a kind;
+- `badge`: `None`, `Fixed(n)`, or `Own` (the entry's index + 1, `init`'s report badge).
+
+For example, the inference service's entry reads `Give(DebugConsole, WRITE, None)`, `Give(Endpoint(Infer), RECEIVE, None)`, `Give(Endpoint(Events), SEND, Own)`, `Give(Endpoint(Store), SEND, Fixed(MODELS_READ_ONLY))`. A network capability's destinations stay a field of the entry (`net`), as `ALLOW` needs them.
+
+**Rules, host-tested on every table** (a table that breaks one does not build its test):
+- every `SEND` on an endpoint is badged with a number that is not 0: badge 0 is `init`'s own (`RELEASE`, `ALLOW`, `RUNTIME`, `LIMIT`, and its audit records), and no service may send as `init`;
+- one receiver per endpoint, the service named for it;
+- a badge appears once per endpoint across a table (two services with one badge would be one client);
+- `GRANT` only with `RECEIVE` on the runtime's own endpoint (it hands each agent a badged `SEND`);
+- device rights only on devices, each device to one service, `READ` only on `Root`, `WRITE` only on `DebugConsole`;
+- every daemon has `Endpoint(Events)` with `Own`, and no one-shot does.
+
+**Declared runtime gains.** Each entry's `gains` lists what the service may hold beyond `caps`:
+- `Own` (every service): objects it created itself, an endpoint no other process holds, or an interrupt object of one of its devices;
+- `Processes`: process capabilities with `STOP | WAIT`, for `trust` (the runtime and each agent) and for the runtime (its agents);
+- `RuntimeChannel`: `trust`'s `SEND` on `Endpoint(Agents)` badged `agents::TRUST`.
+
+A call's one-shot reply capability is revoked when the call returns, so it needs no entry. The audit tells it apart by taking three snapshots 100 ms apart: a capability counts only if it is in all three. A client's attached buffer is mapped and its capability deleted, so it is no capability; mappings are bounded by each service's page limit.
+
+**`init`.** `grant` becomes a lookup: the object to `init`'s handle, the rights as written, the badge resolved. The kernel already refuses a right `init` does not hold. Two steps:
+1. The boot and test tables move to `pharos-services`, written out to give exactly what `init` grants today. This is a refactor with no change in behaviour: every test kernel passes unchanged.
+2. Each boot service is narrowed (#157), one capability at a time, each change named in the review. Candidates to examine: the runtime's network capability (no destinations while its boot policy table is empty), its inference and files capabilities under the same table, and the debug console for each service.
+
+**The audit (#158).** `kernel/tests/common/manifests.rs`, used by the `system` kernel at ready and again after its faults (a restarted knowledge service, a stopped network service, a given-up inference service). It:
+1. identifies each live child of `init` by its report badge (`Own`) on `init`'s report endpoint, and each of `init`'s endpoints by the service that receives on it;
+2. for each service, matches every capability in its table to one `Give` (same object, rights, and badge) or one declared gain, over the three snapshots;
+3. fails on anything unmatched, any `Give` missing, and any `Give` held with more rights. It prints each service's table.
+
+A mutation in which `init` grants one service one capability more than its entry must fail it, and one in which a manifest gives `GRANT` must fail a host rule.
+
+**Not covered.** `init` itself (the kernel gives it every boot capability; it is reviewed code). Agents (their manifests are D-012's, and the `hostile` and `deputy` kernels test them). Memory mappings, bounded by page limits. Processes the runtime starts that are not agents: there are none.
+
 ## 4. Security
 
 - **The trust boundary is unchanged:** every process, `init` included, is untrusted by the kernel. `init` holds the most authority (every device, the root filesystem). It is small, and its service table is reviewed code.
@@ -196,6 +237,8 @@ Builds on M3.3's supervision (#100): a crashed daemon restarted at once, at most
 | Host, `pharos_proto::service` (#152) | `SERVICE`, `SERVICES`, and the reply round-trip; truncated, trailing, and unknown fields refused; fuzzed |
 | QEMU, `supervision` (#150, #152) | each policy: `Never` not restarted, `Up(n)` restarted n times no sooner than each delay, then given up; no `ready` in 10 s counted as a crash; a stopped service never restarted; each event one audit record and one `trust` line; mutation-checked |
 | QEMU, `system` (#151, #153) | the boot table to ready (console and trail), a restart with its dependents, a stop, a give-up, `services`; mutation-checked |
+| Host, `pharos-services` (#157) | each manifest rule on the boot and test tables; a table breaking each rule refused |
+| QEMU, `system` with the capability audit (#158) | every live service's table against its manifest and gains, at ready and after the faults; mutation-checked (one capability more) |
 
 ## 6. Alternatives
 

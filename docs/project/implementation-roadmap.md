@@ -501,7 +501,7 @@ Ordering notes:
 
 ### M4.2 — Security model and privilege separation
 
-- **Objective and scope:** Apply the security model system-wide: each service runs with minimal capabilities. **Status: Current.** Issues #155–#159. D-027 accepted (#155): the manifest is `init`'s table entry made explicit (each capability's object, rights, and badge) with declared runtime gains, checked by a capability audit test kernel. Next: the design (#156).
+- **Objective and scope:** Apply the security model system-wide: each service runs with minimal capabilities. **Status: Current.** Issues #155–#159. D-027 accepted (#155): the manifest is `init`'s table entry made explicit (each capability's object, rights, and badge) with declared runtime gains, checked by a capability audit test kernel. Design proposed (#156): [services.md](../architecture/services.md#capability-manifests-m42-d-027), awaiting the maintainer.
 - **Deliverables:** Per-service capability manifests; privilege-separation review.
 - **Prerequisites:** M4.1, M3.4.
 - **Acceptance criteria:** No user-space service holds capabilities beyond its manifest; tests confirm.
