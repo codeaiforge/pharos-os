@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0) and Phase 2 — Core System (v0.2.0) are done. Current milestone: M3.8 — Knowledge service.** Everything in Phases 3–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), and Phase 3 — AI Agent Platform are done. Current milestone: M4.1 — Integration of kernel and user-space services.** Everything in Phases 4–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -41,8 +41,8 @@ The phases are not strictly sequential. These tracks run through every phase:
 | --- | --- | --- |
 | 1 | Foundation | Done (v0.1.0) |
 | 2 | Core System | Done (v0.2.0) |
-| 3 | AI Agent Platform | **Current** (M3.8; M3.1, M3.0, M3.2, M3.3, M3.4, M3.5, M3.6, and M3.7 done) |
-| 4 | Full Operating System | Planned |
+| 3 | AI Agent Platform | Done (gate passed 2026-11-06 with M3.8) |
+| 4 | Full Operating System | **Current** (M4.1) |
 | 5 | Deployment and Release | Planned |
 
 ---
@@ -291,7 +291,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 
 ## Phase 3 — AI Agent Platform
 
-**Status: Current** (M3.8; M3.1, M3.0, M3.2, M3.3, M3.4, M3.5, M3.6, and M3.7 done).
+**Status: Done** — gate passed 2026-11-06 with the M3.8 gate: every M3.x gate passed, and the agent isolation review is complete: each milestone's review, with an adversarial test kernel for every way out of an agent (`hostile`, `exhaustion`, `injection`, `deputy`, `poison`), summarized in [review-m3.8-knowledge.md](../security/review-m3.8-knowledge.md#phase-3-agent-isolation); the threat model is updated for agents and inference, with its open limits carried into Phase 4.
 
 Ordering notes:
 
@@ -458,7 +458,7 @@ Ordering notes:
 
 ### M3.8 — Knowledge service
 
-**Status: Current.** M3.7 gives it agents that talk only on granted channels and work in groups under a supervisor, with delegation that only narrows authority and a verifier on every result. Issues #140–#147. D-025 accepted (#140): a `knowledge` service on its own store namespace, reached by agents only through the runtime; append-only versions; scopes granted as runtime permissions; only the user marks a version verified. Design approved (#141): [knowledge.md](../architecture/knowledge.md). Implemented: the data model (#142), the service (#143), agent access and verification on the trusted console (#144; `MAX_SPAWN_CAPS` raised to 12, so the boot runtime gets every handle), private memory and promotion (#145), the access-control, provenance, staleness, and injection tests on host-loaded verified entries (#146: the `poison` kernel). Next: the gate and security review (#147).
+**Status: Done** — gate passed 2026-11-06: the CI jobs passed on `main` at `f230d70` ([run 42179591254](https://github.com/codeaiforge/pharos-os/actions/runs/42179591254)) with 66 test kernels, among them `knowledge` (versions put, corrected, in conflict, retracted, hidden by evidence, queried, and verified, everything kept across a service restart), `knowledge_agents` (reads and writes only in granted scopes, revoked at once; a query leaving out what the caller cannot read; a private file invisible until promoted; `verify` on the trusted console; every put audited without its content), and `poison` (against the user's host-loaded, verified entries: reading around scopes, forged provenance, rewritten or blindly replaced versions, conflicts and staleness kept marked, and stored instructions obeyed, each refused). Letting a writer replace a version it cannot read (review F1 undone) failed CI on a throwaway branch ([run 42184085979](https://github.com/codeaiforge/pharos-os/actions/runs/42184085979)) in the host tests, on Rust 1.85, and at `poison`; the branch was deleted. No CI run on `main` failed during M3.8. The IPC round trip measured a 1,887 ns median, within D-004's budget. The security review ([review-m3.8-knowledge.md](../security/review-m3.8-knowledge.md)) found and fixed two issues: a writer could replace or retract a version it cannot read (F1), and a version the store kept whose answer was lost could be written over (F2); it recorded two (F3: a reader's status flags show that versions it cannot read exist; F4: a writer learns which keys exist in a scope it writes); no new `unsafe`. The maintainer approved it on 2026-11-06. Delivered: D-025 (#140), the design (#141), the data model (#142), the service (#143), agent access and verification (#144; `MAX_SPAWN_CAPS` 12), private memory and promotion (#145), the poisoned-knowledge tests (#146), and the gate (#147). Carried: the limits in the [threat model](../security/threat-model.md#open-limits-carried-out-of-phase-2). This gate closes Phase 3.
 
 - **Where it runs (D-020):** Pharos; data model and provenance logic host-tested.
 - **Objective and scope:** A shared, permission-aware knowledge service with provenance, separate from each agent's private memory.
@@ -475,7 +475,7 @@ Ordering notes:
 
 ## Phase 4 — Full Operating System
 
-**Status: Planned.**
+**Status: Current** (M4.1).
 
 - **Objective and scope:** Integrate the kernel, user-space services, and AI platform into a coherent, configurable, recoverable system.
 - **Deliverables:** M4.1–M4.6.
@@ -489,7 +489,7 @@ Ordering notes:
 
 ### M4.1 — Integration of kernel and user-space services
 
-- **Objective and scope:** Boot into a complete user space with services started by a service manager. **Status: Planned** (partly delivered: M2.10's `init` starts services in a fixed order and reports each failure).
+- **Objective and scope:** Boot into a complete user space with services started by a service manager. **Status: Current** (partly delivered: M2.10's `init` starts services in a fixed order and reports each failure; M3.3's supervision restarts them).
 - **Deliverables:** Service manager with declared dependencies and restart policies, building on `init`; integrated system image.
 - **Prerequisites:** Phase 2 gate.
 - **Acceptance criteria:** System reaches a defined "ready" state in QEMU; each service failure is reported.
@@ -670,4 +670,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, and M3.7 (agent communication and coordination) on 2026-11-05. The current milestone is **M3.8 — Knowledge service**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3. The current milestone is **M4.1 — Integration of kernel and user-space services**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

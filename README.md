@@ -32,7 +32,7 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 | Resource accounting and limits: scheduling classes, CPU time per process, limits carved from the creator's, per-agent and per-group budgets, inference admission, `usage` on the trusted console | Implemented |
 | Controlled tool integration: validated tool calls (a fuzzed parser and an injection corpus), `read_file` on granted files, `send` confirmed by the user per call | Implemented |
 | Agent communication and coordination: granted channels carrying data only, supervised groups with subtasks, delegation that only narrows authority, a compiled-in verifier, `stop group` | Implemented |
-| Knowledge service | Planned |
+| Knowledge service: versioned entries with provenance, scopes granted as permissions, reads that leave out what the caller's evidence cannot reach, verification only by the user on the trusted console | Implemented |
 
 ## Vision
 
@@ -81,7 +81,7 @@ pharos 0.2.0
 $ cargo run -q -p pharos-cli -- info
 Pharos OS 0.2.0
 Project of: CodeAIForge
-Stage:      Phase 3 - AI Agent Platform (M3.7 complete, M3.8 next)
+Stage:      Phase 4 - Full Operating System (Phase 3 complete, M4.1 next)
 ...
 
 $ cargo run -q -p pharos-cli -- doctor
