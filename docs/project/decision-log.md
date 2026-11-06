@@ -982,3 +982,35 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
    - The runtime starts each agent with no capabilities, hands a `STOP` capability on it to the trusted service, and only then grants the agent anything. An agent the runtime never reported holds nothing, and stopping the runtime ends it too.
 9. **Delegation with expiry: left to M3.4, with D-012** (decided there: expiry on runtime grants only, D-012 item 9). M3.3 grants an agent only what a reviewed table allows (below), so it needs no time-limited grants yet.
 10. **Human approval in M3.3: none needed, because nothing beyond the reviewed table is granted.** The runtime grants an agent only capabilities listed for it in a compiled-in table, like `init`'s; a manifest asking for more is refused. Approvals for anything beyond it come with M3.4's permission model.
+
+### D-027: Per-service capability manifests and how they are checked
+
+- **Status:** Proposed
+- **Needed by:** M4.2
+- **Date accepted:** —
+
+**Context.** M4.2 applies the security model to every service: each runs with minimal capabilities, and tests confirm none holds more than its manifest. Agents have manifests (D-012, #97); services do not. This decides what a service's manifest is, where it lives, what a service may gain while it runs, and who checks.
+
+**Evidence (2026-11-06, issue #155):**
+- **`init`'s table already lists each service's capabilities** (`caps`, M2.10), and `spawn` passes only those, each derived from one `init` holds with `GRANT`, rights only narrowed (D-015). But the rights and badge of each are implied by its kind in `init`'s `grant` (for example `Storage(badge)` is `SEND` on the store), not written in the entry, and nothing checks afterwards what a service holds.
+- **What services gain at runtime:**
+  - every `call` hands the server a one-shot reply capability, revoked by the kernel when the call returns;
+  - the storage, inference, and knowledge services map a client's attached buffer and delete its capability, keeping only the mapping; the audit service deletes everything it receives;
+  - `trust` keeps the runtime's and each agent's process capability (`STOP`, `WAIT`) and its channel to the runtime (`SEND`, badged `TRUST`);
+  - the agent runtime keeps one process capability per agent it starts (each agent's badged `SEND` on the runtime is derived inside `spawn` and held only by the agent);
+  - each service creates its own objects: endpoints (for replies), interrupt objects.
+- **A test kernel can read every process's table:** object, rights, and badge per handle (the `supervision` and `system` kernels already find services this way).
+
+**Options.**
+1. *Where the manifest lives:* (a) the table entry in `init`, made explicit: each capability's object, rights, and badge written in the entry, compiled in and reviewed; or (b) a manifest file per service on the root filesystem, parsed and checked by `init`.
+2. *What a service may gain:* (a) per service, a declared list of kinds it may hold beyond its manifest (objects it created, one-shot replies, and for `trust` and the runtime the process and channel capabilities above), everything else never; or (b) only the manifest, with every runtime gain an exception found by the audit.
+3. *Who checks:* (a) the manifest is enforced by construction (`init` grants exactly it) and verified by a capability audit test kernel, at ready and after faults; (b) also at run time, by a new kernel call that lets `init` list a service's table; or (c) the kernel refuses any capability a process's manifest does not allow.
+
+**Evaluation criteria.** Least privilege that a reviewer can read in one place; no new authority for `init` or a parser in its path; what a service gains while it runs is bounded and visible; host-testable rules (D-020); a test that fails when a service gets one capability too many.
+
+**Recommendation.**
+1. **(a) The table entry, explicit.** One reviewed place, no parser in the most privileged process, and the root filesystem is a read-only image built from the same reviewed source. A file gains nothing until manifests change without a new image (M4.3's updates); D-027 can be revisited then.
+2. **(a) A declared list of runtime gains per service.** The gains above are part of how the services work; declaring them makes each one reviewed, and anything else is a finding.
+3. **(a) By construction and a capability audit test.** The audit test boots the boot table and compares every live service's table with its manifest and declared gains, at ready and after the `system` kernel's faults; a mutation granting one capability more must fail it. Rejected: (b) gives `init` a new power to read other processes' tables for a check it cannot act on beyond what it already decides; (c) moves service policy into the kernel (D-015 keeps it out).
+
+**Decision.** Awaiting the maintainer (#155).
