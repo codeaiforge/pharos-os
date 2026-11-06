@@ -35,16 +35,12 @@ pub const AGENTS_LIMIT: u32 = 1 << 14;
 pub const AGENTS_TASKS: u32 = 5;
 pub const MODELS_READ_ONLY: u32 = 3 | 1 << 16;
 pub const AUDIT_TRAIL: u32 = 6;
-pub const FILES_READ_ONLY: u32 = 7 | 1 << 16;
 pub const KNOWLEDGE_STORE: u32 = 8;
-/// Knowledge clients (`pharos_proto::knowledge::client`).
-pub const KNOWLEDGE_RUNTIME: u32 = 1;
+/// `trust`'s knowledge client (`pharos_proto::knowledge::client`).
 pub const KNOWLEDGE_TRUST: u32 = 2;
 /// Audit clients (`pharos_proto::audit::client`).
 pub const AUDIT_TRUST: u32 = 2;
 pub const AUDIT_RUNTIME: u32 = 3;
-/// The runtime's UDP port, for its agents' datagrams (#109).
-pub const RUNTIME_PORT: u32 = 40_100;
 /// The slirp gateway, where `cargo xtask` runs the host echo server.
 pub const HOST_ECHO: Dest = ([10, 0, 2, 2], 47_000);
 pub const OUR_IP: [u8; 4] = [10, 0, 2, 15];
@@ -228,7 +224,10 @@ pub const BOOT: &[Service] = &[
     // The agent runtime (#98), after `trust`, which `init` then sends its
     // `STOP` capability: the runtime never decides whether it can be
     // stopped. `SEND` with `GRANT` on its own endpoint, to hand each agent
-    // a badged `SEND`. Inference client 1. Its boot policy table is empty.
+    // a badged `SEND`. Inference client 1 (it attaches its prompt buffer
+    // at start). Its boot policy table is empty, so it gets no network,
+    // files, or knowledge capability (handles 9 to 11, which it treats as
+    // optional; M4.2 narrowing, #157): an entry needing one adds it here.
     Service {
         name: "agents",
         path: RUNTIME_PATH,
@@ -248,13 +247,9 @@ pub const BOOT: &[Service] = &[
             send(Ep::Trust, TRUST_RUNTIME_BADGE),
             send(Ep::Store, AGENTS_TASKS),
             send(Ep::Audit, AUDIT_RUNTIME),
-            // The union of its policy table's destinations: none.
-            send(Ep::Net, RUNTIME_PORT),
-            send(Ep::Store, FILES_READ_ONLY),
-            send(Ep::Knowledge, KNOWLEDGE_RUNTIME),
         ],
         net: &[],
-        after: &[2, 3, 5, 6],
+        after: &[2, 3, 6],
         limit: AGENTS_LIMIT,
         gains: &[Gain::Processes],
     },

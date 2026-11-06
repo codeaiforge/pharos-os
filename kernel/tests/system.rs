@@ -36,8 +36,6 @@ const SUMMARY: [u8; 2] = [8, 0];
 const VIRTIO_NET: u16 = 0x1041;
 /// `trust` holds the virtio-console.
 const VIRTIO_CONSOLE: u16 = 0x1043;
-/// The agent runtime's network badge, its UDP port; only it holds it.
-const RUNTIME_PORT: u32 = 40_100;
 /// Namespace 3 read-only: the inference service's storage badge.
 const MODELS_READ_ONLY: u32 = 3 | 1 << 16;
 /// The knowledge service holds `init`'s report badge 6 (entry 5) and
@@ -181,7 +179,10 @@ fn run(t: &mut TestRun) {
                         |(o, _)| matches!(o, Object::Device(d) if d.pci.device == VIRTIO_CONSOLE),
                     )
                 });
-                agents = children(init, |caps| caps.iter().any(|(_, b)| *b == RUNTIME_PORT));
+                // Only the runtime holds the root filesystem (its manifest).
+                agents = children(init, |caps| {
+                    caps.iter().any(|(o, _)| matches!(o, Object::Filesystem(_)))
+                });
                 if knowledge.is_some_and(|id| process::kill(id, KILLED)) {
                     step = Step::StopNet;
                 } else {

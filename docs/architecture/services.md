@@ -206,7 +206,21 @@ A call's one-shot reply capability is revoked when the call returns, so it needs
 
 A mutation in which `init` grants one service one capability more than its entry must fail it, and one in which a manifest gives `GRANT` must fail a host rule.
 
-- *Implemented (#157, step 1):* `crates/pharos-services` with the types, the four tables written out (`BOOT`, `TEST`, `NETWORK`, `SUPERVISE`, chosen by `table(arg)`), and `check`, the rules above; `Restart` moved there (`pharos_programs::supervise` re-exports it). `Own` gains are implicit, so `gains` lists only `Processes` and `RuntimeChannel`. `init`'s `grant` copies each `Give` and refuses a `SEND` with badge 0 on another service's endpoint (`capability refused`). Every test kernel passed unchanged. Next: narrowing each boot service (step 2).
+- *Implemented (#157, step 1):* `crates/pharos-services` with the types, the four tables written out (`BOOT`, `TEST`, `NETWORK`, `SUPERVISE`, chosen by `table(arg)`), and `check`, the rules above; `Restart` moved there (`pharos_programs::supervise` re-exports it). `Own` gains are implicit, so `gains` lists only `Processes` and `RuntimeChannel`. `init`'s `grant` copies each `Give` and refuses a `SEND` with badge 0 on another service's endpoint (`capability refused`). Every test kernel passed unchanged.
+- *Implemented (#157, step 2):* each boot service reviewed against what its code uses:
+
+  | Service | Manifest | Change |
+  | --- | --- | --- |
+  | `virtio-blk` | console, the read-only disk | none: both used |
+  | `net` | console, the network card, its endpoint, report | none |
+  | `store` | console, the writable disk, its endpoint, report | none |
+  | `infer` | console, its endpoint, report, `models` read-only | none |
+  | `audit` | console, its endpoint, report, `audit` | none |
+  | `knowledge` | console, its endpoint, report, `knowledge` | none |
+  | `trust` | the trusted console, its endpoint, report, audit client 2, knowledge client 2; gains processes and the runtime channel | none: `verify` uses knowledge, the anchor and records audit; it has no debug console |
+  | `agents` | console, its endpoint (`RECEIVE`, `SEND`, `GRANT`), report, root, inference client 1, `trust` as the runtime, `agents` tasks, audit client 3; gains processes | **narrowed:** the network capability (no destinations), `files` read-only, and knowledge client 1 removed, as the boot policy table runs no agent; the runtime treats handles 9 to 11 as optional. It no longer waits for the knowledge service (`after`), though it still depends on it through `trust` |
+
+  Kept on purpose: the runtime's inference capability (it attaches its prompt buffer at start, before any agent) and root (agent programs and manifests); every service's debug console (its only log). A policy entry that needs a removed capability adds it to the entry, a reviewed change.
 
 **Not covered.** `init` itself (the kernel gives it every boot capability; it is reviewed code). Agents (their manifests are D-012's, and the `hostile` and `deputy` kernels test them). Memory mappings, bounded by page limits. Processes the runtime starts that are not agents: there are none.
 
