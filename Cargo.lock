@@ -30,6 +30,7 @@ version = "0.2.0"
 dependencies = [
  "pharos-elf",
  "pharos-fs",
+ "pharos-services",
 ]
 
 [[package]]

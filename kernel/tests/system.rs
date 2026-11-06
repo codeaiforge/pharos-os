@@ -27,7 +27,29 @@ use pharos_kernel::sched::TaskId;
 use pharos_kernel::testing::{self, TestRun};
 use pharos_kernel::{fs, ipc, kprintln, mm, pci, process, sched, storage, time};
 
+#[path = "common/manifests.rs"]
+mod manifests;
+
 pharos_kernel::test_kernel!(run);
+
+/// Runs the capability audit (#158) and checks it found nothing.
+fn audited(t: &mut TestRun, when: &str, audit: Option<&manifests::Audit<'_>>) {
+    let Some(audit) = audit else {
+        t.check(
+            &alloc::format!("{when}: the audit learned init's endpoints"),
+            false,
+        );
+        return;
+    };
+    let (findings, lines) = audit.check();
+    for line in lines.iter().chain(&findings) {
+        kprintln!("  audit: {line}");
+    }
+    t.check(
+        &alloc::format!("{when}: every service holds exactly its manifest and declared gains"),
+        findings.is_empty(),
+    );
+}
 
 /// The vector a killed service's end reports.
 const KILLED: u64 = 13;
@@ -157,6 +179,7 @@ fn run(t: &mut TestRun) {
 
     let mut w = Watch::default();
     let mut summary = None;
+    let mut audit = None;
     let mut step = Step::Ready;
     // The processes before each fault, so the kernel waits for new ones.
     let (mut knowledge, mut infer) = (None, None);
@@ -168,6 +191,11 @@ fn run(t: &mut TestRun) {
             Step::Ready => {
                 summary = ipc::poll(&report, Duration::from_millis(1)).map(|m| m.bytes().to_vec());
                 if summary.is_some() {
+                    match manifests::Audit::new(init, &report, pharos_services::BOOT) {
+                        Ok(a) => audit = Some(a),
+                        Err(why) => kprintln!("  audit: {why}"),
+                    }
+                    audited(t, "at ready", audit.as_ref());
                     knowledge = knowledge_of(init);
                     step = Step::KillKnowledge;
                 }
@@ -228,6 +256,7 @@ fn run(t: &mut TestRun) {
     sched::sleep(Duration::from_millis(500));
     w.poll();
     kprintln!("  reached step {step:?}");
+    audited(t, "after the faults", audit.as_ref());
 
     t.check(
         "init reported every boot service ready: [8, 0]",

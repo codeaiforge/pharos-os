@@ -25,6 +25,11 @@ pharos-fs = { path = "../crates/pharos-fs" }
 # The user-program format (D-008): same rules, no dependencies of its own.
 pharos-elf = { path = "../crates/pharos-elf" }
 
+# Test kernels only (D-027): the service manifests the `system` kernel
+# audits. Not part of the kernel itself.
+[dev-dependencies]
+pharos-services = { path = "../crates/pharos-services" }
+
 # Test kernels (D-009): each file in tests/ is a no_main kernel booted in QEMU
 # by `cargo xtask runner`. List every test kernel here with harness = false.
 [[test]]
