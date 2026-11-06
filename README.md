@@ -22,7 +22,7 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 | Read-only storage in the kernel (RAM disk, filesystem, file capabilities) | Implemented |
 | Rust user programs loaded from the filesystem (ELF loader, system-call library) | Implemented |
 | PCI discovery, device capabilities (MMIO, DMA, MSI-X interrupts), user-space virtio-blk driver | Implemented |
-| Service manager (`init`: restart policies with growing delays, a ready state, every service failure audited and shown on the trusted console, `services`), user-space network service (UDP, ICMP) with badged network capabilities | Implemented |
+| Service manager (`init`: restart policies with growing delays, a ready state, every service failure audited and shown on the trusted console, `services`; each service's capability manifest written out and audited), user-space network service (UDP, ICMP) with badged network capabilities | Implemented |
 | Crash-consistent writable storage service (`bin/store`) | Implemented |
 | TCP, more drivers | Planned |
 | Inference engine (`crates/pharos-infer`: GGUF Q8_0 Qwen2 models, Qwen2's tokenizer, batched prompts; `no_std`, safe Rust) | Implemented |
@@ -81,7 +81,7 @@ pharos 0.2.0
 $ cargo run -q -p pharos-cli -- info
 Pharos OS 0.2.0
 Project of: CodeAIForge
-Stage:      Phase 4 - Full Operating System (M4.1 complete, M4.2 next)
+Stage:      Phase 4 - Full Operating System (M4.2 complete, M4.3 next)
 ...
 
 $ cargo run -q -p pharos-cli -- doctor
