@@ -8,7 +8,7 @@
   - the `supervision` and `system` test kernels and their runner checks (#150–#153), and every new `unsafe` block.
 - **Design under review:** [services.md](../architecture/services.md), D-026, D-018, D-019, D-022, [capabilities.md](../architecture/capabilities.md).
 - **Date:** 2026-11-06, issue #154. Reviewer: AI-assisted (Claude Code), with code reading and a test for each claim. One finding is fixed, three are recorded.
-- **Status:** awaiting the maintainer's approval.
+- **Status:** **approved** by the maintainer on 2026-11-06 (M4.1 gate, #154), with F2, F3, and F4 recorded.
 
 ## Method
 
