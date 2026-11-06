@@ -12,6 +12,7 @@ pub mod knowledge;
 pub mod mailbox;
 pub mod models;
 pub mod net;
+pub mod supervise;
 pub mod tasks;
 pub mod tools;
 pub mod virtio;

@@ -19,13 +19,15 @@ use pharos_kernel::{fs, ipc, kprintln, mm, process, sched, storage, time};
 pharos_kernel::test_kernel!(run);
 
 /// `init`'s lines for the test table, in the order they must appear.
-const EXPECTED: [&str; 11] = [
+const EXPECTED: [&str; 12] = [
     "init: first started",
     "init: first done",
     "init: daemon started",
     "init: daemon ready",
     "init: crasher started",
     "init: crasher killed 14",
+    // Its policy (#150).
+    "init: crasher not restarted: restart policy never",
     "init: after-crasher skipped",
     "init: independent started",
     "init: independent done",

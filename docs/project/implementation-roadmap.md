@@ -489,7 +489,7 @@ Ordering notes:
 
 ### M4.1 — Integration of kernel and user-space services
 
-- **Objective and scope:** Boot into a complete user space with services started by a service manager. **Status: Current** (partly delivered: M2.10's `init` starts services in a fixed order and reports each failure; M3.3's supervision restarts them). Issues #148–#154. D-026 accepted (#148): a restart policy per service, a ready state for the services and the agent platform, and every failure on the trusted console and in the audit trail. Design approved (#149): [services.md](../architecture/services.md#supervision-and-readiness-m41-d-026). Next: restart policies (#150).
+- **Objective and scope:** Boot into a complete user space with services started by a service manager. **Status: Current** (partly delivered: M2.10's `init` starts services in a fixed order and reports each failure; M3.3's supervision restarts them). Issues #148–#154. D-026 accepted (#148): a restart policy per service, a ready state for the services and the agent platform, and every failure on the trusted console and in the audit trail. Design approved (#149): [services.md](../architecture/services.md#supervision-and-readiness-m41-d-026). Implemented: restart policies per service (#150). Next: the ready state (#151).
 - **Deliverables:** Service manager with declared dependencies and restart policies, building on `init`; integrated system image.
 - **Prerequisites:** Phase 2 gate.
 - **Acceptance criteria:** System reaches a defined "ready" state in QEMU; each service failure is reported.

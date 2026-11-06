@@ -145,6 +145,8 @@ Builds on M3.3's supervision (#100): a crashed daemon restarted at once, at most
 - **Unchanged:** a daemon that sends no `ready` within 10 s is stopped and counted as a crash (so its policy applies; today it is never restarted); a service stopped by the user is never restarted, whatever its policy; restarts count per boot (open question below).
 - **Dependents** (the entries whose `after` names it, directly or through others) are named in the restart's report and keep running; they reach the new instance on the same endpoint (storage, inference, and knowledge clients attach their buffers again on `NO_BUFFER`).
 
+- *Implemented (#150):* `pharos_programs::supervise` (`Restart`, `delay`, `dependents`) and the `restart` field on every table entry (boot daemons `Up(3)`, one-shots `Never`); `init` waits a restart's delay as a deadline (state `Restarting`), and its line reads `init: <name> restarting <n> of <limit> in <ms> ms; used by <dependents>`, or `not restarted: restart policy never` / `restarts used up`. The `supervision` kernel's `silent` is `Up(1)` and the new `brittle` `Never`.
+
 **The ready state (#151).**
 - After the last entry, `init` decides: **ready** if every entry succeeded (a daemon that sent `ready`, a one-shot that exited 0). The agent runtime sends `ready` only after loading its policy table and tasks and giving `trust` its channel, and `trust` only with its console set up, so ready covers the agent platform.
 - **Reported three ways:** to the kernel as now (`[ready, failed]`, which the boot check reads); as an audit record (actor `init`, action `service`, detail `ready <n> services` or `not ready <failed> failed`); and to `trust`, which prints `system ready: <n> services` or `system not ready: <names>` (names cut to fit the line).

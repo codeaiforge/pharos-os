@@ -6,9 +6,11 @@
 //! service, when `client: kill the inference service` appears the
 //! inference service (`process::kill`, as a crash would), and it stops the
 //! `steady` daemon once ready. Then it checks `init`'s lines: a daemon
-//! that never sends `ready` is stopped after 10 s, a crashing one is
-//! restarted 3 times and then left, a stopped one is not restarted, and
-//! both killed services are restarted. The client's steps check that its
+//! that never sends `ready` is stopped after 10 s and, by its policy,
+//! restarted once; a crashing one is restarted 3 times after growing
+//! delays (#150) and then left; one whose policy is never is left; a
+//! stopped one is not restarted; and both killed services are
+//! restarted, their dependents named. The client's steps check that its
 //! services served again, and the kernel that the storage and inference
 //! services freed the slots of clients that ended. Runs under UEFI
 //! (D-009).
@@ -67,6 +69,8 @@ fn used(id: Option<TaskId>) -> Option<u64> {
 #[derive(Default)]
 struct Watch {
     lines: Vec<(TaskId, Vec<u8>)>,
+    /// When each line was first seen (polled every 50 ms or so).
+    seen: Vec<Duration>,
 }
 
 impl Watch {
@@ -75,11 +79,20 @@ impl Watch {
             if !self.lines.contains(&l) {
                 kprintln!("  {}: {}", l.0, core::str::from_utf8(&l.1).unwrap_or("?"));
                 self.lines.push(l);
+                self.seen.push(time::uptime());
             }
         }
     }
     fn has(&self, text: &str) -> bool {
         self.lines.iter().any(|(_, l)| l == text.as_bytes())
+    }
+    /// When the first line starting with `prefix` was seen.
+    fn at(&self, prefix: &str) -> Option<Duration> {
+        let i = (self.lines.iter()).position(|(_, l)| l.starts_with(prefix.as_bytes()))?;
+        Some(self.seen[i])
+    }
+    fn starts(&self, prefix: &str) -> bool {
+        self.at(prefix).is_some()
     }
     fn who(&self, text: &str) -> Option<TaskId> {
         self.lines
@@ -165,7 +178,10 @@ fn run(t: &mut TestRun) {
             served = used(infer_of(init));
         }
         let finished = w.has("init: holder done") || w.has("init: holder exited");
-        if finished && w.has("init: flaky not restarted: restarts used up") {
+        if finished
+            && w.has("init: flaky not restarted: restarts used up")
+            && w.has("init: silent not restarted: restarts used up")
+        {
             break;
         }
         sched::sleep(Duration::from_millis(50));
@@ -180,9 +196,21 @@ fn run(t: &mut TestRun) {
             "a daemon that never sends ready is stopped after 10 s",
             "init: silent no ready within 10 s; stopped",
         ),
+        (
+            "and, its policy allowing one restart, restarted",
+            "init: silent restarting 1 of 1 in 100 ms",
+        ),
+        (
+            "then stopped again and left",
+            "init: silent not restarted: restarts used up",
+        ),
         ("a crashed daemon is reported", "init: flaky killed 14"),
-        ("and restarted", "init: flaky restarting 1"),
-        ("a third time", "init: flaky restarting 3"),
+        ("and restarted", "init: flaky restarting 1 of 3 in 100 ms"),
+        ("again later", "init: flaky restarting 2 of 3 in 400 ms"),
+        (
+            "a third time, later still",
+            "init: flaky restarting 3 of 3 in 1600 ms",
+        ),
         (
             "but not a fourth",
             "init: flaky not restarted: restarts used up",
@@ -195,12 +223,26 @@ fn run(t: &mut TestRun) {
             "the killed storage service is reported",
             "init: store killed 13",
         ),
-        ("and restarted", "init: store restarting 1"),
+        (
+            "and restarted, its dependents named",
+            "init: store restarting 1 of 3 in 100 ms; used by infer, client, holder",
+        ),
         (
             "the killed inference service is reported",
             "init: infer killed 13",
         ),
-        ("and restarted", "init: infer restarting 1"),
+        (
+            "and restarted",
+            "init: infer restarting 1 of 3 in 100 ms; used by client",
+        ),
+        (
+            "a daemon whose policy is never is reported",
+            "init: brittle killed 14",
+        ),
+        (
+            "and not restarted",
+            "init: brittle not restarted: restart policy never",
+        ),
         ("the holder exited", "init: holder done"),
         ("the client exited with no failed step", "init: client done"),
     ] {
@@ -213,12 +255,43 @@ fn run(t: &mut TestRun) {
     );
     t.check(
         "steady was not restarted",
-        !w.has("init: steady restarting 1"),
+        !w.starts("init: steady restarting"),
     );
     t.check(
         "flaky was not restarted a fourth time",
-        !w.has("init: flaky restarting 4"),
+        !w.starts("init: flaky restarting 4"),
     );
+    t.check(
+        "brittle was not restarted",
+        !w.starts("init: brittle restarting"),
+    );
+    // Each restart waits its delay (#150): the next crash's line comes no
+    // sooner, less 50 ms for when the lines were seen.
+    let gap = |from: &str, to: &str| w.at(from).zip(w.at(to)).map(|(a, b)| b.saturating_sub(a));
+    for (from, to, ms) in [
+        (
+            "init: flaky restarting 1 ",
+            "init: flaky restarting 2 ",
+            100,
+        ),
+        (
+            "init: flaky restarting 2 ",
+            "init: flaky restarting 3 ",
+            400,
+        ),
+        (
+            "init: flaky restarting 3 ",
+            "init: flaky not restarted",
+            1600,
+        ),
+    ] {
+        let g = gap(from, to);
+        kprintln!("  {from}to {to}: {g:?}");
+        t.check(
+            &alloc::format!("flaky waited {ms} ms before a restart"),
+            g.is_some_and(|g| g + Duration::from_millis(50) >= Duration::from_millis(ms)),
+        );
+    }
     for step in [
         "a missing model file is a read failure",
         "a read failure is not kept: the model is not loaded",

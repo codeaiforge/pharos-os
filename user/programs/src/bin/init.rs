@@ -21,6 +21,9 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use pharos_programs::supervise::{self, Restart};
 use pharos_proto::audit;
 use pharos_proto::infer::{self, Request as InferRequest};
 use pharos_proto::net::{self, Allowed, Dest, Request as NetRequest};
@@ -103,6 +106,9 @@ struct Service {
     path: &'static [u8],
     arg: u64,
     kind: Kind,
+    /// What happens when it crashes, exits, or sends no `ready` in time
+    /// (#150, D-026).
+    restart: Restart,
     caps: &'static [Cap],
     /// Indexes of services that must have succeeded first.
     after: &'static [usize],
@@ -115,6 +121,7 @@ const NET: Service = Service {
     path: b"bin/net",
     arg: 0,
     kind: Kind::Daemon,
+    restart: Restart::Up(3),
     caps: &[
         Cap::Console,
         Cap::Device(VIRTIO_NET),
@@ -174,6 +181,7 @@ const BOOT: &[Service] = &[
         path: b"bin/virtio-blk",
         arg: 0,
         kind: Kind::OneShot,
+        restart: Restart::Never,
         caps: &[Cap::Console, Cap::Device(VIRTIO_BLK)],
         after: &[],
         limit: 0,
@@ -184,6 +192,7 @@ const BOOT: &[Service] = &[
         path: b"bin/store",
         arg: 0,
         kind: Kind::Daemon,
+        restart: Restart::Up(3),
         caps: &[
             Cap::Console,
             Cap::SecondDevice(VIRTIO_BLK),
@@ -201,6 +210,7 @@ const BOOT: &[Service] = &[
         path: b"bin/infer",
         arg: 0,
         kind: Kind::Daemon,
+        restart: Restart::Up(3),
         caps: &[
             Cap::Console,
             Cap::InferService,
@@ -217,6 +227,7 @@ const BOOT: &[Service] = &[
         path: b"bin/audit",
         arg: 0,
         kind: Kind::Daemon,
+        restart: Restart::Up(3),
         caps: &[
             Cap::Console,
             Cap::AuditService,
@@ -233,6 +244,7 @@ const BOOT: &[Service] = &[
         path: b"bin/knowledge",
         arg: 0,
         kind: Kind::Daemon,
+        restart: Restart::Up(3),
         caps: &[
             Cap::Console,
             Cap::KnowledgeService,
@@ -250,6 +262,7 @@ const BOOT: &[Service] = &[
         path: b"bin/trust",
         arg: 0,
         kind: Kind::Daemon,
+        restart: Restart::Up(3),
         caps: &[
             Cap::Device(VIRTIO_CONSOLE),
             Cap::TrustService,
@@ -268,6 +281,7 @@ const BOOT: &[Service] = &[
         path: RUNTIME_PATH,
         arg: 0,
         kind: Kind::Daemon,
+        restart: Restart::Up(3),
         caps: &[
             Cap::Console,
             Cap::AgentsService,
@@ -294,6 +308,7 @@ const NETWORK: &[Service] = &[
         path: b"bin/netclient",
         arg: 2,
         kind: Kind::Daemon,
+        restart: Restart::Up(3),
         caps: &[
             Cap::Console,
             Cap::Network(40001, &[(OUR_IP, 40000)]),
@@ -307,6 +322,7 @@ const NETWORK: &[Service] = &[
         path: b"bin/netclient",
         arg: 1,
         kind: Kind::OneShot,
+        restart: Restart::Never,
         caps: &[
             Cap::Console,
             Cap::Network(40000, &[HOST_ECHO, (OUR_IP, 40001), (OUR_IP, 40999)]),
@@ -320,6 +336,7 @@ const NETWORK: &[Service] = &[
         path: b"bin/netclient",
         arg: 3,
         kind: Kind::OneShot,
+        restart: Restart::Never,
         caps: &[Cap::Console, Cap::Network(1 << 16, &[HOST_ECHO])],
         after: &[0],
         limit: 0,
@@ -332,6 +349,7 @@ const TEST: &[Service] = &[
         path: b"bin/svc",
         arg: 0,
         kind: Kind::OneShot,
+        restart: Restart::Never,
         caps: &[Cap::Console],
         after: &[],
         limit: 0,
@@ -341,6 +359,7 @@ const TEST: &[Service] = &[
         path: b"bin/svc",
         arg: 1,
         kind: Kind::Daemon,
+        restart: Restart::Up(3),
         caps: &[Cap::Console, Cap::Report],
         after: &[0],
         limit: 0,
@@ -350,6 +369,7 @@ const TEST: &[Service] = &[
         path: b"bin/svc",
         arg: 2,
         kind: Kind::OneShot,
+        restart: Restart::Never,
         caps: &[Cap::Console],
         after: &[],
         limit: 0,
@@ -359,6 +379,7 @@ const TEST: &[Service] = &[
         path: b"bin/svc",
         arg: 0,
         kind: Kind::OneShot,
+        restart: Restart::Never,
         caps: &[Cap::Console],
         after: &[2],
         limit: 0,
@@ -368,6 +389,7 @@ const TEST: &[Service] = &[
         path: b"bin/svc",
         arg: 0,
         kind: Kind::OneShot,
+        restart: Restart::Never,
         caps: &[Cap::Console],
         after: &[],
         limit: 0,
@@ -377,6 +399,7 @@ const TEST: &[Service] = &[
         path: b"bin/no-such-program",
         arg: 0,
         kind: Kind::OneShot,
+        restart: Restart::Never,
         caps: &[Cap::Console],
         after: &[],
         limit: 0,
@@ -386,6 +409,7 @@ const TEST: &[Service] = &[
         path: b"bin/virtio-blk",
         arg: 0,
         kind: Kind::OneShot,
+        restart: Restart::Never,
         caps: &[Cap::Console, Cap::Device(VIRTIO_BLK)],
         after: &[],
         limit: 0,
@@ -393,8 +417,9 @@ const TEST: &[Service] = &[
 ];
 
 /// The `supervision` test kernel's table (#100): the storage and inference
-/// services, a daemon that never reports ready, one that crashes after
-/// each start, one the kernel stops, an inference client the kernel
+/// services, a daemon that never reports ready (restarted once), one
+/// that crashes after each start (restarted 3 times, with growing
+/// delays), one that crashes and is never restarted, one the kernel stops, an inference client the kernel
 /// kills services under, and a one-shot that holds a storage buffer and
 /// exits.
 const SUPERVISE: &[Service] = &[
@@ -403,6 +428,7 @@ const SUPERVISE: &[Service] = &[
         path: b"bin/store",
         arg: 0,
         kind: Kind::Daemon,
+        restart: Restart::Up(3),
         caps: &[
             Cap::Console,
             Cap::SecondDevice(VIRTIO_BLK),
@@ -417,6 +443,7 @@ const SUPERVISE: &[Service] = &[
         path: b"bin/infer",
         arg: 0,
         kind: Kind::Daemon,
+        restart: Restart::Up(3),
         caps: &[
             Cap::Console,
             Cap::InferService,
@@ -431,6 +458,8 @@ const SUPERVISE: &[Service] = &[
         path: b"bin/svc",
         arg: 3,
         kind: Kind::Daemon,
+        // One restart: no `ready` in 10 s counts as a crash (#150).
+        restart: Restart::Up(1),
         caps: &[Cap::Console, Cap::Report],
         after: &[],
         limit: 0,
@@ -440,6 +469,18 @@ const SUPERVISE: &[Service] = &[
         path: b"bin/svc",
         arg: 4,
         kind: Kind::Daemon,
+        restart: Restart::Up(3),
+        caps: &[Cap::Console, Cap::Report],
+        after: &[],
+        limit: 0,
+    },
+    // Crashes as `flaky` does, and is never restarted (#150).
+    Service {
+        name: "brittle",
+        path: b"bin/svc",
+        arg: 4,
+        kind: Kind::Daemon,
+        restart: Restart::Never,
         caps: &[Cap::Console, Cap::Report],
         after: &[],
         limit: 0,
@@ -449,6 +490,7 @@ const SUPERVISE: &[Service] = &[
         path: b"bin/svc",
         arg: 6,
         kind: Kind::Daemon,
+        restart: Restart::Up(3),
         caps: &[Cap::Console, Cap::Report],
         after: &[],
         limit: 0,
@@ -459,6 +501,7 @@ const SUPERVISE: &[Service] = &[
         path: b"bin/inferclient",
         arg: 4,
         kind: Kind::OneShot,
+        restart: Restart::Never,
         caps: &[Cap::Console, Cap::Inference(2), Cap::Storage(3)],
         after: &[0, 1],
         limit: 1024,
@@ -470,6 +513,7 @@ const SUPERVISE: &[Service] = &[
         path: b"bin/svc",
         arg: 5,
         kind: Kind::OneShot,
+        restart: Restart::Never,
         caps: &[Cap::Console, Cap::Storage(1)],
         after: &[0],
         limit: 2048,
@@ -546,6 +590,8 @@ enum State {
     Running(Handle),
     /// A daemon that sent `ready`.
     Ok(Handle),
+    /// Waiting to be started again at this `uptime` (#150).
+    Restarting(u64),
     /// A one-shot service that exited with 0.
     Done,
     Failed,
@@ -553,9 +599,6 @@ enum State {
 
 /// How long a daemon may take to send `ready` (#100).
 const READY_US: u64 = 10_000_000;
-/// Restarts of a daemon that crashed or exited (#100). One that was
-/// stopped is never restarted: the trusted path's safe mode.
-const MAX_RESTARTS: u8 = 3;
 /// How long `init` waits for an audit record.
 const AUDIT_US: u64 = 1_000_000;
 /// How long a service may take to answer `RELEASE`.
@@ -839,28 +882,63 @@ impl Init {
             _ => false,
         };
         self.state[j] = State::Failed;
-        if !crashed || service.kind != Kind::Daemon {
-            return;
+        if crashed {
+            self.crashed(j);
         }
-        if self.restarts[j] >= MAX_RESTARTS {
-            say(service.name, "not restarted: restarts used up", None);
-            return;
-        }
-        self.restarts[j] += 1;
-        say(
-            service.name,
-            "restarting",
-            Some(u64::from(self.restarts[j])),
-        );
-        self.start(j);
     }
 
-    /// Stops daemons that did not send `ready` in time. Returns how long
-    /// until the next deadline.
+    /// Service `j` crashed, exited, or sent no `ready` in time: restarted
+    /// after its policy's delay, or left (#150). One the user stopped
+    /// never comes here: the trusted path's safe mode.
+    fn crashed(&mut self, j: usize) {
+        let service = &self.table[j];
+        let Some(wait) = supervise::delay(service.restart, self.restarts[j]) else {
+            let why = match service.restart {
+                Restart::Never => "not restarted: restart policy never",
+                Restart::Up(_) => "not restarted: restarts used up",
+            };
+            say(service.name, why, None);
+            return;
+        };
+        self.restarts[j] += 1;
+        self.state[j] = State::Restarting(uptime().saturating_add(wait));
+        let mut d = [[0u8; 20]; 3];
+        let [a, b, c] = &mut d;
+        let mut line = [
+            &b"init: "[..],
+            service.name.as_bytes(),
+            b" restarting ",
+            decimal(u64::from(self.restarts[j]), a),
+            b" of ",
+            decimal(u64::from(service.restart.limit()), b),
+            b" in ",
+            decimal(wait / 1000, c),
+            b" ms",
+        ]
+        .concat();
+        let after: alloc::vec::Vec<&[usize]> = self.table.iter().map(|s| s.after).collect();
+        for (k, d) in supervise::dependents(&after, j).into_iter().enumerate() {
+            line.extend_from_slice(if k == 0 { b"; used by " } else { b", " });
+            line.extend_from_slice(self.table[d].name.as_bytes());
+        }
+        let _ = debug_write(CONSOLE, &line);
+    }
+
+    /// Starts services whose restart delay has passed, and stops daemons
+    /// that did not send `ready` in time. Returns how long until the next
+    /// deadline.
     fn check_ready(&mut self) -> u64 {
         let now = uptime();
         let mut wait = u64::MAX;
         for j in 0..self.table.len().min(MAX_SERVICES) {
+            if let State::Restarting(at) = self.state[j] {
+                if now >= at {
+                    self.start(j);
+                } else {
+                    wait = wait.min(at - now);
+                    continue;
+                }
+            }
             let State::Running(p) = self.state[j] else {
                 continue;
             };
@@ -873,6 +951,11 @@ impl Init {
                 let _ = pharos_user::delete(p);
                 self.release(j);
                 self.state[j] = State::Failed;
+                // Counted as a crash (D-026 design, #149).
+                self.crashed(j);
+                if let State::Restarting(at) = self.state[j] {
+                    wait = wait.min(at.saturating_sub(now));
+                }
             } else {
                 wait = wait.min(self.deadline[j] - now);
             }
@@ -975,7 +1058,7 @@ fn main(arg: u64) -> u64 {
         }
         init.start(i);
         // Until this service succeeds or fails; others' events too.
-        while matches!(init.state[i], State::Running(_)) {
+        while matches!(init.state[i], State::Running(_) | State::Restarting(_)) {
             init.step();
         }
     }
