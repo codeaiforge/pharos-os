@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), and Phase 3 — AI Agent Platform are done. Current milestone: M4.1 — Integration of kernel and user-space services.** Everything in Phases 4–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), and Phase 3 — AI Agent Platform are done. Current milestone: M4.2 — Security model and privilege separation.** Everything in Phases 4–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -42,7 +42,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | 1 | Foundation | Done (v0.1.0) |
 | 2 | Core System | Done (v0.2.0) |
 | 3 | AI Agent Platform | Done (gate passed 2026-11-06 with M3.8) |
-| 4 | Full Operating System | **Current** (M4.1) |
+| 4 | Full Operating System | **Current** (M4.2; M4.1 done) |
 | 5 | Deployment and Release | Planned |
 
 ---
@@ -475,7 +475,7 @@ Ordering notes:
 
 ## Phase 4 — Full Operating System
 
-**Status: Current** (M4.1).
+**Status: Current** (M4.2; M4.1 done).
 
 - **Objective and scope:** Integrate the kernel, user-space services, and AI platform into a coherent, configurable, recoverable system.
 - **Deliverables:** M4.1–M4.6.
@@ -489,7 +489,7 @@ Ordering notes:
 
 ### M4.1 — Integration of kernel and user-space services
 
-- **Objective and scope:** Boot into a complete user space with services started by a service manager. **Status: Current** (partly delivered: M2.10's `init` starts services in a fixed order and reports each failure; M3.3's supervision restarts them). Issues #148–#154. D-026 accepted (#148): a restart policy per service, a ready state for the services and the agent platform, and every failure on the trusted console and in the audit trail. Design approved (#149): [services.md](../architecture/services.md#supervision-and-readiness-m41-d-026). Implemented: restart policies per service (#150). Implemented: the ready state (#151). Implemented: failure reporting and `services` (#152). Implemented: the end-to-end `system` test (#153). Next: the M4.1 gate (#154).
+- **Objective and scope:** Boot into a complete user space with services started by a service manager. **Status: Done** — gate passed 2026-11-06: the CI jobs passed on `main` at `e1e4e47` ([run 42233913959](https://github.com/codeaiforge/pharos-os/actions/runs/42233913959)) with 67 test kernels, among them `system` (the boot table to ready, on the trusted console and in the audit trail; the knowledge service killed and restarted after its delay with its dependents named and still running; the network service stopped and never restarted; the inference service killed past its 3 restarts and given up; `services` showing each state; every event one `trust` line and one audit record) and `supervision` (each restart policy and delay, each event one line and one record). Ignoring every service's restart policy failed CI on a throwaway branch ([run 42235010063](https://github.com/codeaiforge/pharos-os/actions/runs/42235010063)) at the `services` kernel (a crashed one-shot whose policy is never restarted); the host tests and Rust 1.85 passed, as the change is only in `init`, and the branch was deleted. No CI run on `main` failed during M4.1. The IPC round trip measured a 1,856 ns median, within D-004's budget. The security review ([review-m4.1-services.md](../security/review-m4.1-services.md)) fixed one issue (F1: a restart record's list of dependents could be cut mid-name) and recorded three (F2: records are written at least once, so one can be there twice; F3: at most 32 wait for the audit service; F4: `services` holds the trusted console up to 1 s per page); no new `unsafe`. The maintainer approved it on 2026-11-06. Delivered: D-026 (#148), the design (#149), restart policies (#150), the ready state (#151), failure reporting and `services` (#152), the `system` test (#153), and the gate (#154).
 - **Deliverables:** Service manager with declared dependencies and restart policies, building on `init`; integrated system image.
 - **Prerequisites:** Phase 2 gate.
 - **Acceptance criteria:** System reaches a defined "ready" state in QEMU; each service failure is reported.
@@ -501,7 +501,7 @@ Ordering notes:
 
 ### M4.2 — Security model and privilege separation
 
-- **Objective and scope:** Apply the security model system-wide: each service runs with minimal capabilities. **Status: Planned.**
+- **Objective and scope:** Apply the security model system-wide: each service runs with minimal capabilities. **Status: Current.**
 - **Deliverables:** Per-service capability manifests; privilege-separation review.
 - **Prerequisites:** M4.1, M3.4.
 - **Acceptance criteria:** No user-space service holds capabilities beyond its manifest; tests confirm.
@@ -671,4 +671,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3. The current milestone is **M4.1 — Integration of kernel and user-space services**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3. M4.1 (integration of kernel and user-space services) passed its gate on 2026-11-06. The current milestone is **M4.2 — Security model and privilege separation**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

@@ -1,6 +1,6 @@
 # Threat model
 
-**Status:** updated at the M2.10 gate, which closes Phase 2 (2026-10-29), at the M3.4 gate (2026-11-04), at the M3.5 gate (2026-11-05), at the M3.6 gate (2026-11-05), at the M3.7 gate (2026-11-05), and at the M3.8 gate, which closes Phase 3 (2026-11-06). It covers what exists today (the host workspace, and a kernel with isolated user processes, a read-only RAM-disk filesystem, user-space drivers, a service manager, and a user-space network service) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
+**Status:** updated at the M2.10 gate, which closes Phase 2 (2026-10-29), at the M3.4 gate (2026-11-04), at the M3.5 gate (2026-11-05), at the M3.6 gate (2026-11-05), at the M3.7 gate (2026-11-05), at the M3.8 gate, which closes Phase 3 (2026-11-06), and at the M4.1 gate (2026-11-06). It covers what exists today (the host workspace, and a kernel with isolated user processes, a read-only RAM-disk filesystem, user-space drivers, a service manager, and a user-space network service) and the planned system. It must be updated at each phase gate (see the [roadmap](../project/implementation-roadmap.md)).
 
 ## Security principles
 
