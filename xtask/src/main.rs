@@ -1795,6 +1795,9 @@ fn supervision_checks(image: &Path, console: &str) -> Result<()> {
             &format!("not ready {not_ready}"),
             &format!("system not ready: {not_ready}"),
         ),
+        // The store is killed once: the record it was writing may be sent
+        // again (review F2).
+        1,
         &[
             "services: store ready, restarts 1 of 3",
             "services: trust ready, restarts 0 of 3",
@@ -1818,6 +1821,7 @@ fn system_checks(image: &Path, console: &str) -> Result<()> {
         console,
         SYSTEM_EVENTS,
         ("ready 8 services", "system ready: 8 services"),
+        0,
         &[
             "services: virtio-blk done, restarts 0 of 0",
             "services: net stopped, restarts 0 of 3",
@@ -1835,13 +1839,16 @@ fn system_checks(image: &Path, console: &str) -> Result<()> {
 /// many `trust` lines and audit records (actor the service, from `init`),
 /// in the store's one audit stream; the system's state (`init`'s detail,
 /// `trust`'s line) is one of each; and `services` showed each of `listed`
-/// once.
+/// once. Up to `copies` records may be in the trail twice, each copy right
+/// after its original: records are written at least once (#154, review
+/// F2), and a store killed mid-write leaves at most one.
 fn event_checks(
     test: &str,
     image: &Path,
     console: &str,
     events: &[(&str, &str, &str, usize)],
     system: (&str, &str),
+    copies: usize,
     listed: &[&str],
 ) -> Result<()> {
     let streams = store_image::audit(image)?;
@@ -1850,8 +1857,9 @@ fn event_checks(
     };
     let record = |actor: &str, detail: &str| {
         let want = format!("client 1 Event service {actor} task 0/0  init outcome 1 {detail}");
-        records.iter().filter(|l| l.ends_with(&want)).count()
+        records_and_copies(records, &want)
     };
+    let mut copied = 0;
     let shown = |line: &str| console.matches(&format!("{line}\r\n")).count();
     let mut checks: Vec<(String, String, String, usize)> = events
         .iter()
@@ -1866,10 +1874,13 @@ fn event_checks(
         .collect();
     checks.push(("init".into(), system.0.into(), system.1.into(), 1));
     for (actor, detail, line, times) in &checks {
-        let (r, c) = (record(actor, detail), shown(line));
-        if (r, c) != (*times, *times) {
+        let ((all, again), c) = (record(actor, detail), shown(line));
+        // An extra record counts as a copy only if it follows its original.
+        let extra = all.saturating_sub(*times).min(again);
+        copied += extra;
+        if (all - extra, c) != (*times, *times) || copied > copies {
             return Err(format!(
-                "\"{actor} {detail}\": {r} audit records and {c} trusted console lines, expected {times} each"
+                "\"{actor} {detail}\": {all} audit records ({again} right after one the same) and {c} trusted console lines, expected {times} each and at most {copies} copies in all"
             ));
         }
     }
@@ -1882,7 +1893,22 @@ fn event_checks(
         "  {test}: {} events, each one audit record and one trusted console line; `services` showed every state",
         checks.iter().map(|c| c.3).sum::<usize>()
     );
+    if copied > 0 {
+        println!(
+            "  {test}: {copied} record sent again after the store was killed (at least once, review F2)"
+        );
+    }
     Ok(())
+}
+
+/// How many records end with `want`, and how many of them come right
+/// after one that does too (a copy sent again, review F2).
+fn records_and_copies(records: &[String], want: &str) -> (usize, usize) {
+    let all = records.iter().filter(|l| l.ends_with(want)).count();
+    let again = (records.windows(2))
+        .filter(|w| w[0].ends_with(want) && w[1].ends_with(want))
+        .count();
+    (all, again)
 }
 
 /// After the `permissions` test kernel (#108): the audit trail holds every
@@ -3005,6 +3031,21 @@ mod tests {
             "    module_path: boot():/boot/modules/root\n    module_string: root\n\
              \x20   module_path: boot():/boot/modules/odd\n    module_string: odd\n"
         ));
+    }
+
+    #[test]
+    fn copies_count_only_right_after_their_original() {
+        let trail = |details: &[&str]| -> Vec<String> {
+            (details.iter().enumerate())
+                .map(|(i, d)| format!("#{i} 1.000 s client 1 Event service x {d}"))
+                .collect()
+        };
+        let t = trail(&["stopped", "stopped", "killed", "stopped"]);
+        assert_eq!(records_and_copies(&t, "stopped"), (3, 1));
+        assert_eq!(records_and_copies(&t, "killed"), (1, 0));
+        // Apart, two are two events, never a copy.
+        assert_eq!(records_and_copies(&trail(&["a", "b", "a"]), "a"), (2, 0));
+        assert_eq!(records_and_copies(&trail(&[]), "a"), (0, 0));
     }
 
     #[test]
