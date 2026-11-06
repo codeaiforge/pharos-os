@@ -513,7 +513,7 @@ Ordering notes:
 
 ### M4.3 — Reliable boot and recovery
 
-- **Objective and scope:** Detect failed boots and updates and recover to a known-good state. Agents may diagnose and propose repairs, but recovery never depends on them. **Status: Current.**
+- **Objective and scope:** Detect failed boots and updates and recover to a known-good state. Agents may diagnose and propose repairs, but recovery never depends on them. **Status: Current.** Issues #160–#167. D-028 accepted (#160): an update replaces the root image only; a factory image on the boot medium plus A/B slots in the store; `init` verifies Ed25519-signed slots and falls back after 3 attempts without ready; safe mode and recovery automatic, from Limine, or from `trust`; updates need the user's approval. Next: the design (#161).
 - **Deliverables:** Recovery mode and safe mode reachable through the trusted path (D-018); known-good image fallback (for example A/B images); signed system updates with rollback; detection of restart and repair loops; Secure Boot evaluation.
 - **Prerequisites:** M4.1; M3.0 (writable storage).
 - **Acceptance criteria:** Simulated corrupted system image leads to recovery, not an unbootable system; a rejected or failing update is rolled back; an update proposed by an agent cannot be applied without the required approval; a malfunctioning agent cannot disable recovery or the emergency stop.
@@ -626,7 +626,7 @@ Ordering notes:
 ### M5.5 — Reproducible builds, release artifacts, documentation, and release criteria
 
 - **Objective and scope:** Produce verifiable releases. **Status: Planned.**
-- **Deliverables:** Reproducible build procedure; signed artifacts; user documentation; written release criteria.
+- **Deliverables:** Reproducible build procedure; signed artifacts; user documentation; written release criteria; Secure Boot enforcement and a secret-keyed audit anchor, moved here from M4.3 (D-028).
 - **Prerequisites:** M5.2, M5.3, M5.4.
 - **Acceptance criteria:** Two independent builds produce bit-identical artifacts; release criteria documented and met.
 - **Validation:** Automated: reproducibility check. Manual: maintainer approval.
@@ -669,6 +669,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-025 | The knowledge service | M3.8 | **Accepted** (#140): a new `knowledge` service on its own store namespace, reached by agents only through the runtime; append-only versions; scopes granted as runtime permissions (`knowledge read`/`write <scope>`), with queries that skip what the caller, or the evidence it cites, cannot read; only the user marks a version verified, on the trusted console |
 | D-026 | Service manager: restart policies, ready state, reporting | M4.1 | **Accepted** (#148): a restart policy per table entry (never, or up to N with a growing delay), dependents reported and not restarted, a stopped service never; ready means every boot service and the agent platform, reported to the kernel, the audit trail, and the trusted console; every failure, skip, and restart audited and shown by `trust` from structured fields, with a `services` command |
 | D-027 | Per-service capability manifests and how they are checked | M4.2 | **Accepted** (#155): the manifest is `init`'s table entry, each capability's object, rights, and badge written out, plus each service's declared runtime gains; enforced by construction and checked by a capability audit test kernel at ready and after faults; no manifest file, no new kernel call |
+| D-028 | Boot recovery, known-good images, and signed updates | M4.3 | **Accepted** (#160): an update replaces only the root image; a factory image on the boot medium plus slots A and B in the store; `init` verifies a slot's Ed25519 signature (`ed25519-compact`, after review) and has the kernel mount it with one new call; an attempt record marked good at ready, 3 failed attempts or a time limit fall back; safe mode and recovery automatic, from Limine, or from `trust`; an update needs a valid signature and the user's yes; Secure Boot evaluated now, enforced in M5.5 |
 
 ## Next milestone
 
