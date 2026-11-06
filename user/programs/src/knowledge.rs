@@ -116,6 +116,14 @@ fn split(p: &[u8]) -> Option<(&[u8], &[u8], u32, bool)> {
     Some((scope, key, u32::try_from(v).ok()?, mark))
 }
 
+/// The version in `bytes`, if it parses, sits at its own path, and its
+/// content matches its hash.
+fn stored<'a>(bytes: &'a [u8], scope: &[u8], key: &[u8], number: u32) -> Option<Version<'a>> {
+    parse_version(bytes).filter(|v| {
+        v.scope == scope && v.key == key && v.version == number && v.hash == sha256(&[v.content])
+    })
+}
+
 #[derive(Default)]
 pub struct Index {
     entries: Vec<Entry>,
@@ -149,13 +157,7 @@ impl Index {
         // In number order, so each version's predecessor comes first.
         versions.sort();
         for (number, scope, key, bytes) in versions {
-            let good = parse_version(&bytes).filter(|v| {
-                v.scope == scope
-                    && v.key == key
-                    && v.version == number
-                    && v.hash == sha256(&[v.content])
-            });
-            match good {
+            match stored(&bytes, &scope, &key, number) {
                 Some(v) if index.insert(&v) => loaded.versions += 1,
                 _ => loaded.unreadable += 1,
             }
@@ -333,7 +335,13 @@ impl Index {
             }
             (None, _) | (Some(_), 0) => return Err(Refused::Replaces),
             (Some(e), r) => {
-                if !e.versions.iter().any(|m| m.version == r) {
+                // A version the writer cannot read is as missing as one
+                // that does not exist (review F1).
+                let seen = e
+                    .versions
+                    .iter()
+                    .any(|m| m.version == r && Self::readable(scope, m, readable));
+                if !seen {
                     return Err(Refused::Replaces);
                 }
                 if e.versions.len() >= MAX_VERSIONS {
@@ -610,9 +618,20 @@ impl Service {
         let Some(n) = encode_version(&v, &mut out) else {
             return only(status::BAD_REQUEST);
         };
-        if f.write(&path(scope, p.key, v.version, false), &out[..n])
-            .is_err()
-        {
+        let at = path(scope, p.key, v.version, false);
+        // A valid version already there was stored before the store's
+        // answer was lost: indexed, never rewritten (review F2).
+        match f.read(&at) {
+            Ok(None) => {}
+            Ok(Some(old)) => {
+                if let Some(old) = stored(&old, scope, p.key, v.version) {
+                    self.index.insert(&old);
+                    return only(code::UNWRITABLE);
+                }
+            }
+            Err(_) => return only(code::UNWRITABLE),
+        }
+        if f.write(&at, &out[..n]).is_err() {
             return only(code::UNWRITABLE);
         }
         self.index.insert(&v);
@@ -772,6 +791,8 @@ mod tests {
         files: BTreeMap<Vec<u8>, Vec<u8>>,
         /// Every write fails while set.
         broken: bool,
+        /// Every write is stored, but its answer lost, while set.
+        lost: bool,
     }
 
     impl Files for Mem {
@@ -780,6 +801,9 @@ mod tests {
                 return Err(StoreFailed);
             }
             self.files.insert(path.to_vec(), bytes.to_vec());
+            if self.lost {
+                return Err(StoreFailed);
+            }
             Ok(())
         }
         fn read(&mut self, path: &[u8]) -> Result<Option<Vec<u8>>, StoreFailed> {
@@ -1448,6 +1472,57 @@ mod tests {
             get(&mut s, &mut f, NOTES, b"budget", 0, READ_ALL).reply[0],
             status::OK
         );
+        // Nor replace or retract what it cannot read (review F1): as if
+        // the version did not exist.
+        for kind in [Kind::Claim, Kind::Retraction] {
+            for key in [&b"budget"[..], b"nothing"] {
+                let over = Put {
+                    kind,
+                    readable: notes,
+                    ..put_req(NOTES, key, 1, b"")
+                };
+                assert_eq!(
+                    send(&mut s, &mut f, client::RUNTIME, &over),
+                    [code::REPLACES]
+                );
+            }
+        }
+        let heads = get(&mut s, &mut f, NOTES, b"budget", 0, READ_ALL);
+        assert_eq!(records(&heads).len(), 1);
+        assert_eq!(records(&heads)[0].0, 0, "version 1 still the head");
+    }
+
+    #[test]
+    fn a_stored_version_whose_answer_was_lost_is_kept() {
+        let mut f = Mem::default();
+        let (mut s, _) = Service::start(&mut f).unwrap();
+        let first = put_req(OPS, b"k", 0, b"one");
+        assert_eq!(send(&mut s, &mut f, client::RUNTIME, &first), ok_version(1));
+        f.lost = true;
+        let a = put_req(OPS, b"k", 1, b"a");
+        assert_eq!(
+            send(&mut s, &mut f, client::RUNTIME, &a),
+            [code::UNWRITABLE]
+        );
+        f.lost = false;
+        let v2 = path(b"ops", b"k", 2, false);
+        let kept = f.files[&v2].clone();
+        // The next put finds version 2 stored and leaves it (review F2).
+        let b = put_req(OPS, b"k", 1, b"b");
+        assert_eq!(
+            send(&mut s, &mut f, client::RUNTIME, &b),
+            [code::UNWRITABLE]
+        );
+        assert_eq!(f.files[&v2], kept, "never rewritten");
+        let r = records(&get(&mut s, &mut f, OPS, b"k", 2, READ_ALL));
+        assert_eq!(parse_version(&r[0].1).unwrap().content, b"a");
+        assert_eq!(send(&mut s, &mut f, client::RUNTIME, &b), ok_version(3));
+        // A file there that is not a valid version is written over, as a
+        // restart would ignore it.
+        f.files
+            .insert(path(b"ops", b"k", 4, false), b"junk".to_vec());
+        let c = put_req(OPS, b"k", 3, b"c");
+        assert_eq!(send(&mut s, &mut f, client::RUNTIME, &c), ok_version(4));
     }
 
     #[test]

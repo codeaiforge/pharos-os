@@ -2057,10 +2057,11 @@ fn poison_audit(image: &Path) -> Result<()> {
         (format!("{refuse}   outcome 2 not for agents"), 1),
         (format!("{refuse}   outcome 2 8 requests refused"), 1),
         (refuse.clone(), 5),
-        // Citing what cites `hr`, two wrong `replaces`, and four stored.
-        (format!("client 3 Intent knowledge {me}"), 7),
+        // Citing what cites `hr`, replacing it and a missing key, two
+        // wrong `replaces`, and four stored.
+        (format!("client 3 Intent knowledge {me}"), 9),
         (format!("knowledge {me}   outcome 3 status 7"), 1),
-        (format!("knowledge {me}   outcome 3 status 33"), 2),
+        (format!("knowledge {me}   outcome 3 status 33"), 4),
         (format!("knowledge {me}   outcome 1 version"), 4),
         ("approve".to_owned(), 0),
         ("verify".to_owned(), 0),

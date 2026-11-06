@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). **Implemented:** the data model (#142), the service (#143), agent access and verification (#144), private memory and promotion (#145), host-loaded verified entries and the access-control, provenance, staleness, and injection tests (#146). To be done: the security review (#147).
+**Planned. Design approved by the maintainer on 2026-11-05 (#141),** with `verify` taking the first 8 hexadecimal digits of the content's hash and staleness derived from versions only (no age). **Implemented:** the data model (#142), the service (#143), agent access and verification (#144), private memory and promotion (#145), host-loaded verified entries and the access-control, provenance, staleness, and injection tests (#146). Security review done ([review-m3.8-knowledge.md](../security/review-m3.8-knowledge.md), #147), awaiting the maintainer's approval.
 
 ## 2. Context
 
@@ -39,7 +39,7 @@ What M3.8 builds on:
   - a version is **superseded** when another version replaces it, and **retracted** when that version is a retraction;
   - a version is **stale** when it is superseded, or when any of its evidence is superseded or retracted;
   - a version is **verified** when the scope's marks name its key, number, and hash (below); else **unverified**.
-- **Stored** as one store file per version, `<scope>/<key>/v<n>`, and one per mark, `<scope>/<key>/m<n>`, each written once and never rewritten or deleted (the service is the namespace's only writer, and refuses a version number that exists). At start, the service lists its namespace and rebuilds each key's version index in memory; unreadable files are counted and left in place, as the runtime's tasks are.
+- **Stored** as one store file per version, `<scope>/<key>/v<n>`, and one per mark, `<scope>/<key>/m<n>`, each written once and never rewritten or deleted (the service is the namespace's only writer, and refuses a version number that exists, in its index or already in the store when a write's answer was lost, review F2). At start, the service lists its namespace and rebuilds each key's version index in memory; unreadable files are counted and left in place, as the runtime's tasks are.
 - *Implemented (#142):* `pharos_proto::knowledge` (the version record, format 1: magic `PKV`, every field above, `MAX_RECORD` 5 KiB; the mark, `PKM`, 56 bytes; status bits `flag`), and `pharos_programs::knowledge::Index` (the index, `heads`, `status`, `readable`, `plan` for a write, `plan_mark` and `marked`, `tagged`, and `load`). A key's first version replaces nothing, and every later one must name a version of it (`Replaces`). A version file is used only if it parses, keeps every rule, sits at its own path, and its content matches its hash; a mark only with its version's number. At load, versions go in number order, and one whose predecessor's file is unreadable is still kept (only `plan` checks `replaces`, before anything is written), so one damaged file hides no later version. The design's first draft had one append-only `marks` file per scope; one file per mark keeps every record written once, with no stream to parse.
 
 ### The service (#143)
@@ -51,14 +51,14 @@ What M3.8 builds on:
   - `QUERY` (scope, tag): up to 16 keys whose heads carry the tag, with their status;
   - `VERIFY` (scope, key, version, hash prefix): from `trust` only; appends a mark;
   - `ATTACH` (a buffer, as the store's `BUFFER`), and `INFO`.
-- **Who may call:** badges name the runtime and `trust` (and the test clients); the runtime's requests carry the author (agent and task) and the caller's **readable scopes** (at most 8). The service answers a read only for a version whose scope and evidence scopes are all readable, and leaves out of `GET`, `HISTORY`, and `QUERY` replies anything else, without saying that it exists. A write's evidence must be readable by the writer.
+- **Who may call:** badges name the runtime and `trust` (and the test clients); the runtime's requests carry the author (agent and task) and the caller's **readable scopes** (at most 8). The service answers a read only for a version whose scope and evidence scopes are all readable, and leaves out of `GET`, `HISTORY`, and `QUERY` replies anything else, answering as if it did not exist; a readable version's status still counts every version of its key (review F3). A write's evidence, and the version it replaces, must be readable by the writer (review F1).
 - **No audit capability:** the service is told who acts and only stores; the runtime records agent updates and `trust` records verifications, as each records the actions it takes today.
 - **Limits:** 256 keys per scope and 64 versions per key (each refused past it, `FULL`); a key's versions are numbered by the service.
 - *Implemented (#143):* the interface in `pharos_proto::knowledge` (`PUT`, `GET`, `HISTORY`, `QUERY`, `VERIFY`, `ATTACH`, `INFO`; badges `client::RUNTIME` 1 and `client::TRUST` 2; codes `FULL`, `REPLACES`, `HASH_DIFFERS`, `UNWRITABLE`), `pharos_programs::knowledge::Service` (every request, host-tested), and `bin/knowledge`, which receives requests, keeps each client's buffer (24 to 64 KiB, 4 clients), copies a `PUT` out of it before parsing, and replies. **Scopes are a fixed table,** `SCOPES` (`notes`, `ops`, `hr`, `team`, `test`), reviewed code like the store's namespaces: requests name a scope by number and the readable scopes by a bit each, so each request fits in a 256-byte message; records keep the names. A `PUT`'s body and a `GET`'s, `HISTORY`'s, or `QUERY`'s answer go through the buffer. The runtime may not write as the user or with the source `host` (`NO_ACCESS`). Each start is counted in the namespace's `starts` file, which is the `boot` in each version's time. A second mark of the same version and hash writes nothing. The service holds no audit capability: the runtime will record agent puts (#144). Not yet in `init`'s boot table: it joins with the runtime's capability (#144).
 
 ### Agent access (#144)
 
-- **Two new permissions,** runtime grants like `file` and `channel` (wire kinds 7 and 8, a length and the scope's name): `knowledge read <scope>` and `knowledge write <scope>`. Given at the attempt's start from the policy entry's new `knowledge_read` and `knowledge_write` lists (the manifest may ask for fewer); askable through the entry's `ask_knowledge`; revoked like any other (`revoke <agent> knowledge read <scope>`). `knowledge write` does not imply read.
+- **Two new permissions,** runtime grants like `file` and `channel` (wire kinds 7 and 8, a length and the scope's name): `knowledge read <scope>` and `knowledge write <scope>`. Given at the attempt's start from the policy entry's new `knowledge_read` and `knowledge_write` lists (the manifest may ask for fewer); askable through the entry's `ask_knowledge`; revoked like any other (`revoke <agent> knowledge read <scope>`). `knowledge write` does not imply read, so without read an agent adds new keys only (review F1).
 - **New runtime requests:**
   - `KNOWLEDGE_PUT` (28): needs `knowledge write <scope>`; the runtime sends `PUT` with the agent's name and task as author, and its readable scopes;
   - `KNOWLEDGE_GET` (29), `KNOWLEDGE_HISTORY` (30), `KNOWLEDGE_QUERY` (31): need `knowledge read <scope>`; the runtime passes the agent's readable scopes, and copies the reply into the agent's buffer.
@@ -88,7 +88,7 @@ What M3.8 builds on:
 ## 4. Security
 
 - **No authority from content:** knowledge is data on both paths; no request reads a permission, a policy, or an instruction from an entry, and the trusted console never shows one.
-- **No reading around a grant:** the service answers only for scopes the runtime says the caller can read, and leaves out anything whose evidence chain reaches another scope, so a query, history, or summary cannot leak content or its existence; revoking `knowledge read` takes effect on the next request.
+- **No reading around a grant:** the service answers only for scopes the runtime says the caller can read, and leaves out anything whose evidence chain reaches another scope, so a query, history, or summary cannot leak content (it can show that a version the caller cannot read supersedes or conflicts with one it can, review F3); revoking `knowledge read` takes effect on the next request.
 - **No forged provenance:** the author comes from the runtime's badge and the task it runs, the hash and time from the service, and the verified status only from a user's mark; an agent cannot write a version as another agent, as the user, or as verified.
 - **No rewritten history:** versions are written once; a correction or retraction is a new version, and a conflict keeps both sides.
 - **Trusted:** the service (stores what it is told, enforces scopes, versions, and evidence), the runtime (authorship, readable scopes), and `trust` (marks).
@@ -114,4 +114,4 @@ What M3.8 builds on:
 
 ## 7. Open questions
 
-- None yet; the review (#147) may add some.
+- None. The review (#147) fixed F1 and F2 and recorded F3 and F4.

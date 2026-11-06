@@ -99,7 +99,7 @@
 //!   writes `notes` and `ops`, may ask for nothing), against the user's
 //!   host-loaded, verified entries: `hr/pay` is refused by get, history,
 //!   and query, and `ops/pay`, which cites it, is as missing as a key that
-//!   does not exist, and cannot be cited; a copy of the verified
+//!   does not exist, and cannot be cited or replaced; a copy of the verified
 //!   `notes/policy` version 1, claiming the user from the host, is stored
 //!   as itself and unverified; a wrong `replaces`, a key's second first
 //!   version, and a key reaching a mark's path are refused; a second
@@ -948,6 +948,9 @@ impl Agent {
             || self.k_query(IN_OPS, b"pay") != Ok(Vec::new())
             || self.k_put(&claim(IN_OPS, b"leak", 0, b"x", &[(IN_OPS, b"pay", 1)]))
                 != Err(status::NOT_FOUND)
+            // Nor replaced blind (review F1).
+            || self.k_put(&claim(IN_OPS, b"pay", 1, b"x", &[])) != Err(REPLACES)
+            || self.k_put(&claim(IN_OPS, b"none", 1, b"x", &[])) != Err(REPLACES)
         {
             return self.fail(b"what cites hr was seen");
         }
