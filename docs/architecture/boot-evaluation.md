@@ -1,4 +1,6 @@
-# Boot evaluation (D-001, D-002, D-003)
+# Boot evaluation (D-001, D-002, D-003; Secure Boot, #166)
+
+The [Secure Boot evaluation](#secure-boot-evaluation-166-d-028) (M4.3) is at the end.
 
 - **Status:** Complete. The recommendations were **accepted** on 2026-10-26 ([#4](https://github.com/codeaiforge/pharos-os/issues/4)), with own Limine protocol structures and the kernel as a workspace member. The resulting design is in [boot.md](boot.md). This document is kept as the record of options and evidence.
 - **Implementation status:** Planned. Nothing here is implemented.
@@ -144,9 +146,57 @@ The harness also reported **FAIL** (exit status 35) on both firmware types for a
 - OVMF writes console escape codes and boot messages to the serial port before the kernel starts, so tests must search for a marker rather than compare the whole log.
 - QEMU boots under TCG (no KVM) took about one second each, fast enough for every CI run.
 
+## Secure Boot evaluation (#166, D-028)
+
+- **Status:** Complete; evaluation only. D-028 moved enforcement to M5.5, so nothing here changes the images `xtask` builds. **Implementation status:** not implemented.
+- **Date:** 2026-11-07. **Roadmap:** [M4.3](../project/implementation-roadmap.md#m43--reliable-boot-and-recovery), enforcement in [M5.5](../project/implementation-roadmap.md#m55--reproducible-builds-release-artifacts-documentation-and-release-criteria).
+- **Question:** how does a Pharos image behave under OVMF with Secure Boot on, and what must M5.5 do to make the chain from the firmware to the factory image hold?
+
+**Environment:** QEMU 8.2.2 (`q35`, TCG), OVMF 2024.02 (Ubuntu `ovmf` 2024.02-2ubuntu0.10), sbsigntool 0.9.4, Limine 12.9.4 (the pinned release), the main image built by `cargo xtask image` on `main` at `0921577`. Secure Boot firmware: `OVMF_CODE_4M.secboot.fd`, which needs `-M q35,smm=on -global driver=cfi.pflash01,property=secure,value=on`. Variable stores: `OVMF_VARS_4M.ms.fd` (Microsoft's keys enrolled, Secure Boot on) and `OVMF_VARS_4M.snakeoil.fd` (Debian's public test key, `PkKek-1-snakeoil`, enrolled as PK, KEK, and in `db`, Secure Boot on). The snakeoil key stands in for our own key; it is public and must never sign a release.
+
+**Procedure:** each case copies the image's `iso-root`, changes it, and rebuilds the ISO with `xtask`'s `xorriso` arguments. `BOOTX64.EFI` is replaced in both places that carry it: `EFI/BOOT/` and the El Torito FAT image `boot/limine/limine-uefi-cd.bin` (`mcopy -o`), which is the one OVMF boots from a CD. The steps, in this order:
+
+1. Path hashes: append `#<BLAKE2b-512>` (`b2sum`) to every `path:` and `module_path:` in `limine.conf` (the kernel, `root`, and `recovery`, in all three entries).
+2. Config hash: `limine enroll-config BOOTX64.EFI $(b2sum limine.conf | cut -d' ' -f1)`.
+3. Signature: `sbsign --key <key> --cert <cert> BOOTX64.EFI`, checked with `sbverify`.
+
+Then the image is booted for up to 60 s with serial and the screen captured. A pass is QEMU status 33 with `PHAROS: boot ok` (D-009).
+
+| Case | Firmware and keys | Result |
+| --- | --- | --- |
+| Unchanged image | Secure Boot off (`OVMF_CODE_4M.fd`) | Boots |
+| Unsigned Limine | Microsoft's keys | Refused by the firmware: `failed to load Boot0001 "UEFI QEMU DVD-ROM …": Access Denied`, then PXE |
+| Unsigned Limine | Our test key | Refused by the firmware, `Access Denied` |
+| Signed with our key | Microsoft's keys (our key not in `db`) | Refused by the firmware, `Access Denied` |
+| Signed, no config hash | Our test key | **Boots.** Limine checks nothing: the config, kernel, and modules can be changed freely |
+| Config hash enrolled and signed, paths without hashes | Our test key | Refused by Limine: `PANIC: Secure Boot is active and URI 'boot():/boot/kernel' has no associated hash!`, back to the menu |
+| Paths hashed, config hash enrolled, signed | Our test key | **Boots** |
+| The same image | Secure Boot off | Boots |
+| Signed first, config hash enrolled after | Our test key | Refused by the firmware, `Access Denied`: `enroll-config` changes the binary and breaks the signature |
+| One byte of the kernel changed | Our test key | Refused by Limine: `Blake2b hash for URI 'boot():/boot/kernel' does not match!` |
+| One byte of the `root` module changed | Our test key | Refused by Limine: `Blake2b hash for URI 'boot():/boot/modules/root' does not match!` |
+| A line added to `limine.conf` | Our test key | Refused by Limine: `CHECKSUM MISMATCH FOR CONFIG FILE`, system halted |
+
+### Findings
+
+1. **The chain holds with all three steps, and only with all three.** Firmware (`db`) → signed Limine → enrolled config hash → path hashes on the kernel and both factory image copies → `init`'s Ed25519 check of a slot with the key in the factory image (D-028). The slots are outside Limine's reach and need none of this; the factory image is covered by its path hash.
+2. **A signed Limine without an enrolled config hash protects nothing past Limine.** M5.5 must enroll the hash for every signed build and check it before release. Limine asks for path hashes only once a config hash is enrolled.
+3. **Order matters:** path hashes, then config hash, then signature. Any change to the kernel or a module changes the config hash and so the signed binary: every release re-signs Limine.
+4. **The kernel and the services need no change.** The same image boots with Secure Boot on or off; nothing in Pharos reads the Secure Boot state.
+5. **Signing is deterministic.** Signing Limine twice with the same key gave the same bytes, so a signed ISO can still be byte-identical across builds (D-009's check) for whoever holds the key. Others can compare after removing the signature (`sbattach --remove`).
+6. **Failures are visible but only on screen.** Limine's refusals are drawn on the framebuffer, not written to serial, and wait for a key; the firmware's `Access Denied` reaches serial. A CI check for M5.5 needs a screen capture (QEMU `screendump`) or a timeout counted as a refusal.
+7. **QEMU arguments differ:** the Secure Boot firmware needs SMM and a secure flash, so `qemu_args` would need a variant.
+
+### Open for M5.5 (not tested here)
+
+- Whose key: Limine is not signed by Microsoft, so a PC with only Microsoft's keys refuses it (as above). Either the user enrolls our key in the firmware, or a Microsoft-signed shim loads Limine with a key the user enrolls once (MOK). To be decided with installation.
+- Measured boot: Limine's documentation, as recorded in [D-028](../project/decision-log.md)'s context, says a config hash also forces `measured_boot` where a TPM 2.0 exists. No software TPM (`swtpm`) is installed here, so this was not tried.
+- The same source says the config editor is disabled under Secure Boot; not tried headless.
+- Real hardware (M5.2), and a key that is ours, kept off the repository and CI (AGENTS.md §4).
+
 ## Sources
 
-All accessed 2026-10-26.
+Boot evaluation: all accessed 2026-10-26. Secure Boot evaluation: the experiments above (2026-11-07), the `limine` tool's own `enroll-config --help`, and Limine's documentation as recorded in D-028's context.
 
 - Limine README and USAGE (v12.9.4): <https://github.com/limine-bootloader/limine>
 - Limine boot protocol specification: <https://github.com/limine-bootloader/limine-protocol/blob/trunk/PROTOCOL.md>

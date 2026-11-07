@@ -105,7 +105,7 @@ Since issue #11: `cargo xtask build` builds the kernel binary. The kernel crate 
 - **Trust:** the firmware and Limine are part of the boot trusted computing base, but neither is project code. Limine is pinned to an exact release. `xtask` checks it against a SHA-256 committed in the repository. Whoever updates the pin also verifies the GPG signature by Limine's maintainer (key `05D2 9860 D0A0 668A AEFB 9D69 1F3C 021B ECA2 3821`).
 - **Untrusted input:** boot information comes from the bootloader. The kernel checks the base revision and the presence of each required response, and treats counts and pointers as bounded by the protocol's guarantees. Further validation (for example, overlapping memory-map entries) is part of M2.5.
 - **`unsafe`:** needed for port I/O, reading bootloader-written memory, and dereferencing response pointers. Kept in small, documented functions.
-- **Not yet covered:** Secure Boot and measured boot (M4.3). Without an enrolled config hash, Limine provides no integrity guarantee for the kernel file.
+- **Not yet covered:** Secure Boot and measured boot, enforced in M5.5 (D-028). Without an enrolled config hash, Limine provides no integrity guarantee for the kernel file. Evaluated in M4.3 ([Secure Boot evaluation](boot-evaluation.md#secure-boot-evaluation-166-d-028), #166): with path hashes, an enrolled config hash, and a signed Limine, in that order, the image boots under OVMF with Secure Boot on and a changed kernel, module, or config is refused; a signed Limine without the config hash checks nothing.
 - **Licensing:** boot images contain Limine binaries (BSD-2-Clause). Images that are distributed must include Limine's license notice.
 
 ## 5. Testing
@@ -247,7 +247,7 @@ Every step is an audit record (`system` action: candidate, verified or refused w
 
 ### Security
 
-- **Trust:** the factory image and the public key in it are the root of trust for updates; the boot medium is read-only. Limine and the firmware are unchanged (Secure Boot: #166, M5.5).
+- **Trust:** the factory image and the public key in it are the root of trust for updates; the boot medium is read-only. Limine and the firmware are unchanged (Secure Boot evaluated in [boot-evaluation.md](boot-evaluation.md#secure-boot-evaluation-166-d-028), #166; enforced in M5.5).
 - **An agent** can only add a file to `incoming` (with `update propose`); it holds nothing on `init`, `trust`, `system`, or the kernel's `MOUNT`. Approval is the user's, on the trusted path, from fields. A signed image an agent proposes is still the maintainer's image.
 - **Limits (accepted):** whoever holds the disk can erase the slots (the factory image runs) or replay a slot file with a lower version over a slot (refused only if a higher version was `good` in the record they can also rewrite): the record is not authenticated without a device secret (M5.5, with the audit anchor). The kernel and Limine are not updated.
 
