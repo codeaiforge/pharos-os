@@ -700,14 +700,14 @@ pub const INIT_DEVICES: [(u16, u16); 3] = [(0x1af4, 0x1042), (0x1af4, 0x1041), (
 /// The capabilities the kernel starts `init` with (services.md): 1 the
 /// debug console, 2 `fs`, 3 `report` (`SEND`), then each device in
 /// [`INIT_DEVICES`] found by PCI enumeration (granted, in PCI order) when
-/// `devices` is true.
+/// `devices` is true, and then the hotplug object (`HOTPLUG`, M4.4).
 #[cfg(target_os = "none")]
 pub fn init_capabilities(
     fs: Arc<crate::fs::Fs>,
     report: Arc<crate::ipc::Endpoint>,
     devices: bool,
 ) -> Vec<Arc<Capability>> {
-    use crate::cap::{CONFIG, GRANT, IRQ, MAP, MOUNT, Object, READ, SEND, WRITE};
+    use crate::cap::{CONFIG, GRANT, HOTPLUG, IRQ, MAP, MOUNT, Object, READ, SEND, WRITE};
     let mut caps = alloc::vec![
         Capability::new(Object::DebugConsole, WRITE | GRANT),
         Capability::new(Object::Filesystem(fs), READ | GRANT | MOUNT),
@@ -723,6 +723,9 @@ pub fn init_capabilities(
                 MAP | CONFIG | IRQ | GRANT,
             ));
         }
+    }
+    if devices {
+        caps.push(Capability::new(Object::Hotplug, HOTPLUG));
     }
     caps
 }

@@ -99,13 +99,15 @@ pub enum State {
     Stopped = 7,
     /// Not started in safe mode or recovery (#164).
     Off = 8,
+    /// A driver entry with no device in a hotplug slot (M4.4).
+    NoDevice = 9,
 }
 
 impl State {
     fn from_code(c: u8) -> Option<Self> {
         use State::*;
         [
-            Pending, Starting, Ready, Done, Restarting, Failed, Skipped, Stopped, Off,
+            Pending, Starting, Ready, Done, Restarting, Failed, Skipped, Stopped, Off, NoDevice,
         ]
         .get(usize::from(c))
         .copied()
@@ -122,6 +124,7 @@ impl State {
             Self::Skipped => b"skipped",
             Self::Stopped => b"stopped",
             Self::Off => b"off (safe mode)",
+            Self::NoDevice => b"waiting for a device",
         }
     }
 }
@@ -644,7 +647,7 @@ mod tests {
         };
         assert_eq!(Reply::write(1, &[bad], &mut out), None, "a bad name");
         // On the wire: an unknown state and a bad name.
-        assert_eq!(Reply::parse(&[0, 1, 1, 1, b'a', 9, 0, 0]), None);
+        assert_eq!(Reply::parse(&[0, 1, 1, 1, b'a', 10, 0, 0]), None);
         assert_eq!(Reply::parse(&[0, 1, 1, 1, b' ', 2, 0, 0]), None);
         assert!(Reply::parse(&[0, 1, 1, 1, b'a', 7, 0, 0]).is_some());
         crate::fuzz(100_000, 9, |m| {

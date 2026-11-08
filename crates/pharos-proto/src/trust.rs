@@ -99,6 +99,13 @@ pub enum Event {
     /// The user's action on the service (#170): `numbers[0]` a
     /// [`by_user`] code; `names` are its dependents, which keep running.
     ByUser = 12,
+    /// A device arrived in a hotplug slot (#171, no name): `numbers` the
+    /// slot and the PCI ID (vendor in the low half); `names` the driver
+    /// started for it, none if no driver is free.
+    DeviceAdded = 13,
+    /// A device left its slot (no name): `numbers` as for
+    /// [`Self::DeviceAdded`]; `names` the driver stopped first, if any.
+    DeviceRemoved = 14,
 }
 
 /// What [`Event::ByUser`] reports.
@@ -172,8 +179,21 @@ impl Event {
     fn from_code(c: u8) -> Option<Self> {
         use Event::*;
         [
-            Exited, Killed, NoReady, Skipped, Restarting, GivenUp, Never, Stopped, Ready, NotReady,
-            NotStarted, Image, ByUser,
+            Exited,
+            Killed,
+            NoReady,
+            Skipped,
+            Restarting,
+            GivenUp,
+            Never,
+            Stopped,
+            Ready,
+            NotReady,
+            NotStarted,
+            Image,
+            ByUser,
+            DeviceAdded,
+            DeviceRemoved,
         ]
         .get(usize::from(c))
         .copied()
@@ -181,7 +201,10 @@ impl Event {
 
     /// True for the system's state, which names no service.
     pub fn system(self) -> bool {
-        matches!(self, Self::Ready | Self::NotReady | Self::Image)
+        matches!(
+            self,
+            Self::Ready | Self::NotReady | Self::Image | Self::DeviceAdded | Self::DeviceRemoved
+        )
     }
 }
 
@@ -994,6 +1017,8 @@ mod tests {
             ev(Event::NotStarted, b"missing", Names::default()),
             ev(Event::Image, b"", Names::default()),
             ev(Event::ByUser, b"knowledge", two),
+            ev(Event::DeviceAdded, b"", two),
+            ev(Event::DeviceRemoved, b"", Names::default()),
         ] {
             let mut buf = [0u8; 256];
             let n = encode(&req, &mut buf).unwrap();
@@ -1023,7 +1048,12 @@ mod tests {
         assert!(parse(&msg(4, &[1, 1, b'a'])).is_ok());
         assert_eq!(parse(&msg(11, &[0])), Err(Refused::Bad), "event 11");
         assert!(parse(&msg(12, &[0])).is_ok(), "event 12");
-        assert_eq!(parse(&msg(13, &[0])), Err(Refused::Bad), "event 13");
+        assert_eq!(
+            parse(&msg(14, &[0])),
+            Err(Refused::Bad),
+            "a device event with a name"
+        );
+        assert_eq!(parse(&msg(15, &[0])), Err(Refused::Bad), "event 15");
         let mut many = std::vec![9];
         for _ in 0..9 {
             many.extend_from_slice(&[1, b'a']);

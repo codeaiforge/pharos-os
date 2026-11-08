@@ -14,6 +14,8 @@ pub const MAX_CAPS: usize = 48;
 pub const CAP_MSIX: u8 = 0x11;
 /// Capability ID of vendor-specific capabilities (virtio uses these).
 pub const CAP_VENDOR: u8 = 0x09;
+/// Capability ID of PCI Express (hotplug slot registers, M4.4).
+pub const CAP_EXPRESS: u8 = 0x10;
 
 /// A decoded base address register.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,7 +212,7 @@ impl Device {
 }
 
 #[cfg(target_os = "none")]
-pub use kernel::{devices, enumerate};
+pub use kernel::{add, devices, enumerate, remove, scan_function};
 
 #[cfg(target_os = "none")]
 mod kernel {
@@ -220,6 +222,22 @@ mod kernel {
     use alloc::sync::Arc;
 
     static DEVICES: IrqMutex<Vec<Arc<Device>>> = IrqMutex::new(Vec::new());
+
+    /// Scans one function as enumeration does (hotplug, after its BARs
+    /// are assigned); `None` if nothing answers.
+    pub fn scan_function(address: Address) -> Option<Device> {
+        scan(address)
+    }
+
+    /// Adds a function that arrived (hotplug).
+    pub fn add(device: Arc<Device>) {
+        DEVICES.lock().push(device);
+    }
+
+    /// Forgets the function at `address` (hotplug removal).
+    pub fn remove(address: Address) {
+        DEVICES.lock().retain(|d| d.address != address);
+    }
 
     fn scan(address: Address) -> Option<Device> {
         let id = hw::read32(address, 0);
@@ -308,6 +326,7 @@ mod kernel {
         }
         let count = found.len();
         *DEVICES.lock() = found;
+        crate::hotplug::find();
         count
     }
 

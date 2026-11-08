@@ -114,7 +114,31 @@ pub enum Object {
     /// The `nth` device (from 0) with this PCI vendor and device ID.
     Device(u32, u8),
     Endpoint(Ep),
+    /// The device with this PCI ID that arrived in a hotplug slot (M4.4,
+    /// drivers.md): an entry holding it is a driver, started when one
+    /// arrives and never at boot.
+    Arrived(u32),
 }
+
+impl Service {
+    /// The PCI ID this entry drives, if it is a driver entry
+    /// ([`Object::Arrived`]).
+    pub fn driver(&self) -> Option<u32> {
+        self.caps.iter().find_map(|g| match g.object {
+            Object::Arrived(id) => Some(id),
+            _ => None,
+        })
+    }
+}
+
+/// Services that can be restarted but never stopped (D-029): the trusted
+/// console, the audit trail, and the store under it.
+pub const PROTECTED: [&str; 3] = ["trust", "audit", "store"];
+
+/// The bit of `init`'s report endpoint that slot events set (M4.4): one
+/// above every entry's end notification, so a table with a driver entry
+/// has at most 31 entries.
+pub const SLOT_BIT: u32 = 31;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Badge {
@@ -157,6 +181,7 @@ pub enum Gain {
     RuntimeChannel,
 }
 
+#[derive(Clone, Copy)]
 pub struct Service {
     pub name: &'static str,
     pub path: &'static [u8],
@@ -196,6 +221,10 @@ pub const fn receive(e: Ep) -> Give {
 pub const fn send(e: Ep, badge: u32) -> Give {
     give(Object::Endpoint(e), SEND, Badge::Fixed(badge))
 }
+/// A driver's rights on the device with PCI ID `id` that arrived.
+pub const fn arrived(id: u32) -> Give {
+    give(Object::Arrived(id), DEVICE, Badge::None)
+}
 /// The driver's rights on the `nth` device with PCI ID `id`.
 pub const fn device(id: u32, nth: u8) -> Give {
     give(Object::Device(id, nth), DEVICE, Badge::None)
@@ -226,6 +255,10 @@ pub enum Broken {
     /// A daemon without exactly one [`REPORT`], or a one-shot with one, or
     /// [`Badge::Own`] anywhere else.
     Report,
+    /// A driver entry ([`Object::Arrived`]) that is not a daemon, is
+    /// protected, is in another entry's `after`, has more than one
+    /// `Arrived`, or is in a table of 32 entries ([`SLOT_BIT`]).
+    Driver,
 }
 
 /// Checks every rule on `table`; the first broken one, with its entry.
@@ -246,11 +279,25 @@ pub fn check(table: &[Service]) -> Result<(), (usize, Broken)> {
         if own != reports || reports != usize::from(s.kind == Kind::Daemon) {
             return fail(Broken::Report);
         }
+        if s.driver().is_some() {
+            let arrived = (s.caps.iter())
+                .filter(|g| matches!(g.object, Object::Arrived(_)))
+                .count();
+            let needed = table.iter().any(|t| t.after.contains(&i));
+            if s.kind != Kind::Daemon
+                || PROTECTED.contains(&s.name)
+                || needed
+                || arrived != 1
+                || table.len() > SLOT_BIT as usize
+            {
+                return fail(Broken::Driver);
+            }
+        }
         for g in s.caps {
             let fits = match g.object {
                 Object::DebugConsole => g.rights == WRITE,
                 Object::Root => g.rights == READ,
-                Object::Device(..) => g.rights == DEVICE,
+                Object::Device(..) | Object::Arrived(_) => g.rights == DEVICE,
                 Object::Endpoint(_) => g.rights & !(SEND | RECEIVE | GRANT) == 0 && g.rights != 0,
             };
             if !fits {
@@ -283,7 +330,7 @@ pub fn check(table: &[Service]) -> Result<(), (usize, Broken)> {
             }
             let fail = |r| Err((j, r));
             match a.object {
-                Object::Device(..) => return fail(Broken::SameDevice),
+                Object::Device(..) | Object::Arrived(_) => return fail(Broken::SameDevice),
                 Object::Endpoint(_) if a.rights & b.rights & RECEIVE != 0 => {
                     return fail(Broken::Receiver);
                 }
@@ -426,6 +473,86 @@ mod tests {
             })
             .collect();
         assert_eq!(check(&t), Err((1, Broken::After)));
+    }
+
+    #[test]
+    fn driver_entries_keep_their_rules() {
+        // The boot table's driver entry is last.
+        let last = BOOT.len() - 1;
+        assert_eq!(BOOT[last].driver(), Some(VIRTIO_BLK));
+        assert_eq!(BOOT[..last].iter().find_map(Service::driver), None);
+        const HOT: Give = arrived(VIRTIO_BLK);
+        // Arrived with other rights, twice, or with a badge.
+        for (caps, broken) in [
+            (
+                &[
+                    CONSOLE,
+                    give(Object::Arrived(VIRTIO_BLK), MAP, Badge::None),
+                    REPORT,
+                ][..],
+                Broken::Rights,
+            ),
+            (&[CONSOLE, HOT, HOT, REPORT][..], Broken::Driver),
+            (
+                &[
+                    CONSOLE,
+                    give(Object::Arrived(VIRTIO_BLK), DEVICE, Badge::Fixed(1)),
+                    REPORT,
+                ][..],
+                Broken::Rights,
+            ),
+        ] {
+            let caps: &'static [Give] = std::boxed::Box::leak(caps.to_vec().into_boxed_slice());
+            assert_eq!(
+                check(&with(BOOT, last, caps)).map_err(|e| e.1),
+                Err(broken),
+                "{caps:?}"
+            );
+        }
+        // A one-shot driver.
+        let mut t = BOOT.to_vec();
+        t[last] = Service {
+            kind: Kind::OneShot,
+            caps: &[CONSOLE, HOT],
+            ..t[last]
+        };
+        assert_eq!(check(&t), Err((last, Broken::Driver)));
+        // A protected one, or one another entry needs.
+        let mut t = BOOT.to_vec();
+        t[last] = Service {
+            name: "store",
+            ..t[last]
+        };
+        assert_eq!(check(&t).map(|_| ()), Err((last, Broken::Driver)));
+        // An entry after it that needs it (BOOT's driver is entry 8).
+        let mut t = BOOT.to_vec();
+        t.push(Service {
+            name: "user",
+            caps: &[CONSOLE],
+            kind: Kind::OneShot,
+            after: &[8],
+            ..BOOT[0]
+        });
+        assert_eq!(check(&t), Err((last, Broken::Driver)));
+        // The same device to two drivers.
+        let mut t = BOOT.to_vec();
+        t.push(t[last]);
+        assert_eq!(check(&t).map_err(|e| e.1), Err(Broken::SameDevice));
+        // 32 entries: no bit left for slot events.
+        let mut t = BOOT.to_vec();
+        while t.len() < 32 {
+            t.insert(
+                0,
+                Service {
+                    name: "pad",
+                    caps: &[CONSOLE],
+                    kind: Kind::OneShot,
+                    after: &[],
+                    ..BOOT[0]
+                },
+            );
+        }
+        assert_eq!(check(&t), Err((31, Broken::Driver)));
     }
 
     #[test]

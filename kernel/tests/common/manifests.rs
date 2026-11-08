@@ -233,7 +233,10 @@ impl<'a> Audit<'a> {
                 };
                 let give = is.and_then(|is| {
                     (s.caps.iter().enumerate()).position(|(k, g)| {
-                        !matched[k] && g.object == is && g.rights == r && g.badge.value(i) == b
+                        // A hot-added device is the entry's `Arrived` (#171).
+                        let same = g.object == is
+                            || matches!((g.object, is), (Is::Arrived(x), Is::Device(y, _)) if x == y);
+                        !matched[k] && same && g.rights == r && g.badge.value(i) == b
                     })
                 });
                 if let Some(k) = give {

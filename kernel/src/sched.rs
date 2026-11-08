@@ -807,6 +807,10 @@ pub fn exit() -> ! {
 /// Timer tick (interrupt context, interrupts disabled): wakes due sleepers
 /// and ends the running task's time slice.
 fn on_tick(from_user: bool) {
+    // Slot polling (M4.4): reads only, may wake `init`; before the
+    // scheduler's lock is taken.
+    #[cfg(target_os = "none")]
+    crate::hotplug::tick(crate::arch::x86_64::apic::timer_ticks());
     let switch = pick_next(Leave::Yield, |s| {
         s.ticks += 1;
         while let Some(task) = s.sleepers.pop_due(s.ticks) {

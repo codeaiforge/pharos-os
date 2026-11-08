@@ -41,6 +41,9 @@ pub mod number {
     pub const PROCESS_STOP: u64 = 25;
     pub const PROCESS_USAGE: u64 = 26;
     pub const FS_MOUNT: u64 = 27;
+    pub const SLOT_NOTIFY: u64 = 28;
+    pub const SLOT_NEXT: u64 = 29;
+    pub const SLOT_ANSWER: u64 = 30;
 }
 
 /// What `process_usage` reports (its second argument).
@@ -257,6 +260,22 @@ pub enum Call {
         /// Must equal the shared object's size (so the caller knows its
         /// bounds).
         pages: u64,
+    },
+    /// Slot events set `bit` on `endpoint` (M4.4, drivers.md).
+    SlotNotify {
+        handle: Handle,
+        endpoint: Handle,
+        bit: u32,
+    },
+    /// The next slot event, 0 if none.
+    SlotNext {
+        handle: Handle,
+    },
+    /// `init`'s answer to a removal.
+    SlotAnswer {
+        handle: Handle,
+        slot: usize,
+        release: bool,
     },
     /// Mounts a copy of `len` bytes at `offset` of a `Memory` object.
     FsMount {
@@ -491,6 +510,23 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             }
             _ => Err(Error::TooLarge),
         },
+        number::SLOT_NOTIFY => match args[2] {
+            bit @ 0..32 => Ok(Call::SlotNotify {
+                handle: args[0],
+                endpoint: args[1],
+                bit: bit as u32,
+            }),
+            _ => Err(Error::TooLarge),
+        },
+        number::SLOT_NEXT => Ok(Call::SlotNext { handle: args[0] }),
+        number::SLOT_ANSWER => match (args[1], args[2]) {
+            (slot @ 0..8, release @ 0..=1) => Ok(Call::SlotAnswer {
+                handle: args[0],
+                slot: slot as usize,
+                release: release == 1,
+            }),
+            _ => Err(Error::TooLarge),
+        },
         _ => Err(Error::UnknownCall),
     }
 }
@@ -511,6 +547,7 @@ pub fn needed_rights(call: &Call) -> cap::Rights {
         | Call::IrqNotify { .. } => cap::WAIT,
         Call::ProcessStop { .. } => cap::STOP,
         Call::FsMount { .. } => cap::MOUNT,
+        Call::SlotNotify { .. } | Call::SlotNext { .. } | Call::SlotAnswer { .. } => cap::HOTPLUG,
         Call::Spawn { .. } => cap::READ,
         _ => 0,
     }
@@ -535,6 +572,14 @@ mod kernel {
         uncached: true,
         user: true,
     };
+
+    /// Checks `handle` is the hotplug object with `HOTPLUG`.
+    fn hotplug_cap(process: &process::Process, handle: Handle) -> Result<(), Error> {
+        match process.caps.lock().get(handle, cap::HOTPLUG)?.object() {
+            Object::Hotplug => Ok(()),
+            _ => Err(Error::MissingRight),
+        }
+    }
 
     /// The device behind `handle`, if the caller holds `needed` on it.
     fn device(
@@ -1400,6 +1445,32 @@ mod kernel {
             }
             // Ends the process and the processes it started (agents.md).
             // Returns at once; `process_status` shows when it has ended.
+            Call::SlotNotify {
+                handle,
+                endpoint,
+                bit,
+            } => {
+                hotplug_cap(&process, handle)?;
+                let target = self::endpoint(&process, endpoint, cap::RECEIVE)?;
+                crate::hotplug::notify_on(target, 1 << bit);
+                Ok(0)
+            }
+            Call::SlotNext { handle } => {
+                hotplug_cap(&process, handle)?;
+                Ok(crate::hotplug::next(&process))
+            }
+            Call::SlotAnswer {
+                handle,
+                slot,
+                release,
+            } => {
+                hotplug_cap(&process, handle)?;
+                if crate::hotplug::answer_slot(&process, slot, release) {
+                    Ok(0)
+                } else {
+                    Err(Error::NotFound)
+                }
+            }
             Call::ProcessStop { handle } => {
                 let cap = process.caps.lock().get(handle, cap::STOP)?;
                 let Object::Process(record) = cap.object() else {
@@ -1451,6 +1522,43 @@ mod tests {
     }
 
     #[test]
+    fn slot_calls_decode_and_need_hotplug() {
+        assert_eq!(
+            decode(28, [7, 3, 31, 0, 0, 0]),
+            Ok(Call::SlotNotify {
+                handle: 7,
+                endpoint: 3,
+                bit: 31
+            })
+        );
+        assert_eq!(decode(28, [7, 3, 32, 0, 0, 0]), Err(Error::TooLarge));
+        assert_eq!(
+            decode(29, [7, 9, 9, 9, 9, 9]),
+            Ok(Call::SlotNext { handle: 7 })
+        );
+        assert_eq!(
+            decode(30, [7, 7, 1, 0, 0, 0]),
+            Ok(Call::SlotAnswer {
+                handle: 7,
+                slot: 7,
+                release: true
+            })
+        );
+        for (slot, release) in [(8, 0), (0, 2), (u64::MAX, 1)] {
+            assert_eq!(
+                decode(30, [7, slot, release, 0, 0, 0]),
+                Err(Error::TooLarge)
+            );
+        }
+        for n in [28, 29, 30] {
+            assert_eq!(
+                needed_rights(&decode(n, [7, 0, 0, 0, 0, 0]).unwrap()),
+                cap::HOTPLUG
+            );
+        }
+    }
+
+    #[test]
     fn fs_mount_refuses_empty_huge_and_wrapping_ranges() {
         for (offset, len) in [(0, 0), (0, (16 << 20) + 1), (u64::MAX, 1), (1, u64::MAX)] {
             assert_eq!(decode(27, [2, 5, offset, len, 0, 0]), Err(Error::TooLarge));
@@ -1461,7 +1569,7 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(28, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(31, [0; 6]), Err(Error::UnknownCall));
         let region = crate::process::MAP_REGION;
         assert_eq!(
             decode(22, [region.start, 8192, 9, 9, 9, 9]),
@@ -1843,7 +1951,7 @@ mod tests {
                 }
                 Ok(_) => assert!(matches!(
                     number,
-                    0 | 1 | 5 | 6 | 13 | 14 | 16 | 21 | 24 | 25 | 26
+                    0 | 1 | 5 | 6 | 13 | 14 | 16 | 21 | 24 | 25 | 26 | 28 | 29 | 30
                 )),
                 Err(error) => assert!(error as u64 >= 1 && error as u64 <= 13),
             }

@@ -76,13 +76,13 @@ use pharos_proto::store::{self, Request as StoreRequest};
 use pharos_proto::trust::{self, Event, Names, by_user, image as shown, not_started};
 use pharos_proto::{audit, status};
 use pharos_services::{
-    Ep, Give, Kind, MAX_SERVICES, Object, RUNTIME_HANDLES, RUNTIME_PATH, Restart, Service,
+    Ep, Give, Kind, MAX_SERVICES, Object, RUNTIME_HANDLES, RUNTIME_PATH, Restart, SLOT_BIT, Service,
 };
 use pharos_user::rights::{RECEIVE, SEND, STOP, WAIT};
 use pharos_user::{
     Class, Error, Grant, Handle, Limits, MAX_SPAWN_CAPS, Received, Status, call_timeout,
     config_read, debug_write, endpoint_create, open, process_status, receive_timeout, send,
-    spawn_with, try_send, try_send_cap, uptime,
+    slot_answer, slot_next, slot_notify, spawn_with, try_send, try_send_cap, uptime,
 };
 
 pharos_user::entry!(main);
@@ -174,6 +174,8 @@ enum State {
     Stopped,
     /// The agent runtime in safe mode and recovery (#164): not started.
     Off,
+    /// A driver entry whose device is not in a slot (#171).
+    NoDevice,
 }
 
 /// How long a daemon may take to send `ready` (#100).
@@ -239,9 +241,14 @@ struct Init {
     /// Booting, or applying an update or a rollback: `trust`'s update
     /// requests get `BUSY` (they would start one inside the other).
     busy: bool,
-    /// Daemons the user started that have not sent `ready` yet (#170):
-    /// their `ready` is told to `trust`.
+    /// Daemons the user started, or drivers started for a device (#171),
+    /// that have not sent `ready` yet (#170): their `ready` is told to
+    /// `trust`.
     by_user: [bool; MAX_SERVICES],
+    /// The hotplug object, if the kernel gave one (#171).
+    hotplug: Option<Handle>,
+    /// Each driver entry's device: its slot's index and `init`'s handle.
+    arrived: [Option<(u8, Handle)>; MAX_SERVICES],
 }
 
 impl Init {
@@ -260,6 +267,8 @@ impl Init {
                 Ep::Audit => self.audit,
                 Ep::Knowledge => self.knowledge,
             },
+            // Per entry, in `grant`.
+            Object::Arrived(_) => return None,
             Object::Device(id, nth) => {
                 (self.devices[..self.device_count].iter())
                     .filter(|d| d.1 == id)
@@ -273,6 +282,13 @@ impl Init {
     /// (D-027). Never a `SEND` with badge 0 on another service's endpoint:
     /// that is `init`'s own (the host-tested rules refuse such a table).
     fn grant(&self, i: usize, give: &Give) -> Option<Grant> {
+        if let Object::Arrived(_) = give.object {
+            return self.arrived[i].map(|(_, handle)| Grant {
+                handle,
+                rights: give.rights,
+                badge: 0,
+            });
+        }
         let badge = give.badge.value(i);
         if give.rights & SEND != 0 && give.rights & RECEIVE == 0 && badge == 0 {
             return None;
@@ -309,7 +325,9 @@ impl Init {
                 None => {
                     let _ = pharos_user::delete(file);
                     let (what, numbers): (&[u8], _) = match give.object {
-                        Object::Device(..) => (b"no device", [not_started::NO_DEVICE, 0, 0]),
+                        Object::Device(..) | Object::Arrived(_) => {
+                            (b"no device", [not_started::NO_DEVICE, 0, 0])
+                        }
                         _ => (
                             b"capability refused",
                             [
@@ -557,6 +575,7 @@ impl Init {
             State::Skipped => Shown::Skipped,
             State::Stopped => Shown::Stopped,
             State::Off => Shown::Off,
+            State::NoDevice => Shown::NoDevice,
         }
     }
 
@@ -668,6 +687,104 @@ impl Init {
         }
     }
 
+    /// Slot events (#171, drivers.md), until the kernel has none: an
+    /// arrival starts the driver entry for its PCI ID; a removal stops the
+    /// driver, then releases the slot. No driver entry is protected (a
+    /// table rule), so a removal is never refused.
+    fn slots(&mut self) {
+        let Some(hotplug) = self.hotplug else { return };
+        while let Ok(Some(e)) = slot_next(hotplug) {
+            let count = self.table.len().min(MAX_SERVICES);
+            let driving = (0..count).find(|&j| self.arrived[j].is_some_and(|(s, _)| s == e.slot));
+            match e.event {
+                1 => {
+                    let free = (0..count).find(|&j| {
+                        self.table[j].driver() == Some(e.id) && self.arrived[j].is_none()
+                    });
+                    self.device(Event::DeviceAdded, e.number, e.id, free);
+                    let Some(j) = free else {
+                        // Left powered and unused until it is removed.
+                        let _ = pharos_user::delete(e.handle);
+                        continue;
+                    };
+                    self.arrived[j] = Some((e.slot, e.handle));
+                    // One the user stopped stays stopped; `start` uses it.
+                    if self.state[j] != State::Stopped {
+                        self.restarts[j] = 0;
+                        self.start(j);
+                        // `service <name> ready` on the console, too.
+                        self.by_user[j] = true;
+                    }
+                }
+                // The user asks to remove it: the driver is stopped, then
+                // the slot released (revoked and powered off at once), or
+                // it was taken without asking (3): the kernel revoked it.
+                2 | 3 => {
+                    if let Some(j) = driving {
+                        self.unplug(j);
+                    }
+                    if e.event == 2 && slot_answer(hotplug, e.slot, true).is_err() {
+                        continue;
+                    }
+                    self.device(Event::DeviceRemoved, e.number, e.id, driving);
+                    if let Some((_, handle)) = driving.and_then(|j| self.arrived[j].take()) {
+                        let _ = pharos_user::delete(handle);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Stops driver `j` because its device leaves (not the user's stop:
+    /// it starts again when a device arrives).
+    fn unplug(&mut self, j: usize) {
+        if let State::Running(p) | State::Ok(p) = self.state[j] {
+            let _ = pharos_user::process_stop(p);
+            for _ in 0..100 {
+                if process_status(p) != Ok(Status::Running) {
+                    break;
+                }
+                pharos_user::sleep(10_000);
+            }
+            let _ = pharos_user::delete(p);
+            self.release(j);
+        }
+        if self.state[j] != State::Stopped {
+            self.state[j] = State::NoDevice;
+        }
+        self.by_user[j] = false;
+    }
+
+    /// A device event: a debug line, a `device` audit record, and a `trust`
+    /// line, with the driver entry `j` started or stopped for it.
+    fn device(&mut self, event: Event, slot: u8, id: u32, j: Option<usize>) {
+        let word: &[u8] = if event == Event::DeviceAdded {
+            b" added "
+        } else {
+            b" removed "
+        };
+        let mut d = [0u8; 20];
+        let mut hex = [0u8; 9];
+        for (k, nibble) in [12, 8, 4, 0, 28, 24, 20, 16].into_iter().enumerate() {
+            hex[k + usize::from(k >= 4)] = b"0123456789abcdef"[((id >> nibble) & 15) as usize];
+        }
+        hex[4] = b':';
+        let driver: &[&[u8]] = match j {
+            Some(j) => &[self.table[j].name.as_bytes()],
+            None => &[],
+        };
+        let mut what = [&b"slot "[..], decimal(slot.into(), &mut d), word, &hex].concat();
+        match driver.first() {
+            Some(name) => what.extend_from_slice(&[&b"; driver "[..], name].concat()),
+            None if event == Event::DeviceAdded => what.extend_from_slice(b"; no driver"),
+            None => {}
+        }
+        let _ = debug_write(CONSOLE, &[&b"init: "[..], &what].concat());
+        self.record_as(audit::action::DEVICE, b"init", &what);
+        self.tell_trust(event, b"", [slot.into(), id, 0], driver);
+    }
+
     /// Stops service `j` for the user: never restarted. Waits (up to 1 s)
     /// until it has ended, so a restart finds its devices free.
     fn stop_one(&mut self, j: usize) {
@@ -691,7 +808,9 @@ impl Init {
     /// kernel gets its `[ready, failed]` as before.
     fn report_ready(&mut self, ready: usize) {
         let failed: alloc::vec::Vec<&[u8]> = (self.table.iter().zip(&self.state))
-            .filter(|(_, s)| !matches!(s, State::Ok(_) | State::Done | State::Off))
+            .filter(|(_, s)| {
+                !matches!(s, State::Ok(_) | State::Done | State::Off | State::NoDevice)
+            })
             .map(|(t, _)| t.name.as_bytes())
             .collect();
         let mut d = [0u8; 20];
@@ -974,6 +1093,9 @@ impl Init {
                         self.ended(j);
                     }
                 }
+                if bits & 1 << SLOT_BIT != 0 {
+                    self.slots();
+                }
             }
             _ => {}
         }
@@ -985,6 +1107,11 @@ impl Init {
     fn start_all(&mut self, which: impl Fn(&Service) -> bool, deadline: u64) -> bool {
         for i in 0..self.table.len().min(MAX_SERVICES) {
             if self.state[i] != State::Pending || !which(&self.table[i]) {
+                continue;
+            }
+            // A driver starts only with its device (#171).
+            if self.table[i].driver().is_some() && self.arrived[i].is_none() {
+                self.state[i] = State::NoDevice;
                 continue;
             }
             if self.safe && self.table[i].path == RUNTIME_PATH {
@@ -1017,7 +1144,7 @@ impl Init {
     /// True if every entry succeeded (or is off in safe mode).
     fn all_ready(&self) -> bool {
         (self.state[..self.table.len().min(MAX_SERVICES)].iter())
-            .all(|s| matches!(s, State::Ok(_) | State::Done | State::Off))
+            .all(|s| matches!(s, State::Ok(_) | State::Done | State::Off | State::NoDevice))
     }
 
     /// Stops every service the image started, so the next image's start
@@ -1647,7 +1774,14 @@ fn main(arg: u64) -> u64 {
         offers: Offers::new(),
         busy: true,
         by_user: [false; MAX_SERVICES],
+        hotplug: None,
+        arrived: [None; MAX_SERVICES],
     };
+    // The hotplug object follows the devices (#171).
+    let hotplug = FIRST_DEVICE + device_count as u64;
+    if slot_notify(hotplug, events, SLOT_BIT).is_ok() {
+        init.hotplug = Some(hotplug);
+    }
     // Only the boot table boots from an image; the test tables run from
     // the root filesystem.
     if table_number == 0 {
@@ -1656,7 +1790,9 @@ fn main(arg: u64) -> u64 {
         init.start_all(|_| true, u64::MAX);
     }
     let ready = init.ready_count();
-    let off = init.state.iter().filter(|s| **s == State::Off).count();
+    let off = (init.state.iter())
+        .filter(|s| matches!(s, State::Off | State::NoDevice))
+        .count();
     let failed = table.len().min(MAX_SERVICES) - ready - off;
     // Idle before `trust` hears the system is ready, so an `update`
     // typed at once is answered.

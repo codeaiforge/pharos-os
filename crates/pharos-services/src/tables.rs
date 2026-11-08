@@ -3,8 +3,8 @@
 
 use crate::rights::{GRANT, RECEIVE, SEND};
 use crate::{
-    Badge, CONSOLE, Dest, Ep, Gain, Give, Kind, Object, REPORT, ROOT, Restart, Service, device,
-    give, receive, send,
+    Badge, CONSOLE, Dest, Ep, Gain, Give, Kind, Object, REPORT, ROOT, Restart, Service, arrived,
+    device, give, receive, send,
 };
 
 pub const VIRTIO_BLK: u32 = 0x1042_1af4;
@@ -252,6 +252,22 @@ pub const BOOT: &[Service] = &[
         after: &[2, 3, 6],
         limit: AGENTS_LIMIT,
         gains: &[Gain::Processes],
+    },
+    // A virtio-blk disk added to a hotplug slot (M4.4, #171): started when
+    // one arrives, never at boot, and stopped before its slot powers off.
+    // Argument 2: it mounts the disk's image, says what it found, sends
+    // `ready`, and keeps the device until stopped.
+    Service {
+        name: "disk",
+        path: b"bin/virtio-blk",
+        arg: 2,
+        kind: Kind::Daemon,
+        restart: Restart::Up(3),
+        caps: &[CONSOLE, arrived(VIRTIO_BLK), REPORT],
+        net: &[],
+        after: &[],
+        limit: 0,
+        gains: &[],
     },
 ];
 

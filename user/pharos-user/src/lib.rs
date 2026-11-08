@@ -40,6 +40,9 @@ pub mod number {
     pub const PROCESS_STOP: u64 = 25;
     pub const PROCESS_USAGE: u64 = 26;
     pub const FS_MOUNT: u64 = 27;
+    pub const SLOT_NOTIFY: u64 = 28;
+    pub const SLOT_NEXT: u64 = 29;
+    pub const SLOT_ANSWER: u64 = 30;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -600,6 +603,51 @@ pub fn mem_map_cap(memory: Handle, writable: bool, len: u64) -> Result<Mapped, E
 /// [`Error::NoMemory`] with two copies mounted already.
 pub fn fs_mount(fs: Handle, memory: Handle, offset: u64, len: u64) -> Result<Handle, Error> {
     call(number::FS_MOUNT, [fs, memory, offset, len, 0, 0])
+}
+
+/// Slot events set `bit` on `endpoint` (needs `HOTPLUG` on `hotplug`,
+/// `RECEIVE` on `endpoint`; M4.4, drivers.md).
+pub fn slot_notify(hotplug: Handle, endpoint: Handle, bit: u32) -> Result<u64, Error> {
+    call(
+        number::SLOT_NOTIFY,
+        [hotplug, endpoint, u64::from(bit), 0, 0, 0],
+    )
+}
+
+/// A slot event: what happened, in which slot, and the device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlotEvent {
+    /// The slot's index, for [`slot_answer`].
+    pub slot: u8,
+    /// Its physical number, as the user sees it.
+    pub number: u8,
+    /// 1 added (with `handle`, a new device capability), 2 the user asks to
+    /// remove it, 3 removed.
+    pub event: u8,
+    pub handle: Handle,
+    /// Vendor (low 16 bits) and device ID, as `config_read(…, 0, 4)`.
+    pub id: u32,
+}
+
+/// The next slot event, `None` if no slot has one.
+pub fn slot_next(hotplug: Handle) -> Result<Option<SlotEvent>, Error> {
+    let v = call(number::SLOT_NEXT, [hotplug, 0, 0, 0, 0, 0])?;
+    Ok((v != 0).then_some(SlotEvent {
+        slot: v as u8,
+        event: (v >> 8) as u8,
+        handle: (v >> 16) & 0xff,
+        number: (v >> 24) as u8,
+        id: (v >> 32) as u32,
+    }))
+}
+
+/// The answer to a removal: `release` once the driver is stopped, or keep
+/// the device (`NOT_FOUND` if the slot is not being removed).
+pub fn slot_answer(hotplug: Handle, slot: u8, release: bool) -> Result<u64, Error> {
+    call(
+        number::SLOT_ANSWER,
+        [hotplug, u64::from(slot), u64::from(release), 0, 0, 0],
+    )
 }
 
 /// Exit code a program's panic ends it with.

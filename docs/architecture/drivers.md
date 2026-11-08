@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-- **M4.4 (D-029):** hotplug below is **planned**; design **approved** (#169, 2026-11-08).
+- **M4.4 (D-029):** hotplug below: design **approved** (#169, 2026-11-08); **implemented** (#171).
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-27 (M2.9, #51). It follows [D-008](../project/decision-log.md#d-008-driver-strategy) (user-space drivers with device capabilities, virtio-blk only, MSI-X, no IOMMU yet) and [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries).
 - **Implementation:** Rust user programs and the ELF loader are **implemented** (#52: `user/pharos-user`, `user/programs`, `crates/pharos-elf`, `process::load_elf` and `spawn_elf`; programs are in the boot filesystem as `bin/<name>`). So is PCI discovery (#53: `arch::x86_64::pci` for configuration access and BAR probing, `pci::enumerate` with decoding and a bounded capability walk, the boot log listing devices; every QEMU run attaches `disk.img` as `virtio-blk-pci,disable-legacy=on`; since #62 it also has one modern virtio-net card on user-mode networking). So are the `Device` capability with `config_read`, `mmio_map`, and `dma_alloc` (#55: `device::DeviceHandle`, `device::mmio_range`, the `DEVICE` page-table bit, `Mapped` in `pharos-user`, and the `devprobe` test program). So are device interrupts (#54: `irq::Irq` and the vector table in `kernel/src/irq.rs`, IDT stubs for vectors 48–63, MSI-X table writes through a kernel-only mapping, `irq_create` and `irq_wait`, and the `irqprobe` test program with a minimal virtio-blk queue in `user/programs/src/virtio.rs`). So is the virtio-blk driver (#56: `user/programs/src/bin/virtio-blk.rs` on the shared `pharos_programs::virtio` module, mounting the disk's `pharos-fs` image with the kernel's parser; tested in `virtio_blk`). To run that parser, `pharos-user` has a heap in its `syscall` module: a 256 KiB bump allocator that never freed memory until M3.0 replaced it with a size-class allocator over `mem_map` (#75, [user-environment.md](user-environment.md#the-user-allocator)). The M2.9 security review ([review-m2.9-drivers.md](../security/review-m2.9-drivers.md), #57) found and fixed four issues (F1–F4), recorded below where they apply.
 
@@ -154,7 +154,7 @@ In M2.9 test kernels started drivers. Since M2.10 (#61) the main kernel grants t
 
 ### Hotplug (M4.4, D-029)
 
-**Planned, not implemented.** Design approved (#169, 2026-11-08). D-029 (#168): native PCIe hotplug on q35 root ports, ACPI hotplug off; the kernel polls each slot on its timer, gives an arriving device BARs inside its port's window, and tells `init`, which starts the driver its table names; on the attention button `init` stops the driver and the kernel revokes the device and powers the slot off. Hotplug slots only; the boot disks and the trusted console stay on bus 0.
+**Implemented (#171).** Design approved (#169, 2026-11-08); the changes are listed after the tests. D-029 (#168): native PCIe hotplug on q35 root ports, ACPI hotplug off; the kernel polls each slot on its timer, gives an arriving device BARs inside its port's window, and tells `init`, which starts the driver its table names; on the attention button `init` stops the driver and the kernel revokes the device and powers the slot off. Hotplug slots only; the boot disks and the trusted console stay on bus 0.
 
 **The experiment (2026-11-08, QEMU 8.2.2, q35, `-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off`, two `pcie-root-port`s at `00:10.0` and `00:11.0`, chassis and slot 1 and 2).** D-029 made hotplug subject to it; it passed, so the fallback (driver restart only) is not needed.
 - **Both firmwares reserve windows for an empty port**, from `info pci`. OVMF: 2 MiB of memory (`0x80200000`–`0x803fffff` for slot 1) and 512 MiB of 64-bit prefetchable memory above 4 GiB (`0xc000000000`–`0xc01fffffff`); SeaBIOS: 2 MiB of memory and 2 MiB of prefetchable memory below 4 GiB. Neither reserves I/O ports (the I/O window is closed). A port given `mem-reserve` and `pref64-reserve` gets those sizes. Bus numbers are assigned: one secondary bus per port.
@@ -215,6 +215,19 @@ In M2.9 test kernels started drivers. Since M2.10 (#61) the main kernel grants t
 
 The runner's QMP channel is a pair of FIFOs (`qmp.in`, `qmp.out`) made like the trusted console's, so no socket path is involved; a console script step can carry a QMP command instead of a line to type.
 
+- *Implemented (#171):* `kernel/src/hotplug.rs` (decoding, `assign`, the state machine `step`/`answer`, host-tested; the slots, `tick`, and the calls in its kernel module), `arch::x86_64::pci::{write_slot, write_bar}`, `pci::{add, remove, scan_function}`, `Object::Hotplug` and `HOTPLUG` (`1 << 11`), calls 28–30 and `pharos_user::{slot_notify, slot_next, slot_answer}`, `pharos_services::{Object::Arrived, arrived, Service::driver, PROTECTED, SLOT_BIT}` and the rule `Broken::Driver`, `init`'s `slots`, `trust`'s device lines, audit action `device` (22), `virtio-blk` argument 2, the root ports on every QEMU run, and the `hotplug` test kernel.
+- *Changed from the design (#171):*
+  - **No new `Kind`.** A driver entry is a daemon whose manifest holds `Arrived(id)`; `Service::driver` finds it. The rule `Broken::Driver`: a daemon, not protected, in no entry's `after`, one `Arrived`, and a table of at most 31 entries, as slot events use bit 31 (`SLOT_BIT`) of `init`'s report endpoint. Two entries with the same `Arrived` are `SameDevice`.
+  - **The driver entry is in the boot table**, last, as `disk` (`virtio-blk` argument 2; argument 1 was already its crash test). So a virtio-blk disk added on a normal boot gets a driver. It is never started at boot: its state is the new `no device` (`waiting for a device` in `services`, state 9), counted with `off` in the summary, so the boot is still `[8, 0, …]` and `system ready: 8 services`.
+  - **`slot_next`'s value** carries the slot's index (bits 0–7, for `slot_answer`), the event (8–15), the handle (16–23; `init`'s table holds 64), the slot's physical number (24–31, what lines show), and the PCI ID (32–63).
+  - **A release completes the removal:** `slot_answer` revokes and powers off before it returns, so `init` reports the removal then; `REMOVED` comes only for a device taken without asking. `init` never answers `keep`: a driver cannot be protected (the rule), so the kernel's `keep` path (attention indicator blinking) has no caller yet.
+  - **Lines:** `trust` prints `device 1af4:1042 added to slot 1; driver disk`, `device … in slot 1 has no free driver`, and `device 1af4:1042 removed from slot 1; driver disk`; the events (13, 14) are system events, with the driver in the names list. A driver started for a device reports `service <name> ready` too (#170's line). Audit records: `slot <n> added <id>; driver <name>` (or `; no driver`) and `slot <n> removed <id>; driver <name>`; no record for the request or a refusal.
+  - **Starting a driver entry with no device** (`start disk`) is answered `OK` and reported `service disk not started: no device`, as any missing device; no `NO_DEVICE` status.
+  - **Slots holding a device at boot are left alone** (`Fixed`): that device is a boot device. Only function 0 behind a port is used. The wait for command completion is a bounded spin of 100,000 reads (QEMU completes at once), not a timer wait, and is not host-tested.
+  - **`init` gets `Hotplug` only from `init_capabilities` with devices** (the main kernel and the boot-image test kernels), after its devices.
+  - **QEMU deletes a `-drive` with the device it was given to,** so the test has one spare drive per add.
+  - **The console script** gained `>` steps (match only after the previous step's match, so a line seen before can be waited for again) and `qmp:` lines, and adds only whole lines to its transcript, so the console and QMP never split one.
+
 ## 4. Security
 
 - **Trust boundary:** a driver is an untrusted process. It reaches only the device it was given, through capabilities:
@@ -231,7 +244,7 @@ The runner's QMP channel is a pair of FIFOs (`qmp.in`, `qmp.out`) made like the 
 - **Devices are untrusted input** to the driver: every ring index, ID, length, and status is checked. The kernel itself reads only configuration space from devices, and it bounds the capability-list walk.
 - **ELF files are untrusted input:** the safe parser checks everything before any allocation, and it is fuzzed.
 - **Kernel memory:** DMA is at most 64 pages per device; register mappings at most 256 pages per process (F4); programs at most 4 MiB; interrupt vectors are a fixed set of 16, at most 4 per device.
-- **Hotplug (M4.4, planned):**
+- **Hotplug (M4.4, #171):**
   - only `init` holds `Hotplug`; no service or agent sees slot events or answers a removal;
   - a hot-added device is untrusted exactly as a boot device: the capability walk, MSI-X decoding, and BAR checks are the same, and the kernel, not the device, picks its BARs, inside a window firmware reserved and the kernel checked against the memory map;
   - a device cannot make the kernel allocate without bound: slot state is fixed per slot (at most 8), arrivals are limited to one per slot per second, and the tick handler only reads;

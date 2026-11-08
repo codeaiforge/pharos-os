@@ -43,6 +43,9 @@ pub const STOP: Rights = 1 << 9;
 /// Mount an image with `fs_mount` (on a filesystem; only `init`'s root,
 /// boot.md section 8).
 pub const MOUNT: Rights = 1 << 10;
+/// Take slot events and answer removals (on `Hotplug`; only `init`'s,
+/// drivers.md, M4.4).
+pub const HOTPLUG: Rights = 1 << 11;
 
 /// Badges are 24 bits (services.md).
 pub const BADGE_MASK: u32 = 0xff_ffff;
@@ -76,6 +79,9 @@ pub enum Object {
     /// Shared memory: with `READ`, map it read-only; with `WRITE` too,
     /// writable (user-environment.md).
     Memory(Arc<crate::process::SharedMemory>),
+    /// The system's hotplug slots (drivers.md, M4.4): with `HOTPLUG`,
+    /// their events and removal answers.
+    Hotplug,
 }
 
 impl fmt::Debug for Object {
@@ -91,6 +97,7 @@ impl fmt::Debug for Object {
             #[cfg(target_os = "none")]
             Self::Interrupt(i) => write!(f, "{i:?}"),
             Self::Memory(m) => write!(f, "Memory({} pages)", m.frames().len()),
+            Self::Hotplug => f.write_str("Hotplug"),
         }
     }
 }

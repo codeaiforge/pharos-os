@@ -948,6 +948,13 @@ impl Trust {
         let mut d = [[0u8; 20]; 3];
         let [a, b, c] = &mut d;
         let [n0, n1, n2] = n.map(u64::from);
+        // A device's PCI ID as `vendor:device` (#171).
+        let mut hex = [0u8; 9];
+        for (k, nibble) in [12, 8, 4, 0, 28, 24, 20, 16].into_iter().enumerate() {
+            hex[k + usize::from(k >= 4)] = b"0123456789abcdef"[((n[1] >> nibble) & 15) as usize];
+        }
+        hex[4] = b':';
+        let driven = names.iter().next().is_some();
         // At most 9 fixed parts, then 2 per listed name.
         let mut parts: [&[u8]; 9 + 2 * MAX_NAMES] = [b""; 9 + 2 * MAX_NAMES];
         let fixed: &[&[u8]] = match event {
@@ -971,6 +978,15 @@ impl Trust {
             Event::GivenUp => &[b"service ", name, b" not restarted: restarts used up"],
             Event::Never => &[b"service ", name, b" not restarted: restart policy never"],
             Event::Stopped => &[b"service ", name, b" stopped; not restarted"],
+            Event::DeviceAdded if driven => &[b"device ", &hex, b" added to slot ", decimal(n0, a)],
+            Event::DeviceAdded => &[
+                b"device ",
+                &hex,
+                b" in slot ",
+                decimal(n0, a),
+                b" has no free driver",
+            ],
+            Event::DeviceRemoved => &[b"device ", &hex, b" removed from slot ", decimal(n0, a)],
             Event::ByUser => match n[0] {
                 trust::by_user::STOPPED => &[b"service ", name, b" stopped by the user"],
                 trust::by_user::STARTED => &[b"service ", name, b" started by the user"],
@@ -1019,7 +1035,9 @@ impl Trust {
         };
         parts[..fixed.len()].copy_from_slice(fixed);
         let mut k = fixed.len();
-        let lead: &[u8] = if matches!(event, Event::Restarting | Event::ByUser) {
+        let lead: &[u8] = if matches!(event, Event::DeviceAdded | Event::DeviceRemoved) {
+            b"; driver "
+        } else if matches!(event, Event::Restarting | Event::ByUser) {
             b"; used by "
         } else {
             b": "

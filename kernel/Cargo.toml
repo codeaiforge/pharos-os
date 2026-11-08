@@ -261,6 +261,10 @@ name = "supervision"
 harness = false
 
 [[test]]
+name = "hotplug"
+harness = false
+
+[[test]]
 name = "manage"
 harness = false
 

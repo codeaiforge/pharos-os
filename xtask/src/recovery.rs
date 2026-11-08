@@ -493,7 +493,7 @@ fn boot_typed(
     // New FIFOs: an earlier round's script still reads the old ones.
     fresh_fifos(dir)?;
     let base = console::fifos(dir)?;
-    let script = console::Script::start(&base, steps)?;
+    let script = console::Script::start(&base, None, steps)?;
     let log = boot(iso, vars, logs, extra, round, None)?;
     let said = script
         .finish(&[])

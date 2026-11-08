@@ -31,6 +31,7 @@ pub mod boot_info;
 pub mod cap;
 pub mod device;
 pub mod fs;
+pub mod hotplug;
 #[cfg(target_arch = "x86_64")]
 pub mod ipc;
 #[cfg(target_arch = "x86_64")]

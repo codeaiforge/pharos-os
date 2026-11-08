@@ -59,7 +59,11 @@ fn run(t: &mut TestRun) {
     let init = process::spawn_elf_limited(&root, b"bin/init", 0, caps, process::INIT_MEMORY_LIMIT);
     t.check("init started with the boot table", init.is_ok());
     let summary = ipc::poll(&report, Duration::from_secs(75)).map(|m| m.bytes().to_vec());
-    let all = pharos_services::BOOT.len() as u8;
+    // Every entry started at boot: not a driver waiting for its device (#171).
+    let all = pharos_services::BOOT
+        .iter()
+        .filter(|s| s.driver().is_none())
+        .count() as u8;
     t.check(
         "init reported every boot service ready",
         summary

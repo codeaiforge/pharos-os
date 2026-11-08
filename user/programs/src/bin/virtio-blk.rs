@@ -5,7 +5,9 @@
 //! Handles: 1 debug console, 2 the device (`MAP | CONFIG | IRQ`). With
 //! argument 1 the driver crashes on purpose (a stack overflow) while a
 //! request is in flight, so tests can check that a dying driver leaves its
-//! device stopped. Exit codes:
+//! device stopped. With argument 2 (a hot-added disk, M4.4) it checks the
+//! image as below, then sends `ready` on handle 3 (its report capability)
+//! and keeps the device until it is stopped. Exit codes:
 //!
 //! | Code | Meaning |
 //! | --- | --- |
@@ -15,6 +17,7 @@
 //! | 3 | A read failed |
 //! | 4 | The image did not mount |
 //! | 5 | A file is missing or its contents are wrong |
+//! | 6 | Argument 2: `ready` could not be sent |
 
 #![no_std]
 #![no_main]
@@ -23,12 +26,14 @@ use core::cell::RefCell;
 
 use pharos_fs::{BLOCK_SIZE, BlockDevice, BlockError, Image};
 use pharos_programs::virtio::{self, Blk, MAX_READ};
-use pharos_user::{Handle, debug_write, irq_create};
+use pharos_user::{Handle, debug_write, irq_create, send, sleep};
 
 pharos_user::entry!(main);
 
 const CONSOLE: Handle = 1;
 const DEVICE: Handle = 2;
+/// A daemon's report capability (argument 2).
+const REPORT: Handle = 3;
 const BASE: u64 = 0x1000_0000;
 
 /// The disk as a `pharos-fs` block device.
@@ -155,6 +160,16 @@ fn main(arg: u64) -> u64 {
         return 5;
     }
     say("ok dir/big.bin");
+    if arg == 2 {
+        if send(REPORT, b"ready", 0, 0, 0).is_err() {
+            return 6;
+        }
+        // Holds the device until `init` stops it (before its slot powers
+        // off, or on the user's `stop service`).
+        loop {
+            sleep(u64::MAX);
+        }
+    }
     disk.blk.borrow().reset();
     0
 }

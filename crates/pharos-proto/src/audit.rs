@@ -93,7 +93,10 @@ pub mod action {
     /// from `init`: actor the service, the action and its dependents as
     /// detail; also a refused stop of a protected service.
     pub const MANAGE: u8 = 21;
-    pub const LAST: u8 = MANAGE;
+    /// A device added to or removed from a hotplug slot (#171, D-029),
+    /// from `init`: the slot, the PCI ID, and the driver as detail.
+    pub const DEVICE: u8 = 22;
+    pub const LAST: u8 = DEVICE;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -119,6 +122,7 @@ pub mod action {
             "service",
             "system",
             "manage",
+            "device",
         ]
         .get(usize::from(code))
         .copied()

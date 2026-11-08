@@ -1,8 +1,9 @@
 //! PCI configuration access, mechanism #1 (ports `0xCF8`/`0xCFC`; D-008,
 //! drivers.md). Safe functions only: reads; BAR size probing that puts
 //! everything back; the command and MSI-X control bits the kernel's
-//! device handling sets (`device.rs`); and MSI-X table entries (`irq.rs`).
-//! Nothing here re-points a BAR.
+//! device handling sets (`device.rs`); MSI-X table entries (`irq.rs`);
+//! and for hotplug (M4.4, `hotplug.rs`), a slot's control register and the
+//! BARs of a function that has just arrived, before it is handed out.
 
 use core::arch::asm;
 
@@ -93,6 +94,30 @@ pub fn probe_bar(address: Address, index: u8) -> (u32, u32) {
     write32_locked(address, offset, original);
     write32_locked(address, COMMAND, command & 0xffff);
     (original, probe)
+}
+
+/// Writes the Slot Control register of the PCI Express capability at
+/// `cap` (offset `cap + 0x18`), and `clear` into Slot Status, whose event
+/// bits are cleared by writing ones (hotplug).
+pub fn write_slot(address: Address, cap: u8, control: u16, clear: u16) {
+    let _guard = LOCK.lock();
+    write32_locked(
+        address,
+        cap.wrapping_add(0x18),
+        u32::from(control) | u32::from(clear) << 16,
+    );
+}
+
+/// Writes BAR register `index` (0–5) with decoding off, then restores the
+/// command register: only for a hot-added function before any driver has
+/// it (`hotplug.rs`, inside its port's window).
+pub fn write_bar(address: Address, index: u8, value: u32) {
+    let offset = 0x10 + 4 * (index % 6);
+    let _guard = LOCK.lock();
+    let command = read32_locked(address, COMMAND);
+    write32_locked(address, COMMAND, command & !DECODE & 0xffff);
+    write32_locked(address, offset, value);
+    write32_locked(address, COMMAND, command & 0xffff);
 }
 
 /// Turns memory decoding and bus mastering on (`on`) or off together with

@@ -938,6 +938,14 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
         "virtio-net-pci,netdev=net0,disable-legacy=on",
         "-device",
         "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        // Two hotplug slots (M4.4, D-029, drivers.md): native PCIe hotplug,
+        // with q35's ACPI hotplug off; firmware reserves their windows.
+        "-global",
+        "ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off",
+        "-device",
+        "pcie-root-port,id=rp1,bus=pcie.0,addr=0x10,chassis=1,slot=1",
+        "-device",
+        "pcie-root-port,id=rp2,bus=pcie.0,addr=0x11,chassis=2,slot=2",
         "-cdrom",
     ]
     .iter()
@@ -1444,6 +1452,72 @@ const MANAGE_SCRIPT: &[console::Step] = &[
     ("services: agents ready, restarts 0 of 3", "stop all\n"),
     ("stopped all", ""),
 ];
+/// Device add and remove (#171, D-029): the boot table and image, with a
+/// QMP channel and two spare read-only drives (the boot disk's image).
+const HOTPLUG_TEST: &str = "hotplug";
+/// QMP adds a virtio-blk disk to slot 1, removes it once its driver is
+/// ready, adds it again, and removes it while the user has stopped the
+/// driver. `>` waits for a line seen before ([`console::AFTER`]).
+const HOTPLUG_SCRIPT: &[console::Step] = &[
+    ("trust: ready", "qmp:{\"execute\": \"qmp_capabilities\"}\n"),
+    (
+        "system ready: 8 services",
+        "qmp:{\"execute\": \"device_add\", \"arguments\": {\"driver\": \"virtio-blk-pci\", \"drive\": \"spare1\", \"bus\": \"rp1\", \"id\": \"hot1\", \"disable-legacy\": \"on\"}}\n",
+    ),
+    ("device 1af4:1042 added to slot 1; driver disk", ""),
+    (
+        ">service disk ready",
+        "qmp:{\"execute\": \"device_del\", \"arguments\": {\"id\": \"hot1\"}}\n",
+    ),
+    ("device 1af4:1042 removed from slot 1; driver disk", ""),
+    (
+        "\"device\": \"hot1\"",
+        "qmp:{\"execute\": \"device_add\", \"arguments\": {\"driver\": \"virtio-blk-pci\", \"drive\": \"spare2\", \"bus\": \"rp1\", \"id\": \"hot2\", \"disable-legacy\": \"on\"}}\n",
+    ),
+    (">device 1af4:1042 added to slot 1; driver disk", ""),
+    (">service disk ready", "stop service disk\n"),
+    (
+        "service disk stopped by the user",
+        "qmp:{\"execute\": \"device_del\", \"arguments\": {\"id\": \"hot2\"}}\n",
+    ),
+    (">device 1af4:1042 removed from slot 1; driver disk", ""),
+    ("\"device\": \"hot2\"", "services\n"),
+    ("services: disk stopped, restarts 0 of 3", ""),
+];
+/// The `hotplug` kernel's device records (`init`, action `device`): detail
+/// and how many.
+const HOTPLUG_RECORDS: &[(&str, usize)] = &[
+    ("slot 1 added 1af4:1042; driver disk", 2),
+    ("slot 1 removed 1af4:1042; driver disk", 2),
+];
+
+/// After the `hotplug` kernel (#171): each add and remove one `device`
+/// record from `init`, and nothing else recorded as a device event.
+fn hotplug_checks(image: &Path) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, records)] = &streams[..] else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    for &(detail, times) in HOTPLUG_RECORDS {
+        let want = format!("client 1 Event device init task 0/0  init outcome 1 {detail}");
+        let (all, _) = records_and_copies(records, &want);
+        if all != times {
+            return Err(format!(
+                "hotplug: \"{detail}\": {all} audit records, expected {times}"
+            ));
+        }
+    }
+    let devices = records
+        .iter()
+        .filter(|r| r.contains(" Event device "))
+        .count();
+    if devices != 4 {
+        return Err(format!("hotplug: {devices} device records, expected 4"));
+    }
+    println!("  hotplug: 4 device events, each one audit record");
+    Ok(())
+}
+
 /// The `manage` kernel's actions: actor, detail, and the `trust` line
 /// (`service <actor> …`), each once.
 const MANAGE_EVENTS: &[(&str, &str, Option<&str>)] = &[
@@ -3018,7 +3092,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     } else {
         build_user_programs(paths)?
     };
-    let modules = if name == SYSTEM_TEST || name == MANAGE_TEST || slotted {
+    let modules = if name == SYSTEM_TEST || name == MANAGE_TEST || name == HOTPLUG_TEST || slotted {
         kernel_modules(paths, &programs)?
     } else {
         test_modules(&programs)
@@ -3028,6 +3102,24 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     fs::create_dir_all(&logs).map_err(io_err("cannot create", &logs))?;
     let log = logs.join(format!("test-{name}.log"));
     let mut extra = test_qemu_args(&name);
+    if name == HOTPLUG_TEST {
+        // QMP on FIFOs (no socket path), and a drive for each add: QEMU
+        // deletes a drive with the device it was given to.
+        let mut qmp = OsString::from("pipe,id=qmp,path=");
+        qmp.push(out.join(console::QMP));
+        extra.extend([
+            "-chardev".into(),
+            qmp,
+            "-mon".into(),
+            "chardev=qmp,mode=control".into(),
+        ]);
+        for n in 1..=2 {
+            let mut hot =
+                OsString::from(format!("if=none,id=spare{n},format=raw,readonly=on,file="));
+            hot.push(iso.with_file_name(DISK_IMAGE));
+            extra.extend(["-drive".into(), hot]);
+        }
+    }
     if env::var(PCAP_ENV).as_deref() == Ok("1") {
         extra.extend(pcap_args(&logs.join(format!("test-{name}.pcap"))));
     }
@@ -3103,6 +3195,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         SUPERVISION_TEST => (SUPERVISION_SCRIPT, &[]),
         SYSTEM_TEST => (SYSTEM_SCRIPT, &[]),
         MANAGE_TEST => (MANAGE_SCRIPT, &[]),
+        HOTPLUG_TEST => (HOTPLUG_SCRIPT, &[]),
         recovery::UPDATE_TEST => (recovery::UPDATE_SCRIPT, &[]),
         _ => (&[], &[]),
     };
@@ -3110,7 +3203,12 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         None
     } else {
         let base = console::fifos(&out)?;
-        Some(console::Script::start(&base, steps)?)
+        let qmp = if name == HOTPLUG_TEST {
+            Some(console::fifos_named(&out, console::QMP)?)
+        } else {
+            None
+        };
+        Some(console::Script::start(&base, qmp.as_deref(), steps)?)
     };
     let run = boot_headless(
         &iso,
@@ -3138,6 +3236,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == MANAGE_TEST {
                 manage_checks(&out.join(STORE_IMAGE), &output)?;
+            }
+            if name == HOTPLUG_TEST {
+                hotplug_checks(&out.join(STORE_IMAGE))?;
             }
             if name == PERMISSIONS_TEST {
                 permissions_audit(&out.join(STORE_IMAGE))?;
@@ -3537,6 +3638,9 @@ mod tests {
         assert!(!uefi.contains(" -S"));
         assert!(uefi.contains("-serial stdio"));
         assert!(uefi.contains("-chardev pipe,id=trust,path=trust"));
+        assert!(uefi.contains("ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off"));
+        assert!(uefi.contains("pcie-root-port,id=rp1,bus=pcie.0,addr=0x10,chassis=1,slot=1"));
+        assert!(uefi.contains("pcie-root-port,id=rp2,bus=pcie.0,addr=0x11,chassis=2,slot=2"));
         assert!(uefi.contains("virtconsole,chardev=trust"));
         let bios = joined(qemu_args(
             iso,

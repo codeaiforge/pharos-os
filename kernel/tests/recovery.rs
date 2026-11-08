@@ -99,6 +99,11 @@ fn run(t: &mut TestRun) {
     kprintln!("recovery: running {name}");
     kprintln!("recovery: {word} mode");
     // Outside normal mode the agent runtime is off.
-    let all = pharos_services::BOOT.len() as u8 - u8::from(mode != 0);
+    // Every entry started at boot: not a driver waiting for its device (#171).
+    let boot = pharos_services::BOOT
+        .iter()
+        .filter(|s| s.driver().is_none())
+        .count();
+    let all = boot as u8 - u8::from(mode != 0);
     t.check("every boot service is ready", (ready, failed) == (all, 0));
 }

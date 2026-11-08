@@ -5,7 +5,7 @@ pub use pharos_proto::service::{Action, State};
 
 /// Services that can be restarted but never stopped: stopping one would
 /// end the trusted console, the audit trail, or both.
-pub const PROTECTED: [&str; 3] = ["trust", "audit", "store"];
+pub use pharos_services::PROTECTED;
 
 /// What `init` does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +56,7 @@ pub fn decide(
 mod tests {
     use super::*;
 
-    const ALL: [State; 9] = [
+    const ALL: [State; 10] = [
         State::Pending,
         State::Starting,
         State::Ready,
@@ -66,6 +66,7 @@ mod tests {
         State::Skipped,
         State::Stopped,
         State::Off,
+        State::NoDevice,
     ];
     const RUNS: [State; 3] = [State::Starting, State::Ready, State::Restarting];
 
