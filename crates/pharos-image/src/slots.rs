@@ -241,14 +241,16 @@ impl Record {
         self.active = Some(slot);
     }
 
-    /// The lowest version an update may have (#165): above every `Good`
-    /// slot's, so an older image is never installed again.
-    pub fn min_version(&self) -> u64 {
+    /// The lowest version an update may have (#165, #167): above every
+    /// version a slot records, `bad` ones too, and above `factory`, the
+    /// factory image's, so an older image is never installed again, even
+    /// with no slot `good`.
+    pub fn min_version(&self, factory: u64) -> u64 {
         (self.slots.iter())
-            .filter(|s| s.state == State::Good)
-            .map(|s| s.version.saturating_add(1))
-            .max()
-            .unwrap_or(0)
+            .filter(|s| s.state != State::Empty)
+            .map(|s| s.version)
+            .fold(factory, u64::max)
+            .saturating_add(1)
     }
 
     /// True if `sha256` is the image of a `Bad` slot: never offered again,
@@ -452,21 +454,28 @@ mod tests {
     }
 
     #[test]
-    fn an_update_must_be_newer_than_every_good_slot_and_not_a_bad_one() {
-        assert_eq!(Record::EMPTY.min_version(), 0);
+    fn an_update_must_be_newer_than_every_slot_and_the_factory_image() {
+        // No slot: above the factory image's version.
+        assert_eq!(Record::EMPTY.min_version(0), 1);
+        assert_eq!(Record::EMPTY.min_version(5), 6);
         let r = record(
             Some(Slot::A),
             info(State::Good, 0, 7),
             info(State::Bad, 0, 9),
         );
-        // The bad slot's version does not count; its image is refused.
-        assert_eq!(r.min_version(), 8);
+        // A bad slot's version counts too (#167, F2), and its image is
+        // refused.
+        assert_eq!(r.min_version(0), 10);
         assert!(r.was_bad(&[9; 32]));
         assert!(!r.was_bad(&[7; 32]), "a good slot's image");
-        let both = record(None, info(State::Good, 0, 3), info(State::Good, 0, 5));
-        assert_eq!(both.min_version(), 6);
+        // No slot good: the floor stays.
+        let bad = record(None, info(State::Bad, 0, 3), info(State::Bad, 0, 5));
+        assert_eq!(bad.min_version(0), 6);
+        assert_eq!(bad.min_version(8), 9, "the factory image is newer");
+        let trying = record(None, info(State::Trying, 1, 4), info(State::Staged, 0, 2));
+        assert_eq!(trying.min_version(0), 5);
         let top = record(None, info(State::Good, 0, u64::MAX), SlotInfo::EMPTY);
-        assert_eq!(top.min_version(), u64::MAX, "saturates");
+        assert_eq!(top.min_version(0), u64::MAX, "saturates");
     }
 
     #[test]

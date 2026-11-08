@@ -687,7 +687,7 @@ fn tools(mut c: Client) -> u64 {
     );
     let proposer = c.submit(b"proposer", b"propose");
     c.step(
-        "an agent with update propose proposes its file, at most 4 times",
+        "an agent with update propose proposes its file, at most 3 times",
         ended(&c, proposer, b"propose ok"),
     );
     let _ = send(REPORT, b"done", 0, 0, 0);

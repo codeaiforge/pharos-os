@@ -8,8 +8,8 @@
 //! `reader` task (agent `reader`: both tools, `report.txt` and `big.txt`
 //! given, `notes.txt` askable, 4 KiB of `file_kb`), then a `plain` task (the
 //! same file, no tool, no `update propose`: its `PROPOSE` is refused),
-//! then a `proposer` task (#165: its own file proposed four times, the
-//! fifth over the limit; the runtime also has handle 12, namespace
+//! then a `proposer` task (#165: its own file proposed three times, the
+//! fourth over the limit, #167; the runtime also has handle 12, namespace
 //! `system/incoming`). The runner approves `notes.txt` on the trusted
 //! console, then revokes `report.txt`, and afterwards checks the audit
 //! trail. Runs under UEFI (D-009).
@@ -82,7 +82,7 @@ fn run(t: &mut TestRun) {
     for step in [
         "read_file reads a granted file; every other call is refused",
         "an agent that may use no tool is refused one",
-        "an agent with update propose proposes its file, at most 4 times",
+        "an agent with update propose proposes its file, at most 3 times",
     ] {
         let want = alloc::format!("ok {step}");
         t.check(step, passed.iter().any(|l| l == want.as_bytes()));

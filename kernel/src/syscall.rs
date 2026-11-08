@@ -924,7 +924,8 @@ mod kernel {
     /// `fs_mount` (#163, boot.md section 8): copies the range into frames
     /// the kernel owns, then mounts the copy, so the caller cannot change
     /// the bytes after the checks. The copy's pages are charged to the
-    /// caller until it ends; a failed mount gives them back.
+    /// caller until the copy is freed (#167, F1); a failed mount gives them
+    /// back at once.
     fn fs_mount(
         process: &process::Process,
         handle: Handle,
@@ -949,17 +950,16 @@ mod kernel {
         // Its pages, their tables, and the copy's top-level tables.
         let pages = len.div_ceil(4096);
         let charge = pages + pages.div_ceil(512) + 4;
-        if !process.memory.lock().take(charge, true) {
-            return Err(Error::NoMemory);
-        }
-        let give_back = || process.memory.lock().charged -= charge;
+        let charge = process
+            .memory
+            .lock()
+            .charge(charge)
+            .ok_or(Error::NoMemory)?;
         let pause = || crate::arch::x86_64::interrupt_window();
-        let Some(copy) = crate::fs::Copy::new(memory.frames(), offset, len, pause) else {
-            give_back();
+        let Some(copy) = crate::fs::Copy::new(memory.frames(), offset, len, charge, pause) else {
             return Err(Error::NoMemory);
         };
         let Ok(image) = pharos_fs::Image::mount(crate::fs::Disk::Copy(copy)) else {
-            give_back();
             return Err(Error::BadImage);
         };
         let fs = alloc::sync::Arc::new(image);

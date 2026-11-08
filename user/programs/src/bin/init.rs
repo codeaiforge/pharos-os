@@ -229,6 +229,8 @@ struct Init {
     record: Record,
     /// The public key slots and updates are verified with.
     key: Option<[u8; 32]>,
+    /// The factory image's version: updates must be newer (#167).
+    factory: u64,
     /// The updates offered since the last `update` (#165).
     offers: Offers,
     /// Booting, or applying an update or a rollback: `trust`'s update
@@ -1220,14 +1222,11 @@ impl Init {
             let path = [system::INCOMING, name].concat();
             let checked = (self.slots.as_ref())
                 .map_or(Err(Refusal::Unreadable), |s| {
-                    s.check(&path, self.key.as_ref(), self.record.min_version())
+                    s.check(&path, self.key.as_ref())
                 })
                 .and_then(|(version, sha256, _)| {
-                    if self.record.was_bad(&sha256) {
-                        Err(Refusal::WasBad)
-                    } else {
-                        Ok((version, sha256))
-                    }
+                    pharos_programs::system::admit(&self.record, self.factory, version, &sha256)?;
+                    Ok((version, sha256))
                 });
             match checked {
                 Ok((version, sha256)) => {
@@ -1295,11 +1294,13 @@ impl Init {
             return;
         }
         let checked = slots
-            .check(&path, self.key.as_ref(), self.record.min_version())
-            .and_then(|(version, sha256, len)| match sha256 == offer.sha256 {
-                true if self.record.was_bad(&sha256) => Err(Refusal::WasBad),
-                true => Ok((version, sha256, len)),
-                false => Err(Refusal::Changed),
+            .check(&path, self.key.as_ref())
+            .and_then(|(version, sha256, len)| {
+                if sha256 != offer.sha256 {
+                    return Err(Refusal::Changed);
+                }
+                pharos_programs::system::admit(&self.record, self.factory, version, &sha256)?;
+                Ok((version, sha256, len))
             });
         let (version, sha256, len) = match checked {
             Ok(found) => found,
@@ -1492,6 +1493,7 @@ fn main(arg: u64) -> u64 {
         slots: None,
         record: Record::EMPTY,
         key: pharos_programs::system::parse_key(option_env!("PHAROS_IMAGE_KEY")),
+        factory: pharos_programs::system::parse_version(option_env!("PHAROS_IMAGE_VERSION")),
         offers: Offers::new(),
         busy: true,
     };

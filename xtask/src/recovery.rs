@@ -24,6 +24,12 @@
 //! 7. `broken-factory`, an image whose factory agent runtime exits at
 //!    once: not ready, so `init` stops its services and starts again in
 //!    recovery mode.
+//!
+//! A malfunctioning agent runtime (#167), before round 3:
+//!
+//! 8. `spinning`, slot A whose agent runtime (`spinner`) spins forever
+//!    and never reports ready, slot B good: A is stopped after 20 s and B
+//!    runs, in place.
 
 use std::ffi::OsString;
 use std::fs;
@@ -216,6 +222,18 @@ pub fn rounds(
         })
         .collect();
     let never_ready = fs_image::pack_with(&dir, &never_ready)?;
+    // The agent runtime replaced by `spinner`, which spins forever.
+    let spinner = programs
+        .iter()
+        .find(|(p, _)| p == "bin/spinner")
+        .ok_or("no bin/spinner")?;
+    let spinning: Vec<ImageFile> = (programs.iter())
+        .map(|(p, b)| match p.as_str() {
+            "bin/agents" => (p.clone(), spinner.1.clone()),
+            _ => (p.clone(), b.clone()),
+        })
+        .collect();
+    let spinning = fs_image::pack_with(&dir, &spinning)?;
     let store_path = iso.with_file_name(STORE_IMAGE);
     let tests_ok = "PHAROS: tests ok";
 
@@ -360,6 +378,33 @@ pub fn rounds(
         ],
     )?;
 
+    // 8. Slot A's agent runtime spins and never reports ready: stopped on
+    //    `init`'s deadline, and slot B runs in place.
+    store(
+        &store_path,
+        &signed(&spinning, 3, &seed),
+        Some(&signed(&root, 2, &seed)),
+    )?;
+    let log = boot(iso, vars, logs, extra, "spinning", None)?;
+    expect(
+        "spinning",
+        &log,
+        &[
+            "init: system: slot A: attempt 1",
+            "init: system: slot A version 3 not ready within 20 s; its services stopped",
+            "init: system: slot B: attempt 1",
+            "init: system: running slot B version 2",
+            "recovery: running slot B",
+            tests_ok,
+        ],
+    )?;
+    let r = record(iso)?;
+    expect_slot("spinning", &r, Slot::A, State::Trying, 1)?;
+    expect_slot("spinning", &r, Slot::B, State::Good, 0)?;
+    if r.active != Some(Slot::B) {
+        return Err(format!("{TEST} spinning: slot B is not active"));
+    }
+
     // 3. Slot A never ready: one attempt per boot, the second boot killed
     //    once its attempt is written.
     store(&store_path, &signed(&never_ready, 4, &seed), None)?;
@@ -503,7 +548,9 @@ const ROLLBACK: &[console::Step] = &[
     ("rollback: the services start again", ""),
     ("system: rolled back; running slot A", ""),
 ];
-/// The runner's own boot: refusals, then a discard.
+/// The runner's own boot: refusals, then an agent's proposal (by its
+/// name) answered with the runtime's `yes 1`, which must not apply it
+/// (#167), then a discard.
 pub const UPDATE_SCRIPT: &[console::Step] = &[
     ("system ready: 8 services", "system\n"),
     ("active slot A, 4 incoming", "update\n"),
@@ -511,7 +558,9 @@ pub const UPDATE_SCRIPT: &[console::Step] = &[
     ("update: forged refused: bad signature", ""),
     ("update: old refused: version too old", ""),
     ("update: was-bad refused: the image of a bad slot", ""),
-    ("update #1: newer version 11", "discard 1\n"),
+    ("update #1: proposer-1 version 11", "yes 1\n"),
+    ("no request #1", "system\n"),
+    ("running slot A, active slot A, 4 incoming", "discard 1\n"),
     ("update #1: discarded", ""),
 ];
 
@@ -616,7 +665,8 @@ pub fn update_rounds(
     expect_slot("rollback", &r, Slot::B, State::Bad, 0)?;
 
     // The last boot's store: an older image, one signed with another key,
-    // the image of the bad slot B, and a newer one, which is discarded.
+    // the image of the bad slot B, and a newer one named as an agent's
+    // proposal, which `yes 1` does not apply and which is discarded.
     let old = signed(&root, 5, &seed);
     let forged = signed(&root, 9, &[7; 32]);
     // Another image than the others: the check compares SHA-256s.
@@ -628,14 +678,14 @@ pub fn update_rounds(
         (b"system/incoming/old", &old),
         (b"system/incoming/forged", &forged),
         (b"system/incoming/was-bad", &was_bad),
-        (b"system/incoming/newer", &newer),
+        (b"system/incoming/proposer-1", &newer),
     ];
     store_with(&store_path, &a_active(info(&was_bad, State::Bad)), &files)?;
     fresh_fifos(iso.parent().unwrap_or(Path::new(".")))
 }
 
-/// After the runner's own boot: nothing was applied, the refused files
-/// are kept, and the discarded one is gone.
+/// After the runner's own boot: nothing was applied (not by `yes 1`
+/// either), the refused files are kept, and the discarded one is gone.
 pub fn update_last(iso: &Path, log: &str) -> Result<()> {
     expect(
         "discard",
@@ -644,8 +694,8 @@ pub fn update_last(iso: &Path, log: &str) -> Result<()> {
             "init: system: incoming forged refused: bad signature",
             "init: system: incoming old refused: version too old",
             "init: system: incoming was-bad refused: the image of a bad slot",
-            "init: system: offered #1: incoming newer version 11",
-            "update: init: system: update discarded: incoming newer",
+            "init: system: offered #1: incoming proposer-1 version 11",
+            "update: init: system: update discarded: incoming proposer-1",
         ],
     )?;
     let r = record(iso)?;
@@ -657,7 +707,7 @@ pub fn update_last(iso: &Path, log: &str) -> Result<()> {
         ("old", true),
         ("forged", true),
         ("was-bad", true),
-        ("newer", false),
+        ("proposer-1", false),
     ] {
         let path = format!("system/incoming/{name}");
         if store_image::read(&store, path.as_bytes())?.is_some() != kept {

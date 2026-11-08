@@ -2,7 +2,7 @@
 //! that can be tested on the host: the public key it was built with, the
 //! reason codes it sends `trust`, and the updates it offered (#165).
 
-use pharos_image::slots::Mode;
+use pharos_image::slots::{Mode, Record};
 use pharos_proto::trust::image::REASONS;
 use pharos_proto::trust::{MAX_NAME, valid_name};
 
@@ -10,6 +10,9 @@ use pharos_proto::trust::{MAX_NAME, valid_name};
 pub const OFFER_US: u64 = 60_000_000;
 /// Most incoming images `update` looks at.
 pub const MAX_INCOMING: usize = 4;
+/// Most files agents may have waiting in `incoming` (#167): one place is
+/// kept, so agents cannot hide a file the host stages.
+pub const MAX_PROPOSED: usize = MAX_INCOMING - 1;
 
 /// An incoming image shown to the user: its file in `system/incoming`,
 /// the SHA-256 it had then (an answer applies only that image), and when.
@@ -148,6 +151,30 @@ pub fn split_arg(arg: u64) -> (u64, Mode, bool) {
     (arg & 0xff, mode, arg >> 8 == 3)
 }
 
+/// The factory image's version, as `PHAROS_IMAGE_VERSION` holds it when
+/// `init` is built (#167); 0 without it or for anything but a number.
+pub fn parse_version(decimal: Option<&str>) -> u64 {
+    decimal.and_then(|d| d.parse().ok()).unwrap_or(0)
+}
+
+/// Whether an incoming image with `version` and `sha256` may be offered
+/// or applied, after its signature (#165, #167): not a bad slot's image,
+/// then newer than every slot and than the factory image (`factory`).
+pub fn admit(
+    record: &Record,
+    factory: u64,
+    version: u64,
+    sha256: &[u8; 32],
+) -> Result<(), Refusal> {
+    if record.was_bad(sha256) {
+        return Err(Refusal::WasBad);
+    }
+    if version < record.min_version(factory) {
+        return Err(Refusal::Image(pharos_image::Error::Old));
+    }
+    Ok(())
+}
+
 /// The public key in 64 hex digits, as `PHAROS_IMAGE_KEY` holds it when
 /// `init` is built; `None` for anything else.
 pub fn parse_key(hex: Option<&str>) -> Option<[u8; 32]> {
@@ -234,6 +261,38 @@ mod tests {
         assert_eq!(split_arg(0x200), (0, Mode::Recovery, false));
         assert_eq!(split_arg(0x300), (0, Mode::Recovery, true));
         assert_eq!(split_arg(0x900), (0, Mode::Normal, false));
+    }
+
+    #[test]
+    fn an_update_is_not_a_bad_image_then_newer_than_all() {
+        use pharos_image::slots::{Slot, SlotInfo, State};
+        let slot = |state, version: u64| SlotInfo {
+            state,
+            attempts: 0,
+            version,
+            sha256: [version as u8; 32],
+        };
+        let r = Record {
+            active: Some(Slot::A),
+            slots: [slot(State::Good, 6), slot(State::Bad, 10)],
+            ..Record::EMPTY
+        };
+        // The bad slot's image says so, though it is also too old.
+        assert_eq!(admit(&r, 0, 10, &[10; 32]), Err(Refusal::WasBad));
+        assert_eq!(
+            admit(&r, 0, 10, &[1; 32]),
+            Err(Refusal::Image(pharos_image::Error::Old))
+        );
+        assert_eq!(admit(&r, 0, 11, &[1; 32]), Ok(()));
+        assert_eq!(admit(&Record::EMPTY, 0, 1, &[1; 32]), Ok(()));
+        assert_eq!(
+            admit(&Record::EMPTY, 4, 4, &[1; 32]),
+            Err(Refusal::Image(pharos_image::Error::Old)),
+            "not older than the factory image"
+        );
+        assert_eq!(parse_version(Some("12")), 12);
+        assert_eq!(parse_version(Some("x")), 0);
+        assert_eq!(parse_version(None), 0);
     }
 
     #[test]

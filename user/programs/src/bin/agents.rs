@@ -2590,13 +2590,13 @@ impl Runtime {
         let incoming = self.incoming.as_mut().ok_or(status::INTERNAL)?;
         incoming.health.ready()?;
         let waiting = incoming.list(b"").map_err(|_| status::INTERNAL)?;
-        if waiting.len() >= pharos_programs::system::MAX_INCOMING {
+        if waiting.len() >= pharos_programs::system::MAX_PROPOSED {
             return Err(status::OVER_LIMIT);
         }
         let agent = limits.entry.name;
         // The first free `<agent>-<n>`, a valid name for `trust` to show.
         let mut d = [0u8; 20];
-        let (n, name) = (1..=pharos_programs::system::MAX_INCOMING as u64)
+        let (n, name) = (1..=pharos_programs::system::MAX_PROPOSED as u64)
             .map(|n| (n, [agent, b"-", decimal(n, &mut d)].concat()))
             .find(|(_, name)| !waiting.contains(name))
             .ok_or(status::OVER_LIMIT)?;

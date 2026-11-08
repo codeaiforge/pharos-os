@@ -134,6 +134,23 @@ fn main(_: u64) -> u64 {
         "after one is deleted, another mounts",
         c.is_ok() && hello(c.unwrap_or(0)).as_deref() == Some(b"second"),
     );
+
+    // Each freed copy gives its pages back (#167, F1): 20 mounts would
+    // take about 140 of its 64 pages if they were kept.
+    let mut c = c.unwrap_or(0);
+    let mut again = true;
+    for _ in 0..20 {
+        let _ = delete(c);
+        match fs_mount(MOUNT, memory, AT, second.len() as u64) {
+            Ok(h) => c = h,
+            Err(_) => again = false,
+        }
+    }
+    report(
+        &mut failures,
+        "a copy's pages come back: 20 more mounts in turn",
+        again && hello(c).as_deref() == Some(b"second"),
+    );
     report(&mut failures, "done", true);
     pharos_user::sleep(10_000_000);
     failures

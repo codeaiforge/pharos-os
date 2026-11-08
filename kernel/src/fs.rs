@@ -91,6 +91,8 @@ mod kernel {
     pub struct Copy {
         space: Option<AddressSpace>,
         len: u64,
+        /// The caller's pages for it, given back when it is freed.
+        _charge: crate::process::Charge,
     }
 
     impl Copy {
@@ -99,13 +101,23 @@ mod kernel {
         /// memory ran out (nothing is kept then). The caller checked the
         /// range against the frames. `pause` runs between pages, with no
         /// lock held.
-        pub fn new(source: &[u64], offset: u64, len: u64, mut pause: impl FnMut()) -> Option<Self> {
+        pub fn new(
+            source: &[u64],
+            offset: u64,
+            len: u64,
+            charge: crate::process::Charge,
+            mut pause: impl FnMut(),
+        ) -> Option<Self> {
             if COPIES.fetch_add(1, Ordering::AcqRel) >= MAX_COPIES {
                 COPIES.fetch_sub(1, Ordering::AcqRel);
                 return None;
             }
             // From here on, dropping `copy` gives everything back.
-            let mut copy = Self { space: None, len };
+            let mut copy = Self {
+                space: None,
+                len,
+                _charge: charge,
+            };
             let space = AddressSpace::new_user(crate::mm::frames().as_mut()?);
             copy.space = Some(space.ok()?);
             let first = offset / 4096;

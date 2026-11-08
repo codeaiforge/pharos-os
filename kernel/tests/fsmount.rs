@@ -3,7 +3,8 @@
 //! buffer, and mounts them: without `MOUNT` refused, a corrupt image
 //! `BAD_IMAGE`, 17 MiB and a range past the buffer `TOO_LARGE`, a third
 //! mount `NO_MEMORY`; the copy keeps its bytes after the buffer changes,
-//! and a mount at a byte offset works. While it waits, the kernel counts
+//! a mount at a byte offset works, and a freed copy gives its pages back
+//! (20 more mounts in turn, #167). While it waits, the kernel counts
 //! two copies; once it has ended, none, and every frame is back. Runs
 //! under UEFI (D-009).
 
@@ -47,7 +48,7 @@ fn printed(id: TaskId, line: &[u8]) -> bool {
         .any(|(t, l)| *t == id && l == line)
 }
 
-const STEPS: [&str; 11] = [
+const STEPS: [&str; 12] = [
     "without MOUNT: missing right",
     "mount an image",
     "read its file",
@@ -59,6 +60,7 @@ const STEPS: [&str; 11] = [
     "read the second image's file",
     "a third mount: no memory",
     "after one is deleted, another mounts",
+    "a copy's pages come back: 20 more mounts in turn",
 ];
 
 fn run(t: &mut TestRun) {

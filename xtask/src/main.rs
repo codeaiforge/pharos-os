@@ -649,7 +649,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 29] = [
+const USER_PROGRAMS: [&str; 30] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -679,6 +679,7 @@ const USER_PROGRAMS: [&str; 29] = [
     "knowledge",
     "knowledgeclient",
     "mountprobe",
+    "spinner",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -2161,21 +2162,21 @@ fn budgets_audit(image: &Path) -> Result<()> {
 /// an intent and an outcome, each kind of refused call is recorded once
 /// with its first example, and the approval and the revocation are there.
 fn tools_audit(image: &Path) -> Result<()> {
-    // #165: `proposer`'s file, four times, in `system/incoming`, and
-    // nothing else of `init`'s written.
-    for n in 1..=4 {
+    // #165: `proposer`'s file, three times (#167), in `system/incoming`,
+    // and nothing else of `init`'s written.
+    for n in 1..=3 {
         let path = format!("system/incoming/proposer-{n}");
         if store_image::read(image, path.as_bytes())?.as_deref() != Some(b"proposed by an agent") {
             return Err(format!("{path} is not proposer's file"));
         }
     }
     let system = store_image::paths(image, b"system/")?;
-    if system.len() != 4 {
+    if system.len() != 3 {
         return Err(format!(
-            "system/ holds {system:?}, not only the 4 proposals"
+            "system/ holds {system:?}, not only the 3 proposals"
         ));
     }
-    println!("  proposer's 4 proposals in system/incoming; no slot or record written");
+    println!("  proposer's 3 proposals in system/incoming; no slot or record written");
     let streams = store_image::audit(image)?;
     let [(_, lines)] = streams.as_slice() else {
         return Err(format!("expected one audit stream, got {}", streams.len()));
@@ -2212,7 +2213,7 @@ fn tools_audit(image: &Path) -> Result<()> {
         "client 3 Event refuse plain task 2/1 update propose  outcome 2 no grant",
         "client 3 Event grant proposer task 3/1 update propose  outcome 1",
         "update propose store outcome 0 propose image as proposer-1",
-        "update propose store outcome 0 propose image as proposer-4",
+        "update propose store outcome 0 propose image as proposer-3",
     ] {
         if count(want) != 1 {
             return Err(format!("{} records like {want:?}, expected 1", count(want)));

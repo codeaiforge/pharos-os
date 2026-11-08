@@ -1,9 +1,13 @@
 //! `init`'s image slots (#163, boot.md section 8): namespace `system` on
 //! its own unbadged storage capability, through one buffer big enough for
 //! a slot file. The same buffer is the `Memory` object `fs_mount` copies
-//! the image from. Updates wait in `system/incoming` (#165).
+//! the image from. Updates wait in `system/incoming` (#165). Once a file
+//! is read for a check, the store's access to the buffer is revoked until
+//! the next request that needs it (#167), so the bytes checked are the
+//! bytes mounted or written.
 
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use pharos_image::HEADER_LEN;
 use pharos_image::slots::{RECORD_LEN, Record, Slot};
@@ -11,7 +15,7 @@ use pharos_programs::system::{MAX_INCOMING, Refusal};
 use pharos_proto::store::{self, Request, Status};
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
-    Handle, Mapped, Received, call_timeout, fs_mount, mem_map_buffer, mem_share, send,
+    Handle, Mapped, Received, call_timeout, fs_mount, mem_map_buffer, mem_share, revoke, send,
 };
 
 /// A 16 MiB image takes about a second to read under QEMU.
@@ -28,6 +32,8 @@ pub struct Slots {
     buffer: Mapped,
     /// `READ | WRITE | GRANT` on the buffer, kept for `fs_mount`.
     memory: Handle,
+    /// The store's access is revoked: attach again before using it.
+    private: Cell<bool>,
 }
 
 /// What `system/state` held.
@@ -54,11 +60,13 @@ impl Slots {
             reply,
             buffer,
             memory,
+            private: Cell::new(false),
         };
         slots.attach().then_some(slots)
     }
 
     fn attach(&self) -> bool {
+        self.private.set(false);
         let len = self.buffer.len() as u64;
         let mut msg = [0u8; 16];
         let sent = store::encode(&Request::Attach { len }, &mut msg)
@@ -76,9 +84,12 @@ impl Slots {
         }
     }
 
-    /// A request that uses the buffer, attaching it again once if the
-    /// store lost it (it restarted).
+    /// A request that uses the buffer, attaching it again first if it was
+    /// made private, and once more if the store lost it (it restarted).
     fn call_buffered(&self, req: &Request<'_>) -> Option<(Status, [u8; 256])> {
+        if self.private.get() && !self.attach() {
+            return None;
+        }
         match self.call(req)? {
             (Status::NoBuffer, _) if self.attach() => self.call(req),
             answer => Some(answer),
@@ -134,26 +145,30 @@ impl Slots {
         matches!(self.call_buffered(&req), Some((Status::Ok, _)))
     }
 
-    /// Reads `path` (in namespace `system`) and verifies it with `key`,
-    /// its version at least `min`: its version, SHA-256, and length. The
-    /// checked bytes stay in the buffer, which only the store also maps,
-    /// and only `init`'s requests make it write there.
+    /// Reads `path` (in namespace `system`) and verifies its signature
+    /// with `key`: its version, SHA-256, and length. Versions are the
+    /// caller's to check. The store's access to the buffer is revoked
+    /// first (the kernel ends its mapping), so until the next buffered
+    /// request only `init` can change the checked bytes.
     pub fn check(
         &self,
         path: &[u8],
         key: Option<&[u8; 32]>,
-        min: u64,
     ) -> Result<(u64, [u8; 32], u64), Refusal> {
         let key = key.ok_or(Refusal::NoKey)?;
         let Ok(Some(len)) = self.read(path) else {
             return Err(Refusal::Unreadable);
         };
+        if revoke(self.memory).is_err() {
+            return Err(Refusal::Unreadable);
+        }
+        self.private.set(true);
         let mut file = Vec::new();
         file.try_reserve_exact(len as usize)
             .map_err(|_| Refusal::Unreadable)?;
         file.resize(len as usize, 0);
         self.buffer.read_bytes(0, &mut file);
-        let v = pharos_image::verify(&file, key, min).map_err(Refusal::Image)?;
+        let v = pharos_image::verify(&file, key, 0).map_err(Refusal::Image)?;
         Ok((v.version, v.sha256, len))
     }
 
@@ -168,7 +183,7 @@ impl Slots {
         record: &Record,
         key: Option<&[u8; 32]>,
     ) -> Result<(Handle, u64), Refusal> {
-        let (version, sha256, len) = self.check(slot.path(), key, 0)?;
+        let (version, sha256, len) = self.check(slot.path(), key)?;
         if sha256 != record.slot(slot).sha256 {
             return Err(Refusal::Replaced);
         }

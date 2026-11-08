@@ -55,8 +55,8 @@
 //!   `10.0.2.2:47000`, the `late` echo is never delivered and sending
 //!   there is refused; completes with `talk ok`.
 //! - `propose` (agent `proposer`, the `tools` kernel, #165): `PROPOSE`
-//!   of a missing file is `NOT_FOUND`, of its own file `OK` four times
-//!   (numbered 1 to 4), and `OVER_LIMIT` the fifth time;
+//!   of a missing file is `NOT_FOUND`, of its own file `OK` three times
+//!   (numbered 1 to 3), and `OVER_LIMIT` the fourth time;
 //! - `hostile` (agent `hostile`, the `hostile` kernel, #110): logs `check
 //!   me` (the kernel inspects what it holds), then tries what it must not
 //!   be able to do, each refused as listed in testing.md: every other
@@ -442,8 +442,8 @@ impl Agent {
     }
 
     /// Agent `proposer` (#165): a file it does not have is not found; its
-    /// own file is proposed four times, numbered 1 to 4; a fifth is over
-    /// the limit.
+    /// own file is proposed three times, numbered 1 to 3; a fourth is over
+    /// the limit, which keeps one place for the host (#167).
     fn proposer(&self) -> u64 {
         if self.put(b"image", PROPOSED) != status::OK {
             return self.fail(b"writing its file failed");
@@ -451,13 +451,13 @@ impl Agent {
         if self.propose(b"missing").0 != status::NOT_FOUND {
             return self.fail(b"a missing file was proposed");
         }
-        for n in 1..=4 {
+        for n in 1..=3 {
             if self.propose(b"image") != (status::OK, n) {
                 return self.fail(b"a proposal was refused");
             }
         }
         if self.propose(b"image").0 != status::OVER_LIMIT {
-            return self.fail(b"a fifth proposal was not refused");
+            return self.fail(b"a fourth proposal was not refused");
         }
         self.complete(b"propose ok")
     }

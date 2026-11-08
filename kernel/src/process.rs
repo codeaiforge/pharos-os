@@ -15,6 +15,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::x86_64::idt::{self, ExceptionFrame, Report};
 use crate::arch::x86_64::paging::{AddressSpace, Flags, MapError};
@@ -181,8 +182,24 @@ pub struct UserMemory {
     /// Pages charged for the kernel's bookkeeping of memory it shared
     /// (one per 512 shared pages), until it ends.
     pub charged: u64,
+    /// Pages charged for mounted copies (`fs_mount`), given back by each
+    /// [`Charge`] as its copy is freed, whoever drops it, without a lock.
+    pub mounted: Arc<AtomicU64>,
     /// Mappings as (start, pages), sorted by start.
     maps: Vec<(u64, u64)>,
+}
+
+/// Pages charged to a process for as long as this lives (#167, F1).
+#[derive(Debug)]
+pub struct Charge {
+    pages: u64,
+    to: Arc<AtomicU64>,
+}
+
+impl Drop for Charge {
+    fn drop(&mut self) {
+        self.to.fetch_sub(self.pages, Ordering::AcqRel);
+    }
 }
 
 impl UserMemory {
@@ -224,6 +241,20 @@ impl UserMemory {
             .saturating_sub(self.used)
             .saturating_sub(self.given)
             .saturating_sub(self.charged)
+            .saturating_sub(self.mounted.load(Ordering::Acquire))
+    }
+
+    /// Charges `pages` until the returned [`Charge`] is dropped; `None`
+    /// (nothing taken) if fewer are available.
+    pub fn charge(&mut self, pages: u64) -> Option<Charge> {
+        if pages > self.available() {
+            return None;
+        }
+        self.mounted.fetch_add(pages, Ordering::AcqRel);
+        Some(Charge {
+            pages,
+            to: self.mounted.clone(),
+        })
     }
 
     /// Takes `pages` for a child's limit, or for bookkeeping when
@@ -1146,5 +1177,18 @@ mod tests {
         assert_eq!((m.used, m.given, m.charged), (5, 4, 1));
         m.given -= 4; // the child ended
         assert_eq!(m.available(), 4);
+    }
+
+    #[test]
+    fn a_mount_charge_is_given_back_when_dropped() {
+        let mut m = UserMemory::new(10);
+        let a = m.charge(6).expect("6 fit");
+        assert!(m.charge(5).is_none(), "5 more do not fit");
+        assert_eq!(m.available(), 4);
+        drop(a);
+        assert_eq!(m.available(), 10, "given back with the copy");
+        for _ in 0..100 {
+            drop(m.charge(10).expect("given back each time"));
+        }
     }
 }
