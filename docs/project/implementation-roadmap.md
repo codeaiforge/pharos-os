@@ -525,7 +525,7 @@ Ordering notes:
 
 ### M4.4 — Device and service management
 
-- **Objective and scope:** Manage devices and services at runtime (start, stop, restart, status). **Status: Current.**
+- **Objective and scope:** Manage devices and services at runtime (start, stop, restart, status). **Status: Current.** Issues #168–#173. D-029 accepted (#168): the user manages services from the trusted console only (`init`'s `START`, `STOP`, `RESTART` on `trust`'s badge); `trust`, `audit`, and `store` restart but never stop; dependents keep running and are reported; only compiled table entries start, with their manifests; device add and remove by native PCIe hotplug on QEMU root ports, polled by the kernel, which assigns a new device's BARs in its port's window, subject to an experiment in the design (#169), with driver restart as the fallback. Next: the design (#169).
 - **Deliverables:** Management interface and CLI.
 - **Prerequisites:** M4.1, M2.9.
 - **Acceptance criteria:** Services can be restarted without reboot; device add/remove (where QEMU supports it) is handled.
@@ -670,6 +670,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-026 | Service manager: restart policies, ready state, reporting | M4.1 | **Accepted** (#148): a restart policy per table entry (never, or up to N with a growing delay), dependents reported and not restarted, a stopped service never; ready means every boot service and the agent platform, reported to the kernel, the audit trail, and the trusted console; every failure, skip, and restart audited and shown by `trust` from structured fields, with a `services` command |
 | D-027 | Per-service capability manifests and how they are checked | M4.2 | **Accepted** (#155): the manifest is `init`'s table entry, each capability's object, rights, and badge written out, plus each service's declared runtime gains; enforced by construction and checked by a capability audit test kernel at ready and after faults; no manifest file, no new kernel call |
 | D-028 | Boot recovery, known-good images, and signed updates | M4.3 | **Accepted** (#160): an update replaces only the root image; a factory image on the boot medium plus slots A and B in the store; `init` verifies a slot's Ed25519 signature (`ed25519-compact`, after review) and has the kernel mount it with one new call; an attempt record marked good at ready, 3 failed attempts or a time limit fall back; safe mode and recovery automatic, from Limine, or from `trust`; an update needs a valid signature and the user's yes; Secure Boot evaluated now, enforced in M5.5 |
+| D-029 | Runtime management of services and devices | M4.4 | **Accepted** (#168): the trusted console only; `trust`, `audit`, and `store` restartable, not stoppable; dependents keep running and are reported; only compiled table entries start; native PCIe hotplug on root ports, polled, BARs assigned by the kernel in the port's window, after an experiment (fallback: driver restart, hotplug to M5.2); hotplug slots only, protected drivers refuse removal |
 
 ## Next milestone
 
