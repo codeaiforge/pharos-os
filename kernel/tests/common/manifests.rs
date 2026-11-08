@@ -159,6 +159,15 @@ impl<'a> Audit<'a> {
         })
     }
 
+    /// `init`'s endpoint `e`, as learned.
+    #[allow(dead_code)] // Used by the `manage` kernel only.
+    pub fn endpoint_of(&self, e: Ep) -> Option<Arc<Endpoint>> {
+        self.eps
+            .iter()
+            .find(|(name, _)| *name == e)
+            .map(|(_, x)| x.clone())
+    }
+
     fn ep(&self, e: &Arc<Endpoint>) -> Option<Ep> {
         self.eps
             .iter()

@@ -7,7 +7,11 @@
 //! knowledge), `start knowledge`, `restart trust`, `services`, and `stop
 //! all`. The kernel waits for the runtime's stop, which shows the new
 //! `trust` holds the emergency stop, then checks `init`'s lines and the
-//! capability audit. The runner checks the trusted console and the trail.
+//! capability audit. First, at ready, it sends `init` `STOP agents` and
+//! `RESTART audit` itself (services the script never manages) under the
+//! knowledge service's badge and an unknown one: `init` answers
+//! management only on `trust`'s badge, so no answer may come and neither
+//! may happen. The runner checks the trusted console and the trail.
 //! Runs under UEFI (D-009).
 
 #![no_std]
@@ -19,11 +23,13 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use pharos_kernel::arch::x86_64::{apic, gdt, idt};
-use pharos_kernel::cap::{MAX_HANDLES, Object};
-use pharos_kernel::ipc::Endpoint;
+use pharos_kernel::cap::{Capability, MAX_HANDLES, Object, SEND};
+use pharos_kernel::ipc::{Endpoint, Message};
 use pharos_kernel::sched::TaskId;
+use pharos_kernel::syscall::MAX_MESSAGE;
 use pharos_kernel::testing::{self, TestRun};
 use pharos_kernel::{fs, ipc, kprintln, mm, pci, process, sched, storage, time};
+use pharos_services::Ep;
 
 #[path = "common/manifests.rs"]
 mod manifests;
@@ -33,6 +39,25 @@ pharos_kernel::test_kernel!(run);
 /// The boot table's 8 entries, all succeeded, from the factory image.
 const SUMMARY: [u8; 4] = [8, 0, 0, 0];
 const VIRTIO_NET: u16 = 0x1041;
+/// The knowledge service's report badge (entry 5 + 1), and one nobody has.
+const FORGED_BADGES: [u32; 2] = [6, 99];
+
+/// Sends `init`'s report endpoint `[version, op, length, name]` under
+/// `badge`. (An answer cannot be seen: `init` answers without waiting, and
+/// the kernel does not wait in `receive`; what `init` does is checked.)
+fn forged(events: &Endpoint, badge: u32, op: u8, name: &[u8]) {
+    let mut data = [0; MAX_MESSAGE];
+    let request = [&[1, op, name.len() as u8][..], name].concat();
+    data[..request.len()].copy_from_slice(&request);
+    let message = Message {
+        data,
+        len: request.len(),
+        cap: Some(Capability::new(Object::Endpoint(Endpoint::new()), SEND)),
+        badge,
+    };
+    ipc::send(events, message);
+}
+
 /// The last line: the new `trust`'s `stop all` reached the runtime.
 const LAST: &str = "init: agents stopped; not restarted";
 
@@ -111,6 +136,18 @@ fn run(t: &mut TestRun) {
                     Err(why) => kprintln!("  audit: {why}"),
                 }
                 net_before = net_of(init);
+                let events = audit.as_ref().and_then(|a| a.endpoint_of(Ep::Events));
+                for (e, &badge) in events
+                    .iter()
+                    .flat_map(|e| FORGED_BADGES.iter().map(move |b| (e, b)))
+                {
+                    forged(e, badge, 8, b"agents");
+                    forged(e, badge, 9, b"audit");
+                }
+                t.check(
+                    "init's report endpoint found, and STOP and RESTART sent on it not as trust",
+                    events.is_some(),
+                );
             }
         }
         if has(&lines, LAST) {
@@ -154,8 +191,10 @@ fn run(t: &mut TestRun) {
     }
     let count = |text: &str| lines.iter().filter(|(_, l)| l == text.as_bytes()).count();
     t.check(
-        "each action happened once (net stopped once, refusals did nothing)",
-        count("init: net stopped by the user") == 1 && count("init: net started by the user") == 1,
+        "each action happened once (net stopped once, forged and refused requests did nothing)",
+        count("init: net stopped by the user") == 1
+            && count("init: net started by the user") == 1
+            && count("init: knowledge restarted by the user; used by trust, agents") == 1,
     );
     t.check(
         "no service was restarted by its policy",
@@ -166,6 +205,13 @@ fn run(t: &mut TestRun) {
     t.check(
         "trust was not restarted while knowledge was stopped",
         count("init: trust restarted by the user; used by agents") == 1,
+    );
+    t.check(
+        "the forged requests did nothing: agents not stopped, audit not restarted by them",
+        !has(&lines, "init: agents stopped by the user")
+            && !lines
+                .iter()
+                .any(|(_, l)| l.starts_with(b"init: audit restarted")),
     );
     let net_now = net_of(init);
     t.check(
