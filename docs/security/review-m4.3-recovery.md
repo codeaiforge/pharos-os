@@ -10,7 +10,7 @@
   - the Secure Boot evaluation (#166) and every new `unsafe` block.
 - **Design under review:** [boot.md](../architecture/boot.md), D-028, D-018, D-022, D-027, [capabilities.md](../architecture/capabilities.md).
 - **Date:** 2026-11-07, issue #167. Reviewer: AI-assisted (Claude Code), from reading the code. All five findings are fixed (2026-11-08), each with a test except F3 (below).
-- **Status:** **awaiting the maintainer's approval** (M4.3 gate, #167).
+- **Status:** **approved** by the maintainer on 2026-11-08 (M4.3 gate, #167), with F1–F5 fixed.
 
 ## Method
 
