@@ -61,7 +61,7 @@
 use pharos_programs::virtio_console::{Console, RX_BUFFER, TX_BUFFER};
 use pharos_proto::knowledge::{self, Author};
 use pharos_proto::permission::Permission;
-use pharos_proto::service::{self as listing, Reply, System};
+use pharos_proto::service::{self as listing, Action, Managed, Reply, System};
 use pharos_proto::trust::{
     self, Command, Event, INIT, Line, Lines, MAX_NAME, MAX_NAMES, Names, Outcome, RUNTIME, Request,
     SLOTS, parse,
@@ -86,9 +86,11 @@ const AUDIT_US: u64 = 1_000_000;
 /// How long `trust` waits for each page of `init`'s `SERVICES`.
 const INIT_US: u64 = 1_000_000;
 const BASE: u64 = 0x1000_0000;
+/// Two lines: one console line holds at most 256 bytes.
 const HELP: &[u8] = b"commands: list, stop <agent>, stop group <group>, stop all, \
-revoke <agent> <permission>, yes <n>, no <n>, audit, usage, services, system, safe, \
-recovery, update, apply <n>, discard <n>, rollback, verify <scope> <key> <version> <hash>";
+revoke <agent> <permission>, yes <n>, no <n>, audit, usage, verify <scope> <key> <version> <hash>";
+const HELP_SYSTEM: &[u8] = b"commands: services, start <service>, restart <service>, \
+stop service <service>, system, safe, recovery, update, apply <n>, discard <n>, rollback";
 /// How long a stop may take before the answer says it is still running.
 const STOP_WAIT_US: u64 = 1_000_000;
 
@@ -348,17 +350,76 @@ impl Trust {
                 version,
                 prefix,
             } => self.verify(scope, key, version, prefix),
-            Command::Help => self.say(&[HELP]),
+            Command::Help => {
+                self.say(&[HELP]);
+                self.say(&[HELP_SYSTEM]);
+            }
+            Command::Manage(action, name) => self.manage(action, name),
+        }
+    }
+
+    /// `start`, `stop service`, or `restart` (#170): `init` decides and
+    /// reports the action itself (`SERVICE`); only a refusal is said here.
+    fn manage(&mut self, action: Action, name: &[u8]) {
+        let word: &[u8] = match action {
+            Action::Start => b"start: ",
+            Action::Stop => b"stop: ",
+            Action::Restart => b"restart: ",
+        };
+        let mut out = [0u8; 256];
+        let req = listing::Request::Manage { action, name };
+        let answer = self.ask_init(&req, &mut out).map(Managed::parse);
+        match answer {
+            Some(Some(Managed::Ok)) => {}
+            Some(Some(Managed::Unknown)) => self.say(&[word, b"no service ", name]),
+            Some(Some(Managed::Busy)) => {
+                self.say(&[word, b"not now (booting, updating, or in recovery)"])
+            }
+            Some(Some(Managed::Protected)) => self.say(&[
+                word,
+                name,
+                b" is protected: it can be restarted, not stopped",
+            ]),
+            Some(Some(Managed::Running)) => self.say(&[word, name, b" is running"]),
+            Some(Some(Managed::NotRunning)) => self.say(&[word, name, b" is not running"]),
+            Some(Some(Managed::Needs(d))) => self.say(&[word, name, b" needs ", d]),
+            Some(None) => self.say(&[word, b"refused"]),
+            None => self.say(&[word, b"init is not answering"]),
         }
     }
 
     /// Asks `init` (on the report capability) and returns its answer.
     fn ask_init<'a>(&self, req: &listing::Request, out: &'a mut [u8; 256]) -> Option<&'a [u8]> {
-        let mut msg = [0u8; 8];
+        let mut msg = [0u8; 48];
         let n = listing::encode(req, &mut msg)?;
         match call_timeout(REPORT, &msg[..n], self.reply?, out, INIT_US) {
             Ok(Received::Message { len, .. }) => Some(&out[..len.min(256)]),
             _ => None,
+        }
+    }
+
+    /// After a restart (#170): the running runtime's process capability
+    /// from `init`, before any typed command, so `stop all` works at once.
+    /// At boot the runtime does not run yet; it is registered when it
+    /// starts (`RUNTIME` from `init`).
+    fn ask_runtime(&mut self) {
+        let (Some(reply), mut out, mut msg) = (self.reply, [0u8; 8], [0u8; 8]) else {
+            return;
+        };
+        let Some(n) = listing::encode(&listing::Request::Runtime, &mut msg) else {
+            return;
+        };
+        if let Ok(Received::Message { cap, len, .. }) =
+            call_timeout(REPORT, &msg[..n], reply, &mut out, INIT_US)
+        {
+            if out[..len.min(8)] == [status::OK] && cap != 0 && process_status(cap).is_ok() {
+                if let Some(old) = self.runtime.replace(cap) {
+                    let _ = delete(old);
+                }
+                self.say(&[b"registered runtime"]);
+            } else if cap != 0 {
+                let _ = delete(cap);
+            }
         }
     }
 
@@ -910,6 +971,12 @@ impl Trust {
             Event::GivenUp => &[b"service ", name, b" not restarted: restarts used up"],
             Event::Never => &[b"service ", name, b" not restarted: restart policy never"],
             Event::Stopped => &[b"service ", name, b" stopped; not restarted"],
+            Event::ByUser => match n[0] {
+                trust::by_user::STOPPED => &[b"service ", name, b" stopped by the user"],
+                trust::by_user::STARTED => &[b"service ", name, b" started by the user"],
+                trust::by_user::READY => &[b"service ", name, b" ready"],
+                _ => &[b"service ", name, b" restarted by the user"],
+            },
             Event::Image => {
                 let image = trust::image::name(n[1]);
                 match n[0] {
@@ -952,7 +1019,7 @@ impl Trust {
         };
         parts[..fixed.len()].copy_from_slice(fixed);
         let mut k = fixed.len();
-        let lead: &[u8] = if event == Event::Restarting {
+        let lead: &[u8] = if matches!(event, Event::Restarting | Event::ByUser) {
             b"; used by "
         } else {
             b": "
@@ -1002,6 +1069,7 @@ fn main(_: u64) -> u64 {
     }
     t.say(&[b"trust: ready; ", HELP]);
     t.audit();
+    t.ask_runtime();
     let mut lines = Lines::new();
     let mut msg = [0u8; 256];
     let mut bytes = [0u8; RX_BUFFER];

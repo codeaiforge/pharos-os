@@ -1406,6 +1406,109 @@ const SYSTEM_SCRIPT: &[console::Step] = &[
     ("system: slot B empty", "safe\n"),
     ("next boot: safe mode", ""),
 ];
+/// The user managing services (#170, D-029): the boot table and image.
+const MANAGE_TEST: &str = "manage";
+/// Each command once its answer to the last one is on the console. After
+/// `restart trust`, the new `trust`'s banner right after the restart line
+/// (which the old one printed) shows it is up.
+const MANAGE_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("system ready: 8 services", "stop service net\n"),
+    ("service net stopped by the user", "stop service net\n"),
+    ("stop: net is not running", "start net\n"),
+    ("service net started by the user", "start net\n"),
+    ("start: net is running", "stop service store\n"),
+    (
+        "stop: store is protected: it can be restarted, not stopped",
+        "start nosuch\n",
+    ),
+    ("start: no service nosuch", "restart knowledge\n"),
+    (
+        "service knowledge restarted by the user; used by trust, agents",
+        "stop service knowledge\n",
+    ),
+    (
+        "service knowledge stopped by the user; used by trust, agents",
+        "restart trust\n",
+    ),
+    ("restart: trust needs knowledge", "start knowledge\n"),
+    // Its own `ready`, not the one after `restart knowledge`.
+    (
+        "knowledge started by the user\r\nservice knowledge ready\r\n",
+        "restart trust\n",
+    ),
+    (
+        "service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "services\n",
+    ),
+    ("services: agents ready, restarts 0 of 3", "stop all\n"),
+    ("stopped all", ""),
+];
+/// The `manage` kernel's actions: actor, detail, and the `trust` line
+/// (`service <actor> …`), each once.
+const MANAGE_EVENTS: &[(&str, &str, Option<&str>)] = &[
+    ("net", "stopped by the user", Some("stopped by the user")),
+    ("net", "started by the user", Some("started by the user")),
+    ("store", "stop refused: protected", None),
+    (
+        "knowledge",
+        "restarted by the user; used by trust, agents",
+        Some("restarted by the user; used by trust, agents"),
+    ),
+    (
+        "knowledge",
+        "stopped by the user; used by trust, agents",
+        Some("stopped by the user; used by trust, agents"),
+    ),
+    (
+        "knowledge",
+        "started by the user",
+        Some("started by the user"),
+    ),
+    (
+        "trust",
+        "restarted by the user; used by agents",
+        Some("restarted by the user; used by agents"),
+    ),
+];
+
+/// After the `manage` kernel (#170): each action one `manage` record from
+/// `init` and, but for the refused stop, one `trust` line; a refusal that
+/// changed nothing has no record.
+fn manage_checks(image: &Path, console: &str) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, records)] = &streams[..] else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    for &(actor, detail, line) in MANAGE_EVENTS {
+        let want = format!("client 1 Event manage {actor} task 0/0  init outcome 1 {detail}");
+        let (all, _) = records_and_copies(records, &want);
+        let shown = line.map_or(1, |l| {
+            console.matches(&format!("service {actor} {l}\r\n")).count()
+        });
+        if (all, shown) != (1, 1) {
+            return Err(format!(
+                "manage: \"{actor} {detail}\": {all} audit records and {shown} trusted console lines, expected 1 each"
+            ));
+        }
+    }
+    let managed = records
+        .iter()
+        .filter(|r| r.contains(" Event manage "))
+        .count();
+    if managed != MANAGE_EVENTS.len() {
+        return Err(format!(
+            "manage: {managed} manage records, expected {} (refusals other than a protected stop are not recorded)",
+            MANAGE_EVENTS.len()
+        ));
+    }
+    println!(
+        "  manage: {} actions, each one audit record and one trusted console line",
+        MANAGE_EVENTS.len()
+    );
+    Ok(())
+}
+
 /// Each service event the `system` kernel causes, as [`SUPERVISION_EVENTS`].
 const SYSTEM_EVENTS: &[(&str, &str, &str, usize)] = &[
     ("knowledge", "killed 13", "killed 13", 1),
@@ -2915,7 +3018,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     } else {
         build_user_programs(paths)?
     };
-    let modules = if name == SYSTEM_TEST || slotted {
+    let modules = if name == SYSTEM_TEST || name == MANAGE_TEST || slotted {
         kernel_modules(paths, &programs)?
     } else {
         test_modules(&programs)
@@ -2999,6 +3102,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
         SUPERVISION_TEST => (SUPERVISION_SCRIPT, &[]),
         SYSTEM_TEST => (SYSTEM_SCRIPT, &[]),
+        MANAGE_TEST => (MANAGE_SCRIPT, &[]),
         recovery::UPDATE_TEST => (recovery::UPDATE_SCRIPT, &[]),
         _ => (&[], &[]),
     };
@@ -3031,6 +3135,9 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == SYSTEM_TEST {
                 system_checks(&out.join(STORE_IMAGE), &output)?;
+            }
+            if name == MANAGE_TEST {
+                manage_checks(&out.join(STORE_IMAGE), &output)?;
             }
             if name == PERMISSIONS_TEST {
                 permissions_audit(&out.join(STORE_IMAGE))?;
@@ -3091,7 +3198,13 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
             Ok(())
         }
     });
-    match evaluate_boot(&run, TESTS_MARKER, timeout).and(typed) {
+    let booted = evaluate_boot(&run, TESTS_MARKER, timeout);
+    // Both failed: the console's failure (with its output) explains the
+    // kernel's, so it is shown too.
+    if let (Err(_), Err(console)) = (&booted, &typed) {
+        println!("  {console}");
+    }
+    match booted.and(typed) {
         Ok(()) => {
             for line in clean_log(&run.log)
                 .lines()

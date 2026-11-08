@@ -89,7 +89,11 @@ pub mod action {
     /// The image `init` boots from (#163): each candidate, refusal,
     /// fallback, and the image that runs, as detail.
     pub const SYSTEM: u8 = 20;
-    pub const LAST: u8 = SYSTEM;
+    /// The user's start, stop, or restart of a service (#170, D-029),
+    /// from `init`: actor the service, the action and its dependents as
+    /// detail; also a refused stop of a protected service.
+    pub const MANAGE: u8 = 21;
+    pub const LAST: u8 = MANAGE;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -114,6 +118,7 @@ pub mod action {
             "knowledge",
             "service",
             "system",
+            "manage",
         ]
         .get(usize::from(code))
         .copied()

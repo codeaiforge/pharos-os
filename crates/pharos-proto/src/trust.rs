@@ -40,6 +40,7 @@
 //! and the service never refuses a valid one (it replaces a slot's entry).
 
 use crate::permission::Permission;
+use crate::service::Action;
 use crate::{Reader, Refused, Writer, split};
 
 pub const NAME: &[u8] = b"trust";
@@ -95,6 +96,18 @@ pub enum Event {
     /// The image the system runs (#163, no name): `numbers` are an
     /// [`image`] step, the image, and for a refusal its reason.
     Image = 11,
+    /// The user's action on the service (#170): `numbers[0]` a
+    /// [`by_user`] code; `names` are its dependents, which keep running.
+    ByUser = 12,
+}
+
+/// What [`Event::ByUser`] reports.
+pub mod by_user {
+    pub const STOPPED: u32 = 0;
+    pub const STARTED: u32 = 1;
+    pub const RESTARTED: u32 = 2;
+    /// A daemon the user started or restarted sent `ready`.
+    pub const READY: u32 = 3;
 }
 
 /// What [`Event::Image`] reports (boot.md section 8): `numbers[0]` a step,
@@ -160,7 +173,7 @@ impl Event {
         use Event::*;
         [
             Exited, Killed, NoReady, Skipped, Restarting, GivenUp, Never, Stopped, Ready, NotReady,
-            NotStarted, Image,
+            NotStarted, Image, ByUser,
         ]
         .get(usize::from(c))
         .copied()
@@ -653,6 +666,9 @@ pub enum Command<'a> {
     StopAll,
     /// `stop group <name>`: every agent registered in that group (#136).
     StopGroup(&'a [u8]),
+    /// `start <service>`, `restart <service>`, and `stop service
+    /// <service>` (#170): `init`'s table names.
+    Manage(Action, &'a [u8]),
     /// `revoke <agent> <permission>` (#105).
     Revoke(&'a [u8], Permission),
     /// `yes <n>` or `no <n>`: the answer to approval request `n` (#106).
@@ -738,6 +754,17 @@ pub fn command(line: &[u8]) -> Command<'_> {
             None => Command::Help,
         },
         (Some(b"stop"), Some(b"all"), None) => Command::StopAll,
+        (Some(b"stop"), Some(b"service"), Some(name))
+            if valid_name(name) && words.next().is_none() =>
+        {
+            Command::Manage(Action::Stop, name)
+        }
+        (Some(b"start"), Some(name), None) if valid_name(name) => {
+            Command::Manage(Action::Start, name)
+        }
+        (Some(b"restart"), Some(name), None) if valid_name(name) => {
+            Command::Manage(Action::Restart, name)
+        }
         (Some(b"stop"), Some(b"group"), Some(name))
             if valid_name(name) && words.next().is_none() =>
         {
@@ -966,6 +993,7 @@ mod tests {
             ev(Event::NotReady, b"", two),
             ev(Event::NotStarted, b"missing", Names::default()),
             ev(Event::Image, b"", Names::default()),
+            ev(Event::ByUser, b"knowledge", two),
         ] {
             let mut buf = [0u8; 256];
             let n = encode(&req, &mut buf).unwrap();
@@ -994,6 +1022,8 @@ mod tests {
         };
         assert!(parse(&msg(4, &[1, 1, b'a'])).is_ok());
         assert_eq!(parse(&msg(11, &[0])), Err(Refused::Bad), "event 11");
+        assert!(parse(&msg(12, &[0])).is_ok(), "event 12");
+        assert_eq!(parse(&msg(13, &[0])), Err(Refused::Bad), "event 13");
         let mut many = std::vec![9];
         for _ in 0..9 {
             many.extend_from_slice(&[1, b'a']);
@@ -1147,6 +1177,34 @@ mod tests {
             "an agent named group"
         );
         assert_eq!(command(b"stop group a b"), Command::Help);
+        assert_eq!(
+            command(b" stop  service net "),
+            Command::Manage(Action::Stop, b"net")
+        );
+        assert_eq!(
+            command(b"stop service"),
+            Command::Stop(b"service"),
+            "an agent named service"
+        );
+        assert_eq!(
+            command(b"start knowledge"),
+            Command::Manage(Action::Start, b"knowledge")
+        );
+        assert_eq!(
+            command(b"restart trust"),
+            Command::Manage(Action::Restart, b"trust")
+        );
+        for bad in [
+            &b"start"[..],
+            b"restart",
+            b"start a b",
+            b"restart a;b",
+            b"stop service a b",
+            b"stop service a;b",
+            b"Start net",
+        ] {
+            assert_eq!(command(bad), Command::Help, "{bad:?}");
+        }
         assert_eq!(command(b"stop group a;b"), Command::Help);
         assert_eq!(command(b"yes 3"), Command::Answer(3, true));
         assert_eq!(command(b"audit"), Command::Audit);

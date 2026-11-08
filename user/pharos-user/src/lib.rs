@@ -185,6 +185,27 @@ pub fn try_send(endpoint: Handle, bytes: &[u8]) -> Result<u64, Error> {
     call(number::SEND, args)
 }
 
+/// [`send`] with `cap`, only if a receiver is waiting now; otherwise
+/// nothing is queued, nothing is passed, and the result is
+/// [`Error::WouldBlock`].
+pub fn try_send_cap(
+    endpoint: Handle,
+    bytes: &[u8],
+    cap: Handle,
+    rights: u32,
+    badge: u32,
+) -> Result<u64, Error> {
+    let args = [
+        endpoint,
+        bytes.as_ptr() as u64,
+        bytes.len() as u64,
+        cap,
+        u64::from(rights) | u64::from(badge) << 32,
+        1,
+    ];
+    call(number::SEND, args)
+}
+
 /// Wait forever: the timeout every wrapper passes unless given one.
 pub const FOREVER: u64 = u64::MAX;
 

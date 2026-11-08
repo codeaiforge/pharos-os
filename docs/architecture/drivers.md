@@ -200,7 +200,7 @@ In M2.9 test kernels started drivers. Since M2.10 (#61) the main kernel grants t
 - `ADDED`: record the slot and handle against the `Driver` entry for its ID and start it (`service <name> started`, as any start). An entry stopped by the user stays stopped; `start <name>` starts it on the device that is there (`NO_DEVICE` if none).
 - `REMOVE`: if the device's driver is protected (none is in M4.4, as protected services' devices are on bus 0), answer `keep` and say `device in slot <n> cannot be removed: used by <service>`. Otherwise stop the driver, wait for its end notification (at most 1 s, then answer anyway: revocation stops the device), answer `release`.
 - `REMOVED`: delete its handle, mark the entry `pending` (no device), and say `device <id> removed from slot <n>`.
-- Every event is a debug line, an audit record (new action `device`, 22: actor `init`, detail `slot <n> added <id>`, `slot <n> remove requested`, `slot <n> kept`, `slot <n> removed <id>`), and a `trust` line (`SERVICE` gains `DeviceAdded`, `DeviceRemoved`, and `DeviceKept`, event codes 11 to 13, from `init` only).
+- Every event is a debug line, an audit record (new action `device`, 22: actor `init`, detail `slot <n> added <id>`, `slot <n> remove requested`, `slot <n> kept`, `slot <n> removed <id>`), and a `trust` line (`SERVICE` gains `DeviceAdded`, `DeviceRemoved`, and `DeviceKept`, event codes 13 to 15, from `init` only; 11 is `Image` and 12 `ByUser`).
 
 **The test driver:** `virtio-blk` with argument 1 runs as a daemon: it mounts the disk's image as today, prints the file it finds, sends `ready`, and waits until stopped. The `hotplug` test table has one `Driver(VIRTIO_BLK)` entry for it.
 

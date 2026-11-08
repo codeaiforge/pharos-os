@@ -64,13 +64,16 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use pharos_image::slots::{Mode, Record, Slot, State as SlotState};
+use pharos_programs::manage::{self, Plan, Refusal as Refused};
 use pharos_programs::supervise;
 use pharos_programs::system::{Gone, Offers, Refusal};
 use pharos_proto::infer::{self, Request as InferRequest};
 use pharos_proto::net::{self, Allowed, Request as NetRequest};
-use pharos_proto::service::{self as listing, Entry, Reply, State as Shown, System};
+use pharos_proto::service::{
+    self as listing, Action, Entry, Managed, Reply, State as Shown, System,
+};
 use pharos_proto::store::{self, Request as StoreRequest};
-use pharos_proto::trust::{self, Event, Names, image as shown, not_started};
+use pharos_proto::trust::{self, Event, Names, by_user, image as shown, not_started};
 use pharos_proto::{audit, status};
 use pharos_services::{
     Ep, Give, Kind, MAX_SERVICES, Object, RUNTIME_HANDLES, RUNTIME_PATH, Restart, Service,
@@ -79,7 +82,7 @@ use pharos_user::rights::{RECEIVE, SEND, STOP, WAIT};
 use pharos_user::{
     Class, Error, Grant, Handle, Limits, MAX_SPAWN_CAPS, Received, Status, call_timeout,
     config_read, debug_write, endpoint_create, open, process_status, receive_timeout, send,
-    spawn_with, try_send, uptime,
+    spawn_with, try_send, try_send_cap, uptime,
 };
 
 pharos_user::entry!(main);
@@ -236,6 +239,9 @@ struct Init {
     /// Booting, or applying an update or a rollback: `trust`'s update
     /// requests get `BUSY` (they would start one inside the other).
     busy: bool,
+    /// Daemons the user started that have not sent `ready` yet (#170):
+    /// their `ready` is told to `trust`.
+    by_user: [bool; MAX_SERVICES],
 }
 
 impl Init {
@@ -462,13 +468,18 @@ impl Init {
     /// A `service` event in the audit trail (#151): queued until the audit
     /// service takes it.
     fn record(&mut self, actor: &[u8], detail: &[u8]) {
+        self.record_as(audit::action::SERVICE, actor, detail);
+    }
+
+    /// An `action` event in the audit trail, as [`Self::record`].
+    fn record_as(&mut self, action: u8, actor: &[u8], detail: &[u8]) {
         let entry = audit::Entry {
             kind: audit::Kind::Event,
             refers: 0,
             actor,
             task: 0,
             attempt: 0,
-            action: audit::action::SERVICE,
+            action,
             permission: None,
             service: b"init",
             outcome: audit::outcome::OK,
@@ -522,17 +533,7 @@ impl Init {
         let entries: alloc::vec::Vec<Entry<'_>> = (usize::from(from)..count)
             .map(|i| Entry {
                 name: self.table[i].name.as_bytes(),
-                state: match self.state[i] {
-                    State::Pending => Shown::Pending,
-                    State::Running(_) => Shown::Starting,
-                    State::Ok(_) => Shown::Ready,
-                    State::Restarting(_) => Shown::Restarting,
-                    State::Done => Shown::Done,
-                    State::Failed => Shown::Failed,
-                    State::Skipped => Shown::Skipped,
-                    State::Stopped => Shown::Stopped,
-                    State::Off => Shown::Off,
-                },
+                state: self.shown(i),
                 restarts: self.restarts[i],
                 limit: self.table[i].restart.limit(),
             })
@@ -542,6 +543,147 @@ impl Init {
             let _ = try_send(reply, &out[..n]);
             let _ = debug_write(CONSOLE, b"init: services listed for trust");
         }
+    }
+
+    /// Service `i`'s state as `trust` sees it.
+    fn shown(&self, i: usize) -> Shown {
+        match self.state[i] {
+            State::Pending => Shown::Pending,
+            State::Running(_) => Shown::Starting,
+            State::Ok(_) => Shown::Ready,
+            State::Restarting(_) => Shown::Restarting,
+            State::Done => Shown::Done,
+            State::Failed => Shown::Failed,
+            State::Skipped => Shown::Skipped,
+            State::Stopped => Shown::Stopped,
+            State::Off => Shown::Off,
+        }
+    }
+
+    /// The names of the entries that depend on entry `j`.
+    fn users(&self, j: usize) -> Vec<&'static [u8]> {
+        let table = self.table;
+        let after: Vec<&[usize]> = table.iter().map(|s| s.after).collect();
+        (supervise::dependents(&after, j).into_iter())
+            .map(|d| table[d].name.as_bytes())
+            .collect()
+    }
+
+    /// `trust`'s `START`, `STOP`, or `RESTART` of service `name` (#170,
+    /// D-029): decided by `pharos_programs::manage`, answered on `reply`
+    /// before anything is done (a restart of `trust` ends its call), then
+    /// carried out and reported as one event.
+    fn manage(&mut self, action: Action, name: &[u8], reply: Handle) {
+        let count = self.table.len().min(MAX_SERVICES);
+        let found = (0..count).find(|&i| self.table[i].name.as_bytes() == name);
+        let decided = match found {
+            _ if self.busy || self.mode == Mode::Recovery => Err(Managed::Busy),
+            None => Err(Managed::Unknown),
+            Some(j) => {
+                let unmet = (self.table[j].after.iter().copied())
+                    .find(|&a| !matches!(self.state[a], State::Ok(_) | State::Done));
+                let service = self.table[j].name;
+                manage::decide(action, service, self.shown(j), unmet)
+                    .map(|plan| (j, plan))
+                    .map_err(|r| match r {
+                        Refused::Unknown => Managed::Unknown,
+                        Refused::Protected => Managed::Protected,
+                        Refused::Running => Managed::Running,
+                        Refused::NotRunning => Managed::NotRunning,
+                        Refused::Needs(d) => Managed::Needs(self.table[d].name.as_bytes()),
+                    })
+            }
+        };
+        let answer = match decided {
+            Ok(_) => Managed::Ok,
+            Err(m) => m,
+        };
+        let mut out = [0u8; 48];
+        if let Some(n) = answer.write(&mut out) {
+            let _ = try_send(reply, &out[..n]);
+        }
+        let (j, plan) = match decided {
+            Ok(d) => d,
+            Err(Managed::Protected) => {
+                // Only `trust`'s badge gets here: the user tried.
+                let j = found.unwrap_or(0);
+                let what = b"stop refused: protected";
+                let _ = debug_write(CONSOLE, &[&b"init: "[..], name, b" ", what].concat());
+                self.record_as(audit::action::MANAGE, self.table[j].name.as_bytes(), what);
+                return;
+            }
+            Err(_) => return,
+        };
+        let users = self.users(j);
+        let (word, code): (&[u8], _) = match plan {
+            Plan::Stop => (b"stopped by the user", by_user::STOPPED),
+            Plan::Start => (b"started by the user", by_user::STARTED),
+            Plan::StopThenStart => (b"restarted by the user", by_user::RESTARTED),
+        };
+        let mut what = word.to_vec();
+        if plan != Plan::Start {
+            for (k, user) in users.iter().enumerate() {
+                what.extend_from_slice(if k == 0 { b"; used by " } else { b", " });
+                what.extend_from_slice(user);
+            }
+        }
+        let shown_users: &[&[u8]] = if plan == Plan::Start { &[] } else { &users };
+        let me = self.table[j].name.as_bytes();
+        let _ = debug_write(CONSOLE, &[&b"init: "[..], me, b" ", &what].concat());
+        self.record_as(audit::action::MANAGE, me, &what);
+        // Reported first, so a stop or restart of `trust` is still said
+        // by the `trust` that is about to end.
+        self.tell_trust(Event::ByUser, me, [code, 0, 0], shown_users);
+        if plan != Plan::Start {
+            if self.table[j].path == b"bin/trust" {
+                // ponytail: a fixed 100 ms for `trust` to print the line it
+                // just took; a reply to `SERVICE` if it is ever too short.
+                pharos_user::sleep(100_000);
+            }
+            self.stop_one(j);
+        }
+        if plan != Plan::Stop {
+            self.restarts[j] = 0;
+            self.start(j);
+            self.by_user[j] = self.table[j].kind == Kind::Daemon;
+        }
+    }
+
+    /// `trust`'s `RUNTIME` (#170): the running runtime's `STOP` and
+    /// `WAIT` in the reply, so a restarted `trust` holds the emergency
+    /// stop; at boot the runtime is registered when it starts.
+    fn give_runtime(&self, reply: Handle) {
+        let runtime = (self.table.iter().zip(&self.state))
+            .find(|(s, _)| s.path == RUNTIME_PATH)
+            .and_then(|(_, st)| match st {
+                State::Running(p) | State::Ok(p) => Some(*p),
+                _ => None,
+            });
+        let sent = match runtime {
+            Some(p) => try_send_cap(reply, &[status::OK], p, STOP | WAIT, 0),
+            None => try_send(reply, &[status::NOT_FOUND]),
+        };
+        if runtime.is_some() && sent.is_err() {
+            say("trust", "runtime not given", None);
+        }
+    }
+
+    /// Stops service `j` for the user: never restarted. Waits (up to 1 s)
+    /// until it has ended, so a restart finds its devices free.
+    fn stop_one(&mut self, j: usize) {
+        if let State::Running(p) | State::Ok(p) = self.state[j] {
+            let _ = pharos_user::process_stop(p);
+            for _ in 0..100 {
+                if process_status(p) != Ok(Status::Running) {
+                    break;
+                }
+                pharos_user::sleep(10_000);
+            }
+            let _ = pharos_user::delete(p);
+            self.release(j);
+        }
+        self.state[j] = State::Stopped;
+        self.by_user[j] = false;
     }
 
     /// The system's state after the boot sequence (#151): ready if every
@@ -725,10 +867,7 @@ impl Init {
             b" ms",
         ]
         .concat();
-        let after: alloc::vec::Vec<&[usize]> = self.table.iter().map(|s| s.after).collect();
-        let users: alloc::vec::Vec<&[u8]> = (supervise::dependents(&after, j).into_iter())
-            .map(|d| self.table[d].name.as_bytes())
-            .collect();
+        let users = self.users(j);
         for (k, name) in users.iter().enumerate() {
             what.extend_from_slice(if k == 0 { b"; used by " } else { b", " });
             what.extend_from_slice(name);
@@ -785,7 +924,9 @@ impl Init {
         if !self.unsent.is_empty() {
             wait = wait.min(self.retry_at.saturating_sub(uptime()).max(10_000));
         }
-        let mut buf = [0u8; 16];
+
+        // Room for a management request's name (#170).
+        let mut buf = [0u8; 40];
         match receive_timeout(self.events, &mut buf, wait) {
             Ok(Received::Message { badge, cap, len }) => {
                 let i = (badge as usize).wrapping_sub(1);
@@ -802,6 +943,11 @@ impl Init {
                             self.answer(number, apply, cap)
                         }
                         listing::Request::Rollback => self.roll_back(cap),
+                        listing::Request::Runtime => self.give_runtime(cap),
+                        listing::Request::Manage { action, name } => {
+                            let name = name.to_vec();
+                            self.manage(action, &name, cap)
+                        }
                     }
                 } else if let (Some(service), Some(State::Running(p))) =
                     (self.table.get(i), self.state.get(i).copied())
@@ -809,6 +955,10 @@ impl Init {
                     if service.kind == Kind::Daemon {
                         say(service.name, "ready", None);
                         self.state[i] = State::Ok(p);
+                        if core::mem::take(&mut self.by_user[i]) {
+                            let name = service.name.as_bytes();
+                            self.tell_trust(Event::ByUser, name, [by_user::READY, 0, 0], &[]);
+                        }
                         if service.path == b"bin/net" {
                             self.allow();
                         }
@@ -1496,6 +1646,7 @@ fn main(arg: u64) -> u64 {
         factory: pharos_programs::system::parse_version(option_env!("PHAROS_IMAGE_VERSION")),
         offers: Offers::new(),
         busy: true,
+        by_user: [false; MAX_SERVICES],
     };
     // Only the boot table boots from an image; the test tables run from
     // the root filesystem.

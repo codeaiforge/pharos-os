@@ -30,6 +30,19 @@
 //! - `ROLLBACK` `[version, op]`: the reply `[OK]` (rolling back),
 //!   `[NOT_FOUND]` (no good slot to roll back to), or `[BUSY]`.
 //!
+//! Runtime management (#170, M4.4, D-029, services.md):
+//! - `START`, `STOP`, `RESTART` `[version, op, length, name…]`: the
+//!   user's action on the service with that table name; the reply is a
+//!   [`Managed`] (`[OK]`, `[NOT_FOUND]` no such entry, `[BUSY]` not now,
+//!   `[PROTECTED]`, `[RUNNING]`, `[NOT_RUNNING]`, or `[NEEDS, length,
+//!   name…]`, the first dependency that does not run).
+//!
+//! - `RUNTIME` `[version, op]` (#170): `trust` asks once it is ready;
+//!   the reply `[OK]` carries the running agent runtime's process
+//!   capability (`STOP`, `WAIT`), so a restarted `trust` holds the
+//!   emergency stop before it reads the console; `[NOT_FOUND]` if the
+//!   runtime does not run (at boot it registers when it starts).
+//!
 //! Names are `init`'s table names ([`crate::trust::valid_name`]), never
 //! text from a service.
 
@@ -45,6 +58,23 @@ pub mod op {
     pub const UPDATE: u8 = 4;
     pub const ANSWER: u8 = 5;
     pub const ROLLBACK: u8 = 6;
+    pub const START: u8 = 7;
+    pub const STOP: u8 = 8;
+    pub const RESTART: u8 = 9;
+    pub const RUNTIME: u8 = 10;
+}
+
+/// Statuses only management replies use (#170).
+pub mod managed {
+    use crate::status::OWN;
+    /// `stop` on `trust`, `audit`, or `store`.
+    pub const PROTECTED: u8 = OWN;
+    /// `start` on a service that runs.
+    pub const RUNNING: u8 = OWN + 1;
+    /// `stop` on a service that does not run.
+    pub const NOT_RUNNING: u8 = OWN + 2;
+    /// A dependency does not run; its name follows.
+    pub const NEEDS: u8 = OWN + 3;
 }
 
 /// A service's state, as `init` holds it.
@@ -96,8 +126,26 @@ impl State {
     }
 }
 
+/// What the user asks of a service (#170).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Request {
+pub enum Action {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl Action {
+    fn op(self) -> u8 {
+        match self {
+            Self::Start => op::START,
+            Self::Stop => op::STOP,
+            Self::Restart => op::RESTART,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Request<'a> {
     Services {
         from: u8,
     },
@@ -112,9 +160,15 @@ pub enum Request {
         apply: bool,
     },
     Rollback,
+    Runtime,
+    /// A table name ([`valid_name`]).
+    Manage {
+        action: Action,
+        name: &'a [u8],
+    },
 }
 
-pub fn parse(msg: &[u8]) -> Result<Request, Refused> {
+pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
     match split(msg, VERSION)? {
         (op::SERVICES, [from]) => Ok(Request::Services { from: *from }),
         (op::SYSTEM, []) => Ok(Request::System),
@@ -125,6 +179,17 @@ pub fn parse(msg: &[u8]) -> Result<Request, Refused> {
             apply: *apply == 1,
         }),
         (op::ROLLBACK, []) => Ok(Request::Rollback),
+        (op::RUNTIME, []) => Ok(Request::Runtime),
+        (o @ (op::START | op::STOP | op::RESTART), [len, name @ ..])
+            if usize::from(*len) == name.len() && valid_name(name) =>
+        {
+            let action = match o {
+                op::START => Action::Start,
+                op::STOP => Action::Stop,
+                _ => Action::Restart,
+            };
+            Ok(Request::Manage { action, name })
+        }
         _ => Err(Refused::Bad),
     }
 }
@@ -142,8 +207,70 @@ pub fn encode(req: &Request, out: &mut [u8]) -> Option<usize> {
             w.bytes(&[u8::from(apply)])?
         }
         Request::Rollback => w.bytes(&[VERSION, op::ROLLBACK])?,
+        Request::Runtime => w.bytes(&[VERSION, op::RUNTIME])?,
+        Request::Manage { action, name } => {
+            if !valid_name(name) {
+                return None;
+            }
+            w.bytes(&[VERSION, action.op(), name.len() as u8])?;
+            w.bytes(name)?
+        }
     }
     Some(w.len())
+}
+
+/// The reply to `START`, `STOP`, or `RESTART` (#170).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Managed<'a> {
+    Ok,
+    /// No entry by that name in the running table.
+    Unknown,
+    /// Booting, switching images, or in recovery.
+    Busy,
+    Protected,
+    Running,
+    NotRunning,
+    /// This dependency (a table name) does not run.
+    Needs(&'a [u8]),
+}
+
+impl<'a> Managed<'a> {
+    pub fn write(&self, out: &mut [u8]) -> Option<usize> {
+        let mut w = Writer::new(out);
+        match *self {
+            Self::Ok => w.bytes(&[status::OK])?,
+            Self::Unknown => w.bytes(&[status::NOT_FOUND])?,
+            Self::Busy => w.bytes(&[status::BUSY])?,
+            Self::Protected => w.bytes(&[managed::PROTECTED])?,
+            Self::Running => w.bytes(&[managed::RUNNING])?,
+            Self::NotRunning => w.bytes(&[managed::NOT_RUNNING])?,
+            Self::Needs(name) => {
+                if !valid_name(name) {
+                    return None;
+                }
+                w.bytes(&[managed::NEEDS, name.len() as u8])?;
+                w.bytes(name)?
+            }
+        }
+        Some(w.len())
+    }
+
+    pub fn parse(reply: &'a [u8]) -> Option<Self> {
+        Some(match reply {
+            [status::OK] => Self::Ok,
+            [status::NOT_FOUND] => Self::Unknown,
+            [status::BUSY] => Self::Busy,
+            [managed::PROTECTED] => Self::Protected,
+            [managed::RUNNING] => Self::Running,
+            [managed::NOT_RUNNING] => Self::NotRunning,
+            [managed::NEEDS, len, name @ ..]
+                if usize::from(*len) == name.len() && valid_name(name) =>
+            {
+                Self::Needs(name)
+            }
+            _ => return None,
+        })
+    }
 }
 
 /// A slot in the `SYSTEM` reply.
@@ -331,13 +458,14 @@ mod tests {
             assert_eq!(parse(&buf[..n - 1]), Err(Refused::Bad), "no index");
             assert_eq!(parse(&[VERSION, op::SERVICES, from, 0]), Err(Refused::Bad));
         }
-        assert_eq!(parse(&[VERSION, 9, 0]), Err(Refused::Bad), "unknown op");
+        assert_eq!(parse(&[VERSION, 15, 0]), Err(Refused::Bad), "unknown op");
         for req in [
             Request::System,
             Request::Next { mode: 1 },
             Request::Next { mode: 2 },
             Request::Update,
             Request::Rollback,
+            Request::Runtime,
             Request::Answer {
                 number: 1,
                 apply: true,
@@ -361,12 +489,66 @@ mod tests {
         }
         assert_eq!(parse(&[VERSION, op::UPDATE, 0]), Err(Refused::Bad));
         assert_eq!(parse(&[VERSION, op::ROLLBACK, 0]), Err(Refused::Bad));
+        assert_eq!(parse(&[VERSION, op::RUNTIME, 0]), Err(Refused::Bad));
         assert_eq!(parse(&[VERSION, op::ANSWER, 1, 0]), Err(Refused::Bad));
         assert_eq!(parse(&[VERSION, op::ANSWER, 1, 0, 2]), Err(Refused::Bad));
         assert_eq!(parse(&[VERSION, op::ANSWER, 1, 0, 1, 0]), Err(Refused::Bad));
         assert_eq!(parse(&[2, op::SERVICES, 0]), Err(Refused::Version));
         crate::fuzz(100_000, 4, |m| {
             let _ = parse(m);
+        });
+    }
+
+    #[test]
+    fn management_requests_and_replies_round_trip() {
+        for action in [Action::Start, Action::Stop, Action::Restart] {
+            for name in [
+                &b"net"[..],
+                b"virtio-blk",
+                b"a_name_of_exactly_32_bytes_long_",
+            ] {
+                let req = Request::Manage { action, name };
+                let mut buf = [0u8; 48];
+                let n = encode(&req, &mut buf).unwrap();
+                assert_eq!(parse(&buf[..n]), Ok(req));
+                assert_eq!(parse(&buf[..n - 1]), Err(Refused::Bad), "cut");
+                let mut long = buf;
+                long[n] = b'x';
+                assert_eq!(parse(&long[..n + 1]), Err(Refused::Bad), "trailing");
+            }
+            let mut buf = [0u8; 48];
+            for bad in [
+                &b""[..],
+                b"a b",
+                b"a_name_of_33_bytes_is_one_too_lon",
+                b"n\0",
+            ] {
+                let req = Request::Manage { action, name: bad };
+                assert_eq!(encode(&req, &mut buf), None, "{bad:?}");
+                let mut msg = std::vec![VERSION, action.op(), bad.len() as u8];
+                msg.extend_from_slice(bad);
+                assert_eq!(parse(&msg), Err(Refused::Bad), "{bad:?}");
+            }
+        }
+        for m in [
+            Managed::Ok,
+            Managed::Unknown,
+            Managed::Busy,
+            Managed::Protected,
+            Managed::Running,
+            Managed::NotRunning,
+            Managed::Needs(b"store"),
+        ] {
+            let mut buf = [0u8; 48];
+            let n = m.write(&mut buf).unwrap();
+            assert_eq!(Managed::parse(&buf[..n]), Some(m));
+        }
+        assert_eq!(Managed::Needs(b"").write(&mut [0u8; 8]), None);
+        assert_eq!(Managed::parse(&[managed::NEEDS, 3, b'n', b'e']), None);
+        assert_eq!(Managed::parse(&[status::OK, 0]), None);
+        assert_eq!(Managed::parse(&[]), None);
+        crate::fuzz(100_000, 64, |m| {
+            let _ = Managed::parse(m);
         });
     }
 

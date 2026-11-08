@@ -175,6 +175,23 @@ fn run(t: &mut TestRun) {
     if start(t, &programs, b"bin/trust", caps, &report, 0).is_none() {
         return;
     }
+    // Answer `trust`'s `RUNTIME` request (#170) as `init` does with no
+    // runtime: `NOT_FOUND`, so it reads its console at once, and later
+    // waits for `ready` on this endpoint do not take it instead.
+    if let Some(Object::Endpoint(reply)) = ipc::poll(&report, Duration::from_secs(2))
+        .and_then(|m| m.cap)
+        .map(|c| c.object().clone())
+    {
+        let mut data = [0; pharos_kernel::syscall::MAX_MESSAGE];
+        data[0] = 7; // status::NOT_FOUND
+        let answer = ipc::Message {
+            data,
+            len: 1,
+            cap: None,
+            badge: 0,
+        };
+        let _ = ipc::try_send(&reply, answer);
+    }
 
     let (id, passed) = client(&programs, &audit, 0);
     for step in [

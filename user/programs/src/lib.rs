@@ -10,6 +10,7 @@ pub mod grants;
 pub mod groups;
 pub mod knowledge;
 pub mod mailbox;
+pub mod manage;
 pub mod models;
 pub mod net;
 pub mod supervise;

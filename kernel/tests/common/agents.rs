@@ -102,6 +102,25 @@ pub fn endpoint(c: &Capability) -> Option<&Arc<Endpoint>> {
     }
 }
 
+/// Answers `trust`'s `RUNTIME` request (#170), sent right after its
+/// `ready`, as `init` does before the runtime runs: `NOT_FOUND`. So `trust`
+/// reads its console at once, and the next wait for a `ready` on `report`
+/// does not take it instead. The kernel then registers the runtime itself.
+fn answer_runtime(report: &Arc<Endpoint>) {
+    let reply = ipc::poll(report, Duration::from_secs(2)).and_then(|m| m.cap);
+    if let Some(Object::Endpoint(reply)) = reply.as_ref().map(|c| c.object()) {
+        let mut data = [0; MAX_MESSAGE];
+        data[0] = 7; // status::NOT_FOUND
+        let answer = Message {
+            data,
+            len: 1,
+            cap: None,
+            badge: 0,
+        };
+        let _ = ipc::try_send(reply, answer);
+    }
+}
+
 /// Starts `path` and waits for its `ready` on `report`.
 fn start(
     t: &mut TestRun,
@@ -114,6 +133,9 @@ fn start(
 ) -> Option<TaskId> {
     let id = process::spawn_elf_limited(programs, path, arg, caps, pages).ok();
     let ready = ipc::poll(report, Duration::from_secs(10)).is_some_and(|m| m.bytes() == b"ready");
+    if ready && path == b"bin/trust" {
+        answer_runtime(report);
+    }
     let name = core::str::from_utf8(path).unwrap_or("?");
     t.check(
         &alloc::format!("{name} started and reported ready"),
