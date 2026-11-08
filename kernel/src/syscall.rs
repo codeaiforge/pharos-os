@@ -1313,7 +1313,10 @@ mod kernel {
                     })
                 })
                 .ok_or(Error::BadAddress)??;
-                device.add_dma(phys, pages);
+                device.add_dma(phys, pages, process.record.id);
+                // Off since a previous driver ended, or for a hot-added
+                // device until now (M4.4 review F1, F3).
+                device.master();
                 record_device(&process, via, device, addr, pages as u64);
                 Ok(phys)
             }

@@ -219,10 +219,17 @@ impl<'a> Audit<'a> {
                 let is: Option<Is> = match c.object() {
                     Object::DebugConsole => Some(Is::DebugConsole),
                     Object::Filesystem(_) => Some(Is::Root),
+                    // A device behind a slot is `Arrived`, one on bus 0 the
+                    // `nth` of its ID there (M4.4 review F2).
+                    Object::Device(d) if d.pci.address.bus != 0 => Some(Is::Arrived(
+                        u32::from(d.pci.device) << 16 | u32::from(d.pci.vendor),
+                    )),
                     Object::Device(d) => {
                         let id = u32::from(d.pci.device) << 16 | u32::from(d.pci.vendor);
                         let same = |x: &Arc<pci::Device>| {
-                            x.vendor == d.pci.vendor && x.device == d.pci.device
+                            x.address.bus == 0
+                                && x.vendor == d.pci.vendor
+                                && x.device == d.pci.device
                         };
                         let nth = (pci::devices().iter().filter(|x| same(x)))
                             .position(|x| Arc::ptr_eq(x, &d.pci));
@@ -233,10 +240,7 @@ impl<'a> Audit<'a> {
                 };
                 let give = is.and_then(|is| {
                     (s.caps.iter().enumerate()).position(|(k, g)| {
-                        // A hot-added device is the entry's `Arrived` (#171).
-                        let same = g.object == is
-                            || matches!((g.object, is), (Is::Arrived(x), Is::Device(y, _)) if x == y);
-                        !matched[k] && same && g.rights == r && g.badge.value(i) == b
+                        !matched[k] && g.object == is && g.rights == r && g.badge.value(i) == b
                     })
                 });
                 if let Some(k) = give {

@@ -134,6 +134,19 @@ pub fn set_enabled(address: Address, on: bool) {
     write32_locked(address, COMMAND, command);
 }
 
+/// Turns bus mastering on or off, leaving memory and I/O decoding as they
+/// are (DMA buffers freed or allocated, M4.4 review F1 and F3).
+pub fn set_bus_master(address: Address, on: bool) {
+    let _guard = LOCK.lock();
+    let command = read32_locked(address, COMMAND) & 0xffff;
+    let command = if on {
+        command | BUS_MASTER
+    } else {
+        command & !BUS_MASTER
+    };
+    write32_locked(address, COMMAND, command);
+}
+
 /// The command register's memory-decoding and bus-master bits.
 pub fn enabled_bits(address: Address) -> (bool, bool) {
     let command = read32(address, COMMAND);

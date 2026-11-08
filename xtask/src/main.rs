@@ -1445,8 +1445,90 @@ const MANAGE_SCRIPT: &[console::Step] = &[
         "knowledge started by the user\r\nservice knowledge ready\r\n",
         "restart trust\n",
     ),
+    // 20 more restarts: each `trust` gets its console's DMA pages back
+    // when the last one ends (review F1; 16 used to exhaust them).
     (
         "service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
+        "restart trust\n",
+    ),
+    (
+        ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
         "services\n",
     ),
     ("services: agents ready, restarts 0 of 3", "stop all\n"),
@@ -1465,8 +1547,10 @@ const HOTPLUG_SCRIPT: &[console::Step] = &[
         "qmp:{\"execute\": \"device_add\", \"arguments\": {\"driver\": \"virtio-blk-pci\", \"drive\": \"spare1\", \"bus\": \"rp1\", \"id\": \"hot1\", \"disable-legacy\": \"on\"}}\n",
     ),
     ("device 1af4:1042 added to slot 1; driver disk", ""),
+    (">service disk ready", ""),
+    // The kernel audits the running driver first (review F2).
     (
-        ">service disk ready",
+        "hotplug test: audited the running driver",
         "qmp:{\"execute\": \"device_del\", \"arguments\": {\"id\": \"hot1\"}}\n",
     ),
     ("device 1af4:1042 removed from slot 1; driver disk", ""),
@@ -1545,6 +1629,8 @@ const MANAGE_EVENTS: &[(&str, &str, Option<&str>)] = &[
         Some("restarted by the user; used by agents"),
     ),
 ];
+/// `restart trust` is typed 21 times ([`MANAGE_SCRIPT`]).
+const MANAGE_TRUST_RESTARTS: usize = 21;
 
 /// After the `manage` kernel (#170): each action one `manage` record from
 /// `init` and, but for the refused stop, one `trust` line; a refusal that
@@ -1560,9 +1646,14 @@ fn manage_checks(image: &Path, console: &str) -> Result<()> {
         let shown = line.map_or(1, |l| {
             console.matches(&format!("service {actor} {l}\r\n")).count()
         });
-        if (all, shown) != (1, 1) {
+        let times = if actor == "trust" {
+            MANAGE_TRUST_RESTARTS
+        } else {
+            1
+        };
+        if (all, shown) != (times, times) {
             return Err(format!(
-                "manage: \"{actor} {detail}\": {all} audit records and {shown} trusted console lines, expected 1 each"
+                "manage: \"{actor} {detail}\": {all} audit records and {shown} trusted console lines, expected {times} each"
             ));
         }
     }
@@ -1570,10 +1661,10 @@ fn manage_checks(image: &Path, console: &str) -> Result<()> {
         .iter()
         .filter(|r| r.contains(" Event manage "))
         .count();
-    if managed != MANAGE_EVENTS.len() {
+    let expected = MANAGE_EVENTS.len() - 1 + MANAGE_TRUST_RESTARTS;
+    if managed != expected {
         return Err(format!(
-            "manage: {managed} manage records, expected {} (refusals other than a protected stop are not recorded)",
-            MANAGE_EVENTS.len()
+            "manage: {managed} manage records, expected {expected} (refusals other than a protected stop are not recorded)"
         ));
     }
     println!(
@@ -3203,12 +3294,22 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         None
     } else {
         let base = console::fifos(&out)?;
-        let qmp = if name == HOTPLUG_TEST {
-            Some(console::fifos_named(&out, console::QMP)?)
+        let (qmp, serial) = if name == HOTPLUG_TEST {
+            // The kernel's own lines too: its audit holds the removal back.
+            let _ = fs::remove_file(&log);
+            (
+                Some(console::fifos_named(&out, console::QMP)?),
+                Some(log.as_path()),
+            )
         } else {
-            None
+            (None, None)
         };
-        Some(console::Script::start(&base, qmp.as_deref(), steps)?)
+        Some(console::Script::start(
+            &base,
+            qmp.as_deref(),
+            serial,
+            steps,
+        )?)
     };
     let run = boot_headless(
         &iso,

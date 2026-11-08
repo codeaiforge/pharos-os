@@ -7,7 +7,11 @@
 //! for the device. When its last
 //! reference goes, it first turns bus mastering off and masks MSI-X, and
 //! only then frees those buffers, so the device can never write to memory
-//! that has been reused. [`mmio_range`] decides which BAR ranges a driver
+//! that has been reused. Each buffer also records the process that
+//! allocated it: when that process ends, bus mastering is turned off and
+//! its buffers are freed, so a restarted driver does not pile up pages
+//! (M4.4 review F1); the next `dma_alloc` turns bus mastering on again.
+//! [`mmio_range`] decides which BAR ranges a driver
 //! may map: never outside a memory BAR, and never the MSI-X table or PBA.
 //! Safe Rust.
 
@@ -75,8 +79,9 @@ pub fn mmio_range(device: &pci::Device, bar: u64, offset: u64, len: u64) -> Resu
 /// One PCI function handed to a driver.
 pub struct DeviceHandle {
     pub pci: Arc<pci::Device>,
-    /// DMA buffers: (physical address, pages).
-    dma: IrqMutex<Vec<(u64, usize)>>,
+    /// DMA buffers: (physical address, pages, the process that allocated
+    /// it).
+    dma: IrqMutex<Vec<(u64, usize, u64)>>,
 }
 
 impl core::fmt::Debug for DeviceHandle {
@@ -97,7 +102,7 @@ impl DeviceHandle {
 
     /// DMA pages held.
     pub fn dma_pages(&self) -> usize {
-        self.dma.lock().iter().map(|&(_, n)| n).sum()
+        self.dma.lock().iter().map(|&(_, n, _)| n).sum()
     }
 
     /// True if `pages` more DMA pages stay within [`MAX_DMA_PAGES`].
@@ -105,9 +110,19 @@ impl DeviceHandle {
         self.dma_pages() + pages <= MAX_DMA_PAGES
     }
 
-    /// Records a DMA buffer the handle now owns.
-    pub fn add_dma(&self, phys: u64, pages: usize) {
-        self.dma.lock().push((phys, pages));
+    /// Records a DMA buffer the handle now owns, allocated by process
+    /// `owner`.
+    pub fn add_dma(&self, phys: u64, pages: usize, owner: u64) {
+        self.dma.lock().push((phys, pages, owner));
+    }
+
+    /// Takes the buffers process `owner` allocated, to be freed once the
+    /// device can no longer reach them.
+    pub fn take_owned(&self, owner: u64) -> Vec<(u64, usize)> {
+        let mut dma = self.dma.lock();
+        let (mine, rest): (Vec<_>, Vec<_>) = dma.drain(..).partition(|b| b.2 == owner);
+        *dma = rest;
+        mine.into_iter().map(|(p, n, _)| (p, n)).collect()
     }
 }
 
@@ -149,19 +164,51 @@ mod kernel {
         }
     }
 
+    fn free(buffers: impl IntoIterator<Item = (u64, usize)>) {
+        if let Some(frames) = crate::mm::frames().as_mut() {
+            for (phys, pages) in buffers {
+                if let Some(frame) = Frame::from_addr(phys) {
+                    let _ = frames.free_contiguous(frame, pages);
+                }
+            }
+        }
+    }
+
+    impl DeviceHandle {
+        /// Process `owner` has ended (review F1): if it allocated buffers,
+        /// bus mastering goes off (no DMA can reach them) and they are
+        /// freed. Memory decoding stays on, so the next driver can reset
+        /// the device through its registers before its first `dma_alloc`
+        /// turns bus mastering on again ([`Self::master`]).
+        pub fn release_from(&self, owner: u64) {
+            let mine = self.take_owned(owner);
+            if mine.is_empty() {
+                return;
+            }
+            hw::set_bus_master(self.pci.address, false);
+            free(mine);
+        }
+
+        /// Turns bus mastering on (a `dma_alloc`: the driver now has
+        /// buffers the device may use).
+        pub fn master(&self) {
+            hw::set_bus_master(self.pci.address, true);
+        }
+
+        /// Turns bus mastering off and keeps memory decoding: a hot-added
+        /// device has no buffers until its driver asks (review F3).
+        pub fn unmaster(&self) {
+            hw::set_bus_master(self.pci.address, false);
+        }
+    }
+
     impl Drop for DeviceHandle {
         fn drop(&mut self) {
             // Stop the device first: no more DMA or MSI writes.
             self.stop();
             // Only now may its buffers be reused.
             let buffers = core::mem::take(&mut *self.dma.lock());
-            if let Some(frames) = crate::mm::frames().as_mut() {
-                for (phys, pages) in buffers {
-                    if let Some(frame) = Frame::from_addr(phys) {
-                        let _ = frames.free_contiguous(frame, pages);
-                    }
-                }
-            }
+            free(buffers.into_iter().map(|(p, n, _)| (p, n)));
             // Stopped and its memory freed: it may be granted again.
             GRANTED.lock().retain(|a| *a != self.pci.address);
         }
@@ -290,8 +337,26 @@ mod tests {
     fn dma_page_limit() {
         let h = DeviceHandle::new(Arc::new(device()));
         assert!(h.dma_fits(MAX_DMA_PAGES));
-        h.add_dma(0x10_0000, 60);
+        h.add_dma(0x10_0000, 60, 7);
         assert!(h.dma_fits(4) && !h.dma_fits(5));
         assert_eq!(h.dma_pages(), 60);
+    }
+
+    #[test]
+    fn an_ended_process_gives_back_only_its_own_buffers() {
+        let h = DeviceHandle::new(Arc::new(device()));
+        h.add_dma(0x10_0000, 4, 7);
+        h.add_dma(0x20_0000, 2, 8);
+        h.add_dma(0x30_0000, 1, 7);
+        assert_eq!(h.take_owned(9), std::vec![], "a process with none");
+        assert_eq!(h.take_owned(7), std::vec![(0x10_0000, 4), (0x30_0000, 1)]);
+        assert_eq!(h.dma_pages(), 2);
+        // A restarted driver can allocate again: 16 starts of 4 pages
+        // fit only if each start's pages come back (review F1).
+        for start in 0..20 {
+            assert!(h.dma_fits(4), "start {start}");
+            h.add_dma(0x40_0000, 4, 100 + start);
+            assert_eq!(h.take_owned(100 + start).len(), 1);
+        }
     }
 }

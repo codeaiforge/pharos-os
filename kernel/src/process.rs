@@ -845,6 +845,16 @@ fn end_current(end: End) -> ! {
         if let Some((parent, budget)) = parent {
             parent.take_back(&budget);
         }
+        // Its DMA buffers, with the device's bus mastering off first, before
+        // its parent hears it ended and starts another (M4.4 review F1).
+        #[cfg(target_os = "none")]
+        if let Some(process) = &process {
+            let pins = core::mem::take(&mut *process.pins.lock());
+            for device in &pins {
+                device.release_from(id);
+            }
+            drop(pins);
+        }
         if let Some(process) = &process {
             let cpu = sched::cpu_cycles(id).unwrap_or(0);
             process

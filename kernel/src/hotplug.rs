@@ -333,7 +333,16 @@ mod kernel {
         }
     }
 
-    static SLOTS: IrqMutex<Vec<Slot>> = IrqMutex::new(Vec::new());
+    /// The slots. `slot_next` and `slot_answer` take one out while they
+    /// work on it (probing, granting, revoking), so this lock is never held
+    /// for that work (review F4); only `init` calls them, one at a time.
+    static SLOTS: IrqMutex<Vec<Option<Slot>>> = IrqMutex::new(Vec::new());
+    /// What the tick reads, fixed at boot: each handled slot's port and
+    /// capability offset, so the tick never waits for a slot being worked
+    /// on.
+    static POLLED: IrqMutex<Vec<(Address, u8)>> = IrqMutex::new(Vec::new());
+    /// Slots powering on (a bit each): the tick wakes `init` for them.
+    static POWERING: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
     /// `init`'s endpoint and bit (`slot_notify`).
     static NOTIFY: IrqMutex<Option<(Arc<Endpoint>, u32)>> = IrqMutex::new(None);
 
@@ -414,14 +423,18 @@ mod kernel {
             slots.push(slot);
         }
         let n = slots.len();
-        *SLOTS.lock() = slots;
+        *POLLED.lock() = (slots.iter())
+            .filter(|s| s.state != State::Fixed)
+            .map(|s| (s.port, s.cap))
+            .collect();
+        *SLOTS.lock() = slots.into_iter().map(Some).collect();
         n
     }
 
     /// The physical numbers of the slots handled and empty at boot (for
     /// tests).
     pub fn slots() -> Vec<u16> {
-        (SLOTS.lock().iter())
+        (SLOTS.lock().iter().flatten())
             .filter(|s| s.state != State::Fixed)
             .map(|s| s.number)
             .collect()
@@ -439,11 +452,12 @@ mod kernel {
         if ticks % POLL_TICKS != 0 {
             return;
         }
-        let work = SLOTS.lock().iter().any(|s| {
-            s.state != State::Fixed
-                && (matches!(s.state, State::Powering { .. })
-                    || s.status().1 & (status::BUTTON | status::PRESENCE_CHANGED) != 0)
-        });
+        let powering = POWERING.load(core::sync::atomic::Ordering::Relaxed) != 0;
+        let work = powering
+            || POLLED.lock().iter().any(|&(port, cap)| {
+                let sta = (hw::read32(port, cap.wrapping_add(0x18)) >> 16) as u16;
+                sta & (status::BUTTON | status::PRESENCE_CHANGED) != 0
+            });
         if work {
             let target = NOTIFY.lock().clone();
             if let Some((endpoint, bits)) = target {
@@ -525,6 +539,9 @@ mod kernel {
             );
             return None;
         };
+        // Not bus master until its driver allocates buffers, so a device
+        // no driver takes cannot DMA (review F3).
+        handle.unmaster();
         let root = Capability::new(Object::Device(handle), MAP | CONFIG | IRQ | GRANT);
         let given = init
             .caps
@@ -547,37 +564,65 @@ mod kernel {
     /// `init`, until one has an event for it; 0 if none.
     pub fn next(init: &process::Process) -> u64 {
         let now = sched::ticks();
-        let mut slots = SLOTS.lock();
-        for (i, slot) in slots.iter_mut().enumerate() {
-            // A slot may take several steps (power on, then probe) in one
-            // call if its function appears at once, as in QEMU.
-            for _ in 0..3 {
-                // Each event is seen once: cleared as soon as it is read.
-                let (control, sta) = slot.status();
-                let seen = sta & (status::BUTTON | status::PRESENCE_CHANGED | status::LINK_CHANGED);
-                if seen != 0 {
-                    hw::write_slot(slot.port, slot.cap, control, seen);
-                }
-                let present = hw::read32(slot.function(), 0) as u16 != 0xffff;
-                let (state, act_, event) = step(slot.state, sta, present, now);
-                slot.state = state;
-                let probed = act_.and_then(|a| act(slot, a, init, now));
-                if let Some(event) = event {
-                    let (handle, id) = match (event, probed) {
-                        (Event::Added, Some(p)) => p,
-                        (Event::Added, None) => break,
-                        _ => (
-                            0,
-                            slot.device.as_ref().map_or(0, |(d, _)| {
-                                u32::from(d.vendor) | u32::from(d.device) << 16
-                            }),
-                        ),
-                    };
-                    return encode(i, event, handle, slot.number, id);
-                }
-                if act_.is_none() {
-                    break;
-                }
+        let count = SLOTS.lock().len();
+        for i in 0..count {
+            let found = with_slot(i, |slot| next_in(i, slot, init, now)).unwrap_or(0);
+            if found != 0 {
+                return found;
+            }
+        }
+        0
+    }
+
+    /// Runs `f` on slot `i` taken out of [`SLOTS`], so no lock is held
+    /// while it works (review F4), then puts it back and notes whether it
+    /// is powering on for the tick.
+    fn with_slot<T>(i: usize, f: impl FnOnce(&mut Slot) -> T) -> Option<T> {
+        use core::sync::atomic::Ordering::Relaxed;
+        let mut slot = SLOTS.lock().get_mut(i).and_then(Option::take)?;
+        let out = f(&mut slot);
+        let bit = 1u8 << (i % MAX_SLOTS);
+        if matches!(slot.state, State::Powering { .. }) {
+            POWERING.fetch_or(bit, Relaxed);
+        } else {
+            POWERING.fetch_and(!bit, Relaxed);
+        }
+        if let Some(s) = SLOTS.lock().get_mut(i) {
+            *s = Some(slot);
+        }
+        Some(out)
+    }
+
+    /// One slot's steps for [`next`]: its event, or 0.
+    fn next_in(i: usize, slot: &mut Slot, init: &process::Process, now: u64) -> u64 {
+        // A slot may take several steps (power on, then probe) in one
+        // call if its function appears at once, as in QEMU.
+        for _ in 0..3 {
+            // Each event is seen once: cleared as soon as it is read.
+            let (control, sta) = slot.status();
+            let seen = sta & (status::BUTTON | status::PRESENCE_CHANGED | status::LINK_CHANGED);
+            if seen != 0 {
+                hw::write_slot(slot.port, slot.cap, control, seen);
+            }
+            let present = hw::read32(slot.function(), 0) as u16 != 0xffff;
+            let (state, act_, event) = step(slot.state, sta, present, now);
+            slot.state = state;
+            let probed = act_.and_then(|a| act(slot, a, init, now));
+            if let Some(event) = event {
+                let (handle, id) = match (event, probed) {
+                    (Event::Added, Some(p)) => p,
+                    (Event::Added, None) => return 0,
+                    _ => (
+                        0,
+                        slot.device
+                            .as_ref()
+                            .map_or(0, |(d, _)| u32::from(d.vendor) | u32::from(d.device) << 16),
+                    ),
+                };
+                return encode(i, event, handle, slot.number, id);
+            }
+            if act_.is_none() {
+                return 0;
             }
         }
         0
@@ -588,21 +633,20 @@ mod kernel {
     /// powered off): no `REMOVED` event follows, which is only for a device
     /// taken without asking.
     pub fn answer_slot(init: &process::Process, slot: usize, release: bool) -> bool {
-        let mut slots = SLOTS.lock();
-        let Some(s) = slots.get_mut(slot) else {
-            return false;
-        };
-        let Some((state, act_, _)) = answer(s.state, release) else {
-            return false;
-        };
-        s.state = state;
-        if let Some(a) = act_ {
-            act(s, a, init, sched::ticks());
-        }
-        if release {
-            kprintln!("hotplug: slot {}: released and powered off", s.number);
-        }
-        true
+        with_slot(slot, |s| {
+            let Some((state, act_, _)) = answer(s.state, release) else {
+                return false;
+            };
+            s.state = state;
+            if let Some(a) = act_ {
+                act(s, a, init, sched::ticks());
+            }
+            if release {
+                kprintln!("hotplug: slot {}: released and powered off", s.number);
+            }
+            true
+        })
+        .unwrap_or(false)
     }
 }
 

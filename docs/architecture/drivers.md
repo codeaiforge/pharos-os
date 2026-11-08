@@ -80,6 +80,7 @@ Adding `user/pharos-user`'s `syscall` module to the list of places allowed to us
   - when the kernel hands out a `Device`, it enables memory decoding and bus mastering in the PCI command register. A device is granted to one driver at a time: `grant` refuses it until the previous handle's last reference is gone (F2);
   - a process that maps a device's registers (`mmio_map`) or buffers (`dma_alloc`) pins the device until it ends, even if it deletes its handles (F2);
   - when the `Device` object's last reference goes (the driver exits or is killed, and nothing else holds it or pins it), the kernel disables bus mastering and memory decoding and masks MSI-X (function mask). Only then are the device's DMA buffers freed.
+  - since M4.4 (review F1), each buffer also records the process that allocated it: when that process ends, the kernel turns bus mastering off and frees its buffers, even though `init` still holds the device for the next driver; the next `dma_alloc` turns bus mastering on again. A hot-added device starts with bus mastering off (review F3).
   - So a device can never DMA into freed memory. Firmware may leave a device enabled before it is granted; granting sets a known state.
 - **New rights:** `MAP = 1 << 5`, `IRQ = 1 << 6`, `CONFIG = 1 << 7`, `WAIT = 1 << 8`.
 

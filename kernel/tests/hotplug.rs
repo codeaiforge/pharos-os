@@ -59,6 +59,32 @@ fn slot_device_caps() -> usize {
 /// The `disk` driver's report badge: entry 8 + 1.
 const DISK_BADGE: u32 = 9;
 
+/// The buses of the devices the running `disk` driver holds.
+fn driver_device_buses(init: TaskId) -> Vec<u8> {
+    let Some(p) = (init + 1..init + 400)
+        .filter_map(process::by_id)
+        .find(|p| p.parent == Some(init) && holds_disk_badge(p))
+    else {
+        return Vec::new();
+    };
+    let mut caps = p.caps.lock();
+    (1..=MAX_HANDLES as u64)
+        .filter_map(|h| caps.get(h, 0).ok())
+        .filter_map(|c| match c.object() {
+            Object::Device(d) => Some(d.pci.address.bus),
+            _ => None,
+        })
+        .collect()
+}
+
+fn holds_disk_badge(p: &process::Process) -> bool {
+    let mut caps = p.caps.lock();
+    (1..=MAX_HANDLES as u64).any(|h| {
+        caps.get(h, 0)
+            .is_ok_and(|c| matches!(c.object(), Object::Endpoint(_)) && c.badge() == DISK_BADGE)
+    })
+}
+
 /// Live children of `init` holding the driver entry's report capability.
 fn drivers(init: TaskId) -> usize {
     (init + 1..init + 400)
@@ -124,6 +150,7 @@ fn run(t: &mut TestRun) {
     let mut summary = None;
     let mut audit = None;
     let mut running_audit = None;
+    let mut driver_devices = Vec::new();
     let start = time::uptime();
     // About 10 s needed; under the runner's 60 s limit.
     while time::uptime() - start < Duration::from_secs(50) {
@@ -142,10 +169,12 @@ fn run(t: &mut TestRun) {
                 }
             }
         }
-        // Once the first driver runs (it is never removed before its
-        // `ready`): its manifest, and its device.
-        if running_audit.is_none() && count(&lines, "init: disk started") == 1 {
+        // Once the first driver is ready: its manifest, and its device. The
+        // runner removes it only after the marker below (review F2).
+        if running_audit.is_none() && count(&lines, "init: disk ready") == 1 {
             running_audit = audit.as_ref().map(|a| a.check());
+            driver_devices = driver_device_buses(init);
+            kprintln!("hotplug test: audited the running driver");
         }
         if count(&lines, "init: disk stopped by the user") >= 1 && count(&lines, LAST) >= 1 {
             break;
@@ -188,6 +217,10 @@ fn run(t: &mut TestRun) {
             kprintln!("  audit: {line}");
         }
     }
+    t.check(
+        "the running driver held one device, behind the slot (bus 1), and no boot device",
+        driver_devices == [1],
+    );
     t.check(
         "while the driver ran, every service held exactly its manifest",
         running_audit

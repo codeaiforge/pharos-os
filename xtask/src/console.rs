@@ -109,16 +109,46 @@ fn open_pair(base: &Path) -> Result<(std::fs::File, std::fs::File), String> {
     Ok((open("in")?, open("out")?))
 }
 
+/// Reads a file as it grows, waiting for it to appear (the serial log,
+/// which QEMU writes). Never ends.
+struct Tail {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+}
+
+impl Read for Tail {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if self.file.is_none() {
+                self.file = std::fs::File::open(&self.path).ok();
+            }
+            if let Some(n) = self.file.as_mut().map(|f| f.read(buf)).transpose()? {
+                if n > 0 {
+                    return Ok(n);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
 impl Script {
     /// Plays `steps` on the console FIFOs at `base`, and QMP's at `qmp`
     /// if given: QMP's output joins the transcript as `qmp: ` text, and a
-    /// [`QMP_PREFIX`] line is written to QMP.
-    pub fn start(base: &Path, qmp: Option<&Path>, steps: &'static [Step]) -> Result<Self, String> {
+    /// [`QMP_PREFIX`] line is written to QMP. With `serial` (a log that
+    /// must not exist yet), the kernel's serial output joins it as
+    /// `serial: ` text, so a step can wait for the kernel.
+    pub fn start(
+        base: &Path,
+        qmp: Option<&Path>,
+        serial: Option<&Path>,
+        steps: &'static [Step],
+    ) -> Result<Self, String> {
         let (input, output) = open_pair(base)?;
         let qmp = qmp.map(open_pair).transpose()?;
         let state = Arc::new(Mutex::new((0, 0, String::new(), Vec::new())));
         let inputs = Arc::new(Mutex::new((input, qmp.as_ref().map(|q| q.0.try_clone()))));
-        let reader = |mut from: std::fs::File, tag: &'static str| {
+        let reader = |mut from: Box<dyn Read + Send>, tag: &'static str| {
             let (shared, inputs) = (Arc::clone(&state), Arc::clone(&inputs));
             std::thread::spawn(move || {
                 let mut buf = [0u8; 512];
@@ -159,9 +189,16 @@ impl Script {
                 }
             });
         };
-        reader(output, "");
+        reader(Box::new(output), "");
         if let Some((_, out)) = qmp {
-            reader(out, "qmp: ");
+            reader(Box::new(out), "qmp: ");
+        }
+        if let Some(path) = serial {
+            let tail = Tail {
+                path: path.to_path_buf(),
+                file: None,
+            };
+            reader(Box::new(tail), "serial: ");
         }
         Ok(Self { state, steps })
     }
