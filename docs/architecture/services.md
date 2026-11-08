@@ -3,6 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-28 (M2.10, #59). It follows [D-015](../project/decision-log.md#d-015-network-stack-and-service-model) (as amended on 2026-10-28: badges instead of per-client endpoints), [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism) (IPC), and [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries). Networking is in [networking.md](networking.md).
+- **M4.4 (D-029):** runtime management below is **planned**; design proposed (#169), awaiting the maintainer.
 - **M4.3 (D-028):** **implemented (#163):** with the boot table, `init` starts the storage service from the factory image, picks and verifies an image slot, mounts it with `fs_mount`, starts the other services from it (`trust`'s program always from the factory image), and falls back in place to the other slot, then the factory image; it reports `[ready, failed, image]`. **Implemented (#164):** safe mode and recovery: the kernel's mode in `init`'s argument (bits 8 and up), else the slot record's one-shot `next`; the agent runtime `off` in both; recovery on the factory image (or the `recovery` copy), also when the factory image is not ready; the report `[ready, failed, image, mode]`; `trust`'s `system`, `safe`, and `recovery` (`SYSTEM`, `NEXT`). **Implemented (#165):** updates staged from the host: `trust`'s `update` (`UPDATE`, answered at once, then an `OFFER` per file), `apply <n>` and `discard <n>` (`ANSWER`), and `rollback` (`ROLLBACK`); an approved update goes to the slot that is not active and is tried in place, and one that is not ready is bad and the previous slot runs again. An agent with `update propose` only adds a file to `system/incoming` (`PROPOSE`, through the runtime's namespace 9; the boot table gives the runtime no such capability, as no boot entry may propose). Design in [boot.md](boot.md#8-recovery-and-updates-m43-d-028).
 - **M4.1 (D-026, #149):** restart policies, the ready state, and failure reporting below are **planned**. Design approved by the maintainer on 2026-11-06 (#149), with a daemon that sends no `ready` in 10 s counted as a crash.
 - **Implementation:** `endpoint_create`, `spawn`, `process_status`, badges, and endpoint notifications are **implemented** (#60: `cap::Capability::derive_badged`, `ipc::Endpoint::signal`, `process::ProcessRecord`, `pharos_user::{spawn, Grant, Received, Status}`; tested by the `spawn` test kernel with the `spawner` and `child` programs). So is `init` (#61: `user/programs/src/bin/init.rs`, `process::init_capabilities`, `ipc::poll` for the kernel's wait on the report; the main kernel starts it at boot, and the `services` test kernel runs its test table with the `svc` program). The boot table has `virtio-blk`, the network service (#63), and the storage service on the second virtio-blk disk with a 1 GiB page limit (#77; entries carry a `limit` and `Cap::SecondDevice` picks the second device with an ID), and the inference service with a 1 GiB limit, its endpoint, and a read-only `models` storage capability (#88, `Cap::InferService` and `Cap::Storage`; [inference.md](inference.md)), and the trusted service `trust` with the virtio-console device (`1af4:1043`, now in `process::INIT_DEVICES`), its endpoint, and the report endpoint (#96, `Cap::TrustService`; [agents.md](agents.md#the-trusted-path-96)), and the agent runtime `agents` after it, with a 64 MiB limit, its endpoint with `RECEIVE`, `SEND`, and `GRANT` (so it can give each agent a badged `SEND`), the root filesystem read-only, inference client 1, and `SEND` on `trust` badged as the runtime (#98, `Cap::AgentsService`, `Cap::Root`, `Cap::Inference`, `Cap::TrustRuntime`), and storage namespace `agents` read-write for its tasks (#99, `Cap::Storage(5)`), so it starts after the storage service. Right after starting the runtime, `init` sends `trust` its process capability with `STOP` and `WAIT` through `init`'s own unbadged handle; if that fails, it stops the runtime. So is `irq_notify` (#62: `irq::Vectors::bind`, kernel-side bindings beside the vector table). So are `call` and non-blocking `send` (#63: `ipc::call`, `ipc::try_send`, `Endpoint::offer_now`, `Endpoint::is_idle`).
@@ -227,6 +228,45 @@ A mutation in which `init` grants one service one capability more than its entry
 
 **Not covered.** `init` itself (the kernel gives it every boot capability; it is reviewed code). Agents (their manifests are D-012's, and the `hostile` and `deputy` kernels test them). Memory mappings, bounded by page limits. Processes the runtime starts that are not agents: there are none.
 
+### Runtime management (M4.4, D-029)
+
+**Planned, not implemented.** Design proposed (#169), awaiting the maintainer. D-029 (#168): the user starts, stops, and restarts services from the trusted console only; `trust`, `audit`, and `store` can be restarted but not stopped; dependents keep running and are reported; only compiled table entries start. Devices added and removed at runtime are in [drivers.md](drivers.md#hotplug-m44-d-029).
+
+**Console commands** (`pharos_proto::trust::command`):
+
+| Command | Meaning |
+| --- | --- |
+| `start <service>` | Start a stopped, given-up, failed, or skipped service |
+| `restart <service>` | Stop it if it runs, then start it |
+| `stop service <service>` | Stop it; never restarted by its policy |
+| `stop <agent>` | Unchanged: stops an agent (the runtime's registry) |
+
+`start` and `restart` have no agent meaning, so they take a service name directly. `stop` keeps its agent meaning; a service is named after the word `service`, as a group is after `group`. An agent named `service` is stopped with `stop service` alone, as one named `group` is today. A service name is one of `init`'s table names (`valid_name`, at most 16 bytes); `trust` does not check it, `init` does.
+
+**`init` requests** (`pharos_proto::service`, version 1, answered only on `trust`'s badge, like `SERVICES`):
+
+| Op | Request | Reply |
+| --- | --- | --- |
+| 7 `START` | `[version, 7, len, name…]` | `[status]` |
+| 8 `STOP` | `[version, 8, len, name…]` | `[status]` |
+| 9 `RESTART` | `[version, 9, len, name…]` | `[status]` |
+
+Statuses: `OK`, `UNKNOWN` (no entry by that name in the running table, so also every entry the mode leaves out, such as `agents` in safe mode), `PROTECTED` (`stop` on `trust`, `audit`, or `store`), `RUNNING` (`start` on a service that runs), `NOT_RUNNING` (`stop` on one that does not), `NEEDS` with the first dependency that does not run (its index in the table), `NO_DEVICE` (a driver entry with no device, [drivers.md](drivers.md#hotplug-m44-d-029)), `BUSY` (`init` is booting, switching images, or in recovery, the same "not now" as `UPDATE`).
+
+**The rules** are a host-tested module, `pharos_programs::manage`: `decide(action, entry, state, deps) -> Result<Plan, Refusal>`, where `Plan` is `Stop`, `Start`, or `StopThenStart`. `init` only carries out a plan.
+- **`stop`:** allowed while the service is `starting`, `ready`, or `restarting` (a waiting restart is cancelled). `init` stops the process, marks it `stopped` (never restarted, as for a stop by `trust` today, D-026), and reports its dependents, which keep running.
+- **`start`:** allowed from `stopped`, `failed` (given up included), `skipped`, `done` (a one-shot runs again), and `pending`. Every entry in its `after` must be `ready` or `done`, else `NEEDS`. `init` starts it from its table entry with exactly its manifest (D-027) and sets its restart count to 0, so its policy applies afresh. A daemon still has 10 s to send `ready`.
+- **`restart`:** allowed while the service runs, protected ones included; a stop then a start, with the count reset. On a service that does not run it is a `start`.
+- **Protected services** (`trust`, `audit`, `store`) refuse only `stop`. Restarting `trust` ends the session on the console: `init` answers `OK` before it stops `trust`, and the new `trust` prints its banner. Restarting the agent runtime sends `trust` its `RUNTIME` registration again, as supervision does.
+- **One request at a time:** `init` is one thread and answers each request before taking the next, so two commands never interleave.
+
+**Reporting.** Each accepted action goes through `init`'s one event path (debug line, audit record, `SERVICE` line to `trust`, #152):
+- new audit action `manage` (21): actor the service's table name, detail `stopped by the user`, `started by the user`, or `restarted by the user`, with `; used by <dependents>` for a stop or restart (cut as F1 of the M4.1 review cuts it);
+- `trust` prints `service <name> stopped by the user`, `started by the user`, or `restarted by the user`, then the normal events (`ready`, `failed`, …) as they come; a refusal is one line from `trust` alone (`stop: <name> is protected`, `start: <name> is running`, `start: <name> needs <dependency>`, `start: no service <name>`, `start: not now`), and an audit record only for `PROTECTED` (the only refusal that is an attempt to remove something the user cannot).
+- `services` shows the new state; nothing else changes.
+
+**Not in M4.4.** Any service or agent asking `init` to manage a service (D-029 1(b)); starting a program that has no table entry (4(b)); persisting a stop across a reboot.
+
 ## 4. Security
 
 - **The trust boundary is unchanged:** every process, `init` included, is untrusted by the kernel. `init` holds the most authority (every device, the root filesystem). It is small, and its service table is reviewed code.
@@ -240,6 +280,7 @@ A mutation in which `init` grants one service one capability more than its entry
   `spawn` checks all limits before allocating. The process limit also bounds what a spawn loop can take.
 - **Notifications** carry no data: a forged or coalesced bit only makes a receiver re-check its source. Only the kernel sets them, and only on endpoints the binder receives on.
 - **Untrusted programs:** program files come only through file capabilities, so `init` can start only programs from the filesystems it was given. The ELF loader is unchanged.
+- **Runtime management (M4.4, planned):** only `trust`'s badge reaches `START`, `STOP`, and `RESTART`, so an agent or service cannot stop anything; a start uses only a compiled entry's manifest, so it adds no authority the capability audit does not already check; `trust`, `audit`, and `store` cannot be stopped, so no command ends the console or the audit trail.
 - The threat model gains a "Processes and services" section (planned).
 
 ## 5. Testing
