@@ -7,7 +7,7 @@
 - **Phase 4 gate:** all M4.x gates and a full threat-model review (below).
 - **Design under review:** services.md, D-031, D-022, D-027, D-029, [capabilities.md](../architecture/capabilities.md), [threat-model.md](threat-model.md).
 - **Date:** 2026-11-09, issue #185. Reviewer: AI-assisted (Claude Code), from reading the code, the `aifail` and `compromised` kernels, and the experiments recorded in services.md (a runaway `infer` stopping `trust`, #182; `trust` losing `system ready`, #183).
-- **Status:** **proposed**, awaiting the maintainer. F1 and F2 fixed (2026-11-09) at the maintainer's request; F3 and F4 accepted; F5 carried.
+- **Status:** **approved** by the maintainer on 2026-11-09 (M4.6 and Phase 4 gate, #185), with F1 and F2 fixed, F3 and F4 accepted, and F5 carried to M5.1.
 
 ## Method
 
