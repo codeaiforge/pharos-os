@@ -549,7 +549,7 @@ Ordering notes:
 
 ### M4.6 — Integration of AI services without unrestricted kernel access
 
-- **Objective and scope:** Run inference and the agent runtime as integrated system services with no privileged access. **Status: Current.**
+- **Objective and scope:** Run inference and the agent runtime as integrated system services with no privileged access. **Status: Current.** Issues #180–#185. D-031 accepted (#180): `infer` and the agent runtime keep their M4.2 manifests, each capability justified in the design and any unused one removed; adversarial tests run hostile programs under their exact manifests against kernel memory, other processes, devices, and the other services; failure tests crash, hang, and exhaust each until given up and check the trusted console, storage, knowledge, and audit still work and `start` brings them back; no KPTI and user-mode `rdtsc` are carried to M5.2, required before real-hardware use. Next: the design (#181).
 - **Deliverables:** AI services under the service manager with capability manifests.
 - **Prerequisites:** M4.2, Phase 3 gate.
 - **Acceptance criteria:** AI services run unprivileged; adversarial tests show they cannot access kernel memory or resources outside their capabilities; the system remains usable if AI services fail.
@@ -672,6 +672,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-028 | Boot recovery, known-good images, and signed updates | M4.3 | **Accepted** (#160): an update replaces only the root image; a factory image on the boot medium plus slots A and B in the store; `init` verifies a slot's Ed25519 signature (`ed25519-compact`, after review) and has the kernel mount it with one new call; an attempt record marked good at ready, 3 failed attempts or a time limit fall back; safe mode and recovery automatic, from Limine, or from `trust`; an update needs a valid signature and the user's yes; Secure Boot evaluated now, enforced in M5.5 |
 | D-029 | Runtime management of services and devices | M4.4 | **Accepted** (#168): the trusted console only; `trust`, `audit`, and `store` restartable, not stoppable; dependents keep running and are reported; only compiled table entries start; native PCIe hotplug on root ports, polled, BARs assigned by the kernel in the port's window, after an experiment (fallback: driver restart, hotplug to M5.2); hotplug slots only, protected drivers refuse removal |
 | D-030 | System configuration and diagnostics | M4.5 | **Accepted** (#174): settings only, within compiled ceilings; `etc/system.conf` in the signed root image; the manifest format; checked at build, update offer, and boot, refused not narrowed; `INFO` health checks every 10 s, an unresponsive daemon restarted by its policy; `trust`'s `health` and `config` |
+| D-031 | AI services as unprivileged system services | M4.6 | **Accepted** (#180): the M4.2 manifests, each capability justified; hostile programs under `infer`'s and the runtime's exact manifests; crash, hang, and exhaust, then the rest checked; KPTI and `rdtsc` carried to M5.2 |
 
 ## Next milestone
 
