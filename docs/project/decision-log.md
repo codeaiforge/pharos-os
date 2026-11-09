@@ -1131,3 +1131,34 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
    - The runtime starts each agent with no capabilities, hands a `STOP` capability on it to the trusted service, and only then grants the agent anything. An agent the runtime never reported holds nothing, and stopping the runtime ends it too.
 9. **Delegation with expiry: left to M3.4, with D-012** (decided there: expiry on runtime grants only, D-012 item 9). M3.3 grants an agent only what a reviewed table allows (below), so it needs no time-limited grants yet.
 10. **Human approval in M3.3: none needed, because nothing beyond the reviewed table is granted.** The runtime grants an agent only capabilities listed for it in a compiled-in table, like `init`'s; a manifest asking for more is refused. Approvals for anything beyond it come with M3.4's permission model.
+
+### D-031: AI services as unprivileged system services
+
+- **Status:** Proposed
+- **Needed by:** M4.6
+
+**Context.** M4.6 must run inference and the agent runtime as integrated system services with no privileged access: adversarial tests must show they cannot reach kernel memory or resources outside their capabilities, and the system must stay usable if they fail. Kernel-resident inference is out of scope. This decides what each AI service may hold, which adversary the tests play, what "usable" means after a failure, and where the two limits carried to M4.2 and still open (no KPTI, `rdtsc` in user mode) go.
+
+**Evidence (2026-11-09, issue #180):**
+- **Both already run in ring 3 under `init`, with compiled manifests audited live** (D-026, D-027; the `system` kernel checks each live table at ready and after faults). `infer`: the debug console, `RECEIVE` on its endpoint, its report endpoint, and the store's `models` namespace read-only; a 1 GiB page limit; no gains. `agents` (the runtime): the debug console, its own endpoint unbadged (`RECEIVE`, `SEND`, `GRANT`; M4.2 review F2), its report endpoint, the root filesystem (to load agent programs), `infer` (badge 1), `trust`'s runtime channel, the store's `tasks` namespace, and `audit` as the runtime; a 64 MiB limit; gains: its agents' process capabilities.
+- **Only the runtime depends on `infer`, and nothing depends on the runtime** (boot table: `virtio-blk`, `net`, `store`, `infer`, `audit`, `knowledge`, `trust`, `agents`).
+- **The adversary in today's tests is an agent.** `hostile`, `deputy`, `exhaustion`, `injection`, and `poison` attack through the runtime. No test runs a hostile program holding `infer`'s or the runtime's manifest. `user_mode` shows a ring-3 process is killed reading or writing kernel data, jumping into kernel code, or reading another process's page, but as a test program, not with a service's capabilities.
+- **Failure is tested service by service, not for what is left.** `system` kills `infer` until it is given up and checks each service's line; `supervision` kills `infer` and `store`; `manage` stops `agents`; `health` gives up a silent daemon. No test checks that the trusted console, storage, knowledge, and audit keep working after both AI services are given up, or that the user can start them again.
+- **The runtime is its agents' reference monitor,** so a compromised runtime controls every agent and uses whatever it holds: inference, its `tasks` namespace, audit records as the runtime, and approval prompts on the trusted console (which only the user answers).
+- **No KPTI and `rdtsc` in user mode** are listed as carried to M4.2 in the threat model, but M4.2 closed without addressing them. The kernel holds no secret today: the audit chain is unkeyed (M5.5) and `init` holds only the update key's public half (D-028). No user program uses `rdtsc`.
+
+**Options.**
+1. *What the AI services hold:* (a) the M4.2 manifests, each capability justified in the design and any found unused removed; (b) also move agent loading to `init`, so the runtime no longer holds the root filesystem.
+2. *The adversary:* (a) a compromised service: test tables start hostile programs under `infer`'s and the runtime's exact manifests (the `pharos-services` entries with the path swapped, checked by the capability audit), which try kernel memory, other processes' memory, devices, every handle, and forged requests to `init`, `store`, `audit`, `knowledge`, and `trust`; (b) agents only, as today.
+3. *Usable after failure:* (a) tests crash, hang, and exhaust each AI service until `init` gives it up, then check that the trusted console (`services`, `health`, `audit`, `stop all`), storage, knowledge, and audit still answer, and that `start` brings them back; (b) crash only.
+4. *Kernel memory and side channels:* (a) architectural access tested as the services (option 2); the Meltdown class and `rdtsc` recarried to M5.2 as limits required before real-hardware use, since Phase 4 runs only in QEMU and the kernel holds no secret; (b) KPTI and `CR4.TSD` now.
+
+**Evaluation criteria.** Meets M4.6's acceptance criteria with tests in CI; no new kernel code or `unsafe` unless an option needs it; no capability added to any service; every test fails when its check is removed (mutation); the threat model has no limit carried to a closed milestone.
+
+**Recommendation:** 1(a), 2(a), 3(a), 4(a).
+1. **(a) The M4.2 manifests, justified one by one.** They already pass the live audit; M4.6 makes each line answer "what for", and drops what does not. (b) moves a parser of agent programs into `init`, the most privileged process, to take a read-only filesystem from the runtime, which already controls every agent.
+2. **(a) A compromised service.** The acceptance criterion is about the services, and the agent tests already cover agents. Swapping the path keeps the manifest exactly the one that ships.
+3. **(a) Crash, hang, and exhaust, then the rest.** "Usable" is what the user can still do, so the test checks that, not only the failed service's line.
+4. **(a) Recarried to M5.2.** KPTI is a large change to the kernel's most sensitive code (every entry and exit, and the TLB), for an attack that needs real hardware and a secret to steal; `CR4.TSD` alone leaves other timers. Both stay required before real-hardware use.
+
+**Consequences (if accepted).** services.md, inference.md, and agents.md gain a manifest table for each AI service with a reason per capability (#181); a `hostile` service program and test tables for `infer` and the runtime; a failure test kernel; the threat model's KPTI and `rdtsc` rows carried to M5.2; the Phase 4 gate (#185) reviews the whole threat model.
