@@ -56,7 +56,7 @@ pub fn decide(
 mod tests {
     use super::*;
 
-    const ALL: [State; 10] = [
+    const ALL: [State; 11] = [
         State::Pending,
         State::Starting,
         State::Ready,
@@ -67,6 +67,7 @@ mod tests {
         State::Stopped,
         State::Off,
         State::NoDevice,
+        State::Configured,
     ];
     const RUNS: [State; 3] = [State::Starting, State::Ready, State::Restarting];
 

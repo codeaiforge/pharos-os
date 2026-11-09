@@ -7,6 +7,28 @@ use pharos_fs::{BLOCK_SIZE, Builder, ENTRY_SIZE, HEADER_SIZE, Image, crc32};
 
 use crate::Result;
 
+/// Checks the `etc/system.conf` in `image` against the boot table (M4.5,
+/// services.md), as `init` will, so a bad file never ships. An image
+/// without one passes.
+pub fn check_config(image: &[u8]) -> Result<()> {
+    use pharos_services::config;
+    let fs = Image::mount(image).map_err(|e| format!("the image does not mount: {e}"))?;
+    let Ok(file) = fs.lookup(config::PATH) else {
+        return Ok(());
+    };
+    let size = fs.size(file).map_err(|e| e.to_string())?;
+    let mut text = vec![
+        0;
+        usize::try_from(size)
+            .unwrap_or(usize::MAX)
+            .min(config::MAX_SIZE + 1)
+    ];
+    fs.read(file, 0, &mut text).map_err(|e| e.to_string())?;
+    config::parse(&text, pharos_services::BOOT)
+        .map(|_| ())
+        .map_err(|e| format!("etc/system.conf: {e}"))
+}
+
 /// Packs every regular file under `dir` into an image. Paths are relative
 /// to `dir`, with `/` between components. Symbolic links and other special
 /// files are refused, so the image matches what a reviewer sees.
@@ -14,10 +36,13 @@ pub fn pack(dir: &Path) -> Result<Vec<u8>> {
     pack_with(dir, &[])
 }
 
-/// [`pack`] plus `extra` files given as `(path, contents)`.
+/// [`pack`] plus `extra` files given as `(path, contents)`; one with the
+/// path of a file in `dir` replaces it (a test image's own
+/// `etc/system.conf`).
 pub fn pack_with(dir: &Path, extra: &[(String, Vec<u8>)]) -> Result<Vec<u8>> {
     let mut builder = Builder::new();
-    add_dir(&mut builder, dir, "")?;
+    let skip: Vec<&str> = extra.iter().map(|(p, _)| p.as_str()).collect();
+    add_dir(&mut builder, dir, "", &skip)?;
     for (path, data) in extra {
         builder
             .add(path.as_bytes(), data)
@@ -28,7 +53,7 @@ pub fn pack_with(dir: &Path, extra: &[(String, Vec<u8>)]) -> Result<Vec<u8>> {
         .map_err(|e| format!("cannot build an image from {}: {e}", dir.display()))
 }
 
-fn add_dir(builder: &mut Builder, dir: &Path, prefix: &str) -> Result<()> {
+fn add_dir(builder: &mut Builder, dir: &Path, prefix: &str, skip: &[&str]) -> Result<()> {
     let entries = fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
@@ -42,7 +67,9 @@ fn add_dir(builder: &mut Builder, dir: &Path, prefix: &str) -> Result<()> {
             .file_type()
             .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
         if kind.is_dir() {
-            add_dir(builder, &path, &format!("{image_path}/"))?;
+            add_dir(builder, &path, &format!("{image_path}/"), skip)?;
+        } else if kind.is_file() && skip.contains(&image_path.as_str()) {
+            continue;
         } else if kind.is_file() {
             let data =
                 fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -432,6 +459,36 @@ pub fn program_test_image(programs: &[(String, Vec<u8>)]) -> Vec<u8> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_bad_configuration_is_refused_by_the_builder() {
+        let with = |text: &[u8]| {
+            let mut b = Builder::new();
+            b.add(b"etc/motd", b"hi").unwrap();
+            if !text.is_empty() {
+                b.add(b"etc/system.conf", text).unwrap();
+            }
+            b.build().unwrap()
+        };
+        assert_eq!(check_config(&with(b"")), Ok(()));
+        assert_eq!(
+            check_config(&with(b"config = 1\n[service net]\nstart = no\n")),
+            Ok(())
+        );
+        assert_eq!(
+            check_config(&with(b"config = 1\n[service audit]\nstart = no\n")),
+            Err("etc/system.conf: line 3: audit always starts".into())
+        );
+        let big = vec![b'#'; 5000];
+        assert_eq!(
+            check_config(&with(&big)),
+            Err("etc/system.conf: over 4096 bytes".into())
+        );
+        assert!(check_config(b"not an image").is_err());
+        // The shipped root has a valid file, or none.
+        let root = pack(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../kernel/root")).unwrap();
+        assert_eq!(check_config(&root), Ok(()));
+    }
 
     /// The smallest valid program: one read + execute segment.
     pub(crate) fn tiny_elf() -> Vec<u8> {

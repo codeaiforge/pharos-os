@@ -763,6 +763,7 @@ fn check_user_program(bytes: &[u8]) -> Result<()> {
 /// which the kernel mounts if `root` fails its checks (#164).
 fn kernel_modules(paths: &Paths, programs: &[ImageFile]) -> Result<Vec<Module>> {
     let root = fs_image::pack_with(&paths.root.join("kernel").join("root"), programs)?;
+    fs_image::check_config(&root)?;
     Ok(vec![("root", root.clone()), ("recovery", root)])
 }
 

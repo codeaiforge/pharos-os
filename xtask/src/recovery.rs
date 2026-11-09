@@ -55,6 +55,21 @@ fn signed(image: &[u8], version: u64, seed: &[u8; 32]) -> Vec<u8> {
     file
 }
 
+/// The root image with its own `etc/system.conf` (M4.5): `text`.
+fn with_config(dir: &Path, programs: &[ImageFile], text: &str) -> Result<Vec<u8>> {
+    let mut files = programs.to_vec();
+    files.push((
+        String::from_utf8_lossy(pharos_services::config::PATH).into_owned(),
+        text.as_bytes().to_vec(),
+    ));
+    fs_image::pack_with(dir, &files)
+}
+
+/// A configuration that turns `net` off (M4.5).
+const NET_OFF: &str = "config = 1\n[service net]\nstart = no\n[service knowledge]\nrestarts = 1\n";
+/// A configuration refused on line 3: `audit` always starts.
+const AUDIT_OFF: &str = "config = 1\n[service audit]\nstart = no\n";
+
 /// What the record says of a slot file, before it was ever booted.
 fn good(file: &[u8]) -> SlotInfo {
     SlotInfo {
@@ -276,8 +291,9 @@ pub fn rounds(
     )?;
     expect_slot("unsigned", &record(iso)?, Slot::A, State::Bad, 1)?;
 
-    // 4. Safe mode from the record's `next`: slot A without the runtime.
-    let slot_a = signed(&root, 6, &seed);
+    // 4. Safe mode from the record's `next`: slot A without the runtime,
+    //    and without its configuration, which turns `net` off (M4.5).
+    let slot_a = signed(&with_config(&dir, programs, NET_OFF)?, 6, &seed);
     store_next(&store_path, &slot_a, None, Mode::Safe)?;
     let log = boot(iso, vars, logs, extra, "next-safe", None)?;
     let [a, b, c] = off("safe");
@@ -293,7 +309,14 @@ pub fn rounds(
             &c,
         ],
     )?;
-    absent("next-safe", &log, &["init: agents started"])?;
+    absent(
+        "next-safe",
+        &log,
+        &[
+            "init: agents started",
+            "init: net not started: configuration",
+        ],
+    )?;
     let r = record(iso)?;
     expect_slot("next-safe", &r, Slot::A, State::Good, 0)?;
     if r.next != Mode::Normal {
@@ -403,6 +426,30 @@ pub fn rounds(
     expect_slot("spinning", &r, Slot::B, State::Good, 0)?;
     if r.active != Some(Slot::B) {
         return Err(format!("{TEST} spinning: slot B is not active"));
+    }
+
+    // 9. Slot A's configuration is refused (M4.5): A is bad before
+    //    anything starts from it, and slot B runs.
+    store(
+        &store_path,
+        &signed(&with_config(&dir, programs, AUDIT_OFF)?, 3, &seed),
+        Some(&signed(&root, 2, &seed)),
+    )?;
+    let log = boot(iso, vars, logs, extra, "bad-config", None)?;
+    expect(
+        "bad-config",
+        &log,
+        &[
+            "init: system: slot A refused: bad configuration: line 3: audit always starts",
+            "init: system: running slot B version 2",
+            "recovery: running slot B",
+            tests_ok,
+        ],
+    )?;
+    let r = record(iso)?;
+    expect_slot("bad-config", &r, Slot::A, State::Bad, 1)?;
+    if r.active != Some(Slot::B) {
+        return Err(format!("{TEST} bad-config: slot B is not active"));
     }
 
     // 3. Slot A never ready: one attempt per boot, the second boot killed
@@ -548,6 +595,19 @@ const ROLLBACK: &[console::Step] = &[
     ("rollback: the services start again", ""),
     ("system: rolled back; running slot A", ""),
 ];
+/// Configurations in updates (M4.5): two refused with their lines, one
+/// applied.
+const CONFIG: &[console::Step] = &[
+    ("system ready: 8 services", "update\n"),
+    ("update: audit-off refused: bad configuration, line 3", ""),
+    ("update #1: net-off version 14", ""),
+    (
+        "update: over refused: bad configuration, line 4",
+        "apply 1\n",
+    ),
+    ("system: update applied; running slot B", ""),
+];
+
 /// The runner's own boot: refusals, then an agent's proposal (by its
 /// name) answered with the runtime's `yes 1`, which must not apply it
 /// (#167), then a discard.
@@ -663,6 +723,34 @@ pub fn update_rounds(
     let r = record(iso)?;
     expect_active("rollback", &r, Slot::A)?;
     expect_slot("rollback", &r, Slot::B, State::Bad, 0)?;
+
+    // M4.5: two updates whose configurations are refused when offered,
+    // with their lines, and one applied: `net` is not started from it.
+    let audit_off = signed(&with_config(&dir, programs, AUDIT_OFF)?, 12, &seed);
+    let over = "config = 1\n# more restarts than compiled\n[service knowledge]\nrestarts = 9\n";
+    let over = signed(&with_config(&dir, programs, over)?, 13, &seed);
+    let net_off = signed(&with_config(&dir, programs, NET_OFF)?, 14, &seed);
+    let files: [(&[u8], &[u8]); 4] = [
+        (b"system/a", &v6),
+        (b"system/incoming/audit-off", &audit_off),
+        (b"system/incoming/net-off", &net_off),
+        (b"system/incoming/over", &over),
+    ];
+    store_with(&store_path, &a_active(SlotInfo::EMPTY), &files)?;
+    let (log, _) = boot_typed(iso, vars, logs, extra, "config", CONFIG)?;
+    expect(
+        "config",
+        &log,
+        &[
+            "init: system: incoming audit-off refused: bad configuration: line 3: audit always starts",
+            "init: system: incoming over refused: bad configuration: line 4: restarts 9 over 3 for knowledge",
+            "init: system: offered #1: incoming net-off version 14",
+            "init: system: staged version 14 in slot B; trying it",
+            "init: net not started: configuration",
+            "init: system: running slot B version 14",
+        ],
+    )?;
+    expect_active("config", &record(iso)?, Slot::B)?;
 
     // The last boot's store: an older image, one signed with another key,
     // the image of the bad slot B, and a newer one named as an agent's

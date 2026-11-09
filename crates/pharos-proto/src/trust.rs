@@ -154,6 +154,9 @@ pub mod image {
         // #165: an update with the image of a bad slot.
         b"the image of a bad slot",
         b"changed since it was offered",
+        // M4.5: its `etc/system.conf` was refused; the offer's `version`
+        // holds the line (0: the whole file).
+        b"bad configuration",
     ];
 
     /// The image's name: `factory image`, `slot A`, `slot B`, `recovery

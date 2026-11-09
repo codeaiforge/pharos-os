@@ -11,8 +11,10 @@ use core::cell::Cell;
 
 use pharos_image::HEADER_LEN;
 use pharos_image::slots::{RECORD_LEN, Record, Slot};
-use pharos_programs::system::{MAX_INCOMING, Refusal};
+use pharos_programs::system::{MAX_INCOMING, Refusal, image_config};
 use pharos_proto::store::{self, Request, Status};
+use pharos_services::Service;
+use pharos_services::config::{self, Config};
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
     Handle, Mapped, Received, call_timeout, fs_mount, mem_map_buffer, mem_share, revoke, send,
@@ -25,6 +27,10 @@ const BUFFER: u64 = pharos_image::MAX_IMAGE + 4096;
 const RECORD: &[u8] = b"state";
 /// Where updates wait, in namespace `system`.
 pub const INCOMING: &[u8] = b"incoming/";
+
+/// What [`Slots::check`] found: the version, SHA-256, length, and the
+/// image's configuration or why it was refused.
+pub type Checked = (u64, [u8; 32], u64, Result<Config, config::Error>);
 
 pub struct Slots {
     store: Handle,
@@ -146,15 +152,17 @@ impl Slots {
     }
 
     /// Reads `path` (in namespace `system`) and verifies its signature
-    /// with `key`: its version, SHA-256, and length. Versions are the
-    /// caller's to check. The store's access to the buffer is revoked
+    /// with `key`: its version, SHA-256, length, and its image's
+    /// configuration checked against `table` (M4.5). Versions and the
+    /// configuration are the caller's to judge. The store's access to the buffer is revoked
     /// first (the kernel ends its mapping), so until the next buffered
     /// request only `init` can change the checked bytes.
     pub fn check(
         &self,
         path: &[u8],
         key: Option<&[u8; 32]>,
-    ) -> Result<(u64, [u8; 32], u64), Refusal> {
+        table: &[Service],
+    ) -> Result<Checked, Refusal> {
         let key = key.ok_or(Refusal::NoKey)?;
         let Ok(Some(len)) = self.read(path) else {
             return Err(Refusal::Unreadable);
@@ -169,12 +177,13 @@ impl Slots {
         file.resize(len as usize, 0);
         self.buffer.read_bytes(0, &mut file);
         let v = pharos_image::verify(&file, key, 0).map_err(Refusal::Image)?;
-        Ok((v.version, v.sha256, len))
+        let config = image_config(&file[HEADER_LEN..], table);
+        Ok((v.version, v.sha256, len, config))
     }
 
     /// Reads `slot`, verifies it with `key` and against the SHA-256 the
     /// record names, and mounts its image with `MOUNT` on `root`: the new
-    /// filesystem and the image's version. The kernel mounts a copy of
+    /// filesystem, the image's version, and its configuration (M4.5). The kernel mounts a copy of
     /// the buffer.
     pub fn mount(
         &self,
@@ -182,15 +191,16 @@ impl Slots {
         slot: Slot,
         record: &Record,
         key: Option<&[u8; 32]>,
-    ) -> Result<(Handle, u64), Refusal> {
-        let (version, sha256, len) = self.check(slot.path(), key)?;
+        table: &[Service],
+    ) -> Result<(Handle, u64, Result<Config, config::Error>), Refusal> {
+        let (version, sha256, len, config) = self.check(slot.path(), key, table)?;
         if sha256 != record.slot(slot).sha256 {
             return Err(Refusal::Replaced);
         }
         let image_len = len - HEADER_LEN as u64;
         let fs = fs_mount(root, self.memory, HEADER_LEN as u64, image_len)
             .map_err(|_| Refusal::NotMounted)?;
-        Ok((fs, version))
+        Ok((fs, version, config))
     }
 
     /// The first [`MAX_INCOMING`] files in `system/incoming`, names only

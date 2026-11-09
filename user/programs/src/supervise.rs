@@ -8,10 +8,11 @@ pub use pharos_services::Restart;
 /// The first restart's delay; each later one is 4 times the one before.
 pub const FIRST_DELAY_US: u64 = 100_000;
 
-/// How long to wait before restart `done + 1`, in microseconds; `None`
-/// once the policy's restarts are used up.
-pub fn delay(policy: Restart, done: u8) -> Option<u64> {
-    (done < policy.limit()).then(|| FIRST_DELAY_US << (2 * u32::from(done.min(20))))
+/// How long to wait before restart `done + 1`, in microseconds, when the
+/// first waits `first_us` (`FIRST_DELAY_US` unless the configuration says
+/// otherwise, M4.5); `None` once the policy's restarts are used up.
+pub fn delay(policy: Restart, first_us: u64, done: u8) -> Option<u64> {
+    (done < policy.limit()).then(|| first_us.saturating_mul(1 << (2 * u32::from(done.min(20)))))
 }
 
 /// The entries that depend on entry `i`, directly or through others, in
@@ -81,13 +82,22 @@ mod tests {
 
     #[test]
     fn delays_grow_and_end() {
-        assert_eq!(delay(Restart::Never, 0), None);
+        let f = FIRST_DELAY_US;
+        assert_eq!(delay(Restart::Never, f, 0), None);
         let up = Restart::Up(3);
         assert_eq!(
-            [delay(up, 0), delay(up, 1), delay(up, 2), delay(up, 3)],
+            [
+                delay(up, f, 0),
+                delay(up, f, 1),
+                delay(up, f, 2),
+                delay(up, f, 3)
+            ],
             [Some(100_000), Some(400_000), Some(1_600_000), None]
         );
-        assert_eq!(delay(Restart::Up(255), 254), Some(FIRST_DELAY_US << 40));
+        assert_eq!(delay(Restart::Up(255), f, 254), Some(FIRST_DELAY_US << 40));
+        // A configured first delay (M4.5), and the longest saturates.
+        assert_eq!(delay(up, 500_000, 1), Some(2_000_000));
+        assert_eq!(delay(Restart::Up(255), 60_000_000, 254), Some(u64::MAX));
         assert_eq!((Restart::Never.limit(), up.limit()), (0, 3));
     }
 

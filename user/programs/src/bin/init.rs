@@ -75,6 +75,7 @@ use pharos_proto::service::{
 use pharos_proto::store::{self, Request as StoreRequest};
 use pharos_proto::trust::{self, Event, Names, by_user, image as shown, not_started};
 use pharos_proto::{audit, status};
+use pharos_services::config::{self, Config};
 use pharos_services::{
     Ep, Give, Kind, MAX_SERVICES, Object, RUNTIME_HANDLES, RUNTIME_PATH, Restart, SLOT_BIT, Service,
 };
@@ -176,6 +177,8 @@ enum State {
     Off,
     /// A driver entry whose device is not in a slot (#171).
     NoDevice,
+    /// Not started at boot: the configuration says so (M4.5).
+    Configured,
 }
 
 /// How long a daemon may take to send `ready` (#100).
@@ -247,11 +250,19 @@ struct Init {
     by_user: [bool; MAX_SERVICES],
     /// The hotplug object, if the kernel gave one (#171).
     hotplug: Option<Handle>,
+    /// The configuration of the image that runs (M4.5); compiled values
+    /// in safe mode and recovery.
+    config: Config,
     /// Each driver entry's device: its slot's index and `init`'s handle.
     arrived: [Option<(u8, Handle)>; MAX_SERVICES],
 }
 
 impl Init {
+    /// Entry `i`'s restart policy, as the configuration sets it (M4.5).
+    fn restart(&self, i: usize) -> Restart {
+        self.config.restart(i, self.table[i].restart)
+    }
+
     /// `init`'s handle for `object`, if it has it.
     fn handle(&self, object: Object) -> Option<Handle> {
         Some(match object {
@@ -553,7 +564,7 @@ impl Init {
                 name: self.table[i].name.as_bytes(),
                 state: self.shown(i),
                 restarts: self.restarts[i],
-                limit: self.table[i].restart.limit(),
+                limit: self.restart(i).limit(),
             })
             .collect();
         let mut out = [0u8; 256];
@@ -576,6 +587,7 @@ impl Init {
             State::Stopped => Shown::Stopped,
             State::Off => Shown::Off,
             State::NoDevice => Shown::NoDevice,
+            State::Configured => Shown::Configured,
         }
     }
 
@@ -809,7 +821,10 @@ impl Init {
     fn report_ready(&mut self, ready: usize) {
         let failed: alloc::vec::Vec<&[u8]> = (self.table.iter().zip(&self.state))
             .filter(|(_, s)| {
-                !matches!(s, State::Ok(_) | State::Done | State::Off | State::NoDevice)
+                !matches!(
+                    s,
+                    State::Ok(_) | State::Done | State::Off | State::NoDevice | State::Configured
+                )
             })
             .map(|(t, _)| t.name.as_bytes())
             .collect();
@@ -958,9 +973,10 @@ impl Init {
     /// after its policy's delay, or left (#150). One the user stopped
     /// never comes here: the trusted path's safe mode.
     fn crashed(&mut self, j: usize) {
-        let service = &self.table[j];
-        let Some(wait) = supervise::delay(service.restart, self.restarts[j]) else {
-            let (why, event): (&[u8], _) = match service.restart {
+        let policy = self.restart(j);
+        let first = (self.config).first_delay_us(j, supervise::FIRST_DELAY_US);
+        let Some(wait) = supervise::delay(policy, first, self.restarts[j]) else {
+            let (why, event): (&[u8], _) = match policy {
                 Restart::Never => (b"not restarted: restart policy never", Event::Never),
                 Restart::Up(_) => (b"not restarted: restarts used up", Event::GivenUp),
             };
@@ -971,7 +987,7 @@ impl Init {
         self.state[j] = State::Restarting(uptime().saturating_add(wait));
         let numbers = [
             u32::from(self.restarts[j]),
-            u32::from(service.restart.limit()),
+            u32::from(policy.limit()),
             (wait / 1000) as u32,
         ];
         let mut d = [[0u8; 20]; 3];
@@ -1114,6 +1130,11 @@ impl Init {
                 self.state[i] = State::NoDevice;
                 continue;
             }
+            if !self.config.starts(i) {
+                self.state[i] = State::Configured;
+                say(self.table[i].name, "not started: configuration", None);
+                continue;
+            }
             if self.safe && self.table[i].path == RUNTIME_PATH {
                 self.state[i] = State::Off;
                 say(self.table[i].name, "not started: safe mode", None);
@@ -1143,8 +1164,12 @@ impl Init {
 
     /// True if every entry succeeded (or is off in safe mode).
     fn all_ready(&self) -> bool {
-        (self.state[..self.table.len().min(MAX_SERVICES)].iter())
-            .all(|s| matches!(s, State::Ok(_) | State::Done | State::Off | State::NoDevice))
+        (self.state[..self.table.len().min(MAX_SERVICES)].iter()).all(|s| {
+            matches!(
+                s,
+                State::Ok(_) | State::Done | State::Off | State::NoDevice | State::Configured
+            )
+        })
     }
 
     /// Stops every service the image started, so the next image's start
@@ -1298,16 +1323,40 @@ impl Init {
             }
             let attempt = decimal(record.slot(slot).attempts.into(), &mut d).to_vec();
             self.system(&[name, b": attempt ", &attempt].concat(), None);
-            let (fs, version) = match slots.mount(ROOT, slot, record, key.as_ref()) {
-                Ok(mounted) => mounted,
-                Err(why) => {
+            let (fs, version, config) =
+                match slots.mount(ROOT, slot, record, key.as_ref(), self.table) {
+                    Ok(mounted) => mounted,
+                    Err(why) => {
+                        record.refuse(slot);
+                        let _ = slots.save(record);
+                        let numbers = [shown::REFUSED, number, why.code()];
+                        self.system(&[name, b" refused: ", why.text()].concat(), Some(numbers));
+                        continue;
+                    }
+                };
+            // Its configuration is checked before anything starts from it
+            // (M4.5): a bad one refuses the slot. Safe mode ignores it.
+            let config = match config {
+                _ if self.safe => Config::COMPILED,
+                Ok(config) => config,
+                Err(e) => {
+                    let _ = pharos_user::delete(fs);
                     record.refuse(slot);
                     let _ = slots.save(record);
-                    let numbers = [shown::REFUSED, number, why.code()];
-                    self.system(&[name, b" refused: ", why.text()].concat(), Some(numbers));
+                    let numbers = [shown::REFUSED, number, Refusal::Config.code()];
+                    let mut why = [0u8; config::MAX_TEXT];
+                    let detail = [
+                        name,
+                        b" refused: ",
+                        Refusal::Config.text(),
+                        b": ",
+                        e.text(&mut why),
+                    ];
+                    self.system(&detail.concat(), Some(numbers));
                     continue;
                 }
             };
+            self.config = config;
             let version = decimal(version, &mut d).to_vec();
             self.image = fs;
             self.image_number = number as u8;
@@ -1333,6 +1382,7 @@ impl Init {
             let _ = pharos_user::delete(fs);
             self.image = ROOT;
             self.image_number = 0;
+            self.config = Config::COMPILED;
         }
         // Slots whose attempts ran out became bad when they were passed
         // over; that is written too.
@@ -1356,6 +1406,11 @@ impl Init {
     fn boot_factory(&mut self, copy: bool) {
         self.image = ROOT;
         self.image_number = if copy { 3 } else { 0 };
+        self.config = if self.safe {
+            Config::COMPILED
+        } else {
+            self.factory_config()
+        };
         self.start_all(|_| true, u64::MAX);
         if !self.all_ready() && !self.safe {
             self.system(
@@ -1365,6 +1420,7 @@ impl Init {
             self.stop_image();
             self.mode = Mode::Recovery;
             self.safe = true;
+            self.config = Config::COMPILED;
             self.start_all(|_| true, u64::MAX);
         }
         let numbers = [shown::RUNNING, u32::from(self.image_number), 0];
@@ -1374,6 +1430,24 @@ impl Init {
             b"running factory image"
         };
         self.system(what, Some(numbers));
+    }
+
+    /// The factory image's configuration (M4.5): the build checked it, so
+    /// a bad one is reported and the compiled values run.
+    fn factory_config(&mut self) -> Config {
+        match read_config(ROOT, self.table) {
+            Ok(config) => config,
+            Err(e) => {
+                let mut why = [0u8; config::MAX_TEXT];
+                let detail = [
+                    &b"factory image: configuration refused: "[..],
+                    e.text(&mut why),
+                    b"; compiled values",
+                ];
+                self.system(&detail.concat(), None);
+                Config::COMPILED
+            }
+        }
     }
 
     /// Answers `trust`'s `SYSTEM` on `reply` without waiting (#164).
@@ -1497,12 +1571,18 @@ impl Init {
         let mut d = [0u8; 20];
         for name in &names {
             let path = [system::INCOMING, name].concat();
+            // A bad configuration (M4.5), to name its line and reason.
+            let mut bad = None;
             let checked = (self.slots.as_ref())
                 .map_or(Err(Refusal::Unreadable), |s| {
-                    s.check(&path, self.key.as_ref())
+                    s.check(&path, self.key.as_ref(), self.table)
                 })
-                .and_then(|(version, sha256, _)| {
+                .and_then(|(version, sha256, _, config)| {
                     pharos_programs::system::admit(&self.record, self.factory, version, &sha256)?;
+                    if let Err(e) = config {
+                        bad = Some(e);
+                        return Err(Refusal::Config);
+                    }
                     Ok((version, sha256))
                 });
             match checked {
@@ -1527,11 +1607,26 @@ impl Init {
                     );
                 }
                 Err(why) => {
+                    // A configuration's line rides in the version field.
+                    let line = bad.map_or(0, |e| e.line as u64);
                     if pharos_proto::trust::valid_name(name) {
-                        self.tell_offer(0, Some(why), name, (0, [0; 32]));
+                        self.tell_offer(0, Some(why), name, (line, [0; 32]));
                     }
+                    let mut text = [0u8; config::MAX_TEXT];
+                    let (sep, detail): (&[u8], &[u8]) = match &bad {
+                        Some(e) => (b": ", e.text(&mut text)),
+                        None => (b"", b""),
+                    };
                     self.system(
-                        &[&b"incoming "[..], name, b" refused: ", why.text()].concat(),
+                        &[
+                            &b"incoming "[..],
+                            name,
+                            b" refused: ",
+                            why.text(),
+                            sep,
+                            detail,
+                        ]
+                        .concat(),
                         None,
                     );
                 }
@@ -1570,15 +1665,17 @@ impl Init {
             self.system(&[b"update discarded: incoming ", name, what].concat(), None);
             return;
         }
-        let checked = slots
-            .check(&path, self.key.as_ref())
-            .and_then(|(version, sha256, len)| {
+        let checked = slots.check(&path, self.key.as_ref(), self.table).and_then(
+            |(version, sha256, len, config)| {
                 if sha256 != offer.sha256 {
                     return Err(Refusal::Changed);
                 }
+                // Offered, so checked; the same image cannot fail now.
+                config.map_err(|_| Refusal::Config)?;
                 pharos_programs::system::admit(&self.record, self.factory, version, &sha256)?;
                 Ok((version, sha256, len))
-            });
+            },
+        );
         let (version, sha256, len) = match checked {
             Ok(found) => found,
             Err(why) => {
@@ -1709,6 +1806,35 @@ impl Init {
     }
 }
 
+/// `etc/system.conf` in the filesystem behind `fs`, checked against
+/// `table`; every compiled value if there is none (M4.5).
+fn read_config(fs: Handle, table: &[Service]) -> Result<Config, config::Error> {
+    let unreadable = config::Error {
+        line: 0,
+        why: config::Why::Unreadable,
+    };
+    let file = match open(fs, config::PATH) {
+        Ok(file) => file,
+        Err(pharos_user::Error::NotFound) => return Ok(Config::COMPILED),
+        Err(_) => return Err(unreadable),
+    };
+    // One byte more than the largest file, to see it is too large.
+    let mut text = [0u8; config::MAX_SIZE + 1];
+    let mut len = 0;
+    while len < text.len() {
+        match pharos_user::read(file, len as u64, &mut text[len..]) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(_) => {
+                let _ = pharos_user::delete(file);
+                return Err(unreadable);
+            }
+        }
+    }
+    let _ = pharos_user::delete(file);
+    config::parse(&text[..len], table)
+}
+
 fn mode_word(mode: Mode) -> &'static [u8] {
     match mode {
         Mode::Normal => b"normal",
@@ -1775,6 +1901,7 @@ fn main(arg: u64) -> u64 {
         busy: true,
         by_user: [false; MAX_SERVICES],
         hotplug: None,
+        config: Config::COMPILED,
         arrived: [None; MAX_SERVICES],
     };
     // The hotplug object follows the devices (#171).
@@ -1791,7 +1918,7 @@ fn main(arg: u64) -> u64 {
     }
     let ready = init.ready_count();
     let off = (init.state.iter())
-        .filter(|s| matches!(s, State::Off | State::NoDevice))
+        .filter(|s| matches!(s, State::Off | State::NoDevice | State::Configured))
         .count();
     let failed = table.len().min(MAX_SERVICES) - ready - off;
     // Idle before `trust` hears the system is ready, so an `update`

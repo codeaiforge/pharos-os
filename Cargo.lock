@@ -94,5 +94,6 @@ dependencies = [
  "pharos-image",
  "pharos-infer",
  "pharos-proto",
+ "pharos-services",
  "pharos-store",
 ]

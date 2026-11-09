@@ -29,6 +29,8 @@ pub fn sign(
             pharos_image::MAX_IMAGE
         ));
     }
+    // Its configuration, as `init` will check it at offer and boot (M4.5).
+    crate::fs_image::check_config(&bytes).map_err(|e| format!("{}: {e}", image.display()))?;
     let mut file = pharos_image::sign(&bytes, version, &seed).to_vec();
     file.extend_from_slice(&bytes);
     let public = pharos_image::public_key(&seed);

@@ -13,6 +13,7 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod config;
 mod tables;
 
 pub use tables::*;

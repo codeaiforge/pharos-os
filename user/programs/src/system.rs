@@ -5,6 +5,8 @@
 use pharos_image::slots::{Mode, Record};
 use pharos_proto::trust::image::REASONS;
 use pharos_proto::trust::{MAX_NAME, valid_name};
+use pharos_services::Service;
+use pharos_services::config::{self, Config};
 
 /// How long an offered update waits for the user's answer (#165).
 pub const OFFER_US: u64 = 60_000_000;
@@ -116,6 +118,8 @@ pub enum Refusal {
     WasBad,
     /// An update whose file is not the image offered.
     Changed,
+    /// Its `etc/system.conf` was refused (M4.5).
+    Config,
 }
 
 impl Refusal {
@@ -134,8 +138,39 @@ impl Refusal {
             Self::Image(e) => e.reason().as_bytes(),
             Self::WasBad => REASONS[13],
             Self::Changed => REASONS[14],
+            Self::Config => REASONS[15],
         }
     }
+}
+
+/// The configuration in `image`, a filesystem image's bytes (M4.5,
+/// services.md): its `etc/system.conf` checked against `table`, or every
+/// compiled value if it has none. An image that does not mount cannot be
+/// read.
+pub fn image_config(image: &[u8], table: &[Service]) -> Result<Config, config::Error> {
+    let unreadable = config::Error {
+        line: 0,
+        why: config::Why::Unreadable,
+    };
+    let fs = pharos_fs::Image::mount(image).map_err(|_| unreadable)?;
+    let file = match fs.lookup(config::PATH) {
+        Ok(file) => file,
+        Err(pharos_fs::FsError::NotFound) => return Ok(Config::COMPILED),
+        Err(_) => return Err(unreadable),
+    };
+    let size = fs.size(file).map_err(|_| unreadable)?;
+    if size > config::MAX_SIZE as u64 {
+        return Err(config::Error {
+            line: 0,
+            why: config::Why::TooLarge,
+        });
+    }
+    let mut text = [0u8; config::MAX_SIZE];
+    let text = &mut text[..size as usize];
+    if fs.read(file, 0, text) != Ok(text.len()) {
+        return Err(unreadable);
+    }
+    config::parse(text, table)
 }
 
 /// `init`'s argument (#164): the service table (bits 0–7), the kernel's
@@ -194,6 +229,54 @@ pub fn parse_key(hex: Option<&str>) -> Option<[u8; 32]> {
 mod tests {
     use super::*;
     use pharos_image::Error;
+    use std::string::ToString;
+
+    fn image(files: &[(&[u8], &[u8])]) -> std::vec::Vec<u8> {
+        let mut b = pharos_fs::Builder::new();
+        for (path, data) in files {
+            b.add(path, data).unwrap();
+        }
+        b.build().unwrap()
+    }
+
+    #[test]
+    fn an_image_s_configuration_is_read_and_checked() {
+        use pharos_services::BOOT;
+        let knowledge = BOOT.iter().position(|s| s.name == "knowledge").unwrap();
+        // No file: every compiled value.
+        let none = image(&[(b"etc/motd", b"hi")]);
+        assert_eq!(image_config(&none, BOOT), Ok(Config::COMPILED));
+        let good = image(&[(
+            config::PATH,
+            b"config = 1\n[service knowledge]\nrestarts = 1\n",
+        )]);
+        let c = image_config(&good, BOOT).unwrap();
+        assert_eq!(
+            c.restart(knowledge, pharos_services::Restart::Up(3))
+                .limit(),
+            1
+        );
+        let over = image(&[(
+            config::PATH,
+            b"config = 1\n[service knowledge]\nrestarts = 9\n",
+        )]);
+        let e = image_config(&over, BOOT).unwrap_err();
+        assert_eq!(e.to_string(), "line 3: restarts 9 over 3 for knowledge");
+        let big = std::vec![b'#'; config::MAX_SIZE + 1];
+        let e = image_config(&image(&[(config::PATH, &big)]), BOOT).unwrap_err();
+        assert_eq!(e.why, config::Why::TooLarge);
+        // Not an image, or a corrupt one.
+        let mut corrupt = good.clone();
+        // A byte of the file's text: its checksum no longer matches.
+        let at = corrupt.windows(8).position(|w| w == b"restarts").unwrap();
+        corrupt[at] ^= 1;
+        for bad in [&b"not an image"[..], &corrupt] {
+            assert_eq!(
+                image_config(bad, BOOT).unwrap_err().why,
+                config::Why::Unreadable
+            );
+        }
+    }
 
     #[test]
     fn every_refusal_has_its_own_reason() {
@@ -213,6 +296,7 @@ mod tests {
             Refusal::Image(Error::Old),
             Refusal::WasBad,
             Refusal::Changed,
+            Refusal::Config,
         ];
         assert_eq!(all.len(), REASONS.len());
         for (i, r) in all.iter().enumerate() {

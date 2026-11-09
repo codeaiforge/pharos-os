@@ -16,6 +16,7 @@ pharos-fs = { path = "../crates/pharos-fs" }
 pharos-image = { path = "../crates/pharos-image" }
 pharos-infer = { path = "../crates/pharos-infer" }
 pharos-proto = { path = "../crates/pharos-proto" }
+pharos-services = { path = "../crates/pharos-services" }
 pharos-store = { path = "../crates/pharos-store" }
 # The tiny model's reference output with the same math as user programs
 # (D-016; MIT, no dependencies).

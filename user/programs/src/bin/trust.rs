@@ -572,7 +572,14 @@ impl Trust {
             } else {
                 (b"update #", n, b": ")
             };
-            self.say(&[lead, n, sep, o.name, b" refused: ", why]);
+            // A refused configuration names its line (M4.5).
+            let mut l = [0u8; 20];
+            let line: &[u8] = if why == b"bad configuration" && o.version > 0 {
+                &[&b", line "[..], decimal(o.version, &mut l)].concat()
+            } else {
+                b""
+            };
+            self.say(&[lead, n, sep, o.name, b" refused: ", why, line]);
             return;
         }
         let mut hex = [0u8; 16];
