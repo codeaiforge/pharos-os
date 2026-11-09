@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), and Phase 3 — AI Agent Platform are done. Current milestone: M4.5 — System configuration and diagnostics.** Everything in Phases 4–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), and Phase 3 — AI Agent Platform are done. Current milestone: M4.6 — Integration of AI services without unrestricted kernel access.** Everything in Phases 4–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -42,7 +42,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | 1 | Foundation | Done (v0.1.0) |
 | 2 | Core System | Done (v0.2.0) |
 | 3 | AI Agent Platform | Done (gate passed 2026-11-06 with M3.8) |
-| 4 | Full Operating System | **Current** (M4.5; M4.1–M4.4 done) |
+| 4 | Full Operating System | **Current** (M4.6; M4.1–M4.5 done) |
 | 5 | Deployment and Release | Planned |
 
 ---
@@ -537,7 +537,7 @@ Ordering notes:
 
 ### M4.5 — System configuration and diagnostics
 
-- **Objective and scope:** Declarative configuration and diagnostics (logs, health checks). **Status: Current.** Issues #174–#179. D-030 accepted (#174): configuration holds settings only, never authority: which optional services start (`net`, `infer`, `knowledge`, `agents`), restart limits and delays, and agent policy limits, each within a ceiling compiled into reviewed code; one file, `etc/system.conf`, in the signed root image, so a change is a signed update with the user's yes and rollback (D-028); the manifest format; checked by one host-tested parser when the image is built, when an update is offered, and at boot, and refused, not narrowed; `init` sends each ready daemon `INFO` every 10 s and restarts one that misses two by its policy; `trust` gains `health` and `config`. Design approved (#175, 2026-11-09: [services.md](../architecture/services.md#configuration-and-health-m45-d-030)); it leaves agent limits out (the boot policy table is empty) and gives each service a compiled window of silence before it counts as unresponsive. Configuration implemented (#176): `etc/system.conf` checked by `pharos_services::config` when the image is built or signed, when an update is offered, and at boot; `update` and `recovery` test rounds. Health checks and diagnostics implemented (#177): `init` checks each daemon with `INFO` every 10 s and restarts one silent past its window; `trust`'s `health` and `config`; `health` test kernel. Tests (#178): configuration accepted (`update` round `config` applies `net` off), refused when built (`cargo xtask` builder tests), when offered (`update` round `config`), and at boot (`recovery` round `bad-config`); health of services (`health`, `manage`) and agents (`manage`'s runtime, `budgets`' running task). Next: the gate (#179).
+- **Objective and scope:** Declarative configuration and diagnostics (logs, health checks). **Status: Done** — gate passed 2026-11-09: the CI jobs passed on `main` at `1e5f82c` ([run 42610090116](https://github.com/codeaiforge/pharos-os/actions/runs/42610090116)) with 73 test kernels, among them `update` (configurations refused at offer with their lines, one applied), `recovery` (a slot with a bad configuration refused at boot), `health` (a silent daemon unresponsive, restarted by its policy, given up), `manage` (every ready daemon answering a check; `health` and `config`), and `budgets` (an agent's process in `health`); a configuration asking more restarts than compiled was accepted on a throwaway branch and failed CI ([run 42610637546](https://github.com/codeaiforge/pharos-os/actions/runs/42610637546)) in the host parser tests and at `update` round `config`; IPC round trip 1,894 ns median; the [configuration review](../security/review-m4.5-configuration.md) approved with F1–F3 fixed. Issues #174–#179. D-030 accepted (#174): configuration holds settings only, never authority: which optional services start (`net`, `infer`, `knowledge`, `agents`), restart limits and delays, and agent policy limits, each within a ceiling compiled into reviewed code; one file, `etc/system.conf`, in the signed root image, so a change is a signed update with the user's yes and rollback (D-028); the manifest format; checked by one host-tested parser when the image is built, when an update is offered, and at boot, and refused, not narrowed; `init` sends each ready daemon `INFO` every 10 s and restarts one that misses two by its policy; `trust` gains `health` and `config`. Design approved (#175, 2026-11-09: [services.md](../architecture/services.md#configuration-and-health-m45-d-030)); it leaves agent limits out (the boot policy table is empty) and gives each service a compiled window of silence before it counts as unresponsive. Configuration implemented (#176): `etc/system.conf` checked by `pharos_services::config` when the image is built or signed, when an update is offered, and at boot; `update` and `recovery` test rounds. Health checks and diagnostics implemented (#177): `init` checks each daemon with `INFO` every 10 s and restarts one silent past its window; `trust`'s `health` and `config`; `health` test kernel. Tests (#178): configuration accepted (`update` round `config` applies `net` off), refused when built (`cargo xtask` builder tests), when offered (`update` round `config`), and at boot (`recovery` round `bad-config`); health of services (`health`, `manage`) and agents (`manage`'s runtime, `budgets`' running task). Gate (#179) passed.
 - **Deliverables:** Configuration format and validation; diagnostics tooling.
 - **Prerequisites:** M4.4.
 - **Acceptance criteria:** Invalid configuration is rejected with a clear error before it is applied; diagnostics report service and agent health.
@@ -549,7 +549,7 @@ Ordering notes:
 
 ### M4.6 — Integration of AI services without unrestricted kernel access
 
-- **Objective and scope:** Run inference and the agent runtime as integrated system services with no privileged access. **Status: Planned.**
+- **Objective and scope:** Run inference and the agent runtime as integrated system services with no privileged access. **Status: Current.**
 - **Deliverables:** AI services under the service manager with capability manifests.
 - **Prerequisites:** M4.2, Phase 3 gate.
 - **Acceptance criteria:** AI services run unprivileged; adversarial tests show they cannot access kernel memory or resources outside their capabilities; the system remains usable if AI services fail.

@@ -22,7 +22,7 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 | Read-only storage in the kernel (RAM disk, filesystem, file capabilities) | Implemented |
 | Rust user programs loaded from the filesystem (ELF loader, system-call library) | Implemented |
 | PCI discovery, device capabilities (MMIO, DMA, MSI-X interrupts), user-space virtio-blk driver | Implemented |
-| Service manager (`init`: restart policies with growing delays, a ready state, every service failure audited and shown on the trusted console, `services`; each service's capability manifest written out and audited; `start`, `stop service`, and `restart` from the trusted console), PCIe hotplug of virtio-blk disks on QEMU root ports, user-space network service (UDP, ICMP) with badged network capabilities | Implemented |
+| Service manager (`init`: restart policies with growing delays, a ready state, every service failure audited and shown on the trusted console, `services`; each service's capability manifest written out and audited; `start`, `stop service`, and `restart` from the trusted console; configuration from `etc/system.conf` in the signed image, refused whole when bad; health checks, and `health` and `config` on the trusted console), PCIe hotplug of virtio-blk disks on QEMU root ports, user-space network service (UDP, ICMP) with badged network capabilities | Implemented |
 | Crash-consistent writable storage service (`bin/store`) | Implemented |
 | Boot recovery (`init`: Ed25519-signed A/B image slots that fall back to the factory image, safe mode and recovery from Limine or the trusted console, updates applied only with the user's yes, rollback) | Implemented |
 | TCP, more drivers | Planned |
@@ -82,7 +82,7 @@ pharos 0.2.0
 $ cargo run -q -p pharos-cli -- info
 Pharos OS 0.2.0
 Project of: CodeAIForge
-Stage:      Phase 4 - Full Operating System (M4.4 complete, M4.5 next)
+Stage:      Phase 4 - Full Operating System (M4.5 complete, M4.6 next)
 ...
 
 $ cargo run -q -p pharos-cli -- doctor
