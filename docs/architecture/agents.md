@@ -2,6 +2,8 @@
 
 ## 1. Status
 
+**M4.6 (D-031):** the runtime's manifest, line by line, the hostile-service and failure tests, and starting while `infer` hangs: [services.md](services.md#ai-services-m46-d-031), design **proposed** (#181).
+
 **Implemented** (M3.3, gate passed 2026-11-03, #101). Design approved by the maintainer on 2026-11-01 (#94); built by the kernel stop call (#95), the trusted path (#96), the manifest parser (#97), the agent runtime (#98), durable tasks (#99), and supervision in `init` (#100). Permissions, approvals, and audit for agents are in [capabilities.md](capabilities.md) (M3.4); resource limits are in [resources.md](resources.md) (M3.5); tools in [tools.md](tools.md) (M3.6); channels, groups, and delegation, planned, in [coordination.md](coordination.md) (M3.7).
 
 ## 2. Context

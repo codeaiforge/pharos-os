@@ -3,6 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-28 (M2.10, #59). It follows [D-015](../project/decision-log.md#d-015-network-stack-and-service-model) (as amended on 2026-10-28: badges instead of per-client endpoints), [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism) (IPC), and [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries). Networking is in [networking.md](networking.md).
+- **M4.6 (D-031):** the AI services as system services below: design **proposed** (#181), awaiting the maintainer; nothing in it is implemented yet.
 - **M4.5 (D-030):** system configuration and health checks below: design **approved** (#175, 2026-11-09); the configuration file and its checks **implemented** (#176); health checks, `health`, and `config` **implemented** (#177).
 - **M4.4 (D-029):** runtime management below: design **approved** (#169, 2026-11-08); `start`, `stop service`, and `restart` **implemented** (#170); driver entries for hotplug **implemented** (#171, [drivers.md](drivers.md#hotplug-m44-d-029)).
 - **M4.3 (D-028):** **implemented (#163):** with the boot table, `init` starts the storage service from the factory image, picks and verifies an image slot, mounts it with `fs_mount`, starts the other services from it (`trust`'s program always from the factory image), and falls back in place to the other slot, then the factory image; it reports `[ready, failed, image]`. **Implemented (#164):** safe mode and recovery: the kernel's mode in `init`'s argument (bits 8 and up), else the slot record's one-shot `next`; the agent runtime `off` in both; recovery on the factory image (or the `recovery` copy), also when the factory image is not ready; the report `[ready, failed, image, mode]`; `trust`'s `system`, `safe`, and `recovery` (`SYSTEM`, `NEXT`). **Implemented (#165):** updates staged from the host: `trust`'s `update` (`UPDATE`, answered at once, then an `OFFER` per file), `apply <n>` and `discard <n>` (`ANSWER`), and `rollback` (`ROLLBACK`); an approved update goes to the slot that is not active and is tried in place, and one that is not ready is bad and the previous slot runs again. An agent with `update propose` only adds a file to `system/incoming` (`PROPOSE`, through the runtime's namespace 9; the boot table gives the runtime no such capability, as no boot entry may propose). Design in [boot.md](boot.md#8-recovery-and-updates-m43-d-028).
@@ -347,6 +348,53 @@ An unresponsive service is reported (new service event `Unresponsive` = 15, `ser
 
 **Rejected in the design:** reloading a file without a new image (a second write path, D-030); configuring the `quiet` window (a short one would let a file restart `infer` mid-generation); a health check by `process_usage` CPU time (a busy service and a hung one look the same).
 
+### AI services (M4.6, D-031)
+
+**Proposed (#181), not implemented.** D-031 (#180): `infer` and the agent runtime keep their M4.2 manifests, each capability justified; adversarial tests run hostile programs under their exact manifests; failure tests crash, hang, and exhaust each, then check the rest of the system; KPTI and user-mode `rdtsc` are carried to M5.2.
+
+**Manifests, line by line** (the boot table; checked live by the `system` audit since #158):
+
+| Service | Handle | Capability | What for |
+| --- | --- | --- | --- |
+| `infer` | 1 | debug console, `WRITE` | its log: model loads, failures, generation times |
+| | 2 | its endpoint, `RECEIVE` | serving clients, told apart by badge |
+| | 3 | `init`'s report endpoint, `SEND`, its own badge | `ready`; answering health checks |
+| | 4 | the store, `models` read-only | loading and verifying model files |
+| | — | 1 GiB page limit; no gains | the S1 model, its cache, and clients' buffers (D-011) |
+| `agents` | 1 | debug console, `WRITE` | its log, and agents' `LOG` lines (kept off the trusted console on purpose, `hostile`) |
+| | 2 | its endpoint, `RECEIVE`, `SEND`, `GRANT` | serving agents and giving each a badged `SEND` (M4.2 review F2) |
+| | 3 | `init`'s report endpoint, `SEND`, its own badge | `ready`; health checks |
+| | 4 | the root filesystem, `READ` | agent programs and manifests |
+| | 5 | `infer`, client 1 | its agents' inference, on its own badge |
+| | 6 | `trust`, as the runtime | registering agents, approvals, the revocation channel |
+| | 7 | the store, `agents` read-write | durable tasks |
+| | 8 | `audit`, client 3 | records before each grant and action (records are stamped with client 3, so it cannot write as `trust` or `init`) |
+| | — | 64 MiB page limit; gains its agents' process capabilities | carved for agents (D-022) |
+
+Unchanged since #157: each line is used by the shipped code, so nothing is removed (#182 re-checks this against the code at the time). Nothing else depends on the runtime, and only the runtime depends on `infer`.
+
+**Gaps to close (#182):**
+1. **A hung `infer` stops the runtime from starting.** The runtime attaches its prompt buffer with a blocking `send` before it reports `ready` (`attach_prompt`); an `infer` that reported `ready` and then stopped receiving holds it there, so `init` counts the runtime as failed every 10 s and gives it up. Fix: attach with `try_send`, start without the buffer, and treat inference as stalled (`BUSY`, D-022) until an attach succeeds, as after an `infer` restart today.
+2. **Page limits are not held against memory.** `infer`'s limit (1 GiB) is above the 256 MiB CI guest, so a runaway `infer` can take every free frame. Whether the other services keep working depends on whether they allocate after start. The `exhaust` round measures it; if any service or `trust` fails, the fix is chosen then and recorded (most likely a reserve of frames the kernel keeps for the trusted and services classes), with its own test.
+
+**The hostile services (`compromised` kernel, #183).** A test table whose `infer` and `agents` entries are the boot entries with only the path changed, to a new program `rogue` (argument 1: as `infer`; 2: as the runtime); a host test requires every other field equal to the boot entry. Each probe prints its result, and the kernel test checks every one:
+- every handle from 1 to 64: `send`, `receive`, `open`, `config_read`, `mmio_map`, `dma_alloc`, `irq_create`, `process_stop`, `spawn` refused unless the manifest grants it;
+- system calls given kernel addresses (`debug_write` from, `receive` into, `mem_share` of the kernel half): refused, nothing read or written;
+- `mem_map` past its page limit: refused;
+- forged requests on every endpoint it holds: `init`'s `START`, `STOP`, `RESTART`, `CONFIG`, `SERVICES`, `RUNTIME`, `ALLOW`, and `RELEASE` (`NO_ACCESS`); the store writing `models` (as `infer`) or reading another namespace; as the runtime, `audit` records with actor `user` (stored with client 3), and to `trust` `RESOLVED` for an approval it never asked and `REGISTER` with a capability that is not a process (both ignored);
+- last, a direct read of kernel memory (as `infer`) or a write (as the runtime): the process is killed with a page fault, and `init` restarts it by its policy and gives it up.
+
+The capability audit runs at ready and must match the manifests. `rogue` holds only what `init` gives, so no new kernel code or `unsafe`.
+
+**Failure (`aifail` kernel, #184).** Booted like `system`, in three rounds:
+- `crash`: the kernel kills `infer` and the runtime 4 times each (`process::kill`); both are given up.
+- `hang`: a table whose `infer` is `rogue` 3 (`ready`, then never receives): the runtime still reports `ready` (gap 1), and an inference request from it is `BUSY`.
+- `exhaust`: `rogue` 4 as `infer` maps pages until refused and holds them (gap 2).
+
+After each, the runner types on the trusted console and checks the answers: `services`, `health`, `audit` (the trail still grows), `stop all`, and a knowledge `verify` (the store and knowledge still answer); then `start infer` and `start agents` (`restart` in `hang`), and both are ready and answer a health check.
+
+Not covered: a hang longer than `infer`'s 600 s window (the `health` kernel tests the give-up with a 30 s window); side channels (D-031, M5.2).
+
 ## 4. Security
 
 - **The trust boundary is unchanged:** every process, `init` included, is untrusted by the kernel. `init` holds the most authority (every device, the root filesystem). It is small, and its service table is reviewed code.
@@ -363,6 +411,7 @@ An unresponsive service is reported (new service event `Unresponsive` = 15, `ser
 - **Runtime management (M4.4, #170):** only `trust`'s badge reaches `START`, `STOP`, and `RESTART`, so an agent or service cannot stop anything; a start uses only a compiled entry's manifest, so it adds no authority the capability audit does not already check; `trust`, `audit`, and `store` cannot be stopped, so no command ends the console or the audit trail.
 - **Configuration (M4.5, D-030, implemented, #176):** a file can only lower restart limits, change delays within a range, and not start services nobody needs; it names no capability, program, or manifest, so the capability audit (D-027) is unchanged; `trust`, `audit`, and `store` always start, with their compiled restart limits and delays (review F3); it changes only with a signed image the user applied, and recovery ignores it.
 - **Health checks (implemented, #177):** `init` sends only `INFO`, which changes nothing; a service can hide a hang from its callers but not from the check; a check costs `init` at most 100 ms.
+- **AI services (M4.6, D-031, planned):** `infer` and the runtime hold only their manifests, checked live; hostile programs under those manifests and the failure rounds above are the evidence (#183, #184). Side channels (no KPTI, `rdtsc`) are open until M5.2.
 - The threat model gains a "Processes and services" section (planned).
 
 ## 5. Testing
@@ -391,6 +440,9 @@ An unresponsive service is reported (new service event `Unresponsive` = 15, `ser
 | QEMU, `health` (#177) | `init` with its `health` table: `net` (`svc` 1, ready, never receives on the network endpoint) found unresponsive after 30–41 s, stopped, restarted once by its policy, unresponsive again, and given up; `steady`, whose name no endpoint has, never checked or stopped |
 | QEMU, `manage` (#177) | no boot service is ever unresponsive over the whole run (21 restarts of `trust`); `health`, before the restarts, shows an answered check for every ready daemon, 7 of them (review F2; mutation-checked: no round at ready, `net` shows `no answer yet`), and the runtime's process; `config` says the factory image's file sets every compiled value |
 | QEMU, `system` with the capability audit (#158) | every live service's table against its manifest and gains, at ready and after the faults; mutation-checked (one capability more) |
+| Host, `pharos-services` (#183, planned) | the `compromised` table's `infer` and `agents` entries equal the boot entries except the path |
+| QEMU, `compromised` (#183, planned) | every probe above refused; the direct kernel read and write killed with a page fault; the capability audit matches; mutation-checked (one capability more for `rogue`) |
+| QEMU, `aifail` (#184, planned) | rounds `crash`, `hang`, and `exhaust`: the trusted console, store, knowledge, and audit still answer; `start` brings both back; mutation-checked (gap 1's fix removed) |
 
 ## 6. Alternatives
 

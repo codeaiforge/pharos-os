@@ -2,6 +2,7 @@
 
 ## 1. Status
 
+- **M4.6 (D-031):** the service's manifest, line by line, the hostile-service and failure tests, and the runtime starting while it hangs: [services.md](services.md#ai-services-m46-d-031), design **proposed** (#181).
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-31 (issue #83). It follows [D-010](../project/decision-log.md#d-010-ai-inference-runtime-model-formats-and-licensing), [D-011](../project/decision-log.md#d-011-cpugpu-support-and-memoryvram-constraints), and [D-019](../project/decision-log.md#d-019-service-interfaces-and-versioning), and builds on M3.0 ([user-environment.md](user-environment.md), [storage.md part 8](storage.md#8-the-writable-store-m30)).
 - **Implementation (#88):** **implemented**: the service (`user/programs/src/bin/infer.rs`), the manifest (`pharos_programs::models`), the interface (`pharos_proto::infer`), generation sessions (`pharos_infer::session`), the test model (`pharos_infer::synth::test_model`), `init` starting the service at boot, and the `inference` test kernel. Where it differs from the text below, it says so. The failure tests are **implemented** (#89, section 5).
 - **Implementation:** the tokenizer is **implemented** (#84: `crates/pharos-infer/src/bpe.rs` and the generated `unicode.rs`; identical to `llama-tokenize` on 40 of 40 cases, [inference-evaluation.md](../project/inference-evaluation.md)). The interface crate `pharos-proto` exists (#92). **Planned:** the rest of M3.2 (#85–#91).
