@@ -475,7 +475,7 @@ Ordering notes:
 
 ## Phase 4 — Full Operating System
 
-**Status: Current** (M4.5; M4.1–M4.4 done).
+**Status: Current** (M4.6; M4.1–M4.5 done).
 
 - **Objective and scope:** Integrate the kernel, user-space services, and AI platform into a coherent, configurable, recoverable system.
 - **Deliverables:** M4.1–M4.6.
