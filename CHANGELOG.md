@@ -55,6 +55,33 @@ All notable changes to this project are documented here. The format is based on 
 - Restart policies per service (#150, services.md, D-026): each `init` table entry has `restart`, `Never` or `Up(n)` (`pharos_programs::supervise`, host-tested); a restart waits 100 ms × 4ⁿ (0.1, 0.4, 1.6 s) instead of starting at once, and its line names the restart's number, limit, delay, and the services that depend on it; a daemon that sends no `ready` in 10 s now counts as a crash, so its policy applies (it was never restarted). Boot daemons keep 3 restarts; one-shots none. The `supervision` kernel checks each policy and each delay; the `services` kernel expects a crashed one-shot's `not restarted: restart policy never`. Two mutations caught: no delay (`flaky`'s 400 and 1,600 ms waits) and the policy ignored (`brittle` restarted)
 - M4.1 design approved (#149): [services.md](docs/architecture/services.md#supervision-and-readiness-m41-d-026). Restart policies `Never` or `Up(n)` with a delay of 100 ms × 4ⁿ (`pharos_programs::supervise`), a daemon with no `ready` in 10 s counted as a crash; the ready state reported to the kernel, the audit trail (new action `service`), and `trust`; `SERVICE` events from `init` to `trust` and a `services` command answered by `init` (`pharos_proto::service`); new test kernel `system`. Planned, not implemented
 - D-026 accepted (#148, M4.1): a restart policy per service table entry (never, or up to N restarts with a growing delay; dependents reported, not restarted; a stopped service never), a ready state covering every boot service and the agent platform, reported to the kernel, the audit trail, and the trusted console, and every service failure, skip, and restart audited and shown by `trust`, with a new `services` command. Planned, not implemented
+  - in `pharos-infer`: Qwen2's tokenizer, batched prompts with bit-identical output, and no hand-written SIMD (it would need `unsafe`, and the SSE2 baseline already meets S1's generation target);
+  - an unprivileged inference service with read-only access to the `models` namespace, a 1 GiB limit, and a compiled-in manifest of models with SHA-256 and expected configuration, loaded on first use;
+  - interface `inference` version 1 on `pharos-proto`: `GENERATE`, pulled `NEXT`, `CANCEL`, `RESULT` with the record for M3.4's audit trail, greedy decoding only, one session at a time;
+  - the planned tests.
+
+  The threat model gains planned inference rows.
+
+### Changed
+
+- The boot agent runtime runs with less (#157, D-027): no network, `files`, or knowledge capability, as its boot policy table runs no agent; every other boot service was reviewed and keeps what it has (services.md lists each). The `system` kernel finds the runtime by its root filesystem
+
+### Fixed
+
+- M4.3 review F1 (#167): `fs_mount`'s page charge lasted until the caller ended, so each in-place image switch used up part of `init`'s limit until a good slot failed to mount and was marked bad; a mounted copy now gives its pages back when it is freed (`process::Charge`). Tested by `mountprobe`'s 20 more mounts in turn in the `fsmount` kernel
+- M4.3 review F2 (#167, D-028 amended): an update's version must be above every version a slot records, `bad` ones too, and above the factory image's (`PHAROS_IMAGE_VERSION`, built into `init`), so an older release cannot be installed when no slot is good (`pharos_programs::system::admit`)
+- M4.3 review F3 (#167): `init` revokes the storage service's access to its slot buffer after reading a file to check it, and attaches it again only when needed, so the bytes it checked are the bytes mounted or written
+- M4.3 review F4 (#167): agents may have at most 3 proposals waiting (`MAX_PROPOSED`), keeping one of the 4 places `update` shows for the host
+- M4.3 review F5 (#167): the `update` kernel's last boot shows the runtime's `yes 1` does not apply an offered proposal; the `recovery` kernel's new `spinning` round (new test program `spinner`) shows a slot whose agent runtime spins forever is stopped on `init`'s deadline and the other slot runs
+
+- The `supervision` runner check failed CI on `main` (run 42238649579): a record written when the store was killed was sent again, so `steady stopped; not restarted` was in the trail twice (review F2, at least once). It now allows one copy in the whole trail, only right after its original (`records_and_copies`, unit-tested); the `system` check allows none
+
+## [0.3.0] - 2026-11-06
+
+Phase 3 (AI Agent Platform) is complete. Agents run on Pharos as unprivileged, isolated processes under a runtime that restarts them and keeps their tasks durable, with only the permissions their policy or the user grants (revocable, audited), budgets for CPU, memory, inference, network, and storage, validated tool calls, granted channels and supervised groups, and a knowledge service with provenance; local inference runs as an unprivileged service (`pharos-infer`, CPU only), and a trusted console no agent can reach can always stop them. Experimental: QEMU only; see the threat model for the open limits (no IOMMU, no KPTI, one CPU). Tagged after the fact at the Phase 3 gate commit, whose workspace version reads 0.2.0.
+
+### Added
+
 - M3.8 gate (#147), closing Phase 3: CI green on `main` at `f230d70` (run 42179591254, 66 test kernels); letting a writer replace a version it cannot read failed CI on a throwaway branch (run 42184085979) in the host tests, on Rust 1.85, and at `poison`, since deleted; review approved; IPC median 1,887 ns; the scenario model's own tool calls for four S1 prompts, written on the host, are each refused and kept as a host test (`tools::tests::the_scenario_models_own_calls`); the model driving an agent on Pharos is carried to M4.6. M3.8 and Phase 3 are done and M4.1 current; `pharos info` says so.
 - M3.8 security review ([review-m3.8-knowledge.md](docs/security/review-m3.8-knowledge.md), #147), approved by the maintainer: two findings fixed (F1, F2), two recorded (F3: a reader's status flags show that versions it cannot read exist, never their content; F4: a writer learns which keys exist in a scope it writes), no new `unsafe`; IPC round trip median 1,887 ns; with a Phase 3 agent isolation summary
 - Poisoned-knowledge tests (#146, knowledge.md): new test kernel `poison`, on a store with the user's host-loaded, verified entries (`store_image::host_knowledge`: version 1 by `user` from `host`, with its mark). Its agent `gullible` reads around its scopes (refused, and an entry citing `hr` is as missing as nothing), copies a verified version while claiming the user (stored as itself, unverified), tries to rewrite versions (refused; a second correction is a conflict, both kept), sees an entry go stale through its evidence and a retraction end the conflict, and obeys instructions stored in a verified entry (each refused). The runner checks the audit trail (each refusal kind once, no content) and the store (the versions exactly, no new mark). Five mutations caught
@@ -154,7 +181,6 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Changed
 
-- The boot agent runtime runs with less (#157, D-027): no network, `files`, or knowledge capability, as its boot policy table runs no agent; every other boot service was reviewed and keeps what it has (services.md lists each). The `system` kernel finds the runtime by its root filesystem
 - `trust`'s `RUNTIME` comes with no badge instead of badge 1 (#98): `init` is the only holder of an unbadged `SEND` on `trust`'s endpoint, and a process cannot badge its own copy (a send to itself would block). The `trust` test kernel sends it so.
 - The IPC round trip is back within D-004's 2 µs budget (#81): medians of 1.87–1.92 µs under KVM (100,000 round trips), down from 2.29–2.32 µs. In the kernel, `IrqMutex` no longer counts held locks with a locked instruction; the count changes only with interrupts disabled on one CPU. `cargo xtask bench-ipc [--runs N]` measures the round trip in one command, under KVM; the `ipc` test kernel's round-trip count is a build-time setting (`PHAROS_IPC_ROUND_TRIPS`). Measured at each milestone gate: no single regression, but M2.9, M2.10, and M3.0's vector-state switch (about 175 ns, not the "no measurable time" recorded in #74) each added time. PCIDs and `XSAVEOPT` were measured (about 80–115 ns and 45 ns) and not adopted.
 - The idle task runs a task woken by an interrupt at once instead of at the next 10 ms tick (`sti; hlt` after checking the ready queue with interrupts disabled). Every interrupt-driven request waited for the tick before: reading 676 MB from the store took over 5 minutes, now about 43 s (#78).
@@ -164,13 +190,6 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
-- M4.3 review F1 (#167): `fs_mount`'s page charge lasted until the caller ended, so each in-place image switch used up part of `init`'s limit until a good slot failed to mount and was marked bad; a mounted copy now gives its pages back when it is freed (`process::Charge`). Tested by `mountprobe`'s 20 more mounts in turn in the `fsmount` kernel
-- M4.3 review F2 (#167, D-028 amended): an update's version must be above every version a slot records, `bad` ones too, and above the factory image's (`PHAROS_IMAGE_VERSION`, built into `init`), so an older release cannot be installed when no slot is good (`pharos_programs::system::admit`)
-- M4.3 review F3 (#167): `init` revokes the storage service's access to its slot buffer after reading a file to check it, and attaches it again only when needed, so the bytes it checked are the bytes mounted or written
-- M4.3 review F4 (#167): agents may have at most 3 proposals waiting (`MAX_PROPOSED`), keeping one of the 4 places `update` shows for the host
-- M4.3 review F5 (#167): the `update` kernel's last boot shows the runtime's `yes 1` does not apply an offered proposal; the `recovery` kernel's new `spinning` round (new test program `spinner`) shows a slot whose agent runtime spins forever is stopped on `init`'s deadline and the other slot runs
-
-- The `supervision` runner check failed CI on `main` (run 42238649579): a record written when the store was killed was sent again, so `steady stopped; not restarted` was in the trail twice (review F2, at least once). It now allows one copy in the whole trail, only right after its original (`records_and_copies`, unit-tested); the `system` check allows none
 - A knowledge writer could replace or retract a version it cannot read (M3.8 review F1, #147): `Index::plan` checked only that the replaced version exists, so in the `poison` kernel `gullible` could correct `ops/pay`, which cites `hr`, and learn it exists. A version the writer cannot read is now as missing as one that does not exist (`REPLACES`); `knowledge write` without `read` adds new keys only. Host test `what_the_caller_cannot_read_does_not_exist` and the `poison` kernel check it
 - A stored knowledge version could be rewritten (M3.8 review F2, #147): when the store kept a version but its answer was lost, the next put of that key wrote the same `v<n>` over it. The service now reads the path first and indexes a valid version it finds there instead of writing; host test `a_stored_version_whose_answer_was_lost_is_kept`
 - The IPC round trip back within D-004's 2 µs budget (#121): M3.5 had added about 30–60 ns, to medians of 1,973–2,043 ns. `sched::current_id` (called on every system call through `process::current`) is now a plain load of the running task's ID, kept at each switch, and `sched::stopping` (also on every system call) is a plain load while no task is told to end, instead of each taking the scheduler's lock. Median 1,935 ns under KVM (1,889–1,990 ns over 5 runs); alternating with the kernel before, 1,895 against 2,024 ns.
@@ -348,6 +367,7 @@ Initial scaffold, completing Phase 1 (Foundation). Pharos OS is not bootable; th
 - Private vulnerability reporting through GitHub, documented in `SECURITY.md`.
 - Issue and pull-request templates, editor configuration, and optional VS Code recommendations.
 
-[Unreleased]: https://github.com/codeaiforge/pharos-os/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/codeaiforge/pharos-os/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/codeaiforge/pharos-os/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/codeaiforge/pharos-os/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/codeaiforge/pharos-os/releases/tag/v0.1.0
