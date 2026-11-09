@@ -2087,6 +2087,30 @@ const LARGE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
 const HEALTH_TEST: &str = "health";
 /// The `aifail` kernel (M4.6) boots the boot image with a stand-in AI service.
 const AIFAIL_TEST: &str = "aifail";
+/// The `aifail` kernel's trusted console (#184): after the runtime is
+/// given up, `services` and `stop all`; after the runaway `infer` and the
+/// kernel's kill of `trust`, the new `trust` stops `infer`, reads the
+/// audit trail, starts both services again, and shows their health
+/// (in table order).
+const AIFAIL_SCRIPT: &[console::Step] = &[
+    ("system ready: 8 services", ""),
+    (
+        "service agents not restarted: restarts used up",
+        "services\n",
+    ),
+    ("services: agents failed, restarts 3 of 3", "stop all\n"),
+    ("stopped all", ""),
+    // `>`: after the previous match, not the same lines at boot.
+    (">trust: ready", "stop service infer\n"),
+    (">service infer stopped by the user", "audit\n"),
+    (">audit: boot 1, ", "start infer\n"),
+    (">service infer ready", "start agents\n"),
+    (">service agents ready", "health\n"),
+    (">health: infer ready, restarts 0 of 3, ", ""),
+    (">health: audit ready, ", ""),
+    (">health: knowledge ready, ", ""),
+    (">health: agents ready, restarts 0 of 3, ", ""),
+];
 /// The `compromised` kernel (M4.6, #183): hostile stand-ins for `infer`
 /// and the runtime, under their exact manifests.
 const COMPROMISED_TEST: &str = "compromised";
@@ -3343,6 +3367,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         SYSTEM_TEST => (SYSTEM_SCRIPT, &[]),
         MANAGE_TEST => (MANAGE_SCRIPT, &[]),
         COMPROMISED_TEST => (COMPROMISED_SCRIPT, COMPROMISED_REFUSED),
+        AIFAIL_TEST => (AIFAIL_SCRIPT, &[]),
         HOTPLUG_TEST => (HOTPLUG_SCRIPT, &[]),
         recovery::UPDATE_TEST => (recovery::UPDATE_SCRIPT, &[]),
         _ => (&[], &[]),

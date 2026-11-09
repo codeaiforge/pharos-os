@@ -399,6 +399,9 @@ The capability audit runs at ready and must match the manifests. `rogue` holds o
 
 After each, the runner types on the trusted console and checks the answers: `services`, `health`, `audit` (the trail still grows), `stop all`, and a knowledge `verify` (the store and knowledge still answer); then `start infer` and `start agents` (`restart` in `hang`), and both are ready and answer a health check.
 
+- *Implemented (#184), in one boot of the `aifail` kernel (about 15 s), in this order:* the hang (`rogue` 3 as `infer`; the runtime starts without it, #182); the crash (the kernel kills the runtime 4 times, `init` gives it up, and the runner types `services`, which shows `agents failed, restarts 3 of 3`, and `stop all`); the runaway (`rogue` takes every frame it may, #182) with `trust` killed and started again; then, on the new `trust`, `stop service infer` (its memory back), `audit` (the trail still answers), `start infer`, `start agents`, and `health`, where `infer`, `audit`, `knowledge`, and the runtime are ready again with their restarts at 0. Mutation-checked: `init` not resetting the restart count on `start` (`health` shows the runtime's restarts used up).
+- **Changed from the design:** one boot instead of three rounds, crash before the runaway (the runtime's restarts would otherwise fail for memory, which the runaway round covers); the crash is the runtime's, since `rogue` stands in for `infer` and the `system` kernel already gives up a killed `infer`; the knowledge service is shown by `health` (ready, answering `init`'s checks) rather than `verify`, which needs an entry; `stop all` runs once the runtime is gone, and `trust` answers at once.
+
 Not covered: a hang longer than `infer`'s 600 s window (the `health` kernel tests the give-up with a 30 s window); side channels (D-031, M5.2).
 
 ## 4. Security
@@ -449,7 +452,7 @@ Not covered: a hang longer than `infer`'s 600 s window (the `health` kernel test
 | Host, `pharos-services` (#183) | the `aifail` and `compromised` tables equal the boot table except `rogue`'s program and argument; `is_runtime` finds only the runtime's entry |
 | QEMU, `compromised` (#183) | all 83 and 86 probes refused; the capability audit matches; nothing started, stopped, or restarted; `trust` shows no forged registration; mutation-checked (the store's read-only bit ignored) |
 | QEMU, `aifail` (#182) | a hung `infer`: the runtime still starts and is ready; mutation-checked (the blocking attach). A runaway `infer` taking every frame it may: the trusted reserve stays free and `trust` restarts; mutation-checked (no reserve) |
-| QEMU, `aifail` (#184, planned) | rounds `crash`, `hang`, and `exhaust`: the trusted console, store, knowledge, and audit still answer; `start` brings both back; mutation-checked (gap 1's fix removed) |
+| QEMU, `aifail` (#184) | the runtime crashed until given up, then `services` and `stop all`; after the runaway and `trust`'s restart, `stop service infer`, `audit`, `start infer`, `start agents`, and `health` with both ready again; mutation-checked (no restart reset on `start`) |
 
 ## 6. Alternatives
 

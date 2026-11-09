@@ -8,7 +8,12 @@
 //! - gap 2: told `exhaust`, `rogue` maps memory until refused, which
 //!   leaves the trusted class's reserve free, and keeps asking for more;
 //!   the kernel then kills `trust`, and `init` starts it again, ready,
-//!   though `rogue` would take every frame `trust` gave back.
+//!   though `rogue` would take every frame `trust` gave back;
+//! - crash (#184): before that, the runtime is killed 4 times and given
+//!   up, and `trust` still lists the services and stops all;
+//! - recovery (#184): on the new `trust` the runner types `stop service
+//!   infer`, `audit`, `start infer`, `start agents`, and `health`, and both
+//!   services are ready again.
 //!
 //! Runs under UEFI (D-009).
 
@@ -139,6 +144,36 @@ fn run(t: &mut TestRun) {
             .is_some_and(|s| s.len() == 4 && usize::from(s[0]) == boot && s[1] == 0),
     );
 
+    // Crash (#184): the runtime killed until `init` gives it up; the
+    // runner checks `services` and `stop all` on the trusted console.
+    let runtime_of = || {
+        child(init, |caps| {
+            caps.iter().any(|(o, _)| matches!(o, Object::Filesystem(_)))
+        })
+    };
+    let mut last = None;
+    for n in 0..4 {
+        let fresh = wait(20, || {
+            let now = runtime_of();
+            now.is_some() && now != last && count(b"init: agents ready") > n
+        });
+        sched::sleep(Duration::from_millis(200));
+        last = runtime_of();
+        if !(fresh && last.is_some_and(|id| process::kill(id, KILLED))) {
+            t.check("the runtime killed 4 times", false);
+            return;
+        }
+    }
+    t.check(
+        "the runtime given up after 3 restarts",
+        wait(20, || has(b"init: agents not restarted: restarts used up")),
+    );
+    t.check(
+        "trust listed the services and stopped all",
+        wait(20, || count(b"init: services listed for trust") >= 1),
+    );
+    sched::sleep(Duration::from_millis(500));
+
     // Gap 2: the stand-in takes every frame it may.
     let rogue = child(init, |caps| {
         caps.iter()
@@ -192,6 +227,29 @@ fn run(t: &mut TestRun) {
         wait(20, || count(b"init: trust ready") == 2),
     );
     kprintln!("  after the restart: {} frames free", free_frames());
+
+    // The user recovers from the new `trust` (#184): `stop service infer`
+    // gives its memory back, `audit` answers, and `start` brings `infer`
+    // and the runtime back; the runner checks `health`.
+    t.check(
+        "the user stopped infer",
+        wait(30, || {
+            (lines().iter()).any(|(_, l)| l.starts_with(b"init: infer stopped by the user"))
+        }),
+    );
+    t.check(
+        "the user started infer and the runtime again, both ready",
+        wait(30, || {
+            has(b"init: infer started by the user")
+                && has(b"init: agents started by the user")
+                && count(b"init: agents ready") == 5
+        }),
+    );
+    t.check(
+        "trust showed health",
+        wait(30, || count(b"init: services listed for trust") >= 2),
+    );
+    sched::sleep(Duration::from_millis(500));
     for (task, line) in lines() {
         kprintln!("  {task}: {}", core::str::from_utf8(&line).unwrap_or("?"));
     }
