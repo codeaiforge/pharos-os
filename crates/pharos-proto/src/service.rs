@@ -79,6 +79,9 @@ pub mod op {
 /// An entry's `quiet_s` when `init` does not check it (not a running
 /// daemon with an endpoint).
 pub const NOT_CHECKED: u32 = u32::MAX;
+/// An entry's `quiet_s` when it has answered no check since it was ready
+/// (M4.5 review F2).
+pub const NO_ANSWER: u32 = u32::MAX - 1;
 /// [`Settings::image`] when the compiled values run.
 pub const COMPILED: u8 = 255;
 

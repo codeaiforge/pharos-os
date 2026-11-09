@@ -296,8 +296,8 @@ delay_ms = 500
 | Key | Value | Ceiling (compiled) | Refused when |
 | --- | --- | --- | --- |
 | `start` | `yes` or `no` | — | `no` for `trust`, `audit`, or `store` (`PROTECTED`), for a driver entry, or for a service another entry that starts lists in `after` (the error names it) |
-| `restarts` | 0–255 | the entry's `Restart::Up(n)`: at most `n` (`Never`: only 0) | over the ceiling |
-| `delay_ms` | the first restart's delay, 10–60,000 | — (a longer delay grants nothing) | out of range |
+| `restarts` | 0–255 | the entry's `Restart::Up(n)`: at most `n` (`Never`: only 0) | over the ceiling; any value for `trust`, `audit`, or `store` (their compiled values only, M4.5 review F3: a file cannot leave the console or the trail down for long) |
+| `delay_ms` | the first restart's delay, 10–60,000 | — (a longer delay grants nothing) | out of range; any value for `trust`, `audit`, or `store` (F3) |
 
 A section for a name not in the table, an unknown key, a repeated section or key, a value out of range, a missing or other `config =` line, a file over 4 KiB, or a line over 128 bytes is an error. The checker reports the first: line number and reason (`line 4: restarts 5 over 3 for knowledge`). A file with an error is refused whole; nothing in it is used.
 
@@ -313,9 +313,10 @@ A section for a name not in the table, an unknown key, a repeated section or key
 **Agent limits: left out (changed from D-030).** The boot agent policy table is empty (agents.md), so at boot there is nothing for a file to narrow. Its entries live in `bin/agents`, which `init` cannot check against, so an agent section could only be checked when the runtime starts, after the image is applied. Agent sections are left until a boot policy entry exists; until then `[agent …]` is an unknown section.
 
 **Health checks:** every 10 s `init` calls each daemon in state `Ready` with `INFO` (common op `0xf0`) on the endpoint it holds, with a 100 ms timeout, one service at a time. An answer of any status counts. Each entry has a compiled `quiet` window: a service that has answered no check for that long is **unresponsive**:
-- 30 s for most services; 600 s for `infer`, which serves one generation at a time and may be busy that long; 60 s for `store`, which may be reading a 16 MiB image;
+- 30 s for most services; 600 s for `infer`, which serves one generation at a time and may be busy that long; 180 s for `agents`, which waits for `infer` up to twice `GENERATE_US` (60 s) in one request (M4.5 review F1; host-tested against `pharos_proto::infer::GENERATE_US`); 60 s for `store`, which may be reading a 16 MiB image;
 - the window is compiled, not configured;
-- a check never blocks `init` for more than 100 ms, so a hung service delays `init` by at most 100 ms every 10 s.
+- a check never blocks `init` for more than 100 ms, so a hung service delays `init` by at most 100 ms every 10 s;
+- a daemon is also checked as soon as it is ready (a round at once); until it answers one check, `health` shows `no answer yet` (`quiet_s` `NO_ANSWER`) rather than its ready time (M4.5 review F2). A restarted `trust` first waits on `init` (`RUNTIME`), so it misses that round and answers the next.
 
 An unresponsive service is reported (new service event `Unresponsive` = 15, `service <name> unresponsive for 30 s; restarting`), audited like other service events, stopped, and handled as a crash by its policy (D-026). It is never restarted past its limit. `audit` and `trust` answer no `INFO` today; each gains one (`audit` on `init`'s unbadged capability, `trust` on its service endpoint). Drivers and one-shots are not checked.
 
@@ -360,7 +361,7 @@ An unresponsive service is reported (new service event `Unresponsive` = 15, `ser
 - **Notifications** carry no data: a forged or coalesced bit only makes a receiver re-check its source. Only the kernel sets them, and only on endpoints the binder receives on.
 - **Untrusted programs:** program files come only through file capabilities, so `init` can start only programs from the filesystems it was given. The ELF loader is unchanged.
 - **Runtime management (M4.4, #170):** only `trust`'s badge reaches `START`, `STOP`, and `RESTART`, so an agent or service cannot stop anything; a start uses only a compiled entry's manifest, so it adds no authority the capability audit does not already check; `trust`, `audit`, and `store` cannot be stopped, so no command ends the console or the audit trail.
-- **Configuration (M4.5, D-030, implemented, #176):** a file can only lower restart limits, change delays within a range, and not start services nobody needs; it names no capability, program, or manifest, so the capability audit (D-027) is unchanged; `trust`, `audit`, and `store` always start; it changes only with a signed image the user applied, and recovery ignores it.
+- **Configuration (M4.5, D-030, implemented, #176):** a file can only lower restart limits, change delays within a range, and not start services nobody needs; it names no capability, program, or manifest, so the capability audit (D-027) is unchanged; `trust`, `audit`, and `store` always start, with their compiled restart limits and delays (review F3); it changes only with a signed image the user applied, and recovery ignores it.
 - **Health checks (implemented, #177):** `init` sends only `INFO`, which changes nothing; a service can hide a hang from its callers but not from the check; a check costs `init` at most 100 ms.
 - The threat model gains a "Processes and services" section (planned).
 
@@ -379,16 +380,16 @@ An unresponsive service is reported (new service event `Unresponsive` = 15, `ser
 | QEMU, `supervision` (#150, #152) | each policy: `Never` not restarted, `Up(n)` restarted n times no sooner than each delay, then given up; no `ready` in 10 s counted as a crash; a stopped service never restarted; each event one audit record and one `trust` line; mutation-checked |
 | QEMU, `system` (#151, #153) | the boot table to ready (console and trail), a restart with its dependents, a stop, a give-up, `services`; mutation-checked |
 | Host, `pharos-services` (#157) | each manifest rule on the boot and test tables; a table breaking each rule refused |
-| Host, `pharos_services::config` (#176) | each key and refusal in the table above, with its line and text; restarts over the limit refused, not narrowed; protected services, drivers, and needed services kept on; fuzzed (random text and mutations of a valid file: never a limit over the compiled one, never a protected service off) |
+| Host, `pharos_services::config` (#176) | each key and refusal in the table above, with its line and text; restarts over the limit refused, not narrowed; protected services, drivers, and needed services kept on; `restarts` and `delay_ms` refused for protected services (review F3, mutation-checked); fuzzed (random text and mutations of a valid file: never a limit over the compiled one, never a protected service off) |
 | Host, `pharos_programs::system` (#176) | `image_config`: no file, a good one, one over a limit, one over 4 KiB, a corrupt image |
 | Host, `pharos_programs::supervise` (#176) | a configured first delay, and the longest one saturating |
 | Host, `xtask` (#176) | a bad `etc/system.conf` refused by the builder with its line; the shipped root accepted |
 | QEMU, `update` (#176) | round `config`: updates whose files turn `audit` off (line 3) or ask 9 restarts of `knowledge` (line 4) refused at offer with their lines, never offered; one with `net` off applied, and `net` not started from it |
 | QEMU, `recovery` (#176) | round `bad-config`: slot A whose file turns `audit` off refused at boot and bad, slot B runs; round `next-safe`: slot A's file turns `net` off, and safe mode ignores it |
-| Host, `pharos_programs::supervise` (#177) | `unresponsive`: each service's window, an answer after `now`, two checks in every window |
+| Host, `pharos_programs::supervise` (#177) | `unresponsive`: each service's window, an answer after `now`, two checks in every window; the runtime's window above twice `GENERATE_US` and a check (review F1, mutation-checked) |
 | Host, `pharos_proto::service` and `trust` (#177) | entries with uptime and last check; `CONFIG` and `Settings` round-trip, cut, bad flags, fuzzed; event 15; `health` and `config` parsed |
 | QEMU, `health` (#177) | `init` with its `health` table: `net` (`svc` 1, ready, never receives on the network endpoint) found unresponsive after 30–41 s, stopped, restarted once by its policy, unresponsive again, and given up; `steady`, whose name no endpoint has, never checked or stopped |
-| QEMU, `manage` (#177) | no boot service is ever unresponsive over the whole run (21 restarts of `trust`); `health` shows uptime and an answered check for each service and the runtime's process; `config` says the factory image's file sets every compiled value |
+| QEMU, `manage` (#177) | no boot service is ever unresponsive over the whole run (21 restarts of `trust`); `health`, before the restarts, shows an answered check for every ready daemon, 7 of them (review F2; mutation-checked: no round at ready, `net` shows `no answer yet`), and the runtime's process; `config` says the factory image's file sets every compiled value |
 | QEMU, `system` with the capability audit (#158) | every live service's table against its manifest and gains, at ready and after the faults; mutation-checked (one capability more) |
 
 ## 6. Alternatives

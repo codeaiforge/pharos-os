@@ -22,11 +22,13 @@ pub const INFO_US: u64 = 100_000;
 
 /// How long service `name` may answer no check before it is
 /// unresponsive: the inference service serves one generation at a time,
-/// and the store may be reading a 16 MiB image; compiled, never
-/// configured (services.md).
+/// the agent runtime waits for it up to twice [`pharos_proto::infer::GENERATE_US`] in one
+/// request (M4.5 review F1), and the store may be reading a 16 MiB image;
+/// compiled, never configured (services.md).
 pub fn quiet_us(name: &str) -> u64 {
     match name {
         "infer" => 600_000_000,
+        "agents" => 180_000_000,
         "store" => 60_000_000,
         _ => 30_000_000,
     }
@@ -115,10 +117,19 @@ mod tests {
         assert!(!unresponsive("net", 50 * s, 10 * s));
         // At least two checks fit in every window.
         assert!(
-            ["net", "store", "infer"]
+            ["net", "store", "infer", "agents"]
                 .iter()
                 .all(|n| quiet_us(n) >= 2 * CHECK_US)
         );
+    }
+
+    #[test]
+    fn the_runtime_outlasts_its_longest_inference_call() {
+        use pharos_proto::infer::GENERATE_US;
+        // A `GENERATE`, sent again once on `NO_BUFFER`, from just after a
+        // check (M4.5 review F1).
+        assert!(quiet_us("agents") > 2 * GENERATE_US + CHECK_US);
+        assert!(!unresponsive("agents", 0, 2 * GENERATE_US + CHECK_US));
     }
 
     #[test]

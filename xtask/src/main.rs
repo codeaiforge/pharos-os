@@ -1444,6 +1444,18 @@ const MANAGE_SCRIPT: &[console::Step] = &[
     // Its own `ready`, not the one after `restart knowledge`.
     (
         "knowledge started by the user\r\nservice knowledge ready\r\n",
+        "health\n",
+    ),
+    // M4.5: each service's health, every one answering a check since it
+    // was ready (review F2: `init` checks a daemon once it is ready), and
+    // each agent process; then the configuration, the shipped file's.
+    // Before `trust` restarts: a new `trust` first waits on `init`
+    // (`RUNTIME`), so it misses the check at its ready and answers 10 s on.
+    ("health: knowledge ready, restarts 0 of 3, ", ""),
+    ("health: agents ready, restarts 0 of 3, ", ""),
+    ("health: agent runtime running", "config\n"),
+    (
+        "config: from factory image; every compiled value",
         "restart trust\n",
     ),
     // 20 more restarts: each `trust` gets its console's DMA pages back
@@ -1532,16 +1544,7 @@ const MANAGE_SCRIPT: &[console::Step] = &[
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
         "services\n",
     ),
-    ("services: agents ready, restarts 0 of 3", "health\n"),
-    // M4.5: each service's health, every one answering its checks, and
-    // each agent process; then the configuration, the shipped file's.
-    ("health: knowledge ready, restarts 0 of 3, up ", ""),
-    ("health: agents ready, restarts 0 of 3, up ", ""),
-    ("health: agent runtime running", "config\n"),
-    (
-        "config: from factory image; every compiled value",
-        "stop all\n",
-    ),
+    ("services: agents ready, restarts 0 of 3", "stop all\n"),
     ("stopped all", ""),
 ];
 /// Device add and remove (#171, D-029): the boot table and image, with a
@@ -1681,8 +1684,16 @@ fn manage_checks(image: &Path, console: &str) -> Result<()> {
     if console.contains(" unresponsive for ") {
         return Err("manage: a boot service was found unresponsive".into());
     }
-    if !console.contains(", answered ") {
-        return Err("manage: health showed no answered check".into());
+    // Each ready daemon answered a real check, not only its ready time
+    // (M4.5 review F2).
+    let ready = console
+        .lines()
+        .filter(|l| l.contains("health: ") && l.contains(" ready, "));
+    if let Some(l) = ready.clone().find(|l| !l.contains(", answered ")) {
+        return Err(format!("manage: a daemon answered no health check: {l}"));
+    }
+    if ready.count() < 7 {
+        return Err("manage: health showed fewer than 7 ready daemons".into());
     }
     println!(
         "  manage: {} actions, each one audit record and one trusted console line",

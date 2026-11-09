@@ -247,9 +247,8 @@ const AUDIT_US: u64 = 2_000_000;
 const STORE_BUFFER: u64 = 128 << 10;
 const STORE_US: u64 = 10_000_000;
 
-/// How long a call to the inference service may take; `GENERATE` may load
-/// a model first.
-const GENERATE_US: u64 = 60_000_000;
+/// How long a call to the inference service may take; `GENERATE` waits
+/// [`infer::GENERATE_US`].
 const INFER_US: u64 = 10_000_000;
 /// How long the user has to answer an approval request: boot table, test
 /// table.
@@ -2180,9 +2179,9 @@ impl Runtime {
                             return Err(code);
                         }
                     };
-                let mut n = self.infer(&req, GENERATE_US, out);
+                let mut n = self.infer(&req, infer::GENERATE_US, out);
                 if n.is_some() && out[0] == status::NO_BUFFER && attach_prompt(&self.infer_buffer) {
-                    n = self.infer(&req, GENERATE_US, out);
+                    n = self.infer(&req, infer::GENERATE_US, out);
                 }
                 let started = n.and_then(|n| Started::parse(&out[..n]));
                 self.outcome(seq, name, id, action::INFER, started.is_some(), b"");

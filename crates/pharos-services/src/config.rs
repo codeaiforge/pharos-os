@@ -103,6 +103,10 @@ pub enum Why {
     BadValue,
     /// `start = no` for `trust`, `audit`, or `store`.
     Protected(&'static str),
+    /// `restarts` or `delay_ms` for `trust`, `audit`, or `store`: their
+    /// compiled values only, so a file cannot leave the console or the
+    /// trail down for long (M4.5 review F3).
+    Compiled(&'static str),
     /// `start = no` for a driver entry (it starts with its device).
     Driver(&'static str),
     /// `start = no` for a service that a started one needs.
@@ -155,6 +159,7 @@ impl fmt::Display for Error {
             Why::RepeatedKey => write!(f, "key repeated"),
             Why::BadValue => write!(f, "bad value"),
             Why::Protected(s) => write!(f, "{s} always starts"),
+            Why::Compiled(s) => write!(f, "{s} restarts as compiled"),
             Why::Driver(s) => write!(f, "{s} starts with its device"),
             Why::Needed(s, by) => write!(f, "{s} is needed by {by}"),
             Why::OverLimit(s, n, max) => write!(f, "restarts {n} over {max} for {s}"),
@@ -259,6 +264,9 @@ pub fn parse(text: &[u8], table: &[Service]) -> Result<Config, Error> {
             return Err(at(Why::RepeatedKey));
         }
         keys |= 1 << k;
+        if k > 0 && PROTECTED.contains(&service.name) {
+            return Err(at(Why::Compiled(service.name)));
+        }
         match k {
             0 => match value {
                 b"yes" => {}
@@ -437,8 +445,21 @@ mod tests {
         for name in PROTECTED {
             let text = std::format!("config = 1\n[service {name}]\nstart = no");
             assert_eq!(err(&text), std::format!("line 3: {name} always starts"));
-            // Restarting them less is still a setting.
-            let text = std::format!("config = 1\n[service {name}]\nrestarts = 1");
+            // Nor restart less or later (M4.5 review F3).
+            for key in [
+                "restarts = 0",
+                "restarts = 3",
+                "delay_ms = 60000",
+                "delay_ms = 100",
+            ] {
+                let text = std::format!("config = 1\n[service {name}]\n{key}");
+                assert_eq!(
+                    err(&text),
+                    std::format!("line 3: {name} restarts as compiled")
+                );
+            }
+            // `start = yes` is still allowed.
+            let text = std::format!("config = 1\n[service {name}]\nstart = yes");
             assert!(parse(text.as_bytes(), BOOT).is_ok());
         }
         assert_eq!(

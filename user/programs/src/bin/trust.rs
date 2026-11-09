@@ -723,6 +723,7 @@ impl Trust {
                 let checked: [&[u8]; 3] = match (health, e.quiet_s) {
                     (false, _) => [b""; 3],
                     (true, listing::NOT_CHECKED) => [b", not checked", b"", b""],
+                    (true, listing::NO_ANSWER) => [b", no answer yet", b"", b""],
                     (true, s) => [b", answered ", decimal(s.into(), q), b" s ago"],
                 };
                 self.say(&[

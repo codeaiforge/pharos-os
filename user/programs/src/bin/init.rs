@@ -256,9 +256,12 @@ struct Init {
     config: Config,
     config_from: u8,
     /// When each service last started, and last answered a health check
-    /// (M4.5); when the next round of checks is due.
+    /// (M4.5; its ready time until the first); a bit per entry that has
+    /// answered one since it was ready (M4.5 review F2); when the next
+    /// round of checks is due.
     started: [u64; MAX_SERVICES],
     answered: [u64; MAX_SERVICES],
+    heard: u32,
     next_check: u64,
     /// Each driver entry's device: its slot's index and `init`'s handle.
     arrived: [Option<(u8, Handle)>; MAX_SERVICES],
@@ -601,6 +604,7 @@ impl Init {
                 pharos_user::call_timeout(ep, &info, self.reply, &mut out, supervise::INFO_US)
             {
                 self.answered[j] = uptime();
+                self.heard |= 1 << j;
                 continue;
             }
             let now = uptime();
@@ -653,6 +657,7 @@ impl Init {
                     _ => 0,
                 };
                 let quiet_s = match (self.checked(i), self.state[i]) {
+                    (Some(_), State::Ok(_)) if self.heard & (1 << i) == 0 => listing::NO_ANSWER,
                     (Some(_), State::Ok(_)) => {
                         (now.saturating_sub(self.answered[i]) / 1_000_000) as u32
                     }
@@ -1198,6 +1203,10 @@ impl Init {
                         say(service.name, "ready", None);
                         self.state[i] = State::Ok(p);
                         self.answered[i] = uptime();
+                        // Checked at once, so its first answer is seen
+                        // (M4.5 review F2); `i` is below `MAX_SERVICES`.
+                        self.heard &= !(1 << i);
+                        self.next_check = 0;
                         if core::mem::take(&mut self.by_user[i]) {
                             let name = service.name.as_bytes();
                             self.tell_trust(Event::ByUser, name, [by_user::READY, 0, 0], &[]);
@@ -2027,6 +2036,7 @@ fn main(arg: u64) -> u64 {
         config_from: listing::COMPILED,
         started: [0; MAX_SERVICES],
         answered: [0; MAX_SERVICES],
+        heard: 0,
         next_check: 0,
         arrived: [None; MAX_SERVICES],
     };
