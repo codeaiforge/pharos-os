@@ -164,6 +164,111 @@ Host noise matters: on the reference host (i9-10900K, `powersave` governor) runs
 
 `PHAROS_MODEL=<qwen2.5-0.5b-instruct-q8_0.gguf> cargo xtask bench-infer [--runs <N>]` measures scenario S1 on Pharos against its targets (#90). It writes a store holding the model (under its manifest path), the S1 prompt (the `summary` prompt of `scripts/bench-inference.py`; a host test checks they match), and `models/s1.expected`, the text `pharos-infer` generates on the host for it with `libm` (128 tokens, about 15 s, also printed with the host's times). It builds the release `inference` test kernel with `PHAROS_INFER_S1` set, which then runs `inferclient` mode 3 instead of its checks, and boots it N times (default 3) under KVM with `-cpu host` and 2 GiB. Each run prints model load, prompt time, first-token time (the `GENERATE` call plus one token's average), tokens per second, and the service's peak mapped memory; the run fails unless the text equals the host's byte for byte. Then the medians against the targets (first token 10 s, 5 tokens/s), and the first request after boot (load plus first token). About 50 s per run. Like `bench-ipc`, it needs `/dev/kvm` and is a manual step. Logs and the store go to `target/xtask/runner/bench-infer/`. Results: [inference-evaluation.md](../project/inference-evaluation.md).
 
+## Release test matrix (M5.1, D-032)
+
+**Status: design, proposed (#187). Planned, not implemented:** none of the commands, kernels, or workflows below exist yet. Implementation: #188 (matrix), #189 (soak and repeat), #190 (S1), #191 (known crash bugs), #192 (gate).
+
+### Cells
+
+Each cell changes one setting from the push configuration (D-032). Every cell runs every test kernel and the boot check, except where noted.
+
+| Cell | Firmware | Memory | CPU | Accelerator | Covers |
+| --- | --- | --- | --- | --- | --- |
+| `push` | UEFI | 256 MiB | `qemu64` | TCG | Today's push run, the reference |
+| `bios` | SeaBIOS | 256 MiB | `qemu64` | TCG | Limine's BIOS path, the kernel without UEFI's memory map and tables |
+| `mem-min` | UEFI | 144 MiB | `qemu64` | TCG | The smallest size that boots the system table (below) |
+| `mem-2g` | UEFI | 2 GiB | `qemu64` | TCG | The frame allocator and direct map past 1 GiB |
+| `mem-4g` | UEFI | 4 GiB | `qemu64` | TCG | RAM above 4 GiB (q35 splits it around the PCI hole) |
+| `cpu-skylake` | UEFI | 256 MiB | `Skylake-Client` | TCG | SMEP, SMAP, XSAVE, and AVX2 in every kernel and service |
+| `cpu-max` | UEFI | 256 MiB | `max` | TCG | Every CPU feature QEMU emulates |
+| `kvm` | UEFI | 256 MiB | `host` | KVM | Hardware timing; after the trial on a throwaway branch, in CI if hosted runners give `/dev/kvm`, otherwise locally |
+
+**Smallest size (measured 2026-11-09, `system` kernel, 16 MiB steps):** 144 MiB passes in 8.6 s, as 256 MiB does. At 128 MiB the boot hangs before the kernel starts: the log ends in the firmware, so the 60 s timeout ends it. At 96 MiB and 64 MiB, Limine panics with `High memory allocator: Out of memory`. The limit is the bootloader loading the boot image, so it rises as the image grows. When `mem-min` fails, the fix either raises the documented minimum in the same change, because the image grew, or the failure is a bug.
+
+**Trial runs (2026-11-09, locally, through a temporary hook for extra QEMU arguments, not committed):**
+
+- `cpu-skylake` and `cpu-max`: the boot check and 74 of 75 test kernels passed in each, about 13 minutes per cell, so SMEP, SMAP, and XSAVE hold in every other kernel and service.
+- `mem-min` (144 MiB): the boot check and 73 of 75 test kernels passed. The two failures were `exhaustion` and `large_file`, because the temporary hook overrode their own memory (1 GiB and 2 GiB). The rule below keeps it.
+- In the CPU cells, the one failure is `vector_state`, which checks FXSAVE and no AVX, so it is tied to `qemu64`. #188 pins it to `-cpu qemu64`, as `vector_state_avx` is pinned to `max`.
+
+**A kernel's own settings win on their axis** (`test_qemu_args`): `vector_state` keeps `qemu64` (#188), `vector_state_avx` keeps `-cpu max`, `large_file` keeps 2 GiB, and `exhaustion` keeps 1 GiB, so the CPU and memory cells run them unchanged. **UEFI-only kernels** skip `bios`: `recovery`, whose rounds use the OVMF variable store. #188 adds any kernel the `bios` cell shows to depend on UEFI, each with its reason, or fixes it.
+
+### Commands
+
+- `cargo xtask matrix --list` prints the cells and their QEMU settings.
+- `cargo xtask matrix <cell> [--shard N/M]` runs `cargo xtask test` in that cell. The cell reaches `cargo xtask runner` through the environment (`PHAROS_CELL`), because Cargo starts the runner. Each result line and log path names the cell, for example `test kernel system (bios): PASS` and `target/xtask/logs/bios/test-system.log`.
+- `cargo xtask test --repeat <N>` runs each test kernel N times in a row in the `push` cell. A kernel that fails once in N fails the run.
+- `cargo xtask soak --minutes <M>` and `PHAROS_MODEL=<file> cargo xtask s1` (below).
+
+The cell table lives in `xtask` as data, with a host test that every cell differs from `push` in exactly one setting and every exception names a kernel that exists.
+
+### Scheduled workflow
+
+`.github/workflows/matrix.yml`, its own file so push runs stay exactly as they are (D-032 said it would join `ci.yml`; a separate file does the same with no `if:` on every push job). Read-only token and pinned actions, as in `ci.yml`; the same QEMU setup and caches.
+
+- **Triggers:** `schedule`, weekly on Sunday at 02:00 UTC, on `main`; and `workflow_dispatch` with a `cells` input (default: all), so a branch or a release commit can be run on demand.
+- **Jobs:**
+  - `cells`: the 7 TCG cells × 4 shares, `fail-fast: false`, about 6 minutes each;
+  - `repeat`: `--repeat 3` in `push`, 4 shares, about 17 minutes each;
+  - `soak`: 60 minutes;
+  - `s1`: the scenario kernel, output checked only;
+  - `kvm`: only if the trial shows `/dev/kvm`.
+- **Cost:** about 28 × 6 + 4 × 17 + 65 + the S1 job ≈ 330 billed minutes a run, or about 1,400 a month weekly. The S1 time under TCG is measured in #190.
+
+### Reporting a failure
+
+- The job name names the cell and share, and xtask prints the end of each failing log, as on push. No artifacts are uploaded (CI's existing rule).
+- xtask also writes one line per failing kernel to the job summary (`$GITHUB_STEP_SUMMARY`): cell, kernel, verdict, and the first failing check.
+- Each failure that is not shown to be infrastructure gets a `bug` issue in the current milestone (D-032). The issue names the run, commit, cell, kernel, and the log lines, and gives the local command that reproduces it (`cargo xtask matrix <cell>`). The fix comes with a test that fails without it. No rerun counts as a pass.
+- Infrastructure (a download or runner failure before QEMU starts) is noted on the run, and the run is started again.
+- **Release evidence:** a green matrix run on the commit being released, linked from the roadmap's gate line, together with the 8-hour soak and the local S1 run.
+
+### Soak
+
+Planned `soak` kernel (#189). The kernel boots `init` with a `SOAK` table, the boot table with the agent runtime given the `agents` policy table (runtime argument 1) and one task-submitting client added. It repeats a cycle until its time is up; the time is a build-time setting (`PHAROS_SOAK_MINUTES`), as `bench-ipc` sets its round trips.
+
+**Each cycle:**
+
+1. one `testagent` task submitted, run, and its result read;
+2. the knowledge service killed with `process::kill` and restarted by its policy;
+3. `restart knowledge` typed on the trusted console, which also resets its restart count (`init`), so the policy is never used up;
+4. `stop service net`, then `start net`.
+
+**Every 5 minutes it checks:**
+
+- free frames back within a fixed margin of their value after the first cycle (the margin is set from the first local 8-hour run and written in the kernel);
+- the same processes and each service's handles exactly as after the first cycle;
+- every boot service ready;
+- no fault and no unexpected exit.
+
+At the end the runner reads the store's audit trail on the host with the store's checks (each record's CRC-32 and chain value, as the `system` round already does) and requires one record per event the kernel counted.
+
+**Runs:** 60 minutes in the scheduled workflow, and 8 hours locally before a release (`cargo xtask soak --minutes 480`), its summary line recorded at the gate. The runner's timeout is the duration plus 5 minutes.
+
+### Repeat pass
+
+`cargo xtask test --repeat 3` in `push` runs every test kernel 3 times. It targets timing checks such as `exhaustion`'s "waited at most 40 ms past each 20 ms wait", which failed once on `main` at a docs-only commit (run 42640888639; #191).
+
+### S1 end to end
+
+Planned `s1` scenario kernel (#190), answering M4.6 review F5.
+
+- **Setup:** `PHAROS_MODEL=<qwen2.5-0.5b-instruct-q8_0.gguf> cargo xtask s1` checks the model against the SHA-256 pinned in [inference-evaluation.md](../project/inference-evaluation.md). It writes a store holding the model and one granted file, and boots a 2 GiB guest.
+- **The run:** `init` starts its services with the runtime's S1 policy entry: inference and `read_file` on that file. A client submits the S1 task; the real model answers it, its `read_file` call is validated and run, and its final text is the result.
+- **Checks:** the tool call and the final text are identical to the host's for the same greedy prompt (`pharos_infer::session` on the host, as `inference.rs` checks text). The audit trail holds the grant, the call, and the result.
+- **Under KVM** (local, `-enable-kvm -cpu host`), it also checks S1's targets: first token within 10 s and at least 5 tokens/s. This run is required at the M5.1 gate.
+- **Scheduled job:** the workflow downloads the model from Hugging Face at its pinned revision, checks the SHA-256, and caches it (`actions/cache`, 676 MB). It checks the output only, under TCG unless the KVM trial passed.
+
+### Test plan
+
+| Issue | Delivers | Checked by |
+| --- | --- | --- |
+| #188 | `cargo xtask matrix`, the cell table, `PHAROS_CELL` in the runner, the job summary line, `matrix.yml` (`cells`), the KVM trial on a throwaway branch and a D-009 amendment for the `kvm` cell | Host test of the cell table; every cell green locally and in a dispatched run; failures found become `bug` issues (#191) |
+| #189 | `soak` kernel, `cargo xtask soak`, `--repeat`, the `soak` and `repeat` jobs | Mutations: a frame leaked per cycle, a handle kept per restart, one audit record dropped; each fails the soak within 10 minutes |
+| #190 | `s1` kernel and `cargo xtask s1`, the `s1` job and model cache | Mutation: the tool call's result not passed back to the model, which changes the text; a model with one byte changed is refused |
+| #191 | A `bug` issue per known failure, starting with `exhaustion`'s, each fixed with a test or explained | No open `bug` issue in M5.1 |
+| #192 | Gate run: the matrix on the gate commit, the 8-hour soak, and the local S1 run; the release-testing review | Run links in the roadmap's gate line |
+
 ## Inference benchmarks (host)
 
 `scripts/bench-inference.py` measures an inference engine's command-line tool on the Linux host, for the runtime evaluation in M3.1 (#68, #69). Results are host results (D-020): they say nothing about Pharos until the engine runs there.
