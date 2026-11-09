@@ -115,6 +115,9 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
+    # A smaller build cache; CI builds each file once anyway.
+    env:
+      CARGO_INCREMENTAL: "0"
     timeout-minutes: 20
     steps:
       # Pinned to a commit SHA (signed v5.1.0 release commit) instead of a
@@ -159,6 +162,25 @@ jobs:
             sudo apt-get install -y --no-install-recommends $pkgs
           fi
           qemu-system-x86_64 --version | head -1
+
+      # The Rust build each share repeats (xtask, the kernel and test
+      # kernels, the user programs) and the downloaded Limine archive, which
+      # xtask checks against its pinned SHA-256 and unpacks fresh every run.
+      # Keyed by the commit, falling back to the newest earlier build, so
+      # cargo rebuilds only what changed; images and logs are not kept. Same
+      # action and SHA as above.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target/debug
+            target/x86_64-unknown-none
+            target/user
+            target/xtask/limine-*/*.tar.xz
+          key: build-${{ steps.image.outputs.version }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            build-${{ steps.image.outputs.version }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
 
       # Builds the kernel and image, then boots headless under UEFI and BIOS
       # (share 1), and boots this share's test kernels. Pass = QEMU exit
