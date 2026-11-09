@@ -104,12 +104,18 @@ jobs:
           cargo +1.85 test -p pharos-kernel --lib --locked
 
   qemu:
-    name: QEMU boot check (UEFI and BIOS)
+    name: QEMU boot check and test kernels (${{ matrix.shard }} of 4)
     # Pinned image: OVMF file names and QEMU behaviour come from the distro
     # packages that cargo xtask expects (Ubuntu 24.04, as on the dev host).
     runs-on: ubuntu-24.04
-    # store_crash (20 boots) and large_file (2 GiB, 676 MB) add minutes.
-    timeout-minutes: 40
+    # The test kernels in 4 parallel shares, balanced by their CI times
+    # (cargo xtask test --shard); share 1 also runs the boot check and the
+    # reproducible ISO. One share fails CI as before; the others still run.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    timeout-minutes: 20
     steps:
       # Pinned to a commit SHA (signed v5.1.0 release commit) instead of a
       # movable tag. Update the SHA and the version comment together.
@@ -154,14 +160,16 @@ jobs:
           fi
           qemu-system-x86_64 --version | head -1
 
-      # Builds the kernel and image, then boots headless under UEFI and BIOS.
-      # Pass = QEMU exit status 33 and "PHAROS: boot ok" within 60 s (D-009).
-      # On failure the end of each serial log is printed here; no artifacts.
-      - name: Boot check
-        run: cargo xtask test
+      # Builds the kernel and image, then boots headless under UEFI and BIOS
+      # (share 1), and boots this share's test kernels. Pass = QEMU exit
+      # status 33 and the expected marker within 60 s (D-009). On failure
+      # the end of each serial log is printed here; no artifacts.
+      - name: Boot check and test kernels
+        run: cargo xtask test --shard ${{ matrix.shard }}/4
 
       # D-009: two image builds must be byte-identical.
       - name: Reproducible ISO
+        if: matrix.shard == 1
         run: |
           first=$(cargo xtask image | sed -n 's/^SHA-256: //p')
           rm -rf target/xtask/image

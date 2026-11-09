@@ -86,7 +86,8 @@ COMMANDS:
                             --kernel boots the given ELF (for example a test
                             kernel) instead of building the kernel.
                             Succeeds only if the kernel reports success.
-    test [--timeout <SECS>] Boot check: build, make the image, and boot it headless
+    test [--timeout <SECS>] [--shard <N/M>]
+                            Boot check: build, make the image, and boot it headless
                             under UEFI and BIOS. Then kernel tests: boot every test
                             kernel in kernel/tests/ under UEFI. A boot passes only
                             if QEMU exits with status 33 and the serial log shows
@@ -95,6 +96,10 @@ COMMANDS:
                             reach a UDP echo server on 127.0.0.1:47000 (from the
                             guest: 10.0.2.2:47000); PHAROS_PCAP=1 also writes
                             each test kernel's packets to test-<name>.pcap there.
+                            --shard N/M runs the N-th of M shares of the test
+                            kernels, balanced by their CI times, and the boot
+                            check only in share 1 (CI runs the shares in
+                            parallel).
     fs build <DIR> <IMAGE>  Pack the regular files under DIR into a Pharos
                             filesystem image (docs/architecture/storage.md).
     fs ls <IMAGE>           Check an image with the kernel's parser and list
@@ -152,6 +157,9 @@ enum Task {
     },
     Test {
         timeout: Duration,
+        /// `(n, of)`: run only the `n`-th of `of` shares of the test
+        /// kernels, from 1 (CI runs them in parallel).
+        shard: Option<(usize, usize)>,
     },
     Runner {
         elf: PathBuf,
@@ -258,6 +266,7 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
         }
         Some("test") => {
             let mut secs = DEFAULT_BOOT_TIMEOUT_SECS;
+            let mut shard = None;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--timeout" => {
@@ -266,11 +275,22 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                             "--timeout must be a positive number of seconds, got '{value}'"
                         ))?;
                     }
+                    "--shard" => {
+                        let value = args.next().ok_or("--shard needs N/M, for example 1/4")?;
+                        let parsed = value
+                            .split_once('/')
+                            .and_then(|(n, m)| Some((n.parse().ok()?, m.parse().ok()?)))
+                            .filter(|&(n, m): &(usize, usize)| 1 <= n && n <= m);
+                        shard = Some(parsed.ok_or(format!(
+                            "--shard must be N/M with 1 <= N <= M, got '{value}'"
+                        ))?);
+                    }
                     other => return Err(format!("unexpected argument '{other}'")),
                 }
             }
             return Ok(Task::Test {
                 timeout: Duration::from_secs(secs),
+                shard,
             });
         }
         Some("fs") => match args.next().as_deref() {
@@ -1240,21 +1260,101 @@ fn report_failure(label: &str, run: &BootRun, log: &Path, reason: &str) {
     }
 }
 
+/// Seconds each slow test kernel took in CI (run 42665044098, its wall
+/// time with its image and extra boots); the others count [`SHARD_OTHER`].
+/// Only balances shards: a wrong number makes one slower, never skips one.
+const SHARD_SECONDS: &[(&str, u32)] = &[
+    ("recovery", 87),
+    ("store_crash", 78),
+    ("health", 65),
+    ("large_file", 51),
+    ("update", 46),
+    ("agents_crash", 33),
+    ("supervision", 32),
+    ("agents_store", 24),
+    ("agents", 20),
+    ("aifail", 16),
+    ("manage", 16),
+    ("permissions", 15),
+    ("inference", 15),
+    ("groups", 14),
+];
+const SHARD_OTHER: u32 = 5;
+/// The boot check's share, which runs with shard 1.
+const SHARD_BOOT: u32 = 30;
+
+/// The test kernels: `kernel/tests/*.rs`, sorted.
+fn test_kernels(paths: &Paths) -> Result<Vec<String>> {
+    let dir = paths.root.join("kernel").join("tests");
+    let mut names: Vec<String> = fs::read_dir(&dir)
+        .map_err(io_err("cannot read", &dir))?
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            (path.extension()? == "rs").then(|| path.file_stem()?.to_str().map(String::from))?
+        })
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// Share `n` (from 1) of `of` of `names`: the slowest first, each to the
+/// share with the least time so far (shard 1 starts with the boot check).
+fn shard(names: &[String], n: usize, of: usize) -> Vec<String> {
+    let secs = |name: &str| {
+        SHARD_SECONDS
+            .iter()
+            .find(|(s, _)| *s == name)
+            .map_or(SHARD_OTHER, |&(_, t)| t)
+    };
+    let mut order: Vec<&String> = names.iter().collect();
+    order.sort_by_key(|name| (std::cmp::Reverse(secs(name)), name.as_str()));
+    let mut load = vec![0; of];
+    load[0] = SHARD_BOOT;
+    let mut mine = Vec::new();
+    for name in order {
+        let least = (0..of).min_by_key(|&i| (load[i], i)).unwrap_or(0);
+        load[least] += secs(name);
+        if least + 1 == n {
+            mine.push(name.clone());
+        }
+    }
+    mine.sort();
+    mine
+}
+
 /// `cargo xtask test`: boot check under UEFI and BIOS, then the kernel tests
-/// (D-009). Both parts always run; the command fails if either fails.
-fn test(paths: &Paths, timeout: Duration) -> Result<()> {
-    let boot = boot_check(paths, timeout);
+/// (D-009). Both parts always run; the command fails if either fails. With
+/// a shard, only its share of the kernels, and the boot check in share 1.
+fn test(paths: &Paths, timeout: Duration, part: Option<(usize, usize)>) -> Result<()> {
+    let boot = match part {
+        Some((n, _)) if n > 1 => Ok(()),
+        _ => boot_check(paths, timeout),
+    };
     if let Err(e) = &boot {
         println!("{e}");
     }
-    println!("Kernel tests (cargo test -p {KERNEL_PACKAGE} --target {KERNEL_TARGET} --test '*'):");
+    let mut selected = vec!["--test".to_string(), "*".to_string()];
+    if let Some((n, of)) = part {
+        let names = shard(&test_kernels(paths)?, n, of);
+        println!(
+            "Shard {n} of {of}: {} test kernels: {}",
+            names.len(),
+            names.join(", ")
+        );
+        selected = names
+            .into_iter()
+            .flat_map(|t| ["--test".to_string(), t])
+            .collect();
+    }
+    println!("Kernel tests (cargo test -p {KERNEL_PACKAGE} --target {KERNEL_TARGET}):");
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let tests = run(
         Command::new(cargo)
             .current_dir(&paths.root)
             .env(TEST_TIMEOUT_ENV, timeout.as_secs().to_string())
             .args(["test", "--locked", "--package", KERNEL_PACKAGE])
-            .args(["--target", KERNEL_TARGET, "--test", "*"]),
+            .args(["--target", KERNEL_TARGET])
+            .args(&selected),
         true,
     );
     match (boot, tests) {
@@ -3523,7 +3623,7 @@ fn main() -> ExitCode {
                 key,
             } => sign::sign(&paths, &image, &out, version, key.as_deref()),
             Task::Run { bios, gdb, kernel } => run_qemu(&paths, bios, gdb, kernel),
-            Task::Test { timeout } => test(&paths, timeout),
+            Task::Test { timeout, shard } => test(&paths, timeout, shard),
             Task::Runner { elf } => runner(&paths, &elf),
             Task::FsBuild { dir, image } => fs_image::build(&dir, &image),
             Task::FsLs { image } => fs_image::ls(&image),
@@ -3842,19 +3942,62 @@ mod tests {
         assert_eq!(
             parse(args(&["test"])),
             Ok(Task::Test {
-                timeout: Duration::from_secs(DEFAULT_BOOT_TIMEOUT_SECS)
+                timeout: Duration::from_secs(DEFAULT_BOOT_TIMEOUT_SECS),
+                shard: None,
             })
         );
         assert_eq!(
             parse(args(&["test", "--timeout", "5"])),
             Ok(Task::Test {
-                timeout: Duration::from_secs(5)
+                timeout: Duration::from_secs(5),
+                shard: None,
             })
         );
+        assert_eq!(
+            parse(args(&["test", "--shard", "2/4"])),
+            Ok(Task::Test {
+                timeout: Duration::from_secs(DEFAULT_BOOT_TIMEOUT_SECS),
+                shard: Some((2, 4)),
+            })
+        );
+        for bad in ["0/4", "5/4", "2", "a/b", "2/"] {
+            assert!(parse(args(&["test", "--shard", bad])).is_err(), "{bad}");
+        }
         assert!(parse(args(&["test", "--timeout"])).is_err());
         assert!(parse(args(&["test", "--timeout", "0"])).is_err());
         assert!(parse(args(&["test", "--timeout", "soon"])).is_err());
         assert!(parse(args(&["test", "--bios"])).is_err());
+    }
+
+    /// Shards cover every test kernel exactly once, and none is far above
+    /// an even share.
+    #[test]
+    fn shards_split_every_test_kernel_once() {
+        let paths = Paths::new();
+        let names = test_kernels(&paths).unwrap();
+        assert!(names.len() > 70 && names.contains(&"aifail".to_string()));
+        for of in [1, 3, 4] {
+            let parts: Vec<Vec<String>> = (1..=of).map(|n| shard(&names, n, of)).collect();
+            let mut all: Vec<String> = parts.concat();
+            all.sort();
+            assert_eq!(all, names, "{of} shards");
+            let secs = |name: &str| {
+                SHARD_SECONDS
+                    .iter()
+                    .find(|(s, _)| *s == name)
+                    .map_or(SHARD_OTHER, |&(_, t)| t)
+            };
+            let total: u32 = names.iter().map(|n| secs(n)).sum::<u32>() + SHARD_BOOT;
+            for (i, part) in parts.iter().enumerate() {
+                let load: u32 =
+                    part.iter().map(|n| secs(n)).sum::<u32>() + if i == 0 { SHARD_BOOT } else { 0 };
+                assert!(
+                    load <= total / of as u32 + 90,
+                    "{of} shards: shard {} has {load} s of {total}",
+                    i + 1
+                );
+            }
+        }
     }
 
     #[test]
