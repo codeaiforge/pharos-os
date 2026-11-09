@@ -2011,7 +2011,8 @@ const INJECTION_REFUSED: &[&str] = &[
 const HOSTILE_TEST: &str = "hostile";
 /// The `budgets` kernel (#116): its trail is checked for each limit.
 const BUDGETS_TEST: &str = "budgets";
-/// `usage` while `idler` (task 8) runs in group `heavy` (#119).
+/// `usage` while `idler` (task 8) runs in group `heavy` (#119), then
+/// `health` (#178).
 const BUDGETS_SCRIPT: &[console::Step] = &[
     ("trust: ready", ""),
     ("registered runtime", ""),
@@ -2020,8 +2021,12 @@ const BUDGETS_SCRIPT: &[console::Step] = &[
     ("usage: idler task 8: cpu ", ""),
     (
         "usage: group heavy: 1 running, 64 pages, 0 tokens and 0 bytes this minute",
-        "",
+        "health\n",
     ),
+    // M4.5 (#178): each agent's process in `health`, here a running task.
+    ("health: agent runtime running", ""),
+    ("health: agent idler running", ""),
+    ("health: agent idler: cpu ", ""),
 ];
 /// Agents exhausting their limits at once (#120).
 const EXHAUSTION_TEST: &str = "exhaustion";
