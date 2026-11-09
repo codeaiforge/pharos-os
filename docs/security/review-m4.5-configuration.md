@@ -7,7 +7,7 @@
   - the tests: `health`, the `manage`, `update`, `recovery`, and `budgets` additions (#176–#178).
 - **Design under review:** services.md, D-030, D-028, D-026, D-022, [capabilities.md](../architecture/capabilities.md).
 - **Date:** 2026-11-09, issue #179. Reviewer: AI-assisted (Claude Code), from reading the code, with one QEMU experiment (F2). F1 and F3 were not reproduced. F1–F3 are fixed (2026-11-09), each with a test that fails without its fix.
-- **Status:** **proposed**, with F1–F3 fixed; awaiting the maintainer's review.
+- **Status:** **approved** by the maintainer on 2026-11-09 (M4.5 gate, #179), with F1–F3 fixed.
 
 ## Method
 
