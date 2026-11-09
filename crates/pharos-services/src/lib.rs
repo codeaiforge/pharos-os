@@ -359,8 +359,30 @@ mod tests {
             ("network", NETWORK),
             ("supervision", SUPERVISE),
             ("health", HEALTH),
+            ("aifail", AIFAIL),
         ] {
             assert_eq!(check(table), Ok(()), "{name}");
+        }
+    }
+
+    /// The `aifail` table is the boot table with only `infer`'s program
+    /// and argument changed, so `rogue` holds exactly the shipped manifest
+    /// (M4.6, D-031).
+    #[test]
+    fn the_aifail_table_is_the_boot_table_but_one_program() {
+        assert_eq!(AIFAIL.len(), BOOT.len());
+        let fields = |s: &Service| {
+            (
+                s.name, s.kind, s.restart, s.caps, s.net, s.after, s.limit, s.gains,
+            )
+        };
+        for (i, (a, b)) in AIFAIL.iter().zip(BOOT).enumerate() {
+            assert_eq!(fields(a), fields(b), "{}", b.name);
+            if i == INFER {
+                assert_eq!((b.name, a.path, a.arg), ("infer", &b"bin/rogue"[..], 3));
+            } else {
+                assert_eq!((a.path, a.arg), (b.path, b.arg), "{}", b.name);
+            }
         }
     }
 

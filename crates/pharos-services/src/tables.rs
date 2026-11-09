@@ -54,6 +54,7 @@ pub fn table(arg: u64) -> &'static [Service] {
         2 => NETWORK,
         3 => SUPERVISE,
         4 => HEALTH,
+        5 => AIFAIL,
         _ => &[],
     }
 }
@@ -160,7 +161,9 @@ const fn svc(
     }
 }
 
-pub const BOOT: &[Service] = &[
+pub const BOOT: &[Service] = &BOOT_ENTRIES;
+
+const BOOT_ENTRIES: [Service; 9] = [
     Service {
         name: "virtio-blk",
         path: b"bin/virtio-blk",
@@ -315,6 +318,23 @@ pub const NETWORK: &[Service] = &[
 ];
 
 /// The `health` test kernel's table (M4.5): a daemon named `net` that
+/// The boot table with entry `i` running `bin/rogue` with `arg`, every
+/// other field as shipped (M4.6, D-031): the AI services' failure and
+/// hostile-service kernels.
+const fn rogue(i: usize, arg: u64) -> [Service; 9] {
+    let mut t = BOOT_ENTRIES;
+    t[i].path = b"bin/rogue";
+    t[i].arg = arg;
+    t
+}
+
+/// The boot table's index of the inference service.
+pub const INFER: usize = 3;
+
+/// The `aifail` kernel (M4.6, #182): `infer` is `rogue` 3, which sends
+/// `ready` and never receives, so the runtime must start without it.
+pub const AIFAIL: &[Service] = &rogue(INFER, 3);
+
 /// sends `ready` and never receives on the network endpoint `init` checks
 /// it on, so it answers no health check (restarted once, then given up),
 /// and one whose name no endpoint has, which is never checked.

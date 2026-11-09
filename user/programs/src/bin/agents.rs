@@ -122,8 +122,8 @@ use pharos_user::rights::{READ, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
     Class, Grant, Handle, Mapped, Received, Status, Usage as Use, call_timeout, debug_write,
     delete, endpoint_create, mem_map_buffer, mem_map_cap, mem_share, mem_unmap, open,
-    process_status, process_stop, process_usage, read, receive_timeout, send, spawn_with, try_send,
-    uptime,
+    process_status, process_stop, process_usage, read, receive_timeout, send, sleep, spawn_with,
+    try_send, try_send_cap, uptime,
 };
 
 pharos_user::entry!(main);
@@ -3853,14 +3853,31 @@ fn needed(req: &Request<'_>) -> Option<Permission> {
     }
 }
 
+/// How long the runtime waits for the inference service to take its
+/// prompt buffer (M4.6, #182): a hung service must not hold it.
+const ATTACH_US: u64 = 100_000;
+
 /// Attaches the prompt buffer at the inference service: at start, and
-/// again after the service restarted and lost it (#100).
+/// again after the service restarted and lost it (#100). Never blocks
+/// longer than [`ATTACH_US`] (M4.6, #182): it sends only while the
+/// service is waiting for a request.
 fn attach_prompt(buffer: &Mapped) -> bool {
     mem_share(buffer.addr(), infer::MAX_BUFFER).is_ok_and(|memory| {
         let mut msg = [0u8; 16];
         let len = infer::MAX_BUFFER;
-        let sent = infer::encode(&InferRequest::Attach { len }, &mut msg)
-            .is_some_and(|n| send(INFER, &msg[..n], memory, READ, 0).is_ok());
+        let sent = infer::encode(&InferRequest::Attach { len }, &mut msg).is_some_and(|n| {
+            let mut waited = 0;
+            loop {
+                if try_send_cap(INFER, &msg[..n], memory, READ, 0).is_ok() {
+                    break true;
+                }
+                if waited >= ATTACH_US {
+                    break false;
+                }
+                sleep(10_000);
+                waited += 10_000;
+            }
+        });
         let _ = delete(memory);
         sent
     })
@@ -3880,8 +3897,12 @@ fn main(arg: u64) -> u64 {
     let Ok(infer_buffer) = mem_map_buffer(infer::MAX_BUFFER) else {
         return 2;
     };
-    if !attach_prompt(&infer_buffer) {
-        return 3;
+    // A hung inference service must not stop the runtime (M4.6, #182):
+    // without the buffer, inference starts stalled, so requests are `BUSY`
+    // until it answers `INFO`, and the first `GENERATE` then attaches it.
+    let infer_attached = attach_prompt(&infer_buffer);
+    if !infer_attached {
+        say(&[b"agents: inference service not taking requests; starting without it"]);
     }
     let mut agents = Vec::new();
     for g in groups.iter().filter(|g| !g.supervisor.is_empty()) {
@@ -3987,7 +4008,10 @@ fn main(arg: u64) -> u64 {
         refused: Vec::new(),
         groups,
         group_use: alloc::vec![GroupUse::default(); groups.len()],
-        infer_health: Health::default(),
+        infer_health: Health {
+            stalled: core::cell::Cell::new(!infer_attached),
+            probe_at: core::cell::Cell::new(0),
+        },
         audit_health: Health::default(),
         net_health: Health::default(),
     };

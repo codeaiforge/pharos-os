@@ -375,6 +375,7 @@ Unchanged since #157: each line is used by the shipped code, so nothing is remov
 
 **Gaps to close (#182):**
 1. **A hung `infer` stops the runtime from starting.** The runtime attaches its prompt buffer with a blocking `send` before it reports `ready` (`attach_prompt`); an `infer` that reported `ready` and then stopped receiving holds it there, so `init` counts the runtime as failed every 10 s and gives it up. Fix: attach with `try_send`, start without the buffer, and treat inference as stalled (`BUSY`, D-022) until an attach succeeds, as after an `infer` restart today.
+   - *Implemented (#182):* `attach_prompt` sends with `try_send_cap` for at most 100 ms (`ATTACH_US`), at start and on `NO_BUFFER`; at start a failed attach is logged (`agents: inference service not taking requests; starting without it`) and inference starts stalled, so the first request asks `INFO` (50 ms) and is `BUSY` if unanswered, or attaches on its `NO_BUFFER` if answered. The `aifail` kernel shows the runtime ready beside a hung `infer` (`rogue` 3, the `aifail` table: the boot table with one program changed, host-tested). An inference request from an agent is not exercised there, as the boot policy table runs none; the stalled path is the one `fairness` tests for the network service.
 2. **Page limits are not held against memory.** `infer`'s limit (1 GiB) is above the 256 MiB CI guest, so a runaway `infer` can take every free frame. Whether the other services keep working depends on whether they allocate after start. The `exhaust` round measures it; if any service or `trust` fails, the fix is chosen then and recorded (most likely a reserve of frames the kernel keeps for the trusted and services classes), with its own test.
 
 **The hostile services (`compromised` kernel, #183).** A test table whose `infer` and `agents` entries are the boot entries with only the path changed, to a new program `rogue` (argument 1: as `infer`; 2: as the runtime); a host test requires every other field equal to the boot entry. Each probe prints its result, and the kernel test checks every one:
@@ -442,6 +443,7 @@ Not covered: a hang longer than `infer`'s 600 s window (the `health` kernel test
 | QEMU, `system` with the capability audit (#158) | every live service's table against its manifest and gains, at ready and after the faults; mutation-checked (one capability more) |
 | Host, `pharos-services` (#183, planned) | the `compromised` table's `infer` and `agents` entries equal the boot entries except the path |
 | QEMU, `compromised` (#183, planned) | every probe above refused; the direct kernel read and write killed with a page fault; the capability audit matches; mutation-checked (one capability more for `rogue`) |
+| QEMU, `aifail` (#182) | a hung `infer`: the runtime still starts and is ready; mutation-checked (the blocking attach) |
 | QEMU, `aifail` (#184, planned) | rounds `crash`, `hang`, and `exhaust`: the trusted console, store, knowledge, and audit still answer; `start` brings both back; mutation-checked (gap 1's fix removed) |
 
 ## 6. Alternatives

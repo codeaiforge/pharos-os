@@ -649,7 +649,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 30] = [
+const USER_PROGRAMS: [&str; 31] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -680,6 +680,7 @@ const USER_PROGRAMS: [&str; 30] = [
     "knowledgeclient",
     "mountprobe",
     "spinner",
+    "rogue",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -2084,6 +2085,8 @@ const MODEL_ENV: &str = "PHAROS_MODEL";
 const LARGE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
 /// The `health` kernel (M4.5) waits out two 30 s windows of silence.
 const HEALTH_TEST: &str = "health";
+/// The `aifail` kernel (M4.6) boots the boot image with a stand-in AI service.
+const AIFAIL_TEST: &str = "aifail";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(150);
 
 /// A test kernel that `runner` first boots `rounds` times on one store
@@ -3221,7 +3224,12 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     } else {
         build_user_programs(paths)?
     };
-    let modules = if name == SYSTEM_TEST || name == MANAGE_TEST || name == HOTPLUG_TEST || slotted {
+    let modules = if name == SYSTEM_TEST
+        || name == MANAGE_TEST
+        || name == HOTPLUG_TEST
+        || name == AIFAIL_TEST
+        || slotted
+    {
         kernel_modules(paths, &programs)?
     } else {
         test_modules(&programs)
