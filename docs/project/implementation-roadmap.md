@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), and Phase 3 — AI Agent Platform are done. Current milestone: M4.4 — Device and service management.** Everything in Phases 4–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), and Phase 3 — AI Agent Platform are done. Current milestone: M4.5 — System configuration and diagnostics.** Everything in Phases 4–5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -42,7 +42,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | 1 | Foundation | Done (v0.1.0) |
 | 2 | Core System | Done (v0.2.0) |
 | 3 | AI Agent Platform | Done (gate passed 2026-11-06 with M3.8) |
-| 4 | Full Operating System | **Current** (M4.4; M4.1, M4.2, and M4.3 done) |
+| 4 | Full Operating System | **Current** (M4.5; M4.1–M4.4 done) |
 | 5 | Deployment and Release | Planned |
 
 ---
@@ -475,7 +475,7 @@ Ordering notes:
 
 ## Phase 4 — Full Operating System
 
-**Status: Current** (M4.4; M4.1, M4.2, and M4.3 done).
+**Status: Current** (M4.5; M4.1–M4.4 done).
 
 - **Objective and scope:** Integrate the kernel, user-space services, and AI platform into a coherent, configurable, recoverable system.
 - **Deliverables:** M4.1–M4.6.
@@ -525,7 +525,7 @@ Ordering notes:
 
 ### M4.4 — Device and service management
 
-- **Objective and scope:** Manage devices and services at runtime (start, stop, restart, status). **Status: Current.** Issues #168–#173. D-029 accepted (#168): the user manages services from the trusted console only (`init`'s `START`, `STOP`, `RESTART` on `trust`'s badge); `trust`, `audit`, and `store` restart but never stop; dependents keep running and are reported; only compiled table entries start, with their manifests; device add and remove by native PCIe hotplug on QEMU root ports, polled by the kernel, which assigns a new device's BARs in its port's window, subject to an experiment in the design (#169), with driver restart as the fallback. Design approved (#169, 2026-11-08: [services.md](../architecture/services.md#runtime-management-m44-d-029), [drivers.md](../architecture/drivers.md#hotplug-m44-d-029)); the hotplug experiment passed under OVMF and SeaBIOS, so no fallback. Service management implemented (#170: `start`, `restart`, `stop service` on the trusted console; `manage` test kernel). Device add and remove implemented (#171: native PCIe hotplug on two QEMU root ports, the `disk` driver entry; `hotplug` test kernel). Next: the management tests in CI (#172), then the gate (#173).
+- **Objective and scope:** Manage devices and services at runtime (start, stop, restart, status). **Status: Done** — gate passed 2026-11-09: the CI jobs passed on `main` at `c0114cf` ([run 42573363222](https://github.com/codeaiforge/pharos-os/actions/runs/42573363222)) with 72 test kernels, among them `manage` (`restart knowledge` with its dependents named and still running; `stop service` and `start` of `net` and `knowledge`; `trust`, `audit`, and `store` refused `stop`; `trust` restarted 21 times, ending with `stop all`; forged requests under other badges doing nothing; each action one `trust` line and one audit record) and `hotplug` (a virtio-blk disk added to slot 1 twice and removed twice over QMP, its driver started each time, audited holding only that device, and stopped before the slot powered off, once while stopped by the user). Making `init` accept `START`, `STOP`, and `RESTART` from any badge failed CI on a throwaway branch ([run 42575204009](https://github.com/codeaiforge/pharos-os/actions/runs/42575204009)) at `manage` (`the forged requests did nothing … FAILED`); the host tests and Rust 1.85 passed, as the change is only in `init`, and the branch was deleted. No CI run on `main` failed during M4.4. The IPC round trip measured a 1,874 ns median, within D-004's budget. The management review ([review-m4.4-management.md](../security/review-m4.4-management.md)) found and fixed four issues (F1: each driver start kept its device's DMA pages, so 16 `restart trust` commands left no console; F2: the capability audit accepted any device of the right ID as `Arrived`; F3: an unclaimed hot-added device kept bus mastering on; F4: `slot_next` held the slots lock while it worked); no new `unsafe`. The maintainer approved it on 2026-11-09. Issues #168–#173. D-029 accepted (#168): the user manages services from the trusted console only (`init`'s `START`, `STOP`, `RESTART` on `trust`'s badge); `trust`, `audit`, and `store` restart but never stop; dependents keep running and are reported; only compiled table entries start, with their manifests; device add and remove by native PCIe hotplug on QEMU root ports, polled by the kernel, which assigns a new device's BARs in its port's window, subject to an experiment in the design (#169), with driver restart as the fallback. Design approved (#169, 2026-11-08: [services.md](../architecture/services.md#runtime-management-m44-d-029), [drivers.md](../architecture/drivers.md#hotplug-m44-d-029)); the hotplug experiment passed under OVMF and SeaBIOS, so no fallback. Service management implemented (#170: `start`, `restart`, `stop service` on the trusted console; `manage` test kernel). Device add and remove implemented (#171: native PCIe hotplug on two QEMU root ports, the `disk` driver entry; `hotplug` test kernel). Management tests in CI (#172). Gate: #173.
 - **Deliverables:** Management interface and CLI.
 - **Prerequisites:** M4.1, M2.9.
 - **Acceptance criteria:** Services can be restarted without reboot; device add/remove (where QEMU supports it) is handled.
@@ -537,7 +537,7 @@ Ordering notes:
 
 ### M4.5 — System configuration and diagnostics
 
-- **Objective and scope:** Declarative configuration and diagnostics (logs, health checks). **Status: Planned.**
+- **Objective and scope:** Declarative configuration and diagnostics (logs, health checks). **Status: Current.**
 - **Deliverables:** Configuration format and validation; diagnostics tooling.
 - **Prerequisites:** M4.4.
 - **Acceptance criteria:** Invalid configuration is rejected with a clear error before it is applied; diagnostics report service and agent health.
@@ -674,4 +674,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3. M4.1 (integration of kernel and user-space services) and M4.2 (security model and privilege separation) passed their gates on 2026-11-06, and M4.3 (reliable boot and recovery) on 2026-11-08. The current milestone is **M4.4 — Device and service management**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3. M4.1 (integration of kernel and user-space services) and M4.2 (security model and privilege separation) passed their gates on 2026-11-06, M4.3 (reliable boot and recovery) on 2026-11-08, and M4.4 (device and service management) on 2026-11-09. The current milestone is **M4.5 — System configuration and diagnostics**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
