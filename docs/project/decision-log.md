@@ -1096,3 +1096,37 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
    - The runtime starts each agent with no capabilities, hands a `STOP` capability on it to the trusted service, and only then grants the agent anything. An agent the runtime never reported holds nothing, and stopping the runtime ends it too.
 9. **Delegation with expiry: left to M3.4, with D-012** (decided there: expiry on runtime grants only, D-012 item 9). M3.3 grants an agent only what a reviewed table allows (below), so it needs no time-limited grants yet.
 10. **Human approval in M3.3: none needed, because nothing beyond the reviewed table is granted.** The runtime grants an agent only capabilities listed for it in a compiled-in table, like `init`'s; a manifest asking for more is refused. Approvals for anything beyond it come with M3.4's permission model.
+
+### D-030: System configuration and diagnostics
+
+- **Status:** Proposed
+- **Needed by:** M4.5
+
+**Context.** M4.5 must add declarative configuration, rejected with a clear error before it is applied, and diagnostics that report service and agent health, without letting a configuration widen privileges. Telemetry to external servers is out of scope. This decides what can be configured, where configuration lives and how it changes, its format, what it is checked against, and what diagnostics show and how health is checked.
+
+**Evidence (2026-11-09):**
+- **Nothing is configured today except agent manifests.** The service table (programs, capabilities, dependencies, restart policies) is compiled into `init` (`pharos-services`, D-026, D-027), and the agent policy table into the runtime (agents.md). Agent manifests (`agents/<name>.manifest`, `key = value` lines, at most 4 KiB) are checked against the policy table: a manifest asking for more than its entry is refused, not narrowed.
+- **The root image is signed and replaced as a whole** (D-028): a file in it changes only through a signed update, applied on the user's yes, tried in place, and rolled back if the system does not reach ready.
+- **What diagnostics exist:** `trust`'s `services` (each service's state, D-026), `list` and `usage` (agents and their resource use, #119), and `audit` (the trail). The runtime keeps a health state per service it calls (stalled after a timeout, D-022). `init` creates and holds every service endpoint, and the store, inference, network, knowledge, and agent services answer `INFO`. The kernel's logs (process exits, kills, debug output; the newest 64 each) cannot be read from user space.
+
+**Options.**
+1. *What can be configured:* (a) settings only, never authority: which optional services start (`net`, `infer`, `knowledge`, `agents`; never `trust`, `audit`, or `store`), restart limits and delays, and each agent policy entry's limits, each only within a ceiling compiled into reviewed code; capabilities, manifests, and programs stay compiled; (b) the service and policy tables themselves as files; or (c) nothing beyond agent manifests.
+2. *Where it lives and how it changes:* (a) one file in the root image, `etc/system.conf`, so a change is a signed update with the user's yes and rollback (D-028); (b) a file in the writable store, changed from the trusted console; or (c) image defaults with store overrides.
+3. *Format:* (a) the manifest format: `key = value` lines, `#` comments, `[service <name>]` and `[agent <name>]` sections, at most 4 KiB; an unknown section or key, a duplicate, or a bad value is an error naming the line; (b) TOML, through a crate.
+4. *When it is checked:* (a) with one host-tested `no_std` parser and checker in `pharos-services`, in three places: when the image is built (`cargo xtask` refuses it), when `init` offers an update (the offer is refused with the error, so it is never applied), and at boot (a slot whose file fails is bad and the previous image runs, D-028); a file that fails is never partly applied; (b) at boot only.
+5. *What it is checked against:* (a) the compiled ceilings: a value over its ceiling, a protected service disabled, or a service disabled that another enabled one needs, is refused with the name, not narrowed, as manifests are; (b) narrowed to the ceiling.
+6. *Health checks:* (a) `init` sends `INFO` to each ready daemon every 10 s with a 100 ms timeout; a daemon that misses two in a row is *unresponsive*, reported on `trust` and audited, and restarted by its policy; (b) reported only, not restarted; or (c) no checks: health is the state `init` already keeps.
+7. *What diagnostics show:* (a) `trust`'s `health`: each service's state, restarts, uptime, and last check, and each agent's state, attempts, and use from the runtime (`STATUS`, `USAGE`); `config`: the configuration in use and where it came from; recent events stay in `audit`; (b) also the kernel's logs, through a new kernel call.
+
+**Evaluation criteria.** No configuration can grant a capability or exceed reviewed code (M4.2); a bad file can never leave the system unbootable or half-configured (D-028); no new kernel code or `unsafe`; no new dependency in `init`; every rule host-testable (D-020); each rejection and each health report shown by a QEMU test in CI.
+
+**Recommendation.**
+1. **(a) Settings only, within compiled ceilings.** Privileges stay in reviewed code and the live capability audit (D-027) holds unchanged. Rejected: (b) a file could widen any service; (c) does not meet M4.5.
+2. **(a) In the signed root image.** Changing it reuses D-028's approval, trial, and rollback, so a bad configuration that passes every check but breaks the boot is still rolled back. Rejected: (b) a second write path to `init`'s inputs, needing its own rollback; (c) both problems.
+3. **(a) The manifest format.** One small parser the project already reviews, with no dependency. Rejected: (b) a dependency in `init` for a few dozen keys.
+4. **(a) Checked when built, offered, and booted.** The user sees the error before an update is applied, and a file that slips past is still refused at boot. Rejected: (b) the first error would be a failed boot.
+5. **(a) Refused, not narrowed.** As manifests: the system never runs with settings nobody wrote down.
+6. **(a) Checked every 10 s, restarted by its policy.** A hung daemon is a failure D-026 already handles; today it is found only by its callers' timeouts. Rejected: (b) leaves a hung service hung; (c) a hang looks ready.
+7. **(a) `health` and `config` on the trusted console.** It builds on what `init` and the runtime already keep. Rejected: (b) a new kernel call and capability for logs the user rarely needs; the audit trail already holds every service event.
+
+**Consequences.** `pharos-services` gains a configuration parser and checker, host-tested and fuzzed; `init` reads `etc/system.conf` from the image it runs and checks it before starting anything; `cargo xtask image` and `init`'s update offer refuse a bad file; the agent runtime takes its limits from `init`; `trust` gains `health` and `config`; new audit actions for configuration refused and service unresponsive. A daemon that answers no `INFO` (to be checked in the design, #175) gets an `INFO` handler.
