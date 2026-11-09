@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-28 (M2.10, #59). It follows [D-015](../project/decision-log.md#d-015-network-stack-and-service-model) (as amended on 2026-10-28: badges instead of per-client endpoints), [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism) (IPC), and [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries). Networking is in [networking.md](networking.md).
-- **M4.6 (D-031):** the AI services as system services below: design **proposed** (#181), awaiting the maintainer; nothing in it is implemented yet.
+- **M4.6 (D-031):** the AI services as system services below: design **approved** (#181, 2026-11-09); nothing in it is implemented yet.
 - **M4.5 (D-030):** system configuration and health checks below: design **approved** (#175, 2026-11-09); the configuration file and its checks **implemented** (#176); health checks, `health`, and `config` **implemented** (#177).
 - **M4.4 (D-029):** runtime management below: design **approved** (#169, 2026-11-08); `start`, `stop service`, and `restart` **implemented** (#170); driver entries for hotplug **implemented** (#171, [drivers.md](drivers.md#hotplug-m44-d-029)).
 - **M4.3 (D-028):** **implemented (#163):** with the boot table, `init` starts the storage service from the factory image, picks and verifies an image slot, mounts it with `fs_mount`, starts the other services from it (`trust`'s program always from the factory image), and falls back in place to the other slot, then the factory image; it reports `[ready, failed, image]`. **Implemented (#164):** safe mode and recovery: the kernel's mode in `init`'s argument (bits 8 and up), else the slot record's one-shot `next`; the agent runtime `off` in both; recovery on the factory image (or the `recovery` copy), also when the factory image is not ready; the report `[ready, failed, image, mode]`; `trust`'s `system`, `safe`, and `recovery` (`SYSTEM`, `NEXT`). **Implemented (#165):** updates staged from the host: `trust`'s `update` (`UPDATE`, answered at once, then an `OFFER` per file), `apply <n>` and `discard <n>` (`ANSWER`), and `rollback` (`ROLLBACK`); an approved update goes to the slot that is not active and is tried in place, and one that is not ready is bad and the previous slot runs again. An agent with `update propose` only adds a file to `system/incoming` (`PROPOSE`, through the runtime's namespace 9; the boot table gives the runtime no such capability, as no boot entry may propose). Design in [boot.md](boot.md#8-recovery-and-updates-m43-d-028).
@@ -350,7 +350,7 @@ An unresponsive service is reported (new service event `Unresponsive` = 15, `ser
 
 ### AI services (M4.6, D-031)
 
-**Proposed (#181), not implemented.** D-031 (#180): `infer` and the agent runtime keep their M4.2 manifests, each capability justified; adversarial tests run hostile programs under their exact manifests; failure tests crash, hang, and exhaust each, then check the rest of the system; KPTI and user-mode `rdtsc` are carried to M5.2.
+**Planned, not implemented.** Design approved (#181, 2026-11-09). D-031 (#180): `infer` and the agent runtime keep their M4.2 manifests, each capability justified; adversarial tests run hostile programs under their exact manifests; failure tests crash, hang, and exhaust each, then check the rest of the system; KPTI and user-mode `rdtsc` are carried to M5.2.
 
 **Manifests, line by line** (the boot table; checked live by the `system` audit since #158):
 
