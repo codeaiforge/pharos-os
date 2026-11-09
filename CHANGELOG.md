@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+### Added
+
+- D-032 accepted (#186, M5.1): the release test matrix, 7 cells changing one axis at a time from the push configuration (firmware, memory sizes, CPU models), plus KVM as a cell, TCG staying the reference; the matrix weekly, on dispatch, and before each release, push runs unchanged; a soak kernel and 3 repeat passes; an S1 scenario kernel with the real model driving an agent; any non-infrastructure failure, flakes included, counts as a known crash bug
+
 ## [0.4.0] - 2026-11-09
 
 Phase 4 (Full Operating System) is complete. The kernel, the services, and the agent platform run as one system in QEMU: a service manager with restart policies and audited capability manifests, signed boot images in two slots with fallback, safe mode, recovery, and updates, service and device management from the trusted console, PCIe hotplug, a checked configuration file and health checks, and the AI services as unprivileged system services, tested as compromised and as failing services. Experimental: QEMU only; see the threat model for the open limits (no IOMMU, no KPTI, one CPU).

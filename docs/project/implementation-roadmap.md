@@ -577,7 +577,7 @@ Ordering notes:
 
 ### M5.1 — QEMU regression and release testing
 
-- **Objective and scope:** Broaden the QEMU regression suite (running since M2.3) into a release test matrix. **Status: Current.** Carried in: the S1 scenario run end to end with the model driving an agent on Pharos (M4.6 review F5).
+- **Objective and scope:** Broaden the QEMU regression suite (running since M2.3) into a release test matrix. **Status: Current.** Issues #186–#192. D-032 accepted (#186): 7 cells, one axis at a time from the push configuration (firmware UEFI or BIOS; memory the smallest that boots, 256 MiB, 2 GiB, 4 GiB; CPU `qemu64`, `Skylake-Client`, `max`), plus KVM as a cell after a trial on a branch, TCG staying the reference; push unchanged, the matrix (`cargo xtask matrix`) weekly, on dispatch, and green on each released commit; a `soak` kernel (1 h scheduled, 8 h before a release) and 3 repeat passes; an S1 scenario kernel with the real model driving an agent, local under KVM at the gate and scheduled in CI; any non-infrastructure failure, flakes included, is a known crash bug with a `bug` issue. Carried in: the S1 scenario run end to end with the model driving an agent on Pharos (M4.6 review F5).
 - **Deliverables:** Test matrix (firmware, memory sizes, CPU models); long-running stability tests.
 - **Prerequisites:** Phase 4 gate.
 - **Acceptance criteria:** Full matrix passes; no known crash bugs open.
@@ -673,6 +673,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-029 | Runtime management of services and devices | M4.4 | **Accepted** (#168): the trusted console only; `trust`, `audit`, and `store` restartable, not stoppable; dependents keep running and are reported; only compiled table entries start; native PCIe hotplug on root ports, polled, BARs assigned by the kernel in the port's window, after an experiment (fallback: driver restart, hotplug to M5.2); hotplug slots only, protected drivers refuse removal |
 | D-030 | System configuration and diagnostics | M4.5 | **Accepted** (#174): settings only, within compiled ceilings; `etc/system.conf` in the signed root image; the manifest format; checked at build, update offer, and boot, refused not narrowed; `INFO` health checks every 10 s, an unresponsive daemon restarted by its policy; `trust`'s `health` and `config` |
 | D-031 | AI services as unprivileged system services | M4.6 | **Accepted** (#180): the M4.2 manifests, each capability justified; hostile programs under `infer`'s and the runtime's exact manifests; crash, hang, and exhaust, then the rest checked; KPTI and `rdtsc` carried to M5.2 |
+| D-032 | Release test matrix and stability tests | M5.1 | **Accepted** (#186): 7 cells, one axis at a time; KVM a cell, TCG the reference; the matrix weekly, on dispatch, and before each release; soak and repeat passes; an S1 scenario kernel with the real model; any non-infrastructure failure, flakes included, is a known crash bug |
 
 ## Next milestone
 

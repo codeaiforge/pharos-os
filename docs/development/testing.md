@@ -222,6 +222,6 @@ Why the split: the kernel targets bare metal (`x86_64-unknown-none`, decision D-
 | Isolation and fuzz tests | M2.7 | Attempt forbidden memory access and invalid syscalls; fuzz syscall argument handling |
 | Agent adversarial tests | M3.4 | Capability bypass attempts, prompt-injection suites, resource exhaustion |
 | Recovery and update tests | M4.3 | Host tests of image verification and slot selection; QEMU boots on one store disk with corrupted, unsigned, and never-ready slots, a corrupted `root` module, updates approved, refused, and rolled back, and a malfunctioning agent ([boot.md](../architecture/boot.md#tests)) |
-| Release matrix | M5.1 | Firmware, memory sizes, CPU models; long-running stability |
+| Release matrix | M5.1 | D-032 (accepted): `cargo xtask matrix`, 7 cells changing one axis at a time from the push configuration (firmware UEFI or BIOS; memory the smallest that boots, 256 MiB, 2 GiB, 4 GiB; CPU `qemu64`, `Skylake-Client`, `max`), plus a KVM cell; weekly, on dispatch, and green on each released commit; push runs unchanged. A `soak` kernel (1 h scheduled, 8 h locally before a release) checking frames, processes, handles, readiness, and the audit chain every 5 minutes; every test kernel run 3 times; an S1 scenario kernel with the real model driving an agent. Any failure not shown to be infrastructure, flakes included, gets a `bug` issue; no retries |
 
 QEMU is not used by any test today, and none should be described as passing until it exists.

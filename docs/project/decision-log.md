@@ -1052,8 +1052,9 @@ Two system calls per direction plus two task switches and two address-space swit
 
 ### D-032: Release test matrix and stability tests
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Needed by:** M5.1
+- **Date accepted:** 2026-11-09 (issue #186)
 
 **Context.** M5.1 must broaden the QEMU regression suite into a release test matrix (firmware, memory sizes, CPU models) with long-running stability tests, run in CI or on a schedule, and close with the full matrix passing and no known crash bugs open. It also carries the S1 scenario run end to end with the model driving an agent on Pharos (M4.6 review F5). Real hardware is M5.2. This decides the matrix's axes and values, what runs on every push and what on a schedule, what the stability tests run and check, how S1 runs with a model that is not in the repository, and what counts as a known crash bug.
 
@@ -1085,7 +1086,7 @@ Two system calls per direction plus two task switches and two address-space swit
 
 **Evaluation criteria.** Covers each axis M5.1 names; exercises kernel paths that today run in one kernel or none; keeps the push run near today's time and cost; one command reproduces any cell locally; no new dependency; every new check fails when broken (mutation); the gate's evidence is a recorded run on the released commit.
 
-**Recommendation:**
+**Decision (the maintainer chose each recommendation):**
 1. **(a) One axis at a time, 7 cells.** Each failure points at one axis, and the cells reach the CPU and memory paths that today run in one kernel or none. The cross product (b) costs about 24 × 22 minutes a run for mostly duplicated coverage.
 2. **(a) TCG the reference, KVM a cell.** KVM changes timing, which is what the timing checks measure, so it adds coverage instead of replacing it; replacing TCG (b) would also hide TCG-only failures such as `exhaustion`'s. This amends D-009 only for the KVM cell.
 3. **(a) Push as today; the matrix weekly, on dispatch, and before each release.** About 7 × 22 + 66 + 60 ≈ 280 minutes a run, roughly 1,200 a month weekly. Running it on every push (b) would multiply each push's cost by about 10.
@@ -1093,7 +1094,7 @@ Two system calls per direction plus two task switches and two address-space swit
 5. **(a) The scenario kernel, local under KVM and scheduled in CI.** It answers F5 on Pharos with the agent, the tool call, and the model together, and keeps it checked after M5.1. (b) leaves it unchecked between releases. (c) adds a storage and bandwidth quota for a file pinned by hash anyway (Qwen2.5-0.5B-Instruct is Apache-2.0).
 6. **(a) Any non-infrastructure failure, flakes included.** With no retries, a flake fails the gate just as a crash does. `exhaustion`'s failure at `2f64de8` becomes the first #191 issue.
 
-**Consequences (if accepted).** testing.md gains the matrix, its cells, the per-kernel exceptions, and the soak and S1 kernels (#187); `xtask` gains `matrix`, `soak`, and `s1`; a scheduled workflow joins `ci.yml` after the KVM trial on a throwaway branch; D-009 is amended for the KVM cell; #191 opens a `bug` issue per known failure, starting with `exhaustion`'s; the M5.1 gate (#192) records a green matrix run, an 8-hour soak, and a local S1 run on the gate commit.
+**Consequences.** testing.md gains the matrix, its cells, the per-kernel exceptions, and the soak and S1 kernels (#187); `xtask` gains `matrix`, `soak`, and `s1`; a scheduled workflow joins `ci.yml` after the KVM trial on a throwaway branch; D-009 is amended for the KVM cell; #191 opens a `bug` issue per known failure, starting with `exhaustion`'s; the M5.1 gate (#192) records a green matrix run, an 8-hour soak, and a local S1 run on the gate commit.
 
 ## Open and proposed decisions
 
