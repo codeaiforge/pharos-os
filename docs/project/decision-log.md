@@ -1050,6 +1050,51 @@ Two system calls per direction plus two task switches and two address-space swit
 
 **Consequences.** services.md, inference.md, and agents.md gain a manifest table for each AI service with a reason per capability (#181); a `hostile` service program and test tables for `infer` and the runtime; a failure test kernel; the threat model's KPTI and `rdtsc` rows carried to M5.2; the Phase 4 gate (#185) reviews the whole threat model.
 
+### D-032: Release test matrix and stability tests
+
+- **Status:** Proposed
+- **Needed by:** M5.1
+
+**Context.** M5.1 must broaden the QEMU regression suite into a release test matrix (firmware, memory sizes, CPU models) with long-running stability tests, run in CI or on a schedule, and close with the full matrix passing and no known crash bugs open. It also carries the S1 scenario run end to end with the model driving an agent on Pharos (M4.6 review F5). Real hardware is M5.2. This decides the matrix's axes and values, what runs on every push and what on a schedule, what the stability tests run and check, how S1 runs with a model that is not in the repository, and what counts as a known crash bug.
+
+**Evidence (2026-11-09, issue #186):**
+- **Every test kernel runs in one configuration:** q35, 256 MiB, one CPU, QEMU's default CPU (`qemu64`), UEFI, TCG (`xtask` `qemu_args`; D-009). BIOS runs only the boot check. The only per-kernel exception is `vector_state_avx` on `-cpu max` (`test_qemu_args`).
+- **So most of the kernel's CPU paths run in one kernel.** `qemu64` reports no SMEP, SMAP, XSAVE, or AVX, so the kernel turns on SMEP and SMAP (`paging.rs`) and saves vector state with XSAVE (`fpu.rs`) only in `vector_state_avx`; the other 74 kernels and every service run with FXSAVE and without SMEP and SMAP.
+- **No memory size but 256 MiB is tested, except S1's 2 GiB.** Nothing runs with memory above 4 GiB (on q35, a guest of 4 GiB or more has RAM there) or near the smallest size that boots the system table. The trusted reserve is 8 MiB (D-022).
+- **One push costs about 27 billed minutes:** run 246 at `9a4e76a` took 6 min, its jobs 98, 355, 320, 293, 348, and 91 s, each rounded up to the minute. The repository is private, so these come out of the account's Actions minutes. One full pass of the test kernels is about 22 minutes across the 4 shares.
+- **S1 runs only locally, under KVM:** `cargo xtask bench-infer` boots a 2 GiB guest with `-enable-kvm -cpu host` and the model from `PHAROS_MODEL` (676 MB, pinned by revision and SHA-256 in inference-evaluation.md), and checks the text against the host's (first token 6.35 s, 14.2 tokens/s). It runs inference only, with no agent; the model's own tool calls are checked on the host (`tools::tests::the_scenario_models_own_calls`). Whether hosted runners for private repositories expose `/dev/kvm` has not been tried.
+- **No `bug` issue is open, but `main` has failed for reasons other than its own changes:** `exhaustion`'s check "the kernel's trusted task waited at most 40 ms past each 20 ms wait" failed on a docs-only commit (`2f64de8`, run 42640888639) and has not been touched since; one run failed downloading Limine (HTTP 504, run 42581217608, before the cache); two failed with GitHub internal errors and no jobs (`65c770b`, `20da4e2`).
+- **No stability test exists:** the longest test kernel runs about 36 s. Nothing checks frames, handles, or processes coming back to a baseline over many cycles, or the audit chain after hours of work.
+
+**Options.**
+1. *Matrix axes and values:*
+   - (a) one axis changed at a time from today's configuration: firmware {UEFI, BIOS}; memory {the smallest that boots the system table, measured in #187; 256 MiB; 2 GiB; 4 GiB}; CPU {`qemu64`; `Skylake-Client` (SMEP, SMAP, XSAVE, AVX2); `max`}. That gives 7 cells. A kernel that needs one value, such as UEFI for `recovery`'s variable store, is listed with its reason and skipped in the other cells.
+   - (b) the full cross product, 24 cells.
+2. *KVM:* (a) TCG stays the reference (D-009) and KVM becomes an eighth cell. It is tried on a throwaway branch: if hosted runners give `/dev/kvm`, the cell runs in CI; otherwise it runs locally with the same command. (b) KVM replaces TCG on push.
+3. *Push and schedule:* (a) push stays as today. The matrix is one command, `cargo xtask matrix`, run locally or by a weekly scheduled workflow and by `workflow_dispatch`. The M5.1 gate, and each release from then on, needs a green matrix run on the commit being released. (b) The matrix runs on every push.
+4. *Stability:*
+   - (a) a `soak` kernel boots the system table and loops for a set time: an agent task, a service killed and restarted, `stop` and `start` from the trusted console. Every 5 minutes it checks that free frames, processes, and handles are back within a fixed margin of their values after the first cycle, every service is ready, and the audit chain verifies. It runs for 1 hour in the scheduled run and 8 hours locally before a release. A repeat pass runs every test kernel 3 times in the default cell, to catch flaky results.
+   - (b) repeat passes only.
+5. *S1 end to end:*
+   - (a) a `cargo xtask s1` scenario kernel: the runtime starts an agent whose task is answered by the real model, its `read_file` call validated and run, and its result checked against the host's output for the same greedy prompt. Locally under KVM it also checks S1's speed targets; this run is required at the M5.1 gate. The scheduled run downloads the model at its pinned revision, checks its SHA-256, caches it, and checks the output only.
+   - (b) local only.
+   - (c) the model committed through Git LFS.
+6. *Known crash bug:*
+   - (a) any failure in any matrix cell, stability run, or push run that is not shown by its log to be infrastructure. That covers a panic or triple fault, a fault or exit the test did not cause, a hang or timeout, and a result that changes between runs of the same commit. Infrastructure means a download failure or a runner error before QEMU starts. Each gets a `bug` issue in M5.1 and a test that fails without its fix. Retries stay disallowed (D-009).
+   - (b) kernel panics only.
+
+**Evaluation criteria.** Covers each axis M5.1 names; exercises kernel paths that today run in one kernel or none; keeps the push run near today's time and cost; one command reproduces any cell locally; no new dependency; every new check fails when broken (mutation); the gate's evidence is a recorded run on the released commit.
+
+**Recommendation:**
+1. **(a) One axis at a time, 7 cells.** Each failure points at one axis, and the cells reach the CPU and memory paths that today run in one kernel or none. The cross product (b) costs about 24 × 22 minutes a run for mostly duplicated coverage.
+2. **(a) TCG the reference, KVM a cell.** KVM changes timing, which is what the timing checks measure, so it adds coverage instead of replacing it; replacing TCG (b) would also hide TCG-only failures such as `exhaustion`'s. This amends D-009 only for the KVM cell.
+3. **(a) Push as today; the matrix weekly, on dispatch, and before each release.** About 7 × 22 + 66 + 60 ≈ 280 minutes a run, roughly 1,200 a month weekly. Running it on every push (b) would multiply each push's cost by about 10.
+4. **(a) Soak and repeat.** M5.1 asks for long-running tests, and leaks and drift show only over time; repeats alone (b) catch flakes but not leaks.
+5. **(a) The scenario kernel, local under KVM and scheduled in CI.** It answers F5 on Pharos with the agent, the tool call, and the model together, and keeps it checked after M5.1. (b) leaves it unchecked between releases. (c) adds a storage and bandwidth quota for a file pinned by hash anyway (Qwen2.5-0.5B-Instruct is Apache-2.0).
+6. **(a) Any non-infrastructure failure, flakes included.** With no retries, a flake fails the gate just as a crash does. `exhaustion`'s failure at `2f64de8` becomes the first #191 issue.
+
+**Consequences (if accepted).** testing.md gains the matrix, its cells, the per-kernel exceptions, and the soak and S1 kernels (#187); `xtask` gains `matrix`, `soak`, and `s1`; a scheduled workflow joins `ci.yml` after the KVM trial on a throwaway branch; D-009 is amended for the KVM cell; #191 opens a `bug` issue per known failure, starting with `exhaustion`'s; the M5.1 gate (#192) records a green matrix run, an 8-hour soak, and a local S1 run on the gate commit.
+
 ## Open and proposed decisions
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
