@@ -8,7 +8,7 @@
   - `pharos_user::try_send_cap`, the new audit actions `manage` (21) and `device` (22), and every new `unsafe` block.
 - **Design under review:** services.md, drivers.md, D-029, D-026, D-027, D-018, D-008, [capabilities.md](../architecture/capabilities.md).
 - **Date:** 2026-11-08, issue #173. Reviewer: AI-assisted (Claude Code), from reading the code; F1 was reproduced in QEMU. All four findings are fixed (2026-11-08), each with a test that fails without its fix except F4 (below).
-- **Status:** **proposed**, awaiting the maintainer.
+- **Status:** **approved** by the maintainer on 2026-11-09 (M4.4 gate, #173), with F1–F4 fixed.
 
 ## Method
 
