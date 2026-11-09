@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), and Phase 3 — AI Agent Platform (v0.3.0) are done. Current milestone: M4.6 — Integration of AI services without unrestricted kernel access.** Everything in Phases 4–5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), Phase 3 — AI Agent Platform (v0.3.0), and Phase 4 — Full Operating System (v0.4.0) are done. Current milestone: M5.1 — QEMU regression and release testing.** Everything in Phase 5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -42,8 +42,8 @@ The phases are not strictly sequential. These tracks run through every phase:
 | 1 | Foundation | Done (v0.1.0) |
 | 2 | Core System | Done (v0.2.0) |
 | 3 | AI Agent Platform | Done (v0.3.0; gate passed 2026-11-06 with M3.8) |
-| 4 | Full Operating System | **Current** (M4.6; M4.1–M4.5 done) |
-| 5 | Deployment and Release | Planned |
+| 4 | Full Operating System | Done (v0.4.0; gate passed 2026-11-09 with M4.6) |
+| 5 | Deployment and Release | **Current** (M5.1) |
 
 ---
 
@@ -475,7 +475,7 @@ Ordering notes:
 
 ## Phase 4 — Full Operating System
 
-**Status: Current** (M4.6; M4.1–M4.5 done).
+**Status: Done** — gate passed 2026-11-09 with the M4.6 gate: every M4.x gate passed, and the full threat-model review is complete ([review-m4.6-ai-services.md](../security/review-m4.6-ai-services.md#phase-4-the-threat-model)): every Phase 4 threat has a tested mitigation or a listed limit, and the limits carried to closed milestones have new places in Phase 5. Released as v0.4.0.
 
 - **Objective and scope:** Integrate the kernel, user-space services, and AI platform into a coherent, configurable, recoverable system.
 - **Deliverables:** M4.1–M4.6.
@@ -549,7 +549,7 @@ Ordering notes:
 
 ### M4.6 — Integration of AI services without unrestricted kernel access
 
-- **Objective and scope:** Run inference and the agent runtime as integrated system services with no privileged access. **Status: Current.** Issues #180–#185. D-031 accepted (#180): `infer` and the agent runtime keep their M4.2 manifests, each capability justified in the design and any unused one removed; adversarial tests run hostile programs under their exact manifests against kernel memory, other processes, devices, and the other services; failure tests crash, hang, and exhaust each until given up and check the trusted console, storage, knowledge, and audit still work and `start` brings them back; no KPTI and user-mode `rdtsc` are carried to M5.2, required before real-hardware use. Design approved (#181, 2026-11-09: [services.md](../architecture/services.md#ai-services-m46-d-031)): each capability of both services justified, none removed; two gaps to close, a hung `infer` stopping the runtime from starting and page limits not held against memory; a `compromised` kernel with hostile programs under the exact manifests, and an `aifail` kernel with crash, hang, and exhaust rounds. Next: #182.
+- **Objective and scope:** Run inference and the agent runtime as integrated system services with no privileged access. **Status: Done** — gate passed 2026-11-09: the CI jobs passed on `main` at `52dba2e` ([run 42678715226](https://github.com/codeaiforge/pharos-os/actions/runs/42678715226)) with 75 test kernels in 4 parallel shares, among them `compromised` (hostile stand-ins for `infer` and the runtime under their exact manifests: 83 and 86 attempts refused, the capability audit matching), `aifail` (a hung `infer`, the runtime crashed until given up, a runaway `infer` held off by the trusted reserve, and recovery from the trusted console), and `recovery` (`system ready` on the trusted console in safe mode, review F1); the store ignoring its read-only bit failed CI on a throwaway branch ([run 42680248800](https://github.com/codeaiforge/pharos-os/actions/runs/42680248800)) at `compromised` alone (`rogue: ALLOWED store APPEND to models`), while the host tests, Rust 1.85, and the other three shares passed, as the change is only in the store program; IPC round trip 1,888 ns median; the [AI services review](../security/review-m4.6-ai-services.md) approved with F1 and F2 fixed, F3 and F4 accepted, and F5 carried to M5.1. Issues #180–#185. D-031 accepted (#180): `infer` and the agent runtime keep their M4.2 manifests, each capability justified in the design and any unused one removed; adversarial tests run hostile programs under their exact manifests against kernel memory, other processes, devices, and the other services; failure tests crash, hang, and exhaust each until given up and check the trusted console, storage, knowledge, and audit still work and `start` brings them back; no KPTI and user-mode `rdtsc` are carried to M5.2, required before real-hardware use. Design approved (#181, 2026-11-09: [services.md](../architecture/services.md#ai-services-m46-d-031)): each capability of both services justified, none removed. Gaps closed (#182): the runtime starts beside a hung `infer`, and a trusted memory reserve (D-022 amended) keeps `trust` restartable beside a runaway one. Hostile-service tests (#183, `compromised`), failure tests (#184, `aifail`), and the gate (#185) passed.
 - **Deliverables:** AI services under the service manager with capability manifests.
 - **Prerequisites:** M4.2, Phase 3 gate.
 - **Acceptance criteria:** AI services run unprivileged; adversarial tests show they cannot access kernel memory or resources outside their capabilities; the system remains usable if AI services fail.
@@ -563,7 +563,7 @@ Ordering notes:
 
 ## Phase 5 — Deployment and Release
 
-**Status: Planned.**
+**Status: Current** (M5.1).
 
 - **Objective and scope:** Make the system releasable: broad testing, hardware compatibility, performance, security review, and reproducible artifacts.
 - **Deliverables:** M5.1–M5.5.
@@ -577,7 +577,7 @@ Ordering notes:
 
 ### M5.1 — QEMU regression and release testing
 
-- **Objective and scope:** Broaden the QEMU regression suite (running since M2.3) into a release test matrix. **Status: Planned.**
+- **Objective and scope:** Broaden the QEMU regression suite (running since M2.3) into a release test matrix. **Status: Current.** Carried in: the S1 scenario run end to end with the model driving an agent on Pharos (M4.6 review F5).
 - **Deliverables:** Test matrix (firmware, memory sizes, CPU models); long-running stability tests.
 - **Prerequisites:** Phase 4 gate.
 - **Acceptance criteria:** Full matrix passes; no known crash bugs open.
@@ -676,4 +676,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3 (released as v0.3.0 at its gate commit, `693c896`, tagged after the fact). M4.1 (integration of kernel and user-space services) and M4.2 (security model and privilege separation) passed their gates on 2026-11-06, M4.3 (reliable boot and recovery) on 2026-11-08, and M4.4 (device and service management) and M4.5 (system configuration and diagnostics) on 2026-11-09. The current milestone is **M4.6 — Integration of AI services without unrestricted kernel access**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3 (released as v0.3.0 at its gate commit, `693c896`, tagged after the fact). M4.1 (integration of kernel and user-space services) and M4.2 (security model and privilege separation) passed their gates on 2026-11-06, M4.3 (reliable boot and recovery) on 2026-11-08, and M4.4 (device and service management), M4.5 (system configuration and diagnostics), and M4.6 (integration of AI services without unrestricted kernel access) on 2026-11-09, which closed Phase 4 (released as v0.4.0). The current milestone is **M5.1 — QEMU regression and release testing**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

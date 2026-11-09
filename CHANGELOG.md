@@ -4,8 +4,14 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-09
+
+Phase 4 (Full Operating System) is complete. The kernel, the services, and the agent platform run as one system in QEMU: a service manager with restart policies and audited capability manifests, signed boot images in two slots with fallback, safe mode, recovery, and updates, service and device management from the trusted console, PCIe hotplug, a checked configuration file and health checks, and the AI services as unprivileged system services, tested as compromised and as failing services. Experimental: QEMU only; see the threat model for the open limits (no IOMMU, no KPTI, one CPU).
+
+
 ### Added
 
+- M4.6 gate (#185), closing Phase 4: CI green on `main` at `52dba2e` (run 42678715226, 75 test kernels in 4 shares, `compromised` and `aifail` among them); the store ignoring its read-only bit failed CI on a throwaway branch (run 42680248800) at `compromised` alone; roadmap: M4.6 and Phase 4 done, Phase 5 and M5.1 current; threat model updated at the gate, limits carried to closed milestones given new places; README and `pharos info`: Phase 5 stage; workspace version 0.4.0
 - CI's QEMU shares cache the Rust build and the Limine archive (`actions/cache`, already pinned in the workflow): run #242's shares each compiled for 58–143 s first; Limine is still checked against its SHA-256 and unpacked fresh
 - CI's QEMU job in 4 parallel shards (`cargo xtask test --shard N/M`): the test kernels split by their CI times, every kernel in exactly one share (host-tested), the boot check and reproducible image in share 1; run #236 spent 895 s in one job, about 210 s of test kernels per share now
 - M4.6 security review and Phase 4 threat-model review approved by the maintainer (#185, 2026-11-09), with F1 and F2 fixed, F3 and F4 accepted, and F5 carried to M5.1
@@ -369,7 +375,8 @@ Initial scaffold, completing Phase 1 (Foundation). Pharos OS is not bootable; th
 - Private vulnerability reporting through GitHub, documented in `SECURITY.md`.
 - Issue and pull-request templates, editor configuration, and optional VS Code recommendations.
 
-[Unreleased]: https://github.com/codeaiforge/pharos-os/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/codeaiforge/pharos-os/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/codeaiforge/pharos-os/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/codeaiforge/pharos-os/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/codeaiforge/pharos-os/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/codeaiforge/pharos-os/releases/tag/v0.1.0

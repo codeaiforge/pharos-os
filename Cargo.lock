@@ -16,19 +16,19 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "pharos-cli"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "pharos-elf"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "pharos-fs"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "pharos-image"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ed25519-compact",
  "pharos-fs",
@@ -37,11 +37,11 @@ dependencies = [
 
 [[package]]
 name = "pharos-infer"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "pharos-kernel"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "pharos-elf",
  "pharos-fs",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "pharos-programs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "libm",
  "pharos-fs",
@@ -64,29 +64,29 @@ dependencies = [
 
 [[package]]
 name = "pharos-proto"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "pharos-fs",
 ]
 
 [[package]]
 name = "pharos-services"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "pharos-store"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "pharos-fs",
 ]
 
 [[package]]
 name = "pharos-user"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "xtask"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "libm",
  "pharos-elf",

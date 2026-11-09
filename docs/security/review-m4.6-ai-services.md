@@ -63,7 +63,8 @@ Phase 4's gate asks for a full threat-model review. Each M4.x review covered wha
 
 - `scripts/check.sh`: passed (the Rust 1.85 step skipped: that toolchain is not installed here).
 - `cargo xtask test`: 75 test kernels passed, among them `aifail` and `compromised`.
-- CI on `main`: run 42655103116 passed at `863449e` (#183); run 42665044098 at `ccf7d34` (#184) was running when this was written.
+- CI on `main`: run 42655103116 passed at `863449e` (#183), run 42665044098 at `ccf7d34` (#184), and run 42678715226 at `52dba2e`, after the fixes, in 4 shares (the gate).
+- Gate mutation: the store ignoring its read-only bit failed CI on a throwaway branch (run 42680248800) at `compromised` alone (`rogue: ALLOWED store APPEND to models`), while the host tests, Rust 1.85, and the other three shares passed, as the change is only in the store program.
 - Mutations, each failing its test: the blocking attach (`aifail`), no reserve (`aifail`), no restart reset on `start` (`aifail`), the store's read-only bit ignored (`compromised`).
 
 ## `unsafe` added in M4.6
