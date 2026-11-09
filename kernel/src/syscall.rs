@@ -795,9 +795,14 @@ mod kernel {
         let mut done = 0;
         while done < pages {
             let batch = (pages - done).min(process::BATCH);
+            let class = sched::current_class();
             let mapped = sched::with_current_space(|space| {
                 let mut guard = crate::mm::frames();
                 let frames = guard.as_mut()?;
+                // Never into the trusted class's reserve (M4.6, #182).
+                if !process::may_take(frames.stats().free as u64, batch, class) {
+                    return None;
+                }
                 for i in done..done + batch {
                     if space
                         .map_new_page(start + i * 4096, Flags::USER_DATA, &[], frames)
@@ -1101,6 +1106,18 @@ mod kernel {
         budget: process::Budget,
         class: sched::Class,
     ) -> Result<u64, Error> {
+        // Never into the trusted class's reserve (M4.6, #182): the file's
+        // pages, the stack, and some page tables.
+        // ponytail: a zero-filled segment past the file is not counted; it
+        // is bounded by `MAX_PROGRAM`'s address range, not by the reserve.
+        let pages =
+            fs.size(file).unwrap_or(u64::MAX).div_ceil(4096) + process::STACK_SIZE / 4096 + 16;
+        let free = crate::mm::frames()
+            .as_ref()
+            .map_or(0, |f| f.stats().free as u64);
+        if !process::may_take(free, pages, class) {
+            return Err(Error::NoMemory);
+        }
         let (space, entry) = process::load_elf_file(fs, file).map_err(|e| match e {
             process::ProcessError::Map(_) | process::ProcessError::NoFrameAllocator => {
                 Error::NoMemory

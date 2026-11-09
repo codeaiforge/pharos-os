@@ -753,6 +753,8 @@ Two system calls per direction plus two task switches and two address-space swit
 
 **Consequences.** A spinning trusted or service process starves every lower class: those processes are trusted and reviewed, and spend their time waiting on IPC; the inference service computing a `GENERATE` holds agents off the CPU, which wait on it anyway. CPU budgets are enforced only by stopping, at the runtime's next check, so an agent overruns by up to that interval. The details (units, check intervals, the new status, the policy fields) are in the design (#113).
 
+
+**Amended (2026-11-09, #182, M4.6 gap 2; the maintainer chose the trusted reserve):** item 3's carving bounds a creator's children, but `init`'s children together could ask for more than memory (`store` and `infer` each 1 GiB, a 256 MiB guest in CI), so a runaway `infer` took every free frame and `trust` could not start. The kernel now keeps a **reserve of 2,048 frames (8 MiB) that only the trusted class may take** (`process::TRUSTED_RESERVE`, checked by `may_take` in `mem_map` and `spawn`): `init` can always start or restart `trust`, so the user can stop the service that took the rest. Rejected: page limits carved from `init`'s so they sum to memory (sizing `store` and `infer` to the machine at boot, a larger change). Accepted: services still share what is left, so a runaway service can starve its peers (`store`, `audit`, `knowledge`) until the user stops it.
 ### D-023: Tool interface and tool-call validation
 
 - **Status:** Accepted

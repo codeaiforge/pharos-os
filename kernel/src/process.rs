@@ -189,6 +189,21 @@ pub struct UserMemory {
     maps: Vec<(u64, u64)>,
 }
 
+/// Free frames only the trusted class may take (M4.6, #182; D-022 as
+/// amended): `init` can always start or restart `trust`, so the user can
+/// stop a service that took the rest. 8 MiB.
+/// ponytail: one reserve for the trusted class; the services class still
+/// shares the rest, so a runaway service can starve its peers until the
+/// user stops it (accepted, D-031 review).
+pub const TRUSTED_RESERVE: u64 = 2048;
+
+/// True if a process in `class` may take `pages` more frames while
+/// `free` are free: the trusted class always; another only if
+/// [`TRUSTED_RESERVE`] frames stay free after.
+pub fn may_take(free: u64, pages: u64, class: crate::sched::Class) -> bool {
+    class == crate::sched::TRUSTED || free.saturating_sub(pages) >= TRUSTED_RESERVE && free >= pages
+}
+
 /// Pages charged to a process for as long as this lives (#167, F1).
 #[derive(Debug)]
 pub struct Charge {
@@ -1124,6 +1139,20 @@ mod tests {
     use super::*;
 
     const PAGE: u64 = FRAME_SIZE;
+
+    /// The trusted class's reserve (M4.6, #182): others stop at it, the
+    /// trusted class does not.
+    #[test]
+    fn only_the_trusted_class_takes_the_reserve() {
+        let r = TRUSTED_RESERVE;
+        for class in [crate::sched::TRUSTED + 1, crate::sched::TRUSTED + 2] {
+            assert!(may_take(r + 64, 64, class), "down to the reserve");
+            assert!(!may_take(r + 63, 64, class), "one frame into it");
+            assert!(!may_take(10, 64, class), "more than is free");
+        }
+        assert!(may_take(r, 64, crate::sched::TRUSTED));
+        assert!(may_take(64, 64, crate::sched::TRUSTED));
+    }
 
     #[test]
     fn mappings_fill_gaps_and_respect_the_limit() {
