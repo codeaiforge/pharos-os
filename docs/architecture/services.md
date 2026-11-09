@@ -3,6 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-28 (M2.10, #59). It follows [D-015](../project/decision-log.md#d-015-network-stack-and-service-model) (as amended on 2026-10-28: badges instead of per-client endpoints), [D-014](../project/decision-log.md#d-014-ipc-model-and-system-call-mechanism) (IPC), and [D-004](../project/decision-log.md#d-004-kernel-architecture-and-privilege-boundaries). Networking is in [networking.md](networking.md).
+- **M4.5 (D-030):** system configuration and health checks below: design **proposed** (#175), awaiting the maintainer; nothing implemented.
 - **M4.4 (D-029):** runtime management below: design **approved** (#169, 2026-11-08); `start`, `stop service`, and `restart` **implemented** (#170); driver entries for hotplug **implemented** (#171, [drivers.md](drivers.md#hotplug-m44-d-029)).
 - **M4.3 (D-028):** **implemented (#163):** with the boot table, `init` starts the storage service from the factory image, picks and verifies an image slot, mounts it with `fs_mount`, starts the other services from it (`trust`'s program always from the factory image), and falls back in place to the other slot, then the factory image; it reports `[ready, failed, image]`. **Implemented (#164):** safe mode and recovery: the kernel's mode in `init`'s argument (bits 8 and up), else the slot record's one-shot `next`; the agent runtime `off` in both; recovery on the factory image (or the `recovery` copy), also when the factory image is not ready; the report `[ready, failed, image, mode]`; `trust`'s `system`, `safe`, and `recovery` (`SYSTEM`, `NEXT`). **Implemented (#165):** updates staged from the host: `trust`'s `update` (`UPDATE`, answered at once, then an `OFFER` per file), `apply <n>` and `discard <n>` (`ANSWER`), and `rollback` (`ROLLBACK`); an approved update goes to the slot that is not active and is tried in place, and one that is not ready is bad and the previous slot runs again. An agent with `update propose` only adds a file to `system/incoming` (`PROPOSE`, through the runtime's namespace 9; the boot table gives the runtime no such capability, as no boot entry may propose). Design in [boot.md](boot.md#8-recovery-and-updates-m43-d-028).
 - **M4.1 (D-026, #149):** restart policies, the ready state, and failure reporting below are **planned**. Design approved by the maintainer on 2026-11-06 (#149), with a daemon that sends no `ready` in 10 s counted as a crash.
@@ -277,6 +278,60 @@ Statuses: `OK`, `UNKNOWN` (no entry by that name in the running table, so also e
   - **A restarted `trust` holds the emergency stop again:** right after its audit line it asks `init` with a new request, `RUNTIME` (op 10), and `init` answers `[OK]` with the running runtime's process capability (`STOP`, `WAIT`) attached, through a new non-blocking `pharos_user::try_send_cap`, or `[NOT_FOUND]` (at boot, when the runtime is registered once it starts). Before, a `trust` restarted after a crash (M4.1) had no runtime capability, so `stop all` did nothing until the runtime restarted. A blocking send from `init` was tried first and deadlocked with `trust`'s own `services` call. Still lost when `trust` restarts: the runtime's channel to `trust` and its agents' registrations (names, groups, open approvals), until the runtime restarts; `stop all` does not need them.
   - The help line became two lines: one console line holds 256 bytes.
 
+### Configuration and health (M4.5, D-030)
+
+**Proposed (#175), awaiting the maintainer; nothing below is implemented.** D-030 (#174): configuration holds settings only, each within a ceiling in reviewed code; one file in the signed root image; the manifest format; checked when the image is built, when an update is offered, and at boot, and refused whole, never narrowed; `init` checks each daemon's health; `trust` gains `health` and `config`.
+
+**The file:** `etc/system.conf` in the root image, at most 4 KiB. A missing file means every compiled value (today's behavior). Lines as in agent manifests: `key = value`, `#` comments, blank lines ignored; sections `[service <name>]`. The first line that is not a comment is `config = 1`. Every key is optional and appears at most once per section.
+
+```text
+config = 1
+[service net]
+start = no
+[service knowledge]
+restarts = 1
+delay_ms = 500
+```
+
+| Key | Value | Ceiling (compiled) | Refused when |
+| --- | --- | --- | --- |
+| `start` | `yes` or `no` | — | `no` for `trust`, `audit`, or `store` (`PROTECTED`), for a driver entry, or for a service another entry that starts lists in `after` (the error names it) |
+| `restarts` | 0–255 | the entry's `Restart::Up(n)`: at most `n` (`Never`: only 0) | over the ceiling |
+| `delay_ms` | the first restart's delay, 10–60,000 | — (a longer delay grants nothing) | out of range |
+
+A section for a name not in the table, an unknown key, a repeated section or key, a value out of range, a missing or other `config =` line, a file over 4 KiB, or a line over 128 bytes is an error. The checker reports the first: line number and reason (`line 4: restarts 5 over 3 for knowledge`). A file with an error is refused whole; nothing in it is used.
+
+**Code:** `pharos_services::config`, `no_std`, no dependency: `parse(text, table) -> Result<Config, Error>` and `Config::restart(i)`, `delay(i)`, `starts(i)`. The table is the one `init` runs, so test tables get their own checks. Host-tested on every rule and fuzzed like the manifest parser (`pharos_proto::fuzz`).
+
+**Where it is checked:**
+1. *When built:* the image builder (`cargo xtask` building the root, and `cargo xtask image sign`) parses `etc/system.conf` against the boot table and stops with the error, so a bad file never ships.
+2. *When offered:* `init`'s `UPDATE` already copies each incoming image into its memory to verify it (`Slots::check`). It then opens the image (`pharos_fs` over the bytes) and checks its `etc/system.conf`. A bad file refuses the offer like a bad signature: `incoming <name> refused: line 4: …` on `trust`, with a new `Refusal::Config`, and the file is never offered, so `apply` cannot reach it.
+3. *At boot:* after mounting a slot and before starting anything from it, `init` reads the file from the mounted image. A bad file makes the slot bad with the same refusal, and `init` falls back in place (D-028). The factory image's file is checked by the build; if it is still bad at boot, `init` reports it and runs with the compiled values.
+
+**Which configuration applies:** the file of the image whose services `init` starts (a slot or the factory image). Safe mode and recovery ignore it and use the compiled values, so no file can change what recovery starts. `start`, `restart`, and `stop service` on the console still work on a service the file does not start: the file sets the boot, the user overrides it. Applying a new file means applying its image (D-028); nothing is reloaded in place.
+
+**Agent limits: left out (changed from D-030).** The boot agent policy table is empty (agents.md), so at boot there is nothing for a file to narrow. Its entries live in `bin/agents`, which `init` cannot check against, so an agent section could only be checked when the runtime starts, after the image is applied. Agent sections are left until a boot policy entry exists; until then `[agent …]` is an unknown section.
+
+**Health checks:** every 10 s `init` calls each daemon in state `Ready` with `INFO` (common op `0xf0`) on the endpoint it holds, with a 100 ms timeout, one service at a time. An answer of any status counts. Each entry has a compiled `quiet` window: a service that has answered no check for that long is **unresponsive**:
+- 30 s for most services; 600 s for `infer`, which serves one generation at a time and may be busy that long; 60 s for `store`, which may be reading a 16 MiB image;
+- the window is compiled, not configured;
+- a check never blocks `init` for more than 100 ms, so a hung service delays `init` by at most 100 ms every 10 s.
+
+An unresponsive service is reported (new service event `Unresponsive` = 15, `service <name> unresponsive for 30 s; restarting`), audited like other service events, stopped, and handled as a crash by its policy (D-026). It is never restarted past its limit. `audit` and `trust` answer no `INFO` today; each gains one (`audit` on `init`'s unbadged capability, `trust` on its service endpoint). Drivers and one-shots are not checked.
+
+**Console commands** (`pharos_proto::trust::command`):
+
+| Command | Meaning |
+| --- | --- |
+| `health` | Each service: state, restarts used and allowed, uptime, seconds since its last answered check. Then each running agent: name, attempt and attempts allowed, seconds since its last progress report against its `progress_ms` |
+| `config` | Where the configuration came from (`slot a version 7`, `factory`, `compiled values (safe mode)`) and each setting that differs from the compiled value |
+
+**`init` requests** (on `trust`'s badge, like `SERVICES`): 11 `HEALTH` (paged like `SERVICES`: `[version, 11, from]`; each entry's state, restarts, uptime, last check), 12 `CONFIG` (`[status, source, version, count, settings…]`). Agent lines come from the runtime: a new runtime op `HEALTH` answered to `trust` (each running agent's name, attempt, and last progress), from what the runtime already keeps.
+
+**Audit:** new action 23 `config` for a configuration refused (where: build is not audited; offer and boot are, with the image's name and the reason); the `Unresponsive` event under the existing service action.
+
+**Rejected in the design:** reloading a file without a new image (a second write path, D-030); configuring the `quiet` window (a short one would let a file restart `infer` mid-generation); a health check by `process_usage` CPU time (a busy service and a hung one look the same).
+
 ## 4. Security
 
 - **The trust boundary is unchanged:** every process, `init` included, is untrusted by the kernel. `init` holds the most authority (every device, the root filesystem). It is small, and its service table is reviewed code.
@@ -291,6 +346,8 @@ Statuses: `OK`, `UNKNOWN` (no entry by that name in the running table, so also e
 - **Notifications** carry no data: a forged or coalesced bit only makes a receiver re-check its source. Only the kernel sets them, and only on endpoints the binder receives on.
 - **Untrusted programs:** program files come only through file capabilities, so `init` can start only programs from the filesystems it was given. The ELF loader is unchanged.
 - **Runtime management (M4.4, #170):** only `trust`'s badge reaches `START`, `STOP`, and `RESTART`, so an agent or service cannot stop anything; a start uses only a compiled entry's manifest, so it adds no authority the capability audit does not already check; `trust`, `audit`, and `store` cannot be stopped, so no command ends the console or the audit trail.
+- **Configuration (M4.5, D-030, planned):** a file can only lower restart limits, change delays within a range, and not start services nobody needs; it names no capability, program, or manifest, so the capability audit (D-027) is unchanged; `trust`, `audit`, and `store` always start; it changes only with a signed image the user applied, and recovery ignores it.
+- **Health checks (planned):** `init` sends only `INFO`, which changes nothing; a service can hide a hang from its callers but not from the check; a check costs `init` at most 100 ms.
 - The threat model gains a "Processes and services" section (planned).
 
 ## 5. Testing
@@ -308,6 +365,10 @@ Statuses: `OK`, `UNKNOWN` (no entry by that name in the running table, so also e
 | QEMU, `supervision` (#150, #152) | each policy: `Never` not restarted, `Up(n)` restarted n times no sooner than each delay, then given up; no `ready` in 10 s counted as a crash; a stopped service never restarted; each event one audit record and one `trust` line; mutation-checked |
 | QEMU, `system` (#151, #153) | the boot table to ready (console and trail), a restart with its dependents, a stop, a give-up, `services`; mutation-checked |
 | Host, `pharos-services` (#157) | each manifest rule on the boot and test tables; a table breaking each rule refused |
+| Host, `pharos_services::config` (#176, planned) | each key and refusal in the table above; line numbers; a file refused whole; every truncation; fuzzed; the boot table's own file accepted |
+| Host, `xtask` (#176, planned) | a root with a bad `etc/system.conf` refused by the builder with the line |
+| QEMU, `config` (#176, #178, planned) | slots signed by the runner: an update whose file disables `audit` refused at offer with its line, and one over a ceiling (`restarts`) refused, never offered; an accepted one with `net` off and `knowledge` at 1 restart applied: `net` not started, `start net` works, `knowledge` given up after one restart; a slot with a bad file written straight into the store refused at boot, fallback to the other; `config` shows each source; safe mode ignores the file; each refusal one audit record |
+| QEMU, `health` (#177, #178, planned) | a test daemon that stops receiving after ready found unresponsive after its window, reported, audited, and restarted by its policy; a daemon busy for less than its window not restarted; `health` shows each service and an agent's progress; mutation-checked at the gate (a file over a ceiling accepted) |
 | QEMU, `system` with the capability audit (#158) | every live service's table against its manifest and gains, at ready and after the faults; mutation-checked (one capability more) |
 
 ## 6. Alternatives
