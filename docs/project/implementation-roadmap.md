@@ -537,7 +537,7 @@ Ordering notes:
 
 ### M4.5 — System configuration and diagnostics
 
-- **Objective and scope:** Declarative configuration and diagnostics (logs, health checks). **Status: Current.**
+- **Objective and scope:** Declarative configuration and diagnostics (logs, health checks). **Status: Current.** Issues #174–#179. D-030 accepted (#174): configuration holds settings only, never authority: which optional services start (`net`, `infer`, `knowledge`, `agents`), restart limits and delays, and agent policy limits, each within a ceiling compiled into reviewed code; one file, `etc/system.conf`, in the signed root image, so a change is a signed update with the user's yes and rollback (D-028); the manifest format; checked by one host-tested parser when the image is built, when an update is offered, and at boot, and refused, not narrowed; `init` sends each ready daemon `INFO` every 10 s and restarts one that misses two by its policy; `trust` gains `health` and `config`. Next: the design (#175).
 - **Deliverables:** Configuration format and validation; diagnostics tooling.
 - **Prerequisites:** M4.4.
 - **Acceptance criteria:** Invalid configuration is rejected with a clear error before it is applied; diagnostics report service and agent health.
@@ -671,6 +671,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-027 | Per-service capability manifests and how they are checked | M4.2 | **Accepted** (#155): the manifest is `init`'s table entry, each capability's object, rights, and badge written out, plus each service's declared runtime gains; enforced by construction and checked by a capability audit test kernel at ready and after faults; no manifest file, no new kernel call |
 | D-028 | Boot recovery, known-good images, and signed updates | M4.3 | **Accepted** (#160): an update replaces only the root image; a factory image on the boot medium plus slots A and B in the store; `init` verifies a slot's Ed25519 signature (`ed25519-compact`, after review) and has the kernel mount it with one new call; an attempt record marked good at ready, 3 failed attempts or a time limit fall back; safe mode and recovery automatic, from Limine, or from `trust`; an update needs a valid signature and the user's yes; Secure Boot evaluated now, enforced in M5.5 |
 | D-029 | Runtime management of services and devices | M4.4 | **Accepted** (#168): the trusted console only; `trust`, `audit`, and `store` restartable, not stoppable; dependents keep running and are reported; only compiled table entries start; native PCIe hotplug on root ports, polled, BARs assigned by the kernel in the port's window, after an experiment (fallback: driver restart, hotplug to M5.2); hotplug slots only, protected drivers refuse removal |
+| D-030 | System configuration and diagnostics | M4.5 | **Accepted** (#174): settings only, within compiled ceilings; `etc/system.conf` in the signed root image; the manifest format; checked at build, update offer, and boot, refused not narrowed; `INFO` health checks every 10 s, an unresponsive daemon restarted by its policy; `trust`'s `health` and `config` |
 
 ## Next milestone
 
