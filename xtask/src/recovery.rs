@@ -295,7 +295,10 @@ pub fn rounds(
     //    and without its configuration, which turns `net` off (M4.5).
     let slot_a = signed(&with_config(&dir, programs, NET_OFF)?, 6, &seed);
     store_next(&store_path, &slot_a, None, Mode::Safe)?;
-    let log = boot(iso, vars, logs, extra, "next-safe", None)?;
+    // `trust` must say the system is ready (M4.6 review F1): with no
+    // runtime after it, `init` reports ready while `trust` still waits on
+    // its first call to `init`, and used to drop the event after 100 ms.
+    let (log, _) = boot_typed(iso, vars, logs, extra, "next-safe", SAFE_READY)?;
     let [a, b, c] = off("safe");
     expect(
         "next-safe",
@@ -525,6 +528,9 @@ fn store_with(path: &Path, record: &Record, files: &[(&[u8], &[u8])]) -> Result<
     store_image::with_room(path, &all)
 }
 
+/// Safe mode's trusted console: every service but the runtime is ready.
+const SAFE_READY: &[console::Step] = &[("system ready: 7 services", "")];
+
 /// Boots once with a fresh trusted console that `steps` play; returns
 /// the serial log and what `trust` said.
 #[allow(clippy::too_many_arguments)]
@@ -542,9 +548,7 @@ fn boot_typed(
     let base = console::fifos(dir)?;
     let script = console::Script::start(&base, None, None, steps)?;
     let log = boot(iso, vars, logs, extra, round, None)?;
-    let said = script
-        .finish(&[])
-        .map_err(|e| format!("{UPDATE_TEST} {round}: {e}"))?;
+    let said = script.finish(&[]).map_err(|e| format!("{round}: {e}"))?;
     Ok((log, said))
 }
 

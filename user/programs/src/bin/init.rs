@@ -189,6 +189,8 @@ const AUDIT_US: u64 = 1_000_000;
 const AUDIT_RETRY_MAX_US: u64 = 60_000_000;
 /// Most records waiting for the audit service; the oldest is dropped.
 const MAX_UNSENT: usize = 32;
+/// Events and offers kept for `trust` while it is busy (M4.6 review F1).
+const MAX_TO_TRUST: usize = 32;
 /// How long a service may take to answer `RELEASE`.
 const RELEASE_US: u64 = 1_000_000;
 /// How long an image's services may take to be ready (boot.md section 8).
@@ -222,6 +224,11 @@ struct Init {
     /// When to try them again, and the wait after the next failure.
     retry_at: u64,
     retry_us: u64,
+    /// Events and offers `trust` has not taken yet, oldest first, and when
+    /// the oldest was first offered (M4.6 review F1): `init` never waits on
+    /// `trust`, which may be waiting on `init`.
+    to_trust: core::cell::RefCell<VecDeque<Vec<u8>>>,
+    to_trust_since: core::cell::Cell<u64>,
     /// The filesystem services start from (but [`FACTORY`]'s), and which
     /// image it is: 0 factory, 1 slot A, 2 slot B.
     image: Handle,
@@ -529,8 +536,8 @@ impl Init {
     }
 
     /// Tells `trust` a `SERVICE` (#151), with as many of `names` as fit,
-    /// if it runs, trying for at most 100 ms: it waits in `receive` almost
-    /// always, and `init` never waits on it longer.
+    /// if it runs: now, or from the queue once `trust` waits for it
+    /// ([`Self::offer_trust`]; M4.6 review F1: it was dropped after 100 ms).
     fn tell_trust(&self, event: Event, name: &[u8], numbers: [u32; 3], names: &[&[u8]]) {
         if !self.up(b"bin/trust") {
             return;
@@ -547,11 +554,44 @@ impl Init {
             trust::encode(&req, &mut msg)
         });
         let Some(n) = fits else { return };
-        for _ in 0..10 {
-            if try_send(self.trust, &msg[..n]).is_ok() {
-                return;
+        self.offer_trust(&msg[..n]);
+    }
+
+    /// Gives `trust` `msg` now if it is waiting, else queues it behind the
+    /// others (at most [`MAX_TO_TRUST`], the oldest dropped first).
+    fn offer_trust(&self, msg: &[u8]) {
+        let mut queue = self.to_trust.borrow_mut();
+        if queue.is_empty() && try_send(self.trust, msg).is_ok() {
+            return;
+        }
+        if queue.is_empty() {
+            self.to_trust_since.set(uptime());
+        }
+        if queue.len() == MAX_TO_TRUST {
+            queue.pop_front();
+        }
+        queue.push_back(msg.to_vec());
+    }
+
+    /// Gives `trust` what it has not taken, in order; one it has not taken
+    /// for [`trust::EVENT_US`], longer than any one wait of `trust`, is
+    /// dropped (M4.6 review F1). Nothing is kept for a `trust` not running.
+    fn flush_trust(&self) {
+        let mut queue = self.to_trust.borrow_mut();
+        if !self.up(b"bin/trust") {
+            queue.clear();
+            return;
+        }
+        while let Some(msg) = queue.front() {
+            let now = uptime();
+            if try_send(self.trust, msg).is_err() {
+                if now.saturating_sub(self.to_trust_since.get()) < trust::EVENT_US {
+                    return;
+                }
+                say("trust", "event not taken; dropped", None);
             }
-            pharos_user::sleep(10_000);
+            queue.pop_front();
+            self.to_trust_since.set(now);
         }
     }
 
@@ -773,8 +813,16 @@ impl Init {
         self.tell_trust(Event::ByUser, me, [code, 0, 0], shown_users);
         if plan != Plan::Start {
             if self.table[j].path == b"bin/trust" {
-                // ponytail: a fixed 100 ms for `trust` to print the line it
-                // just took; a reply to `SERVICE` if it is ever too short.
+                // The old `trust` takes what is queued, then gets a fixed
+                // 100 ms to print the line it took.
+                // ponytail: a reply to `SERVICE` if 100 ms is ever too short.
+                let start = uptime();
+                while !self.to_trust.borrow().is_empty()
+                    && uptime().saturating_sub(start) < trust::EVENT_US
+                {
+                    self.flush_trust();
+                    pharos_user::sleep(10_000);
+                }
                 pharos_user::sleep(100_000);
             }
             self.stop_one(j);
@@ -1160,6 +1208,7 @@ impl Init {
     fn step(&mut self) {
         self.record_starts();
         self.flush();
+        self.flush_trust();
         if uptime() >= self.next_check {
             self.check_health();
             self.next_check = uptime().saturating_add(supervise::CHECK_US);
@@ -1169,6 +1218,9 @@ impl Init {
         wait = wait.min(self.wake_by.saturating_sub(uptime()));
         if !self.unsent.is_empty() {
             wait = wait.min(self.retry_at.saturating_sub(uptime()).max(10_000));
+        }
+        if !self.to_trust.borrow().is_empty() {
+            wait = wait.min(10_000);
         }
 
         // Room for a management request's name (#170).
@@ -1643,8 +1695,7 @@ impl Init {
         (self.image_number, version)
     }
 
-    /// Sends `trust` an `OFFER`, trying for at most 100 ms, as
-    /// [`Self::tell_trust`].
+    /// Sends `trust` an `OFFER`, as [`Self::tell_trust`].
     fn tell_offer(
         &self,
         number: u16,
@@ -1668,12 +1719,7 @@ impl Init {
         let Some(n) = trust::encode(&trust::Request::Offer(offer), &mut msg) else {
             return;
         };
-        for _ in 0..10 {
-            if try_send(self.trust, &msg[..n]).is_ok() {
-                return;
-            }
-            pharos_user::sleep(10_000);
-        }
+        self.offer_trust(&msg[..n]);
     }
 
     /// Whether `trust`'s update request may run now; else `BUSY` is sent.
@@ -2017,6 +2063,8 @@ fn main(arg: u64) -> u64 {
         restarts: [0; MAX_SERVICES],
         recorded: [false; MAX_SERVICES],
         unsent: VecDeque::new(),
+        to_trust: core::cell::RefCell::new(VecDeque::new()),
+        to_trust_since: core::cell::Cell::new(0),
         retry_at: 0,
         retry_us: AUDIT_US,
         image: ROOT,

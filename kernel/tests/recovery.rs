@@ -106,4 +106,10 @@ fn run(t: &mut TestRun) {
         .count();
     let all = boot as u8 - u8::from(mode != 0);
     t.check("every boot service is ready", (ready, failed) == (all, 0));
+    // Outside normal mode nothing starts after `trust`, so `init` reports
+    // ready while `trust` still waits on its first call; the runner checks
+    // `trust` shows it once that call ends (M4.6 review F1).
+    if mode != 0 {
+        sched::sleep(Duration::from_secs(3));
+    }
 }

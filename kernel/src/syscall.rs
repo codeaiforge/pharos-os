@@ -1106,19 +1106,7 @@ mod kernel {
         budget: process::Budget,
         class: sched::Class,
     ) -> Result<u64, Error> {
-        // Never into the trusted class's reserve (M4.6, #182): the file's
-        // pages, the stack, and some page tables.
-        // ponytail: a zero-filled segment past the file is not counted; it
-        // is bounded by `MAX_PROGRAM`'s address range, not by the reserve.
-        let pages =
-            fs.size(file).unwrap_or(u64::MAX).div_ceil(4096) + process::STACK_SIZE / 4096 + 16;
-        let free = crate::mm::frames()
-            .as_ref()
-            .map_or(0, |f| f.stats().free as u64);
-        if !process::may_take(free, pages, class) {
-            return Err(Error::NoMemory);
-        }
-        let (space, entry) = process::load_elf_file(fs, file).map_err(|e| match e {
+        let (space, entry) = process::load_elf_file(fs, file, class).map_err(|e| match e {
             process::ProcessError::Map(_) | process::ProcessError::NoFrameAllocator => {
                 Error::NoMemory
             }
@@ -1318,12 +1306,17 @@ mod kernel {
                 if !device.dma_fits(pages) {
                     return Err(Error::NoMemory);
                 }
+                let class = sched::current_class();
                 let phys = sched::with_current_space(|space| {
                     if !space.range_free(addr, pages as u64) {
                         return Err(Error::InUse);
                     }
                     let mut guard = crate::mm::frames();
                     let frames = guard.as_mut().ok_or(Error::NoMemory)?;
+                    // Never into the trusted class's reserve (M4.6 review F2).
+                    if !process::may_take(frames.stats().free as u64, pages as u64, class) {
+                        return Err(Error::NoMemory);
+                    }
                     space.map_dma(addr, pages, frames).map_err(|e| match e {
                         MapError::OutOfMemory => Error::NoMemory,
                         _ => Error::BadAddress,

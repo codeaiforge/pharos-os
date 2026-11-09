@@ -18,7 +18,7 @@ M3.4 gives agents only granted permissions, with every consequential action audi
 What M3.5 builds on:
 - **The scheduler** has one first-in first-out ready queue and a 10 ms slice ([scheduling.md](scheduling.md)); nothing is counted per task.
 - **Processes** get a page limit at `spawn` (bits 32–63 of its `count` argument), at most the creator's but not taken from it ([user-environment.md](user-environment.md)); at most 32 live processes system-wide, 64 handles each.
-- **The trusted reserve (#182, M4.6; D-022 amended):** limits are not held against memory, so the kernel keeps 2,048 frames (8 MiB) only the trusted class may take (`process::TRUSTED_RESERVE`, in `mem_map` and `spawn`); `init` can always start or restart `trust`. Other classes share the rest, so a runaway service can starve its peers until the user stops it.
+- **The trusted reserve (#182, M4.6; D-022 amended):** limits are not held against memory, so the kernel keeps 2,048 frames (8 MiB) only the trusted class may take (`process::TRUSTED_RESERVE`, in `mem_map`, `dma_alloc`, and `spawn`, which counts every page of the program's segments; M4.6 review F2); `init` can always start or restart `trust`. Other classes share the rest, so a runaway service can starve its peers until the user stops it.
 - **The agent runtime** serves one message at a time, calling the store (10 s), inference (`GENERATE` up to 60 s), audit (2 s), and network (1 s) services with `call_timeout`. It already stops agents with no request for `progress_ms` or over `task_ms`, and holds each agent's `STOP` right ([agents.md](agents.md)).
 - **The inference service** runs one session at a time and answers `BUSY` to others ([inference.md](inference.md)).
 

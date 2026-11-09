@@ -79,20 +79,14 @@ const SERVICE: Handle = 2;
 const REPORT: Handle = 3;
 const AUDIT: Handle = 4;
 const KNOWLEDGE: Handle = 5;
-/// How long `trust` waits for the knowledge service's `VERIFY`.
-const KNOWLEDGE_US: u64 = 1_000_000;
-/// How long `trust` waits for the audit service's `HEAD`.
-const AUDIT_US: u64 = 1_000_000;
-/// How long `trust` waits for each page of `init`'s `SERVICES`.
-const INIT_US: u64 = 1_000_000;
+// Its waits, shared with `init`, which outlasts each (M4.6 review F1).
+use pharos_proto::trust::{AUDIT_US, INIT_US, KNOWLEDGE_US, RUNTIME_SEND_US, STOP_WAIT_US};
 const BASE: u64 = 0x1000_0000;
 /// Two lines: one console line holds at most 256 bytes.
 const HELP: &[u8] = b"commands: list, stop <agent>, stop group <group>, stop all, \
 revoke <agent> <permission>, yes <n>, no <n>, audit, usage, verify <scope> <key> <version> <hash>";
 const HELP_SYSTEM: &[u8] = b"commands: services, health, config, start <service>, \
 restart <service>, stop service <service>, system, safe, recovery, update, apply <n>, discard <n>, rollback";
-/// How long a stop may take before the answer says it is still running.
-const STOP_WAIT_US: u64 = 1_000_000;
 
 /// A registered agent: its name, its group (#136), and its process
 /// capability (`STOP`, `WAIT`).
@@ -168,7 +162,7 @@ impl Trust {
         let (Some(c), Some(n)) = (self.channel, agents::encode(req, &mut msg)) else {
             return false;
         };
-        for _ in 0..200 {
+        for _ in 0..RUNTIME_SEND_US / 10_000 {
             if try_send(c, &msg[..n]).is_ok() {
                 return true;
             }

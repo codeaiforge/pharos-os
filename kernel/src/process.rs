@@ -423,14 +423,18 @@ const USER_RODATA: Flags = Flags {
 /// failure everything allocated is freed again.
 pub fn load_elf(fs: &crate::fs::Fs, path: &[u8]) -> Result<(AddressSpace, u64), ProcessError> {
     let file = fs.lookup(path).map_err(|_| ProcessError::NoSuchProgram)?;
-    load_elf_file(fs, file)
+    load_elf_file(fs, file, crate::sched::TRUSTED)
 }
 
 /// [`load_elf`] for a file already looked up (`spawn` takes a file
 /// capability).
+/// A child of `class` may not take the trusted class's reserve
+/// ([`may_take`], M4.6 review F2): every page its segments span, the
+/// stack, and some page tables.
 pub fn load_elf_file(
     fs: &crate::fs::Fs,
     file: pharos_fs::FileId,
+    class: crate::sched::Class,
 ) -> Result<(AddressSpace, u64), ProcessError> {
     let size = fs.size(file).map_err(|_| ProcessError::NoSuchProgram)?;
     if size == 0 || size > MAX_PROGRAM {
@@ -447,6 +451,14 @@ pub fn load_elf_file(
 
     let mut guard = mm::frames();
     let frames = guard.as_mut().ok_or(ProcessError::NoFrameAllocator)?;
+    let pages = (program.segments().iter())
+        .map(|s| (s.pages().end - s.pages().start) / FRAME_SIZE)
+        .sum::<u64>()
+        + STACK_SIZE / FRAME_SIZE
+        + 16;
+    if !may_take(frames.stats().free as u64, pages, class) {
+        return Err(ProcessError::Map(MapError::OutOfMemory));
+    }
     let mut space = AddressSpace::new_user(frames).map_err(ProcessError::Map)?;
     let mut fill = |space: &mut AddressSpace, frames: &mut FrameAllocator<'_>| {
         for segment in program.segments() {

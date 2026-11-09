@@ -46,6 +46,21 @@ use crate::{Reader, Refused, Writer, split};
 pub const NAME: &[u8] = b"trust";
 pub const VERSION: u8 = 1;
 
+/// How long `trust` waits on each call it makes (M4.6 review F1): to
+/// `init` (each page of `SERVICES`, `RUNTIME`), to the audit service, to
+/// the knowledge service, and for a stopped process to end.
+pub const INIT_US: u64 = 1_000_000;
+pub const AUDIT_US: u64 = 1_000_000;
+pub const KNOWLEDGE_US: u64 = 1_000_000;
+pub const STOP_WAIT_US: u64 = 1_000_000;
+/// How long `trust` keeps offering a message to the runtime, which may be
+/// busy or hung.
+pub const RUNTIME_SEND_US: u64 = 2_000_000;
+/// How long `init` keeps an event (`SERVICE`) or offer for `trust`, which
+/// it never waits on: longer than any one wait above, so an event is not
+/// lost while `trust` waits (M4.6 review F1; it was 100 ms).
+pub const EVENT_US: u64 = 2_500_000;
+
 /// Operation codes.
 pub mod op {
     pub const RUNTIME: u8 = 1;
@@ -917,6 +932,21 @@ impl Default for Lines {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `init` offers each event longer than `trust` ever waits (M4.6
+    /// review F1).
+    #[test]
+    fn init_outlasts_every_wait_of_trust() {
+        for wait in [
+            INIT_US,
+            AUDIT_US,
+            KNOWLEDGE_US,
+            STOP_WAIT_US,
+            RUNTIME_SEND_US,
+        ] {
+            assert!(EVENT_US > wait, "{EVENT_US} <= {wait}");
+        }
+    }
 
     #[test]
     fn requests_round_trip() {
