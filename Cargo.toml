@@ -8,7 +8,7 @@ members = ["crates/pharos-elf", "crates/pharos-fs", "crates/pharos-image", "crat
 default-members = ["crates/pharos-elf", "crates/pharos-fs", "crates/pharos-image", "crates/pharos-infer", "crates/pharos-proto", "crates/pharos-services", "crates/pharos-store", "tools/pharos-cli", "user/pharos-user", "xtask"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # Edition 2024 requires Rust 1.85. Verified by the `msrv` CI job.
 rust-version = "1.85"

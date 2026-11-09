@@ -64,6 +64,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Changed
 
+- Workspace version 0.3.0, for Phase 3 released as v0.3.0 (tagged at its gate commit); the README's status brought up to date (it still named M3.7 as current)
 - The boot agent runtime runs with less (#157, D-027): no network, `files`, or knowledge capability, as its boot policy table runs no agent; every other boot service was reviewed and keeps what it has (services.md lists each). The `system` kernel finds the runtime by its root filesystem
 
 ### Fixed
