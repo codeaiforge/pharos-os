@@ -358,6 +358,7 @@ mod tests {
             ("test", TEST),
             ("network", NETWORK),
             ("supervision", SUPERVISE),
+            ("health", HEALTH),
         ] {
             assert_eq!(check(table), Ok(()), "{name}");
         }

@@ -1532,7 +1532,16 @@ const MANAGE_SCRIPT: &[console::Step] = &[
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
         "services\n",
     ),
-    ("services: agents ready, restarts 0 of 3", "stop all\n"),
+    ("services: agents ready, restarts 0 of 3", "health\n"),
+    // M4.5: each service's health, every one answering its checks, and
+    // each agent process; then the configuration, the shipped file's.
+    ("health: knowledge ready, restarts 0 of 3, up ", ""),
+    ("health: agents ready, restarts 0 of 3, up ", ""),
+    ("health: agent runtime running", "config\n"),
+    (
+        "config: from factory image; every compiled value",
+        "stop all\n",
+    ),
     ("stopped all", ""),
 ];
 /// Device add and remove (#171, D-029): the boot table and image, with a
@@ -1667,6 +1676,13 @@ fn manage_checks(image: &Path, console: &str) -> Result<()> {
         return Err(format!(
             "manage: {managed} manage records, expected {expected} (refusals other than a protected stop are not recorded)"
         ));
+    }
+    // Every boot service answered its health checks (M4.5).
+    if console.contains(" unresponsive for ") {
+        return Err("manage: a boot service was found unresponsive".into());
+    }
+    if !console.contains(", answered ") {
+        return Err("manage: health showed no answered check".into());
     }
     println!(
         "  manage: {} actions, each one audit record and one trusted console line",
@@ -2050,6 +2066,9 @@ const PERMISSIONS_REFUSED: &[&str] = &["approve #4"];
 const MODEL_ENV: &str = "PHAROS_MODEL";
 /// Its time limit at least: about 45 s on the reference host.
 const LARGE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
+/// The `health` kernel (M4.5) waits out two 30 s windows of silence.
+const HEALTH_TEST: &str = "health";
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(150);
 
 /// A test kernel that `runner` first boots `rounds` times on one store
 /// disk and kills at random moments.
@@ -3170,6 +3189,8 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     let name = test_name(elf);
     let timeout = if name == LARGE_FILE_TEST {
         timeout.max(LARGE_FILE_TIMEOUT)
+    } else if name == HEALTH_TEST {
+        timeout.max(HEALTH_TIMEOUT)
     } else {
         timeout
     };

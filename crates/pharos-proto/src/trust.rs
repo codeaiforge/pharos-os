@@ -106,6 +106,9 @@ pub enum Event {
     /// A device left its slot (no name): `numbers` as for
     /// [`Self::DeviceAdded`]; `names` the driver stopped first, if any.
     DeviceRemoved = 14,
+    /// It answered no health check for `numbers[0]` seconds (M4.5):
+    /// stopped, and then handled by its restart policy.
+    Unresponsive = 15,
 }
 
 /// What [`Event::ByUser`] reports.
@@ -197,6 +200,7 @@ impl Event {
             ByUser,
             DeviceAdded,
             DeviceRemoved,
+            Unresponsive,
         ]
         .get(usize::from(c))
         .copied()
@@ -715,6 +719,11 @@ pub enum Command<'a> {
     },
     /// `services`: each service's state, from `init` (#152).
     Services,
+    /// `health`: each service's state, uptime, and last health check,
+    /// and each agent's process (M4.5).
+    Health,
+    /// `config`: the configuration in use (M4.5).
+    Config,
     /// `system`: the mode, the image running, and each slot, from `init`
     /// (#164).
     System,
@@ -770,6 +779,8 @@ pub fn command(line: &[u8]) -> Command<'_> {
         (Some(b"audit"), None, None) => Command::Audit,
         (Some(b"usage"), None, None) => Command::Usage,
         (Some(b"services"), None, None) => Command::Services,
+        (Some(b"health"), None, None) => Command::Health,
+        (Some(b"config"), None, None) => Command::Config,
         (Some(b"system"), None, None) => Command::System,
         (Some(b"safe"), None, None) => Command::NextBoot(1),
         (Some(b"recovery"), None, None) => Command::NextBoot(2),
@@ -1056,7 +1067,8 @@ mod tests {
             Err(Refused::Bad),
             "a device event with a name"
         );
-        assert_eq!(parse(&msg(15, &[0])), Err(Refused::Bad), "event 15");
+        assert!(parse(&msg(15, &[0])).is_ok(), "event 15");
+        assert_eq!(parse(&msg(16, &[0])), Err(Refused::Bad), "event 16");
         let mut many = std::vec![9];
         for _ in 0..9 {
             many.extend_from_slice(&[1, b'a']);
@@ -1244,6 +1256,9 @@ mod tests {
         assert_eq!(command(b" usage "), Command::Usage);
         assert_eq!(command(b"usage all"), Command::Help);
         assert_eq!(command(b" services "), Command::Services);
+        assert_eq!(command(b"health"), Command::Health);
+        assert_eq!(command(b"config"), Command::Config);
+        assert_eq!(command(b"config net"), Command::Help);
         assert_eq!(command(b"services x"), Command::Help);
         assert_eq!(command(b" system "), Command::System);
         assert_eq!(command(b"system a"), Command::Help);

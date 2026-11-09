@@ -7,6 +7,16 @@
 //! - the reply `[OK, total, count, entries…]`, each entry `[name length,
 //!   name, state, restarts done, restart limit]`, as many as fit in one
 //!   message; `trust` asks again from `from + count` until `total`.
+//!   Since M4.5 each entry ends with two u32s: seconds since it started
+//!   (0 if it does not run) and since it last answered `init`'s health
+//!   check ([`NOT_CHECKED`] if it is not checked).
+//! - `CONFIG` `[version, op]` (M4.5): the configuration in use, the reply
+//!   [`Settings`]: `[OK, image, total, count, settings…]`, the image it
+//!   came from (as `SYSTEM`'s; 255: compiled values, safe mode or
+//!   recovery), how many entries differ from the compiled table, and as
+//!   many as fit, each `[name length, name, flags, restarts, delay_ms
+//!   (u32)]`, flags bit 0 `start = no`, bit 1 `restarts` set, bit 2
+//!   `delay_ms` set.
 //!
 //! - `SYSTEM` `[version, op]` (#164): the reply `[OK, mode, image,
 //!   active, incoming, slot A, slot B]` (incoming: how many files wait in
@@ -62,7 +72,15 @@ pub mod op {
     pub const STOP: u8 = 8;
     pub const RESTART: u8 = 9;
     pub const RUNTIME: u8 = 10;
+    /// M4.5.
+    pub const CONFIG: u8 = 11;
 }
+
+/// An entry's `quiet_s` when `init` does not check it (not a running
+/// daemon with an endpoint).
+pub const NOT_CHECKED: u32 = u32::MAX;
+/// [`Settings::image`] when the compiled values run.
+pub const COMPILED: u8 = 255;
 
 /// Statuses only management replies use (#170).
 pub mod managed {
@@ -168,6 +186,7 @@ pub enum Request<'a> {
     },
     Rollback,
     Runtime,
+    Config,
     /// A table name ([`valid_name`]).
     Manage {
         action: Action,
@@ -187,6 +206,7 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
         }),
         (op::ROLLBACK, []) => Ok(Request::Rollback),
         (op::RUNTIME, []) => Ok(Request::Runtime),
+        (op::CONFIG, []) => Ok(Request::Config),
         (o @ (op::START | op::STOP | op::RESTART), [len, name @ ..])
             if usize::from(*len) == name.len() && valid_name(name) =>
         {
@@ -215,6 +235,7 @@ pub fn encode(req: &Request, out: &mut [u8]) -> Option<usize> {
         }
         Request::Rollback => w.bytes(&[VERSION, op::ROLLBACK])?,
         Request::Runtime => w.bytes(&[VERSION, op::RUNTIME])?,
+        Request::Config => w.bytes(&[VERSION, op::CONFIG])?,
         Request::Manage { action, name } => {
             if !valid_name(name) {
                 return None;
@@ -379,9 +400,17 @@ pub struct Entry<'a> {
     pub state: State,
     pub restarts: u8,
     pub limit: u8,
+    /// Seconds since it started; 0 if it does not run (M4.5).
+    pub up_s: u32,
+    /// Seconds since it last answered a health check, or
+    /// [`NOT_CHECKED`] (M4.5).
+    pub quiet_s: u32,
 }
 
 impl<'a> Entry<'a> {
+    /// Bytes after the name.
+    const FIXED: usize = 4 + 8;
+
     fn read(r: &mut Reader<'a>) -> Option<Self> {
         let len = usize::from(r.u8()?);
         let name = r.take(len).filter(|n| valid_name(n))?;
@@ -390,6 +419,8 @@ impl<'a> Entry<'a> {
             state: State::from_code(r.u8()?)?,
             restarts: r.u8()?,
             limit: r.u8()?,
+            up_s: r.u32()?,
+            quiet_s: r.u32()?,
         })
     }
 }
@@ -412,11 +443,14 @@ impl<'a> Reply<'a> {
         let mut w = Writer::new(&mut out[3..]);
         let mut count = 0;
         for e in entries.iter().take(usize::from(u8::MAX)) {
-            let size = 4 + e.name.len();
-            let mut one = [0u8; 4 + crate::trust::MAX_NAME];
+            let size = Entry::FIXED + e.name.len();
+            let mut one = [0u8; Entry::FIXED + crate::trust::MAX_NAME];
             one[0] = e.name.len() as u8;
             one[1..1 + e.name.len()].copy_from_slice(e.name);
-            one[size - 3..size].copy_from_slice(&[e.state as u8, e.restarts, e.limit]);
+            let at = 1 + e.name.len();
+            one[at..at + 3].copy_from_slice(&[e.state as u8, e.restarts, e.limit]);
+            one[at + 3..at + 7].copy_from_slice(&e.up_s.to_le_bytes());
+            one[at + 7..at + 11].copy_from_slice(&e.quiet_s.to_le_bytes());
             if w.bytes(&one[..size]).is_none() {
                 break;
             }
@@ -448,6 +482,97 @@ impl<'a> Reply<'a> {
     pub fn iter(self) -> impl Iterator<Item = Entry<'a>> {
         let mut r = Reader::new(self.entries);
         core::iter::from_fn(move || Entry::read(&mut r))
+    }
+}
+
+/// One entry of the configuration that differs from the compiled table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Setting<'a> {
+    pub name: &'a [u8],
+    /// `start = no`.
+    pub off: bool,
+    pub restarts: Option<u8>,
+    pub delay_ms: Option<u32>,
+}
+
+impl<'a> Setting<'a> {
+    fn read(r: &mut Reader<'a>) -> Option<Self> {
+        let len = usize::from(r.u8()?);
+        let name = r.take(len).filter(|n| valid_name(n))?;
+        let flags = r.u8().filter(|f| *f < 8)?;
+        let (restarts, delay_ms) = (r.u8()?, r.u32()?);
+        Some(Self {
+            name,
+            off: flags & 1 != 0,
+            restarts: (flags & 2 != 0).then_some(restarts),
+            delay_ms: (flags & 4 != 0).then_some(delay_ms),
+        })
+    }
+}
+
+/// The reply to `CONFIG` (M4.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Settings<'a> {
+    /// The image whose file runs, as `SYSTEM`'s, or [`COMPILED`].
+    pub image: u8,
+    pub total: u8,
+    pub count: u8,
+    entries: &'a [u8],
+}
+
+impl<'a> Settings<'a> {
+    /// Writes as many of `settings` as fit; `None` if a name is not valid.
+    pub fn write(image: u8, settings: &[Setting<'_>], out: &mut [u8]) -> Option<usize> {
+        if out.len() < 4 || !settings.iter().all(|s| valid_name(s.name)) {
+            return None;
+        }
+        let mut w = Writer::new(&mut out[4..]);
+        let mut count = 0u8;
+        for s in settings.iter().take(usize::from(u8::MAX)) {
+            let size = 1 + s.name.len() + 6;
+            let mut one = [0u8; 1 + crate::trust::MAX_NAME + 6];
+            one[0] = s.name.len() as u8;
+            one[1..1 + s.name.len()].copy_from_slice(s.name);
+            let at = 1 + s.name.len();
+            let flags = u8::from(s.off)
+                | u8::from(s.restarts.is_some()) << 1
+                | u8::from(s.delay_ms.is_some()) << 2;
+            one[at] = flags;
+            one[at + 1] = s.restarts.unwrap_or(0);
+            one[at + 2..at + 6].copy_from_slice(&s.delay_ms.unwrap_or(0).to_le_bytes());
+            if w.bytes(&one[..size]).is_none() {
+                break;
+            }
+            count += 1;
+        }
+        let n = 4 + w.len();
+        let total = settings.len().min(usize::from(u8::MAX)) as u8;
+        out[..4].copy_from_slice(&[status::OK, image, total, count]);
+        Some(n)
+    }
+
+    pub fn parse(reply: &'a [u8]) -> Option<Self> {
+        let mut r = Reader::new(reply);
+        if r.u8()? != status::OK {
+            return None;
+        }
+        let (image, total, count) = (r.u8()?, r.u8()?, r.u8()?);
+        let entries = r.rest();
+        let mut check = Reader::new(entries);
+        for _ in 0..count {
+            Setting::read(&mut check)?;
+        }
+        (check.is_empty() && count <= total).then_some(Self {
+            image,
+            total,
+            count,
+            entries,
+        })
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = Setting<'a>> {
+        let mut r = Reader::new(self.entries);
+        core::iter::from_fn(move || Setting::read(&mut r))
     }
 }
 
@@ -610,18 +735,24 @@ mod tests {
                 state: State::Ready,
                 restarts: 1,
                 limit: 3,
+                up_s: 42,
+                quiet_s: 3,
             },
             Entry {
                 name: &long,
                 state: State::Stopped,
                 restarts: 0,
                 limit: 0,
+                up_s: 0,
+                quiet_s: NOT_CHECKED,
             },
             Entry {
                 name: b"after-crasher",
                 state: State::Skipped,
                 restarts: 0,
                 limit: 0,
+                up_s: 0,
+                quiet_s: NOT_CHECKED,
             },
         ];
         let mut out = [0u8; 256];
@@ -637,7 +768,7 @@ mod tests {
         longer[n] = 0;
         assert_eq!(Reply::parse(&longer[..n + 1]), None, "a trailing byte");
         // Paging: only the first two fit.
-        let (n, count) = Reply::write(3, &entries, &mut out[..3 + 9 + 36]).unwrap();
+        let (n, count) = Reply::write(3, &entries, &mut out[..3 + 17 + 44]).unwrap();
         assert_eq!(count, 2);
         assert!(
             Reply::parse(&out[..n])
@@ -651,13 +782,67 @@ mod tests {
         };
         assert_eq!(Reply::write(1, &[bad], &mut out), None, "a bad name");
         // On the wire: an unknown state and a bad name.
-        assert_eq!(Reply::parse(&[0, 1, 1, 1, b'a', 11, 0, 0]), None);
-        assert_eq!(Reply::parse(&[0, 1, 1, 1, b' ', 2, 0, 0]), None);
-        assert!(Reply::parse(&[0, 1, 1, 1, b'a', 7, 0, 0]).is_some());
+        let wire = |name: u8, state: u8| [0, 1, 1, 1, name, state, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(Reply::parse(&wire(b'a', 11)), None);
+        assert_eq!(Reply::parse(&wire(b' ', 2)), None);
+        assert!(Reply::parse(&wire(b'a', 7)).is_some());
         crate::fuzz(100_000, 9, |m| {
             if let Some(r) = Reply::parse(m) {
                 assert_eq!(r.iter().count(), usize::from(r.count));
                 assert!(r.iter().all(|e| valid_name(e.name)));
+            }
+        });
+    }
+
+    #[test]
+    fn settings_round_trip_and_bad_ones_are_refused() {
+        let all = [
+            Setting {
+                name: b"net",
+                off: true,
+                restarts: None,
+                delay_ms: None,
+            },
+            Setting {
+                name: b"knowledge",
+                off: false,
+                restarts: Some(0),
+                delay_ms: Some(60_000),
+            },
+        ];
+        let mut out = [0u8; 256];
+        let n = Settings::write(1, &all, &mut out).unwrap();
+        let s = Settings::parse(&out[..n]).unwrap();
+        assert_eq!((s.image, s.total, s.count), (1, 2, 2));
+        assert!(s.iter().eq(all.iter().copied()));
+        for cut in 0..n {
+            assert_eq!(Settings::parse(&out[..cut]), None, "cut at {cut}");
+        }
+        // Only the first fits: total says how many there were.
+        let n = Settings::write(COMPILED, &all, &mut out[..4 + 10]).unwrap();
+        let s = Settings::parse(&out[..n]).unwrap();
+        assert_eq!((s.image, s.total, s.count), (COMPILED, 2, 1));
+        let bad = Setting {
+            name: b"a b",
+            ..all[0]
+        };
+        assert_eq!(Settings::write(0, &[bad], &mut out), None);
+        // Unknown flags, more than the total.
+        assert_eq!(
+            Settings::parse(&[0, 0, 1, 1, 1, b'a', 8, 0, 0, 0, 0, 0]),
+            None
+        );
+        assert_eq!(
+            Settings::parse(&[0, 0, 0, 1, 1, b'a', 1, 0, 0, 0, 0, 0]),
+            None
+        );
+        let req = Request::Config;
+        let mut buf = [0u8; 4];
+        let n = encode(&req, &mut buf).unwrap();
+        assert_eq!(parse(&buf[..n]), Ok(req));
+        crate::fuzz(100_000, 9, |m| {
+            if let Some(s) = Settings::parse(m) {
+                assert_eq!(s.iter().count(), usize::from(s.count));
             }
         });
     }

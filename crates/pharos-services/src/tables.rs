@@ -1,5 +1,6 @@
 //! The tables: argument 0 boot, 1 the `services` test kernel, 2 the
-//! `network` test kernel, 3 the `supervision` test kernel ([`table`]).
+//! `network` test kernel, 3 the `supervision` test kernel, 4 the
+//! `health` test kernel ([`table`]).
 
 use crate::rights::{GRANT, RECEIVE, SEND};
 use crate::{
@@ -52,6 +53,7 @@ pub fn table(arg: u64) -> &'static [Service] {
         1 => TEST,
         2 => NETWORK,
         3 => SUPERVISE,
+        4 => HEALTH,
         _ => &[],
     }
 }
@@ -310,6 +312,29 @@ pub const NETWORK: &[Service] = &[
         limit: 0,
         gains: &[],
     },
+];
+
+/// The `health` test kernel's table (M4.5): a daemon named `net` that
+/// sends `ready` and never receives on the network endpoint `init` checks
+/// it on, so it answers no health check (restarted once, then given up),
+/// and one whose name no endpoint has, which is never checked.
+pub const HEALTH: &[Service] = &[
+    svc(
+        "net",
+        1,
+        Kind::Daemon,
+        Restart::Up(1),
+        &[CONSOLE, REPORT],
+        &[],
+    ),
+    svc(
+        "steady",
+        6,
+        Kind::Daemon,
+        Restart::Up(1),
+        &[CONSOLE, REPORT],
+        &[],
+    ),
 ];
 
 pub const TEST: &[Service] = &[

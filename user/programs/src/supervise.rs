@@ -15,6 +15,29 @@ pub fn delay(policy: Restart, first_us: u64, done: u8) -> Option<u64> {
     (done < policy.limit()).then(|| first_us.saturating_mul(1 << (2 * u32::from(done.min(20)))))
 }
 
+/// How often `init` checks each ready daemon's health (M4.5, D-030).
+pub const CHECK_US: u64 = 10_000_000;
+/// How long one check waits for an answer.
+pub const INFO_US: u64 = 100_000;
+
+/// How long service `name` may answer no check before it is
+/// unresponsive: the inference service serves one generation at a time,
+/// and the store may be reading a 16 MiB image; compiled, never
+/// configured (services.md).
+pub fn quiet_us(name: &str) -> u64 {
+    match name {
+        "infer" => 600_000_000,
+        "store" => 60_000_000,
+        _ => 30_000_000,
+    }
+}
+
+/// Whether a service that last answered at `answered` is unresponsive at
+/// `now` (both `uptime`s).
+pub fn unresponsive(name: &str, answered: u64, now: u64) -> bool {
+    now.saturating_sub(answered) > quiet_us(name)
+}
+
 /// The entries that depend on entry `i`, directly or through others, in
 /// table order; `after[j]` lists the entries `j` needs.
 pub fn dependents(after: &[&[usize]], i: usize) -> Vec<usize> {
@@ -77,6 +100,24 @@ mod tests {
                 k::STOP,
                 k::MOUNT
             ]
+        );
+    }
+
+    #[test]
+    fn a_service_is_unresponsive_only_past_its_window() {
+        let s = 1_000_000;
+        assert!(!unresponsive("net", 0, 30 * s));
+        assert!(unresponsive("net", 0, 30 * s + 1));
+        assert!(!unresponsive("store", 0, 60 * s));
+        assert!(!unresponsive("infer", 0, 599 * s));
+        assert!(unresponsive("infer", 0, 601 * s));
+        // An answer after `now` (a clock read before it) is not silence.
+        assert!(!unresponsive("net", 50 * s, 10 * s));
+        // At least two checks fit in every window.
+        assert!(
+            ["net", "store", "infer"]
+                .iter()
+                .all(|n| quiet_us(n) >= 2 * CHECK_US)
         );
     }
 

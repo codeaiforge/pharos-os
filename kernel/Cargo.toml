@@ -257,6 +257,10 @@ name = "services"
 harness = false
 
 [[test]]
+name = "health"
+harness = false
+
+[[test]]
 name = "supervision"
 harness = false
 

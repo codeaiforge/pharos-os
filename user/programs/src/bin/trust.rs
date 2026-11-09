@@ -61,7 +61,7 @@
 use pharos_programs::virtio_console::{Console, RX_BUFFER, TX_BUFFER};
 use pharos_proto::knowledge::{self, Author};
 use pharos_proto::permission::Permission;
-use pharos_proto::service::{self as listing, Action, Managed, Reply, System};
+use pharos_proto::service::{self as listing, Action, Managed, Reply, Settings, System};
 use pharos_proto::trust::{
     self, Command, Event, INIT, Line, Lines, MAX_NAME, MAX_NAMES, Names, Outcome, RUNTIME, Request,
     SLOTS, parse,
@@ -89,8 +89,8 @@ const BASE: u64 = 0x1000_0000;
 /// Two lines: one console line holds at most 256 bytes.
 const HELP: &[u8] = b"commands: list, stop <agent>, stop group <group>, stop all, \
 revoke <agent> <permission>, yes <n>, no <n>, audit, usage, verify <scope> <key> <version> <hash>";
-const HELP_SYSTEM: &[u8] = b"commands: services, start <service>, restart <service>, \
-stop service <service>, system, safe, recovery, update, apply <n>, discard <n>, rollback";
+const HELP_SYSTEM: &[u8] = b"commands: services, health, config, start <service>, \
+restart <service>, stop service <service>, system, safe, recovery, update, apply <n>, discard <n>, rollback";
 /// How long a stop may take before the answer says it is still running.
 const STOP_WAIT_US: u64 = 1_000_000;
 
@@ -324,7 +324,9 @@ impl Trust {
                 }
             }
             Command::Audit => self.audit(),
-            Command::Services => self.services(),
+            Command::Services => self.services(false),
+            Command::Health => self.services(true),
+            Command::Config => self.config(),
             Command::System => self.system(),
             Command::NextBoot(mode) => self.next_boot(mode),
             Command::Update => self.update(),
@@ -613,8 +615,85 @@ impl Trust {
         ]);
     }
 
-    /// Each service's state, as `init` answers it (#152), one line each.
-    fn services(&mut self) {
+    /// The configuration in use, as `init` answers it (M4.5).
+    fn config(&mut self) {
+        let mut out = [0u8; 256];
+        let answer = self
+            .ask_init(&listing::Request::Config, &mut out)
+            .map(Settings::parse);
+        let s = match answer {
+            Some(Some(s)) => s,
+            _ => return self.say(&[b"config: init is not answering"]),
+        };
+        let from: &[u8] = if s.image == listing::COMPILED {
+            b"compiled values"
+        } else {
+            trust::image::name(s.image.into())
+        };
+        let all: &[u8] = if s.total == 0 {
+            b"; every compiled value"
+        } else {
+            b""
+        };
+        self.say(&[b"config: from ", from, all]);
+        for e in s.iter() {
+            let mut d = [[0u8; 20]; 2];
+            let [a, b] = &mut d;
+            let off: &[u8] = if e.off { b" start = no" } else { b"" };
+            let (r, rn): (&[u8], &[u8]) = match e.restarts {
+                Some(n) => (b" restarts = ", decimal(n.into(), a)),
+                None => (b"", b""),
+            };
+            let (dl, dn): (&[u8], &[u8]) = match e.delay_ms {
+                Some(ms) => (b" delay_ms = ", decimal(ms.into(), b)),
+                None => (b"", b""),
+            };
+            self.say(&[b"config: ", e.name, off, r, rn, dl, dn]);
+        }
+        if s.count < s.total {
+            let mut d = [0u8; 20];
+            self.say(&[
+                b"config: and ",
+                decimal((s.total - s.count).into(), &mut d),
+                b" more",
+            ]);
+        }
+    }
+
+    /// Each agent's process as the kernel reports it (M4.5): what it is
+    /// and what it used, so it is shown even if the runtime is stuck.
+    fn agent_health(&mut self, label: &[u8], process: Handle) {
+        let cpu = process_usage(process, Use::CpuMicros).unwrap_or(0) / 1000;
+        let pages = process_usage(process, Use::Pages).unwrap_or(0);
+        let (mut a, mut b) = ([0u8; 20], [0u8; 20]);
+        let (cpu, pages) = (
+            decimal(cpu, &mut a).to_vec(),
+            decimal(pages, &mut b).to_vec(),
+        );
+        let label = [&b"health: agent "[..], label].concat();
+        self.status(&label, process);
+        self.say(&[&label, b": cpu ", &cpu, b" ms, ", &pages, b" pages"]);
+    }
+
+    /// Each service's state, as `init` answers it (#152), one line each;
+    /// with `health` (M4.5), its uptime and last health check, then each
+    /// agent.
+    fn services(&mut self, health: bool) {
+        if health {
+            self.services_page(true);
+            if let Some(runtime) = self.runtime {
+                self.agent_health(b"runtime", runtime);
+            }
+            let agents = self.agents;
+            for a in agents.iter().flatten() {
+                self.agent_health(&a.name[..a.len], a.process);
+            }
+        } else {
+            self.services_page(false);
+        }
+    }
+
+    fn services_page(&mut self, health: bool) {
         let mut from = 0u8;
         loop {
             let (mut msg, mut out) = ([0u8; 8], [0u8; 256]);
@@ -633,10 +712,21 @@ impl Trust {
                 return;
             };
             for e in page.iter() {
-                let mut d = [[0u8; 20]; 2];
-                let [a, b] = &mut d;
+                let mut d = [[0u8; 20]; 4];
+                let [a, b, c, q] = &mut d;
+                let lead: &[u8] = if health { b"health: " } else { b"services: " };
+                let up: [&[u8]; 3] = if health && e.up_s > 0 {
+                    [b", up ", decimal(e.up_s.into(), c), b" s"]
+                } else {
+                    [b""; 3]
+                };
+                let checked: [&[u8]; 3] = match (health, e.quiet_s) {
+                    (false, _) => [b""; 3],
+                    (true, listing::NOT_CHECKED) => [b", not checked", b"", b""],
+                    (true, s) => [b", answered ", decimal(s.into(), q), b" s ago"],
+                };
                 self.say(&[
-                    b"services: ",
+                    lead,
                     e.name,
                     b" ",
                     e.state.word(),
@@ -644,6 +734,12 @@ impl Trust {
                     decimal(e.restarts.into(), a),
                     b" of ",
                     decimal(e.limit.into(), b),
+                    up[0],
+                    up[1],
+                    up[2],
+                    checked[0],
+                    checked[1],
+                    checked[2],
                 ]);
             }
             from = from.saturating_add(page.count);
@@ -706,6 +802,12 @@ impl Trust {
     /// A message on the endpoint. Keeps the capability only for a valid
     /// request from the badge allowed to send it.
     fn message(&mut self, msg: &[u8], cap: Handle, badge: u32) {
+        // `init`'s health check (M4.5): any answer counts.
+        if badge == INIT && cap != 0 && msg == [trust::VERSION, pharos_proto::op::INFO] {
+            let _ = try_send(cap, &[status::OK]);
+            let _ = delete(cap);
+            return;
+        }
         let valid = cap != 0 && process_status(cap).is_ok();
         match parse(msg) {
             Ok(Request::Channel) if badge == RUNTIME && cap != 0 && !valid => {
@@ -985,6 +1087,13 @@ impl Trust {
             Event::GivenUp => &[b"service ", name, b" not restarted: restarts used up"],
             Event::Never => &[b"service ", name, b" not restarted: restart policy never"],
             Event::Stopped => &[b"service ", name, b" stopped; not restarted"],
+            Event::Unresponsive => &[
+                b"service ",
+                name,
+                b" unresponsive for ",
+                decimal(n0, a),
+                b" s; stopped",
+            ],
             Event::DeviceAdded if driven => &[b"device ", &hex, b" added to slot ", decimal(n0, a)],
             Event::DeviceAdded => &[
                 b"device ",

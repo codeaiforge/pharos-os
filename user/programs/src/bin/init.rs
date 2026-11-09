@@ -70,7 +70,7 @@ use pharos_programs::system::{Gone, Offers, Refusal};
 use pharos_proto::infer::{self, Request as InferRequest};
 use pharos_proto::net::{self, Allowed, Request as NetRequest};
 use pharos_proto::service::{
-    self as listing, Action, Entry, Managed, Reply, State as Shown, System,
+    self as listing, Action, Entry, Managed, Reply, Setting, Settings, State as Shown, System,
 };
 use pharos_proto::store::{self, Request as StoreRequest};
 use pharos_proto::trust::{self, Event, Names, by_user, image as shown, not_started};
@@ -251,8 +251,15 @@ struct Init {
     /// The hotplug object, if the kernel gave one (#171).
     hotplug: Option<Handle>,
     /// The configuration of the image that runs (M4.5); compiled values
-    /// in safe mode and recovery.
+    /// in safe mode and recovery. `config_from`: that image, as `SYSTEM`
+    /// numbers it, or `COMPILED`.
     config: Config,
+    config_from: u8,
+    /// When each service last started, and last answered a health check
+    /// (M4.5); when the next round of checks is due.
+    started: [u64; MAX_SERVICES],
+    answered: [u64; MAX_SERVICES],
+    next_check: u64,
     /// Each driver entry's device: its slot's index and `init`'s handle.
     arrived: [Option<(u8, Handle)>; MAX_SERVICES],
 }
@@ -399,6 +406,7 @@ impl Init {
             }
         }
         self.state[i] = State::Running(process);
+        self.started[i] = uptime();
         self.deadline[i] = uptime().saturating_add(READY_US);
         self.recorded[i] = false;
     }
@@ -557,14 +565,107 @@ impl Init {
 
     /// Answers `trust`'s `SERVICES` on `reply` without waiting (#152):
     /// each entry from `from`, as many as fit.
+    /// The endpoint `init` checks entry `i`'s health on (M4.5): a daemon
+    /// that receives on one of `init`'s endpoints.
+    fn checked(&self, i: usize) -> Option<Handle> {
+        const EPS: [Ep; 7] = [
+            Ep::Net,
+            Ep::Store,
+            Ep::Infer,
+            Ep::Trust,
+            Ep::Agents,
+            Ep::Audit,
+            Ep::Knowledge,
+        ];
+        let service = &self.table[i];
+        if service.kind != Kind::Daemon {
+            return None;
+        }
+        let ep = EPS
+            .into_iter()
+            .find(|e| e.receiver() == Some(service.name))?;
+        self.handle(Object::Endpoint(ep))
+    }
+
+    /// One round of health checks (M4.5, services.md): `INFO` to each
+    /// ready daemon, 100 ms each; any answer counts. One silent past its
+    /// window is stopped and handled as a crash by its policy.
+    fn check_health(&mut self) {
+        for j in 0..self.table.len().min(MAX_SERVICES) {
+            let (Some(ep), State::Ok(p)) = (self.checked(j), self.state[j]) else {
+                continue;
+            };
+            let mut out = [0u8; 256];
+            let info = [1, pharos_proto::op::INFO];
+            if let Ok(Received::Message { .. }) =
+                pharos_user::call_timeout(ep, &info, self.reply, &mut out, supervise::INFO_US)
+            {
+                self.answered[j] = uptime();
+                continue;
+            }
+            let now = uptime();
+            if !supervise::unresponsive(self.table[j].name, self.answered[j], now) {
+                continue;
+            }
+            let secs = (now.saturating_sub(self.answered[j]) / 1_000_000) as u32;
+            let _ = pharos_user::process_stop(p);
+            let _ = pharos_user::delete(p);
+            self.release(j);
+            self.state[j] = State::Failed;
+            let mut d = [0u8; 20];
+            let what = [
+                &b"unresponsive for "[..],
+                decimal(secs.into(), &mut d),
+                b" s; stopped",
+            ]
+            .concat();
+            self.event(j, &what, Event::Unresponsive, [secs, 0, 0], &[]);
+            self.crashed(j);
+        }
+    }
+
+    /// `trust`'s `CONFIG` (M4.5): what the configuration in use sets.
+    fn show_config(&self, reply: Handle) {
+        let settings: Vec<Setting<'_>> = (self.config.settings())
+            .filter(|(i, ..)| *i < self.table.len())
+            .map(|(i, off, restarts, delay_ms)| Setting {
+                name: self.table[i].name.as_bytes(),
+                off,
+                restarts,
+                delay_ms,
+            })
+            .collect();
+        let mut out = [0u8; 256];
+        if let Some(n) = Settings::write(self.config_from, &settings, &mut out) {
+            let _ = try_send(reply, &out[..n]);
+        }
+    }
+
     fn list(&self, from: u8, reply: Handle) {
         let count = self.table.len().min(MAX_SERVICES);
         let entries: alloc::vec::Vec<Entry<'_>> = (usize::from(from)..count)
-            .map(|i| Entry {
-                name: self.table[i].name.as_bytes(),
-                state: self.shown(i),
-                restarts: self.restarts[i],
-                limit: self.restart(i).limit(),
+            .map(|i| {
+                let now = uptime();
+                let up_s = match self.state[i] {
+                    State::Running(_) | State::Ok(_) => {
+                        (now.saturating_sub(self.started[i]) / 1_000_000) as u32
+                    }
+                    _ => 0,
+                };
+                let quiet_s = match (self.checked(i), self.state[i]) {
+                    (Some(_), State::Ok(_)) => {
+                        (now.saturating_sub(self.answered[i]) / 1_000_000) as u32
+                    }
+                    _ => listing::NOT_CHECKED,
+                };
+                Entry {
+                    name: self.table[i].name.as_bytes(),
+                    state: self.shown(i),
+                    restarts: self.restarts[i],
+                    limit: self.restart(i).limit(),
+                    up_s,
+                    quiet_s,
+                }
             })
             .collect();
         let mut out = [0u8; 256];
@@ -1054,7 +1155,12 @@ impl Init {
     fn step(&mut self) {
         self.record_starts();
         self.flush();
+        if uptime() >= self.next_check {
+            self.check_health();
+            self.next_check = uptime().saturating_add(supervise::CHECK_US);
+        }
         let mut wait = self.check_ready();
+        wait = wait.min(self.next_check.saturating_sub(uptime()));
         wait = wait.min(self.wake_by.saturating_sub(uptime()));
         if !self.unsent.is_empty() {
             wait = wait.min(self.retry_at.saturating_sub(uptime()).max(10_000));
@@ -1079,6 +1185,7 @@ impl Init {
                         }
                         listing::Request::Rollback => self.roll_back(cap),
                         listing::Request::Runtime => self.give_runtime(cap),
+                        listing::Request::Config => self.show_config(cap),
                         listing::Request::Manage { action, name } => {
                             let name = name.to_vec();
                             self.manage(action, &name, cap)
@@ -1090,6 +1197,7 @@ impl Init {
                     if service.kind == Kind::Daemon {
                         say(service.name, "ready", None);
                         self.state[i] = State::Ok(p);
+                        self.answered[i] = uptime();
                         if core::mem::take(&mut self.by_user[i]) {
                             let name = service.name.as_bytes();
                             self.tell_trust(Event::ByUser, name, [by_user::READY, 0, 0], &[]);
@@ -1337,8 +1445,14 @@ impl Init {
             // Its configuration is checked before anything starts from it
             // (M4.5): a bad one refuses the slot. Safe mode ignores it.
             let config = match config {
-                _ if self.safe => Config::COMPILED,
-                Ok(config) => config,
+                _ if self.safe => {
+                    self.config_from = listing::COMPILED;
+                    Config::COMPILED
+                }
+                Ok(config) => {
+                    self.config_from = number as u8;
+                    config
+                }
                 Err(e) => {
                     let _ = pharos_user::delete(fs);
                     record.refuse(slot);
@@ -1383,6 +1497,7 @@ impl Init {
             self.image = ROOT;
             self.image_number = 0;
             self.config = Config::COMPILED;
+            self.config_from = listing::COMPILED;
         }
         // Slots whose attempts ran out became bad when they were passed
         // over; that is written too.
@@ -1406,6 +1521,7 @@ impl Init {
     fn boot_factory(&mut self, copy: bool) {
         self.image = ROOT;
         self.image_number = if copy { 3 } else { 0 };
+        self.config_from = listing::COMPILED;
         self.config = if self.safe {
             Config::COMPILED
         } else {
@@ -1421,6 +1537,7 @@ impl Init {
             self.mode = Mode::Recovery;
             self.safe = true;
             self.config = Config::COMPILED;
+            self.config_from = listing::COMPILED;
             self.start_all(|_| true, u64::MAX);
         }
         let numbers = [shown::RUNNING, u32::from(self.image_number), 0];
@@ -1436,7 +1553,10 @@ impl Init {
     /// a bad one is reported and the compiled values run.
     fn factory_config(&mut self) -> Config {
         match read_config(ROOT, self.table) {
-            Ok(config) => config,
+            Ok(config) => {
+                self.config_from = self.image_number;
+                config
+            }
             Err(e) => {
                 let mut why = [0u8; config::MAX_TEXT];
                 let detail = [
@@ -1822,7 +1942,9 @@ fn read_config(fs: Handle, table: &[Service]) -> Result<Config, config::Error> {
     let mut text = [0u8; config::MAX_SIZE + 1];
     let mut len = 0;
     while len < text.len() {
-        match pharos_user::read(file, len as u64, &mut text[len..]) {
+        // `read` takes at most 4 KiB at a time.
+        let end = text.len().min(len + 4096);
+        match pharos_user::read(file, len as u64, &mut text[len..end]) {
             Ok(0) => break,
             Ok(n) => len += n,
             Err(_) => {
@@ -1902,6 +2024,10 @@ fn main(arg: u64) -> u64 {
         by_user: [false; MAX_SERVICES],
         hotplug: None,
         config: Config::COMPILED,
+        config_from: listing::COMPILED,
+        started: [0; MAX_SERVICES],
+        answered: [0; MAX_SERVICES],
+        next_check: 0,
         arrived: [None; MAX_SERVICES],
     };
     // The hotplug object follows the devices (#171).
