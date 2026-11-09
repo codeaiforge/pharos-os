@@ -77,7 +77,7 @@ use pharos_proto::trust::{self, Event, Names, by_user, image as shown, not_start
 use pharos_proto::{audit, status};
 use pharos_services::config::{self, Config};
 use pharos_services::{
-    Ep, Give, Kind, MAX_SERVICES, Object, RUNTIME_HANDLES, RUNTIME_PATH, Restart, SLOT_BIT, Service,
+    Ep, Give, Kind, MAX_SERVICES, Object, RUNTIME_HANDLES, Restart, SLOT_BIT, Service,
 };
 use pharos_user::rights::{RECEIVE, SEND, STOP, WAIT};
 use pharos_user::{
@@ -375,7 +375,7 @@ impl Init {
         };
         // The runtime starts up to 16 agents of 16 handles each (D-022);
         // every other service gets a full table and no descendants.
-        let (processes, handles) = if service.path == RUNTIME_PATH {
+        let (processes, handles) = if service.is_runtime() {
             (16, RUNTIME_HANDLES)
         } else {
             (0, 0)
@@ -401,7 +401,7 @@ impl Init {
         say(service.name, "started", None);
         // `trust` gets the runtime's STOP before the runtime can start any
         // agent; a failed send leaves the runtime unstoppable, so stop it.
-        if service.path == RUNTIME_PATH {
+        if service.is_runtime() {
             let sent = send(self.trust, &TRUST_RUNTIME, process, STOP | WAIT, 0);
             if sent.is_err() {
                 let _ = pharos_user::process_stop(process);
@@ -791,7 +791,7 @@ impl Init {
     /// stop; at boot the runtime is registered when it starts.
     fn give_runtime(&self, reply: Handle) {
         let runtime = (self.table.iter().zip(&self.state))
-            .find(|(s, _)| s.path == RUNTIME_PATH)
+            .find(|(s, _)| s.is_runtime())
             .and_then(|(_, st)| match st {
                 State::Running(p) | State::Ok(p) => Some(*p),
                 _ => None,
@@ -1252,7 +1252,7 @@ impl Init {
                 say(self.table[i].name, "not started: configuration", None);
                 continue;
             }
-            if self.safe && self.table[i].path == RUNTIME_PATH {
+            if self.safe && self.table[i].is_runtime() {
                 self.state[i] = State::Off;
                 say(self.table[i].name, "not started: safe mode", None);
                 continue;

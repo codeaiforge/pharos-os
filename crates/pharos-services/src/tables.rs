@@ -55,6 +55,7 @@ pub fn table(arg: u64) -> &'static [Service] {
         3 => SUPERVISE,
         4 => HEALTH,
         5 => AIFAIL,
+        6 => COMPROMISED,
         _ => &[],
     }
 }
@@ -318,22 +319,26 @@ pub const NETWORK: &[Service] = &[
 ];
 
 /// The `health` test kernel's table (M4.5): a daemon named `net` that
-/// The boot table with entry `i` running `bin/rogue` with `arg`, every
-/// other field as shipped (M4.6, D-031): the AI services' failure and
+/// `table` with entry `i` running `bin/rogue` with `arg`, every other
+/// field as shipped (M4.6, D-031): the AI services' failure and
 /// hostile-service kernels.
-const fn rogue(i: usize, arg: u64) -> [Service; 9] {
-    let mut t = BOOT_ENTRIES;
-    t[i].path = b"bin/rogue";
-    t[i].arg = arg;
-    t
+const fn rogue(mut table: [Service; 9], i: usize, arg: u64) -> [Service; 9] {
+    table[i].path = b"bin/rogue";
+    table[i].arg = arg;
+    table
 }
 
-/// The boot table's index of the inference service.
+/// The boot table's indexes of the inference service and the runtime.
 pub const INFER: usize = 3;
+pub const AGENTS: usize = 7;
 
 /// The `aifail` kernel (M4.6, #182): `infer` is `rogue` 3, which sends
 /// `ready` and never receives, so the runtime must start without it.
-pub const AIFAIL: &[Service] = &rogue(INFER, 3);
+pub const AIFAIL: &[Service] = &rogue(BOOT_ENTRIES, INFER, 3);
+
+/// The `compromised` kernel (M4.6, #183): `infer` is `rogue` 1 and the
+/// runtime `rogue` 2, each probing what its exact manifest refuses.
+pub const COMPROMISED: &[Service] = &rogue(rogue(BOOT_ENTRIES, INFER, 1), AGENTS, 2);
 
 /// sends `ready` and never receives on the network endpoint `init` checks
 /// it on, so it answers no health check (restarted once, then given up),

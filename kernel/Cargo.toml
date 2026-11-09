@@ -37,6 +37,10 @@ name = "aifail"
 harness = false
 
 [[test]]
+name = "compromised"
+harness = false
+
+[[test]]
 name = "apic_timer"
 harness = false
 

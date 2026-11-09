@@ -2087,6 +2087,15 @@ const LARGE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
 const HEALTH_TEST: &str = "health";
 /// The `aifail` kernel (M4.6) boots the boot image with a stand-in AI service.
 const AIFAIL_TEST: &str = "aifail";
+/// The `compromised` kernel (M4.6, #183): hostile stand-ins for `infer`
+/// and the runtime, under their exact manifests.
+const COMPROMISED_TEST: &str = "compromised";
+const COMPROMISED_SCRIPT: &[console::Step] = &[
+    ("system ready: 8 services", "services\n"),
+    ("services: agents ready, restarts 0 of 3", ""),
+];
+/// `rogue` as the runtime registers a capability that is not a process.
+const COMPROMISED_REFUSED: &[&str] = &["registered rogue", "#77"];
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(150);
 
 /// A test kernel that `runner` first boots `rounds` times on one store
@@ -3228,6 +3237,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         || name == MANAGE_TEST
         || name == HOTPLUG_TEST
         || name == AIFAIL_TEST
+        || name == COMPROMISED_TEST
         || slotted
     {
         kernel_modules(paths, &programs)?
@@ -3332,6 +3342,7 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         SUPERVISION_TEST => (SUPERVISION_SCRIPT, &[]),
         SYSTEM_TEST => (SYSTEM_SCRIPT, &[]),
         MANAGE_TEST => (MANAGE_SCRIPT, &[]),
+        COMPROMISED_TEST => (COMPROMISED_SCRIPT, COMPROMISED_REFUSED),
         HOTPLUG_TEST => (HOTPLUG_SCRIPT, &[]),
         recovery::UPDATE_TEST => (recovery::UPDATE_SCRIPT, &[]),
         _ => (&[], &[]),

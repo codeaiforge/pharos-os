@@ -10,6 +10,37 @@ mod syscall;
 
 pub use syscall::{Mapped, vector};
 
+/// Probes for tests (M4.6, #183): system calls given a kernel-half
+/// address, which the kernel must refuse (`BAD_ADDRESS`). Each refuses a
+/// user address itself, so a wrong answer from the kernel cannot read or
+/// write this process's own memory behind Rust's back.
+pub mod probe {
+    use super::{Error, Handle, call, number};
+
+    /// The first kernel-half address (syscalls-ipc.md).
+    pub const KERNEL_HALF: u64 = 0xffff_8000_0000_0000;
+
+    fn kernel(addr: u64) -> Result<(), Error> {
+        if addr >= KERNEL_HALF {
+            Ok(())
+        } else {
+            Err(Error::BadAddress)
+        }
+    }
+
+    /// `debug_write` of `len` bytes from kernel address `addr`.
+    pub fn debug_write_from(console: Handle, addr: u64, len: u64) -> Result<u64, Error> {
+        kernel(addr)?;
+        call(number::DEBUG_WRITE, [console, addr, len, 0, 0, 0])
+    }
+
+    /// `read` of `len` bytes of `file` into kernel address `addr`.
+    pub fn read_into(file: Handle, addr: u64, len: u64) -> Result<u64, Error> {
+        kernel(addr)?;
+        call(number::READ, [file, addr, len, 0, 0, 0])
+    }
+}
+
 /// Call numbers (syscalls-ipc.md, storage.md).
 pub mod number {
     pub const EXIT: u64 = 0;

@@ -130,6 +130,16 @@ impl Service {
             _ => None,
         })
     }
+
+    /// True for the agent runtime's entry: the one that receives on its
+    /// endpoint. `init` gives it agents' budgets and hands `trust` its
+    /// `STOP` (M4.6, #183: found by its manifest, not its program, so a
+    /// stand-in under the same manifest is treated the same).
+    pub fn is_runtime(&self) -> bool {
+        self.caps
+            .iter()
+            .any(|g| g.object == Object::Endpoint(Ep::Agents) && g.rights & rights::RECEIVE != 0)
+    }
 }
 
 /// Services that can be restarted but never stopped (D-029): the trusted
@@ -360,28 +370,51 @@ mod tests {
             ("supervision", SUPERVISE),
             ("health", HEALTH),
             ("aifail", AIFAIL),
+            ("compromised", COMPROMISED),
         ] {
             assert_eq!(check(table), Ok(()), "{name}");
         }
     }
 
-    /// The `aifail` table is the boot table with only `infer`'s program
-    /// and argument changed, so `rogue` holds exactly the shipped manifest
-    /// (M4.6, D-031).
+    /// Only the runtime's entry is the runtime, in every table.
     #[test]
-    fn the_aifail_table_is_the_boot_table_but_one_program() {
-        assert_eq!(AIFAIL.len(), BOOT.len());
+    fn the_runtime_is_found_by_its_manifest() {
+        let runtimes = |t: &[Service]| {
+            t.iter()
+                .filter(|s| s.is_runtime())
+                .map(|s| s.name)
+                .collect::<std::vec::Vec<_>>()
+        };
+        assert_eq!(runtimes(BOOT), ["agents"]);
+        assert_eq!(runtimes(COMPROMISED), ["agents"]);
+        for t in [TEST, NETWORK, SUPERVISE, HEALTH] {
+            assert!(runtimes(t).is_empty());
+        }
+    }
+
+    /// The `aifail` and `compromised` tables are the boot table with only
+    /// `rogue`'s entries' program and argument changed, so it holds exactly
+    /// the shipped manifests (M4.6, D-031).
+    #[test]
+    fn the_rogue_tables_are_the_boot_table_but_their_programs() {
         let fields = |s: &Service| {
             (
                 s.name, s.kind, s.restart, s.caps, s.net, s.after, s.limit, s.gains,
             )
         };
-        for (i, (a, b)) in AIFAIL.iter().zip(BOOT).enumerate() {
-            assert_eq!(fields(a), fields(b), "{}", b.name);
-            if i == INFER {
-                assert_eq!((b.name, a.path, a.arg), ("infer", &b"bin/rogue"[..], 3));
-            } else {
-                assert_eq!((a.path, a.arg), (b.path, b.arg), "{}", b.name);
+        for (table, swapped) in [
+            (AIFAIL, &[(INFER, "infer", 3)][..]),
+            (COMPROMISED, &[(INFER, "infer", 1), (AGENTS, "agents", 2)]),
+        ] {
+            assert_eq!(table.len(), BOOT.len());
+            for (i, (a, b)) in table.iter().zip(BOOT).enumerate() {
+                assert_eq!(fields(a), fields(b), "{}", b.name);
+                match swapped.iter().find(|s| s.0 == i) {
+                    Some(&(_, name, arg)) => {
+                        assert_eq!((b.name, a.path, a.arg), (name, &b"bin/rogue"[..], arg));
+                    }
+                    None => assert_eq!((a.path, a.arg), (b.path, b.arg), "{}", b.name),
+                }
             }
         }
     }
