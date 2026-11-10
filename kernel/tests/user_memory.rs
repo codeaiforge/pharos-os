@@ -139,7 +139,7 @@ fn run(t: &mut TestRun) {
     // It holds an endpoint: once it ends, the kernel's must be the last.
     let held = Endpoint::new();
     let caps = vec![Capability::new(Object::Endpoint(held.clone()), SEND)];
-    let mapper = process::spawn_elf_limited(&programs, b"bin/memprobe", 4, caps, 32_900);
+    let mapper = process::spawn_elf_limited(&programs, b"bin/memprobe", 6, caps, 32_900);
     t.check("memprobe started to map 64 MiB", mapper.is_ok());
     let mapper = mapper.unwrap_or(u64::MAX);
     sched::sleep(Duration::from_millis(30));

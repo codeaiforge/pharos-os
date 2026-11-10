@@ -10,6 +10,10 @@
 //! - Argument 2: a child given no limit. Exits 0 if it cannot map a page.
 //! - Argument 3: a child given half the limit: maps it, holds it for
 //!   300 ms, and exits 0 (#115: meanwhile its parent cannot map that half).
+//! - Argument 6 (the `user_memory` kernel, #120): maps and unmaps 64 MiB
+//!   in a loop until stopped, so a stop lands while it maps however fast
+//!   the machine is (under KVM one mapping takes less than the kernel's
+//!   30 ms wait).
 //! - Argument 5 (the `shared_memory` kernel, #122): see
 //!   [`revoked_while_mapping`].
 //! - Argument 4 (the `exhaustion` kernel, #120, #122): maps 64 MiB and
@@ -122,6 +126,12 @@ fn main(arg: u64) -> u64 {
         }
         2 => return u64::from(mem_map(4096) != Err(Error::NoMemory)),
         5 => return revoked_while_mapping(),
+        6 => loop {
+            let Ok(a) = mem_map(64 * MIB) else { return 1 };
+            if mem_unmap(a, 64 * MIB).is_err() {
+                return 2;
+            }
+        },
         4 => {
             let Ok(a) = mem_map(64 * MIB) else { return 1 };
             if mem_unmap(a, 64 * MIB).is_err() {
