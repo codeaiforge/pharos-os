@@ -1292,9 +1292,21 @@ fn log_tail(text: &str, n: usize) -> Vec<String> {
 }
 
 /// Prints why a headless boot failed and the end of its serial log.
+/// A test kernel's failed checks (`PHAROS-TEST: <check> ... FAILED`).
+fn failed_checks(log: &str) -> Vec<&str> {
+    log.lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| l.contains("PHAROS-TEST: ") && l.ends_with(" ... FAILED"))
+        .collect()
+}
+
 fn report_failure(label: &str, run: &BootRun, log: &Path, reason: &str) {
     let secs = run.elapsed.as_secs_f32();
     println!("{label}: FAIL after {secs:.1} s: {reason}");
+    // The failed checks, wherever they are: the tail may start after them.
+    for line in failed_checks(&run.log) {
+        println!("  failed: {line}");
+    }
     println!("  serial log ({}), last lines:", log.display());
     for line in log_tail(&run.log, LOG_TAIL_LINES) {
         println!("  | {line}");
@@ -3825,6 +3837,16 @@ mod tests {
         let image = pharos_fs::Image::mount(&modules[0].1[..]).unwrap();
         assert!(image.lookup(b"etc/motd").is_ok());
         assert!(image.lookup(b"bin/hello").is_ok());
+    }
+
+    #[test]
+    fn failed_checks_are_found_anywhere_in_the_log() {
+        let log = "PHAROS-TEST: a ... ok\r\nPHAROS-TEST: b ... FAILED\r\nnoise\nPHAROS-TEST: c ... FAILED\nPHAROS: tests FAILED\n";
+        assert_eq!(
+            failed_checks(log),
+            ["PHAROS-TEST: b ... FAILED", "PHAROS-TEST: c ... FAILED"]
+        );
+        assert!(failed_checks("PHAROS-TEST: a ... ok\n").is_empty());
     }
 
     #[test]

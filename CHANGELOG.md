@@ -12,6 +12,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- Failure reports showed only a log's last 40 lines, which can start after the failed check (`aifail (bios)` in CI run 42787996179): they now list every `... FAILED` check from the whole log first
 - `trust` showed the runtime's resolution of an approval it never asked (#193, found by the release matrix's `kvm` cell): a compromised runtime could put `approve #<n>: granted` on the trusted console. `trust` now shows a resolution only for an approval it has open; `rogue` sends its forged one again after it is registered, so `compromised` fails without the fix in every cell
 - `user_memory`'s stop-while-mapping check finished before the stop under KVM (#194, `kvm` cell, 2 of 3 runs): `memprobe` 6 maps and unmaps 64 MiB in a loop until stopped
 

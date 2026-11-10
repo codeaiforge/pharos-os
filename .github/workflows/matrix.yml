@@ -48,6 +48,10 @@ jobs:
           rustup target add x86_64-unknown-none
           rustc --version
 
+      # Failures can depend on the host CPU (KVM passes it through).
+      - name: Runner CPU
+        run: grep -m1 'model name' /proc/cpuinfo
+
       - name: Runner image version
         id: image
         run: echo "version=${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"

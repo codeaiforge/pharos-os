@@ -166,7 +166,7 @@ Host noise matters: on the reference host (i9-10900K, `powersave` governor) runs
 
 ## Release test matrix (M5.1, D-032)
 
-**Status:** design approved by the maintainer on 2026-11-10 (#187). **Implemented** (#188): the cells, `cargo xtask matrix`, and `matrix.yml`'s `cells` job, run locally in every cell but not yet in CI. **Planned:** the `--repeat`, `soak`, and `s1` commands and jobs, and the `kvm` cell in CI (after the trial). Implementation: #188 (matrix), #189 (soak and repeat), #190 (S1), #191 (known crash bugs), #192 (gate).
+**Status:** design approved by the maintainer on 2026-11-10 (#187). **Implemented** (#188): the cells, `cargo xtask matrix`, and `matrix.yml`'s `cells` job. **Planned:** the `--repeat`, `soak`, and `s1` commands and jobs, and the `kvm` cell in CI (after the trial). Implementation: #188 (matrix), #189 (soak and repeat), #190 (S1), #191 (known crash bugs), #192 (gate).
 
 ### Cells
 
@@ -197,6 +197,10 @@ Each cell changes one setting from the push configuration (D-032). Every cell ru
     - `compromised`: `trust` showed a forged resolution (#193);
     - `user_memory`: its stop check finished before the stop (#194).
 
+**In CI** (2026-11-10, `8d89fd7`, the repository public, so hosted runners are free):
+- [Run 42787996179](https://github.com/codeaiforge/pharos-os/actions/runs/42787996179), the 7 TCG cells × 4 shares: 27 of 28 jobs passed, 202–598 s each. `aifail (bios)` failed one check (15 passed, 1 failed); it passed 6 of 6 locally. The failure report did not show which check, because it printed only the log's last 40 lines, so it now also prints every failed check from the whole log.
+- [Run 42788001527](https://github.com/codeaiforge/pharos-os/actions/runs/42788001527), the KVM trial: hosted runners give `/dev/kvm` (share 4 passed). Shares 1–3 failed: the boot check and 17 kernels hit `#GP` with error code `0x28` at the `iretq` returning to user mode (#195), which never happens locally. `kvm` stays out of the weekly list until #195 is fixed; D-009 is amended then.
+
 **A kernel's own settings win on their axis** (`test_qemu_args`, after the cell's arguments, and QEMU takes the last `-m` and `-cpu`): `vector_state` keeps `qemu64`, `vector_state_avx` keeps `-cpu max`, `large_file` keeps 2 GiB, and `exhaustion` keeps 1 GiB, so the CPU and memory cells run them unchanged.
 
 **`bios` skips** (`matrix::skip`, each printed as `SKIP` with its reason):
@@ -207,7 +211,7 @@ Each cell changes one setting from the push configuration (D-032). Every cell ru
 
 - `cargo xtask matrix --list` prints the cells and their QEMU settings.
 - `cargo xtask matrix <cell> [--shard N/M]` runs `cargo xtask test` in that cell. The cell reaches `cargo xtask runner` through the environment (`PHAROS_CELL`), because Cargo starts the runner. Each result line and log path names the cell, for example `test kernel system (bios): PASS` and `target/xtask/logs/bios/test-system.log`.
-- `cargo xtask test` and `matrix` run every test kernel even after one fails (`--no-fail-fast`), so a run shows all its failures. A failing kernel or boot check also writes one line to the CI job's summary (`GITHUB_STEP_SUMMARY`).
+- `cargo xtask test` and `matrix` run every test kernel even after one fails (`--no-fail-fast`), so a run shows all its failures. A failure report lists every failed check from the whole log, then the log's last lines. A failing kernel or boot check also writes one line to the CI job's summary (`GITHUB_STEP_SUMMARY`). `matrix.yml` prints the runner's CPU model.
 - Planned (#189): `cargo xtask test --repeat <N>` runs each test kernel N times in a row in the `push` cell. A kernel that fails once in N fails the run.
 - Planned (#189, #190): `cargo xtask soak --minutes <M>` and `PHAROS_MODEL=<file> cargo xtask s1` (below).
 
