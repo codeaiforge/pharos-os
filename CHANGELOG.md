@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format is based on 
 - M5.1 design approved (#187, D-032): [testing.md](docs/development/testing.md#release-test-matrix-m51-d-032). 8 matrix cells, one setting changed at a time; the smallest memory measured at 144 MiB (128 MiB hangs in the bootloader); a local trial with 74 of 75 test kernels passing on `Skylake-Client` and `max` (`vector_state` tied to `qemu64`) and 73 of 75 at 144 MiB (`exhaustion` and `large_file` keep their own memory); planned `cargo xtask matrix`, `--repeat`, `soak`, and `s1`, a weekly `matrix.yml`, and the test plan for #188–#192
 - D-032 accepted (#186, M5.1): the release test matrix, 7 cells changing one axis at a time from the push configuration (firmware, memory sizes, CPU models), plus KVM as a cell, TCG staying the reference; the matrix weekly, on dispatch, and before each release, push runs unchanged; a soak kernel and 3 repeat passes; an S1 scenario kernel with the real model driving an agent; any non-infrastructure failure, flakes included, counts as a known crash bug
 
+### Fixed
+
+- `trust` showed the runtime's resolution of an approval it never asked (#193, found by the release matrix's `kvm` cell): a compromised runtime could put `approve #<n>: granted` on the trusted console. `trust` now shows a resolution only for an approval it has open; `rogue` sends its forged one again after it is registered, so `compromised` fails without the fix in every cell
+
 ## [0.4.0] - 2026-11-09
 
 Phase 4 (Full Operating System) is complete. The kernel, the services, and the agent platform run as one system in QEMU: a service manager with restart policies and audited capability manifests, signed boot images in two slots with fallback, safe mode, recovery, and updates, service and device management from the trusted console, PCIe hotplug, a checked configuration file and health checks, and the AI services as unprivileged system services, tested as compromised and as failing services. Experimental: QEMU only; see the threat model for the open limits (no IOMMU, no KPTI, one CPU).

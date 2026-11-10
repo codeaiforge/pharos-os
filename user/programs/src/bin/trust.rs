@@ -907,7 +907,11 @@ impl Trust {
                     let _ = delete(cap);
                 }
             }
-            Ok(Request::Resolved { number, resolution }) if badge == RUNTIME => {
+            // Only for an approval it showed and has open (#193): any other
+            // number would put a line on the trusted console the runtime made up.
+            Ok(Request::Resolved { number, resolution })
+                if badge == RUNTIME && number != 0 && self.open.contains(&number) =>
+            {
                 for open in self.open.iter_mut().filter(|n| **n == number) {
                     *open = 0;
                 }

@@ -255,15 +255,7 @@ fn hostile(arg: u64) -> u64 {
         ) {
             let _ = try_send_cap(TRUST, &msg[..n], reply, SEND, 0);
         }
-        if let Some(n) = trust::encode(
-            &trust::Request::Resolved {
-                number: 77,
-                resolution: trust::Resolution::Granted,
-            },
-            &mut msg,
-        ) {
-            let _ = try_send(TRUST, &msg[..n]);
-        }
+        forge_resolution();
         let spawned = spawn(ROOT, 0, &[], None).is_ok();
         p.expect_refused(b"spawn from the filesystem itself", !spawned);
         b"agents"
@@ -279,7 +271,30 @@ fn hostile(arg: u64) -> u64 {
         decimal(p.allowed, &mut b),
         b" allowed",
     ]);
+    if name == b"agents" {
+        // Again once `init` has registered it with `trust` (#193): under
+        // TCG the first one arrives before, when `trust` ignores it anyway.
+        for _ in 0..50 {
+            sleep(100_000);
+            forge_resolution();
+        }
+    }
     idle(reply)
+}
+
+/// Tells `trust` approval 77, never asked, was granted; `trust` must not
+/// show it (the runner refuses "#77").
+fn forge_resolution() {
+    let mut msg = [0u8; 64];
+    if let Some(n) = trust::encode(
+        &trust::Request::Resolved {
+            number: 77,
+            resolution: trust::Resolution::Granted,
+        },
+        &mut msg,
+    ) {
+        let _ = try_send(TRUST, &msg[..n]);
+    }
 }
 
 /// Maps as much as it may, in pieces from 1 MiB down to one page, so
