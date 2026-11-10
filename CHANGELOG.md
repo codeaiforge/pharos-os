@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- M5.1 design approved (#187, D-032): [testing.md](docs/development/testing.md#release-test-matrix-m51-d-032). 8 matrix cells, one setting changed at a time; the smallest memory measured at 144 MiB (128 MiB hangs in the bootloader); a local trial with 74 of 75 test kernels passing on `Skylake-Client` and `max` (`vector_state` tied to `qemu64`) and 73 of 75 at 144 MiB (`exhaustion` and `large_file` keep their own memory); planned `cargo xtask matrix`, `--repeat`, `soak`, and `s1`, a weekly `matrix.yml`, and the test plan for #188–#192
 - D-032 accepted (#186, M5.1): the release test matrix, 7 cells changing one axis at a time from the push configuration (firmware, memory sizes, CPU models), plus KVM as a cell, TCG staying the reference; the matrix weekly, on dispatch, and before each release, push runs unchanged; a soak kernel and 3 repeat passes; an S1 scenario kernel with the real model driving an agent; any non-infrastructure failure, flakes included, counts as a known crash bug
 
 ## [0.4.0] - 2026-11-09

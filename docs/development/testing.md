@@ -166,7 +166,7 @@ Host noise matters: on the reference host (i9-10900K, `powersave` governor) runs
 
 ## Release test matrix (M5.1, D-032)
 
-**Status: design, proposed (#187). Planned, not implemented:** none of the commands, kernels, or workflows below exist yet. Implementation: #188 (matrix), #189 (soak and repeat), #190 (S1), #191 (known crash bugs), #192 (gate).
+**Status: design approved by the maintainer on 2026-11-10 (#187). Planned, not implemented:** none of the commands, kernels, or workflows below exist yet. Implementation: #188 (matrix), #189 (soak and repeat), #190 (S1), #191 (known crash bugs), #192 (gate).
 
 ### Cells
 
