@@ -63,8 +63,10 @@ fn run(t: &mut TestRun) {
         apic::spurious_count()
     );
     t.check("at least 20 timer interrupts handled", ticks >= TICKS);
+    // A tick between `sti` and the first `hlt`, or between the loop check
+    // and `hlt`, wakes nothing, so wake-ups can be fewer, never more (#197).
     t.check(
         "every wake-up was a timer or spurious interrupt",
-        wakeups == ticks + apic::spurious_count(),
+        wakeups <= ticks + apic::spurious_count(),
     );
 }
