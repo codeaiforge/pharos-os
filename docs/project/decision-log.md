@@ -159,6 +159,8 @@ Accepted by the maintainer on 2026-10-26, based on the [boot evaluation](../arch
 - A test kernel reporting failure produced QEMU status 35 and Cargo's `test failed` error (exit 1).
 - A hung test kernel was stopped by the timeout and reported as a failure.
 
+**Amended (2026-11-10, D-032, #195):** TCG stays the reference for push runs and every other cell, but the release matrix's `kvm` cell boots with `-enable-kvm -cpu host`, in CI on hosted runners and locally. Its 60 s timeout is the same. It found a bug TCG cannot show: AMD's `sysret` takes SS's RPL from STAR, which TCG forces to 3 (#195). Passed on AMD and Intel runners in run 42829027222.
+
 ## Accepted decisions (M2.4)
 
 ### D-006: Interrupt controller and timer design

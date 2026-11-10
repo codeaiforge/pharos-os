@@ -13,7 +13,7 @@ on:
       cells:
         description: Cells to run, as a JSON list (cargo xtask matrix --list)
         required: false
-        default: '["push", "bios", "mem-min", "mem-2g", "mem-4g", "cpu-skylake", "cpu-max"]'
+        default: '["push", "bios", "mem-min", "mem-2g", "mem-4g", "cpu-skylake", "cpu-max", "kvm"]'
 
 # Read-only token, as in ci.yml: no publishing, artifacts, or Git operations.
 permissions:
@@ -30,9 +30,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # A schedule has no inputs: the default list. The kvm cell runs
-        # only when named (testing.md: after the KVM trial).
-        cell: ${{ fromJSON(inputs.cells || '["push", "bios", "mem-min", "mem-2g", "mem-4g", "cpu-skylake", "cpu-max"]') }}
+        # A schedule has no inputs: the default list, every cell.
+        cell: ${{ fromJSON(inputs.cells || '["push", "bios", "mem-min", "mem-2g", "mem-4g", "cpu-skylake", "cpu-max", "kvm"]') }}
         shard: [1, 2, 3, 4]
     env:
       CARGO_INCREMENTAL: "0"
@@ -91,7 +90,7 @@ jobs:
             build-${{ steps.image.outputs.version }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
 
       # The kvm cell needs read-write /dev/kvm; if the runner has none, the
-      # cell fails here, which is the trial's answer (testing.md).
+      # cell fails here, before QEMU (infrastructure, D-032).
       - name: KVM access
         if: matrix.cell == 'kvm'
         run: |

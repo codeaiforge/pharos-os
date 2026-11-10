@@ -166,7 +166,7 @@ Host noise matters: on the reference host (i9-10900K, `powersave` governor) runs
 
 ## Release test matrix (M5.1, D-032)
 
-**Status:** design approved by the maintainer on 2026-11-10 (#187). **Implemented** (#188): the cells, `cargo xtask matrix`, and `matrix.yml`'s `cells` job. **Planned:** the `--repeat`, `soak`, and `s1` commands and jobs, and the `kvm` cell in CI (after the trial). Implementation: #188 (matrix), #189 (soak and repeat), #190 (S1), #191 (known crash bugs), #192 (gate).
+**Status:** design approved by the maintainer on 2026-11-10 (#187). **Implemented** (#188): the cells, `cargo xtask matrix`, and `matrix.yml`'s `cells` job. The `kvm` cell runs in CI, in the weekly list since #195 (D-009 amended). **Planned:** the `--repeat`, `soak`, and `s1` commands and jobs. Implementation: #188 (matrix), #189 (soak and repeat), #190 (S1), #191 (known crash bugs), #192 (gate).
 
 ### Cells
 
@@ -181,7 +181,7 @@ Each cell changes one setting from the push configuration (D-032). Every cell ru
 | `mem-4g` | UEFI | 4 GiB | `qemu64` | TCG | RAM above 4 GiB (q35 splits it around the PCI hole) |
 | `cpu-skylake` | UEFI | 256 MiB | `Skylake-Client` | TCG | SMEP, SMAP, XSAVE, and AVX2 in every kernel and service |
 | `cpu-max` | UEFI | 256 MiB | `max` | TCG | Every CPU feature QEMU emulates |
-| `kvm` | UEFI | 256 MiB | `host` | KVM | Hardware timing; after the trial on a throwaway branch, in CI if hosted runners give `/dev/kvm`, otherwise locally |
+| `kvm` | UEFI | 256 MiB | `host` | KVM | Hardware timing, and the host CPU's own behavior (AMD or Intel, whichever runner); in CI, since hosted runners give `/dev/kvm` |
 
 **Smallest size (measured 2026-11-09, `system` kernel, 16 MiB steps):** 144 MiB passes in 8.6 s, as 256 MiB does. At 128 MiB the boot hangs before the kernel starts: the log ends in the firmware, so the 60 s timeout ends it. At 96 MiB and 64 MiB, Limine panics with `High memory allocator: Out of memory`. The limit is the bootloader loading the boot image, so it rises as the image grows. When `mem-min` fails, the fix either raises the documented minimum in the same change, because the image grew, or the failure is a bug.
 
@@ -203,6 +203,7 @@ Each cell changes one setting from the push configuration (D-032). Every cell ru
 - **[Run 42803785671](https://github.com/codeaiforge/pharos-os/actions/runs/42803785671), `118512b`: all 7 TCG cells passed**, 28 of 28 jobs, 163–655 s each (#188).
 - [Run 42788001527](https://github.com/codeaiforge/pharos-os/actions/runs/42788001527), the KVM trial: hosted runners give `/dev/kvm` (share 4 passed). Shares 1–3 failed: the boot check and 17 kernels hit `#GP` with error code `0x28` at the `iretq` returning to user mode (#195), which never happens locally. A second run (42793394291) failed all 4 shares, every job on an AMD EPYC 7763 runner; the reference host is Intel. `kvm` stays out of the weekly list until #195 is fixed; D-009 is amended then.
 - [Run 42821432548](https://github.com/codeaiforge/pharos-os/actions/runs/42821432548), `462878b`, with the #GP report extended: every fault's `iretq` frame held user SS `0x28` (RPL 0), with the GDT correct. STAR's user base was `0x20`; on `sysret`, Intel CPUs and TCG force SS's RPL to 3, AMD CPUs take it from the base. It is now `0x23` (#195). Failing shares ran on AMD EPYC 7763 and 9V74; the share that failed on Intel (Xeon Platinum 8573C) failed only `apic_timer` (#197).
+- **[Run 42829027222](https://github.com/codeaiforge/pharos-os/actions/runs/42829027222), `eb11df6`: the `kvm` cell passed**, 4 of 4 shares, three on AMD (EPYC 7763 twice, 9V74) and one on Intel (Xeon 6973P-C). `kvm` joined the weekly list (8 cells × 4 shares).
 
 **A kernel's own settings win on their axis** (`test_qemu_args`, after the cell's arguments, and QEMU takes the last `-m` and `-cpu`): `vector_state` keeps `qemu64`, `vector_state_avx` keeps `-cpu max`, `large_file` keeps 2 GiB, and `exhaustion` keeps 1 GiB, so the CPU and memory cells run them unchanged.
 
@@ -226,7 +227,7 @@ The cell table lives in `xtask` as data, with a host test that every cell differ
 
 - **Triggers:** `schedule`, weekly on Sunday at 02:00 UTC, on `main`; and `workflow_dispatch` with a `cells` input (default: all), so a branch or a release commit can be run on demand.
 - **Jobs:**
-  - `cells` (implemented): the 7 TCG cells × 4 shares, `fail-fast: false`, each running `cargo xtask matrix <cell> --shard N/4`; `kvm` only when named in `cells`, with a step that fails if the runner has no `/dev/kvm` and otherwise opens it to the job;
+  - `cells` (implemented): the 8 cells × 4 shares, `fail-fast: false`, each running `cargo xtask matrix <cell> --shard N/4`; `kvm` with a step that fails if the runner has no `/dev/kvm` and otherwise opens it to the job;
   - planned, `repeat`: `--repeat 3` in `push`, 4 shares, about 17 minutes each;
   - planned, `soak`: 60 minutes;
   - planned, `s1`: the scenario kernel, output checked only.
@@ -274,7 +275,7 @@ Planned `s1` scenario kernel (#190), answering M4.6 review F5.
 - **The run:** `init` starts its services with the runtime's S1 policy entry: inference and `read_file` on that file. A client submits the S1 task; the real model answers it, its `read_file` call is validated and run, and its final text is the result.
 - **Checks:** the tool call and the final text are identical to the host's for the same greedy prompt (`pharos_infer::session` on the host, as `inference.rs` checks text). The audit trail holds the grant, the call, and the result.
 - **Under KVM** (local, `-enable-kvm -cpu host`), it also checks S1's targets: first token within 10 s and at least 5 tokens/s. This run is required at the M5.1 gate.
-- **Scheduled job:** the workflow downloads the model from Hugging Face at its pinned revision, checks the SHA-256, and caches it (`actions/cache`, 676 MB). It checks the output only, under TCG unless the KVM trial passed.
+- **Scheduled job:** the workflow downloads the model from Hugging Face at its pinned revision, checks the SHA-256, and caches it (`actions/cache`, 676 MB). It checks the output only, under KVM (the trial passed, #195).
 
 ### Test plan
 
