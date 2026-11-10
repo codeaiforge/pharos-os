@@ -1,0 +1,103 @@
+name: Release matrix
+
+# The release test matrix (M5.1, D-032, testing.md): every test kernel and
+# the boot check in each cell, each cell one setting changed from the push
+# run. Weekly on main, and on demand for any branch or commit:
+#   gh workflow run matrix.yml --ref <branch> [-f cells='["bios"]']
+# Push runs stay in ci.yml, unchanged.
+on:
+  schedule:
+    - cron: "0 2 * * 0" # Sundays, 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      cells:
+        description: Cells to run, as a JSON list (cargo xtask matrix --list)
+        required: false
+        default: '["push", "bios", "mem-min", "mem-2g", "mem-4g", "cpu-skylake", "cpu-max"]'
+
+# Read-only token, as in ci.yml: no publishing, artifacts, or Git operations.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cells:
+    name: ${{ matrix.cell }} (${{ matrix.shard }} of 4)
+    # The same runner image as ci.yml's QEMU job.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # A schedule has no inputs: the default list. The kvm cell runs
+        # only when named (testing.md: after the KVM trial).
+        cell: ${{ fromJSON(inputs.cells || '["push", "bios", "mem-min", "mem-2g", "mem-4g", "cpu-skylake", "cpu-max"]') }}
+        shard: [1, 2, 3, 4]
+    env:
+      CARGO_INCREMENTAL: "0"
+    timeout-minutes: 30
+    # The steps up to the test step are ci.yml's QEMU job's; keep them in step.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          rustup target add x86_64-unknown-none
+          rustc --version
+
+      - name: Runner image version
+        id: image
+        run: echo "version=${ImageOS}-${ImageVersion}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-debs
+          key: apt-${{ steps.image.outputs.version }}-qemu-ovmf-xorriso
+
+      - name: Install QEMU, OVMF, and xorriso
+        run: |
+          pkgs="qemu-system-x86 ovmf xorriso"
+          if ls ~/apt-debs/*.deb >/dev/null 2>&1 &&
+             sudo apt-get install -y --no-install-recommends ~/apt-debs/*.deb; then
+            echo "Installed from the cache"
+          else
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends --download-only $pkgs
+            rm -rf ~/apt-debs && mkdir -p ~/apt-debs
+            cp /var/cache/apt/archives/*.deb ~/apt-debs/
+            sudo apt-get install -y --no-install-recommends $pkgs
+          fi
+          qemu-system-x86_64 --version | head -1
+
+      # ci.yml's build cache, same key: on a commit ci.yml already ran, a hit.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target/debug
+            target/x86_64-unknown-none
+            target/user
+            target/xtask/limine-*/*.tar.xz
+          key: build-${{ steps.image.outputs.version }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            build-${{ steps.image.outputs.version }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
+
+      # The kvm cell needs read-write /dev/kvm; if the runner has none, the
+      # cell fails here, which is the trial's answer (testing.md).
+      - name: KVM access
+        if: matrix.cell == 'kvm'
+        run: |
+          test -e /dev/kvm || { echo "this runner has no /dev/kvm"; exit 1; }
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      # Pass = QEMU exit status 33 and the marker within 60 s (D-009), as on
+      # push. Failing kernels are also listed in the job summary.
+      - name: Boot check and test kernels in the cell
+        run: cargo xtask matrix ${{ matrix.cell }} --shard ${{ matrix.shard }}/4

@@ -166,7 +166,7 @@ Host noise matters: on the reference host (i9-10900K, `powersave` governor) runs
 
 ## Release test matrix (M5.1, D-032)
 
-**Status: design approved by the maintainer on 2026-11-10 (#187). Planned, not implemented:** none of the commands, kernels, or workflows below exist yet. Implementation: #188 (matrix), #189 (soak and repeat), #190 (S1), #191 (known crash bugs), #192 (gate).
+**Status:** design approved by the maintainer on 2026-11-10 (#187). **Implemented** (#188): the cells, `cargo xtask matrix`, and `matrix.yml`'s `cells` job, run locally in every cell but not yet in CI. **Planned:** the `--repeat`, `soak`, and `s1` commands and jobs, and the `kvm` cell in CI (after the trial). Implementation: #188 (matrix), #189 (soak and repeat), #190 (S1), #191 (known crash bugs), #192 (gate).
 
 ### Cells
 
@@ -185,20 +185,31 @@ Each cell changes one setting from the push configuration (D-032). Every cell ru
 
 **Smallest size (measured 2026-11-09, `system` kernel, 16 MiB steps):** 144 MiB passes in 8.6 s, as 256 MiB does. At 128 MiB the boot hangs before the kernel starts: the log ends in the firmware, so the 60 s timeout ends it. At 96 MiB and 64 MiB, Limine panics with `High memory allocator: Out of memory`. The limit is the bootloader loading the boot image, so it rises as the image grows. When `mem-min` fails, the fix either raises the documented minimum in the same change, because the image grew, or the failure is a bug.
 
-**Trial runs (2026-11-09, locally, through a temporary hook for extra QEMU arguments, not committed):**
+**Local runs (reference host):**
 
-- `cpu-skylake` and `cpu-max`: the boot check and 74 of 75 test kernels passed in each, about 13 minutes per cell, so SMEP, SMAP, and XSAVE hold in every other kernel and service.
-- `mem-min` (144 MiB): the boot check and 73 of 75 test kernels passed. The two failures were `exhaustion` and `large_file`, because the temporary hook overrode their own memory (1 GiB and 2 GiB). The rule below keeps it.
-- In the CPU cells, the one failure is `vector_state`, which checks FXSAVE and no AVX, so it is tied to `qemu64`. #188 pins it to `-cpu qemu64`, as `vector_state_avx` is pinned to `max`.
+- **Before `cargo xtask matrix`** (2026-11-09, a temporary hook for extra QEMU arguments, not committed):
+  - `cpu-skylake` and `cpu-max`: the boot check and 74 of 75 test kernels passed in each, about 13 minutes per cell, so SMEP, SMAP, and XSAVE hold in every other kernel and service. The one failure was `vector_state`, which checks FXSAVE and no AVX, so it is tied to `qemu64`; it is now pinned there, and passes in `cpu-skylake`, `cpu-max`, and `kvm`.
+  - `mem-min` (144 MiB): 73 of 75 passed. The two failures were `exhaustion` and `large_file`, because the hook overrode their own memory (1 GiB and 2 GiB); `cargo xtask matrix` keeps it (below).
+- **With `cargo xtask matrix`** (2026-11-10):
+  - `mem-2g` and `mem-4g`: the boot check and all 75 kernels passed, about 13.5 minutes each.
+  - `bios`: the SeaBIOS boot check and 73 kernels passed, 2 skipped (below), about 8 minutes.
+  - `kvm`: 73 of 75 passed in about 10 minutes. Both failures are fixed, each with a `bug` issue:
+    - `compromised`: `trust` showed a forged resolution (#193);
+    - `user_memory`: its stop check finished before the stop (#194).
 
-**A kernel's own settings win on their axis** (`test_qemu_args`): `vector_state` keeps `qemu64` (#188), `vector_state_avx` keeps `-cpu max`, `large_file` keeps 2 GiB, and `exhaustion` keeps 1 GiB, so the CPU and memory cells run them unchanged. **UEFI-only kernels** skip `bios`: `recovery`, whose rounds use the OVMF variable store. #188 adds any kernel the `bios` cell shows to depend on UEFI, each with its reason, or fixes it.
+**A kernel's own settings win on their axis** (`test_qemu_args`, after the cell's arguments, and QEMU takes the last `-m` and `-cpu`): `vector_state` keeps `qemu64`, `vector_state_avx` keeps `-cpu max`, `large_file` keeps 2 GiB, and `exhaustion` keeps 1 GiB, so the CPU and memory cells run them unchanged.
+
+**`bios` skips** (`matrix::skip`, each printed as `SKIP` with its reason):
+- `recovery`, whose rounds use the OVMF variable store;
+- `boot_info`, which checks that 64-bit UEFI booted it; the BIOS boot check covers the BIOS boot's firmware and memory map.
 
 ### Commands
 
 - `cargo xtask matrix --list` prints the cells and their QEMU settings.
 - `cargo xtask matrix <cell> [--shard N/M]` runs `cargo xtask test` in that cell. The cell reaches `cargo xtask runner` through the environment (`PHAROS_CELL`), because Cargo starts the runner. Each result line and log path names the cell, for example `test kernel system (bios): PASS` and `target/xtask/logs/bios/test-system.log`.
-- `cargo xtask test --repeat <N>` runs each test kernel N times in a row in the `push` cell. A kernel that fails once in N fails the run.
-- `cargo xtask soak --minutes <M>` and `PHAROS_MODEL=<file> cargo xtask s1` (below).
+- `cargo xtask test` and `matrix` run every test kernel even after one fails (`--no-fail-fast`), so a run shows all its failures. A failing kernel or boot check also writes one line to the CI job's summary (`GITHUB_STEP_SUMMARY`).
+- Planned (#189): `cargo xtask test --repeat <N>` runs each test kernel N times in a row in the `push` cell. A kernel that fails once in N fails the run.
+- Planned (#189, #190): `cargo xtask soak --minutes <M>` and `PHAROS_MODEL=<file> cargo xtask s1` (below).
 
 The cell table lives in `xtask` as data, with a host test that every cell differs from `push` in exactly one setting and every exception names a kernel that exists.
 
@@ -208,11 +219,10 @@ The cell table lives in `xtask` as data, with a host test that every cell differ
 
 - **Triggers:** `schedule`, weekly on Sunday at 02:00 UTC, on `main`; and `workflow_dispatch` with a `cells` input (default: all), so a branch or a release commit can be run on demand.
 - **Jobs:**
-  - `cells`: the 7 TCG cells × 4 shares, `fail-fast: false`, about 6 minutes each;
-  - `repeat`: `--repeat 3` in `push`, 4 shares, about 17 minutes each;
-  - `soak`: 60 minutes;
-  - `s1`: the scenario kernel, output checked only;
-  - `kvm`: only if the trial shows `/dev/kvm`.
+  - `cells` (implemented): the 7 TCG cells × 4 shares, `fail-fast: false`, each running `cargo xtask matrix <cell> --shard N/4`; `kvm` only when named in `cells`, with a step that fails if the runner has no `/dev/kvm` and otherwise opens it to the job;
+  - planned, `repeat`: `--repeat 3` in `push`, 4 shares, about 17 minutes each;
+  - planned, `soak`: 60 minutes;
+  - planned, `s1`: the scenario kernel, output checked only.
 - **Cost:** about 28 × 6 + 4 × 17 + 65 + the S1 job ≈ 330 billed minutes a run, or about 1,400 a month weekly. The S1 time under TCG is measured in #190.
 
 ### Reporting a failure

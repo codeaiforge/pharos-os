@@ -20,6 +20,7 @@ mod bench;
 mod console;
 mod echo;
 mod fs_image;
+mod matrix;
 mod recovery;
 mod sign;
 mod store_image;
@@ -100,6 +101,12 @@ COMMANDS:
                             kernels, balanced by their CI times, and the boot
                             check only in share 1 (CI runs the shares in
                             parallel).
+    matrix --list | matrix <CELL> [test options]
+                            The release test matrix (D-032, testing.md): list
+                            the cells, or run `test` in one. Each cell changes
+                            one setting from the push run (firmware, memory,
+                            CPU, or KVM); a test kernel's own settings win.
+                            Logs: target/xtask/logs/<CELL>/.
     fs build <DIR> <IMAGE>  Pack the regular files under DIR into a Pharos
                             filesystem image (docs/architecture/storage.md).
     fs ls <IMAGE>           Check an image with the kernel's parser and list
@@ -163,6 +170,11 @@ enum Task {
     },
     Runner {
         elf: PathBuf,
+    },
+    /// `None`: list the cells.
+    Matrix {
+        cell: Option<String>,
+        test_args: Vec<String>,
     },
     FsBuild {
         dir: PathBuf,
@@ -262,6 +274,23 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
             }
             return Ok(Task::Runner {
                 elf: PathBuf::from(elf),
+            });
+        }
+        Some("matrix") => {
+            let cell = args.next().ok_or("matrix needs a cell name, or --list")?;
+            if cell == "--list" {
+                return Ok(Task::Matrix {
+                    cell: None,
+                    test_args: Vec::new(),
+                });
+            }
+            matrix::find(&cell)?;
+            let test_args: Vec<String> = args.collect();
+            // Checked here, so a typo fails before anything builds.
+            parse(std::iter::once("test".to_string()).chain(test_args.iter().cloned()))?;
+            return Ok(Task::Matrix {
+                cell: Some(cell),
+                test_args,
             });
         }
         Some("test") => {
@@ -422,8 +451,13 @@ impl Paths {
         self.target.join("xtask").join("image")
     }
 
+    /// `target/xtask/logs/`, or `logs/<cell>/` in a matrix cell but `push`.
     fn logs_dir(&self) -> PathBuf {
-        self.target.join("xtask").join("logs")
+        let logs = self.target.join("xtask").join("logs");
+        match matrix::current().name {
+            "push" => logs,
+            cell => logs.join(cell),
+        }
     }
 
     fn runner_dir(&self, name: &str) -> PathBuf {
@@ -942,6 +976,10 @@ fn main_image(paths: &Paths, kernel: Option<PathBuf>) -> Result<PathBuf> {
 /// such as `stdio` or `file:<path>`. UEFI uses OVMF with a writable copy of
 /// its variable store at `vars`.
 fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> Vec<OsString> {
+    // The release matrix cell (D-032): its settings come before a test
+    // kernel's own, which callers append, so a kernel's own settings win.
+    let cell = matrix::current();
+    let bios = bios || cell.bios;
     let mut args: Vec<OsString> = [
         "-M",
         "q35",
@@ -1014,6 +1052,7 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
         args.push("-drive".into());
         args.push(vars_drive);
     }
+    args.extend(cell.args.iter().map(OsString::from));
     if gdb {
         // -s: GDB server on localhost:1234; -S: wait for GDB before starting.
         args.push("-s".into());
@@ -1168,9 +1207,11 @@ fn boot_headless(
 }
 
 /// Extra QEMU arguments for test kernels that need a different machine:
-/// `vector_state_avx` runs on `-cpu max` (XSAVE and AVX, D-016).
+/// `vector_state_avx` runs on `-cpu max` (XSAVE and AVX, D-016), and
+/// `vector_state` on `qemu64` (FXSAVE, no AVX) in every matrix cell.
 fn test_qemu_args(name: &str) -> Vec<OsString> {
     match name {
+        "vector_state" => vec!["-cpu".into(), "qemu64".into()],
         "vector_state_avx" => vec!["-cpu".into(), "max".into()],
         // After `qemu_args`' 256M: QEMU takes the last `-m`.
         LARGE_FILE_TEST => vec!["-m".into(), "2G".into()],
@@ -1352,7 +1393,14 @@ fn test(paths: &Paths, timeout: Duration, part: Option<(usize, usize)>) -> Resul
         Command::new(cargo)
             .current_dir(&paths.root)
             .env(TEST_TIMEOUT_ENV, timeout.as_secs().to_string())
-            .args(["test", "--locked", "--package", KERNEL_PACKAGE])
+            // Every kernel runs even after one fails, so a run shows all failures.
+            .args([
+                "test",
+                "--locked",
+                "--no-fail-fast",
+                "--package",
+                KERNEL_PACKAGE,
+            ])
             .args(["--target", KERNEL_TARGET])
             .args(&selected),
         true,
@@ -1375,7 +1423,13 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
     fs::create_dir_all(&logs).map_err(io_err("cannot create", &logs))?;
 
     let mut failures = 0;
-    for bios in [false, true] {
+    // The `bios` cell boots SeaBIOS only; the others both firmwares.
+    let firmwares: &[bool] = if matrix::current().bios {
+        &[true]
+    } else {
+        &[false, true]
+    };
+    for &bios in firmwares {
         let name = firmware_name(bios);
         let log = logs.join(format!("boot-{name}.log"));
         let vars = logs.join(format!("boot-{name}-ovmf-vars.fd"));
@@ -1386,15 +1440,19 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
             Err(reason) => {
                 failures += 1;
                 report_failure(&label, &run, &log, &reason);
+                matrix::summary(&format!("`{label}`: FAIL: {reason}"));
             }
         }
     }
     if failures > 0 {
-        return Err(format!("{failures} of 2 boot checks failed"));
+        return Err(format!(
+            "{failures} of {} boot checks failed",
+            firmwares.len()
+        ));
     }
     // Both boots wrote the same store: one audit stream each (#108).
     let store = iso.with_file_name(STORE_IMAGE);
-    match boot_audit(&store) {
+    match boot_audit(&store, firmwares.len()) {
         Ok(n) => {
             println!(
                 "boot audit trail: {n} streams, each with a start record for every service and the ready state"
@@ -1422,10 +1480,10 @@ const BOOT_SERVICES: [&str; 8] = [
 /// recorded a start for each boot service in each, including those started
 /// before the audit service was ready (#108), and that the system was
 /// ready with every one of them (#151). Returns the stream count.
-fn boot_audit(store: &Path) -> Result<usize> {
+fn boot_audit(store: &Path, boots: usize) -> Result<usize> {
     let streams = store_image::audit(store)?;
-    if streams.len() != 2 {
-        return Err(format!("expected 2 streams, got {}", streams.len()));
+    if streams.len() != boots {
+        return Err(format!("expected {boots} streams, got {}", streams.len()));
     }
     for (name, lines) in &streams {
         for service in BOOT_SERVICES {
@@ -3339,6 +3397,12 @@ fn crash_rounds(c: &Crash, iso: &Path, vars: &Path, logs: &Path, extra: &[OsStri
 fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     let timeout = runner_timeout(env::var(TEST_TIMEOUT_ENV).ok().as_deref())?;
     let name = test_name(elf);
+    let cell = matrix::current();
+    let label = format!("test kernel {name} ({})", matrix::label(cell));
+    if let Some(why) = matrix::skip(cell, &name) {
+        println!("{label}: SKIP: {why}");
+        return Ok(());
+    }
     let timeout = if name == LARGE_FILE_TEST {
         timeout.max(LARGE_FILE_TIMEOUT)
     } else if name == HEALTH_TEST {
@@ -3501,7 +3565,6 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         timeout,
         &extra,
     )?;
-    let label = format!("test kernel {name} (uefi)");
     let typed = script.map_or(Ok(()), |s| {
         s.finish(refused).and_then(|output| {
             println!("  trusted console:");
@@ -3601,51 +3664,61 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
         }
         Err(reason) => {
             report_failure(&label, &run, &log, &reason);
-            Err(format!("{label} failed"))
+            Err(format!("{label} failed: {reason}"))
         }
     }
 }
 
 fn main() -> ExitCode {
-    let result = parse(env::args().skip(1)).and_then(|task| {
-        let paths = Paths::new();
-        match task {
-            Task::Help => {
-                print!("{HELP}");
-                Ok(())
-            }
-            Task::Build => build(&paths),
-            Task::Image { kernel } => main_image(&paths, kernel).map(|_| ()),
-            Task::ImageSign {
-                image,
-                out,
-                version,
-                key,
-            } => sign::sign(&paths, &image, &out, version, key.as_deref()),
-            Task::Run { bios, gdb, kernel } => run_qemu(&paths, bios, gdb, kernel),
-            Task::Test { timeout, shard } => test(&paths, timeout, shard),
-            Task::Runner { elf } => runner(&paths, &elf),
-            Task::FsBuild { dir, image } => fs_image::build(&dir, &image),
-            Task::FsLs { image } => fs_image::ls(&image),
-            Task::StoreBuild { dir, image, blocks } => store_image::build(&dir, &image, blocks),
-            Task::StoreLs { image } => store_image::ls(&image),
-            Task::StoreAudit { image } => store_image::audit(&image).map(|streams| {
-                for (name, lines) in streams {
-                    println!("{name}: {} records", lines.len());
-                    for line in lines {
-                        println!("  {line}");
+    let result = matrix::check_env()
+        .and_then(|()| parse(env::args().skip(1)))
+        .and_then(|task| {
+            let paths = Paths::new();
+            match task {
+                Task::Help => {
+                    print!("{HELP}");
+                    Ok(())
+                }
+                Task::Build => build(&paths),
+                Task::Image { kernel } => main_image(&paths, kernel).map(|_| ()),
+                Task::ImageSign {
+                    image,
+                    out,
+                    version,
+                    key,
+                } => sign::sign(&paths, &image, &out, version, key.as_deref()),
+                Task::Run { bios, gdb, kernel } => run_qemu(&paths, bios, gdb, kernel),
+                Task::Test { timeout, shard } => test(&paths, timeout, shard),
+                Task::Runner { elf } => runner(&paths, &elf).inspect_err(|e| matrix::summary(e)),
+                Task::Matrix { cell: None, .. } => {
+                    matrix::list();
+                    Ok(())
+                }
+                Task::Matrix {
+                    cell: Some(cell),
+                    test_args,
+                } => matrix::run(&cell, &test_args),
+                Task::FsBuild { dir, image } => fs_image::build(&dir, &image),
+                Task::FsLs { image } => fs_image::ls(&image),
+                Task::StoreBuild { dir, image, blocks } => store_image::build(&dir, &image, blocks),
+                Task::StoreLs { image } => store_image::ls(&image),
+                Task::StoreAudit { image } => store_image::audit(&image).map(|streams| {
+                    for (name, lines) in streams {
+                        println!("{name}: {} records", lines.len());
+                        for line in lines {
+                            println!("  {line}");
+                        }
                     }
-                }
-            }),
-            Task::StoreKnowledge { image } => store_image::knowledge(&image).map(|lines| {
-                for line in lines {
-                    println!("{line}");
-                }
-            }),
-            Task::BenchIpc { runs } => bench::ipc(&paths, runs),
-            Task::BenchInfer { runs } => bench::infer(&paths, runs),
-        }
-    });
+                }),
+                Task::StoreKnowledge { image } => store_image::knowledge(&image).map(|lines| {
+                    for line in lines {
+                        println!("{line}");
+                    }
+                }),
+                Task::BenchIpc { runs } => bench::ipc(&paths, runs),
+                Task::BenchInfer { runs } => bench::infer(&paths, runs),
+            }
+        });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -3752,6 +3825,31 @@ mod tests {
         let image = pharos_fs::Image::mount(&modules[0].1[..]).unwrap();
         assert!(image.lookup(b"etc/motd").is_ok());
         assert!(image.lookup(b"bin/hello").is_ok());
+    }
+
+    #[test]
+    fn parses_matrix() {
+        assert_eq!(
+            parse(args(&["matrix", "--list"])),
+            Ok(Task::Matrix {
+                cell: None,
+                test_args: Vec::new()
+            })
+        );
+        assert_eq!(
+            parse(args(&["matrix", "bios", "--shard", "2/4"])),
+            Ok(Task::Matrix {
+                cell: Some("bios".into()),
+                test_args: vec!["--shard".into(), "2/4".into()],
+            })
+        );
+        assert!(parse(args(&["matrix"])).is_err());
+        assert!(
+            parse(args(&["matrix", "nope"]))
+                .unwrap_err()
+                .contains("no matrix cell")
+        );
+        assert!(parse(args(&["matrix", "bios", "--shard", "5/4"])).is_err());
     }
 
     #[test]
@@ -3875,7 +3973,7 @@ mod tests {
         assert_eq!(test_qemu_args("vector_state_avx"), ["-cpu", "max"]);
         assert_eq!(test_qemu_args("large_file"), ["-m", "2G"]);
         assert_eq!(test_qemu_args("exhaustion"), ["-m", "1G"]);
-        assert!(test_qemu_args("vector_state").is_empty());
+        assert_eq!(test_qemu_args("vector_state"), ["-cpu", "qemu64"]);
         assert!(test_qemu_args("network").is_empty());
     }
 
