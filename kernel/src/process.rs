@@ -197,6 +197,14 @@ pub struct UserMemory {
 /// user stops it (accepted, D-031 review).
 pub const TRUSTED_RESERVE: u64 = 2048;
 
+/// The most page-table frames mapping `pages` new pages can take: one
+/// table per 512 pages, one more where the range crosses a table, and a
+/// new page directory and directory-pointer table. Counted with the pages
+/// against the reserve (#196): the tables come from the same frames.
+pub const fn tables_for(pages: u64) -> u64 {
+    pages.div_ceil(512) + 3
+}
+
 /// True if a process in `class` may take `pages` more frames while
 /// `free` are free: the trusted class always; another only if
 /// [`TRUSTED_RESERVE`] frames stay free after.
@@ -1164,6 +1172,26 @@ mod tests {
         }
         assert!(may_take(r, 64, crate::sched::TRUSTED));
         assert!(may_take(64, 64, crate::sched::TRUSTED));
+    }
+
+    /// A batch's tables count against the reserve too (#196).
+    #[test]
+    fn a_mapping_counts_its_page_tables() {
+        assert_eq!(
+            tables_for(1),
+            4,
+            "a table, a directory, a pointer table, and one crossing"
+        );
+        assert_eq!(tables_for(BATCH), 4);
+        assert_eq!(tables_for(512), 4);
+        assert_eq!(tables_for(513), 5);
+        let class = crate::sched::TRUSTED + 1;
+        let r = TRUSTED_RESERVE;
+        assert!(
+            !may_take(r + 1, 1 + tables_for(1), class),
+            "one page above the reserve"
+        );
+        assert!(may_take(r + 5, 1 + tables_for(1), class));
     }
 
     #[test]

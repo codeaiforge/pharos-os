@@ -799,8 +799,10 @@ mod kernel {
             let mapped = sched::with_current_space(|space| {
                 let mut guard = crate::mm::frames();
                 let frames = guard.as_mut()?;
-                // Never into the trusted class's reserve (M4.6, #182).
-                if !process::may_take(frames.stats().free as u64, batch, class) {
+                // Never into the trusted class's reserve (M4.6, #182), with
+                // the batch's page tables (#196).
+                let need = batch + process::tables_for(batch);
+                if !process::may_take(frames.stats().free as u64, need, class) {
                     return None;
                 }
                 for i in done..done + batch {
@@ -927,12 +929,18 @@ mod kernel {
             user: true,
         };
         // In batches, as `mem_map` (#122); the region is reserved meanwhile.
+        let class = sched::current_class();
         let mut done = 0;
         while done < pages {
             let n = (pages - done).min(process::BATCH);
             let mapped = sched::with_current_space(|space| {
                 let mut guard = crate::mm::frames();
                 let frames = guard.as_mut()?;
+                // The frames are the memory object's; its page tables are
+                // new, and never from the trusted class's reserve (#196).
+                if !process::may_take(frames.stats().free as u64, process::tables_for(n), class) {
+                    return None;
+                }
                 for i in done..done + n {
                     let virt = start + i * 4096;
                     let phys = memory.frames()[i as usize];
@@ -1313,8 +1321,10 @@ mod kernel {
                     }
                     let mut guard = crate::mm::frames();
                     let frames = guard.as_mut().ok_or(Error::NoMemory)?;
-                    // Never into the trusted class's reserve (M4.6 review F2).
-                    if !process::may_take(frames.stats().free as u64, pages as u64, class) {
+                    // Never into the trusted class's reserve (M4.6 review F2),
+                    // with the pages' tables (#196).
+                    let need = pages as u64 + process::tables_for(pages as u64);
+                    if !process::may_take(frames.stats().free as u64, need, class) {
                         return Err(Error::NoMemory);
                     }
                     space.map_dma(addr, pages, frames).map_err(|e| match e {
