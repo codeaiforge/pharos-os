@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(KERNEL_CODE & 0b111, 0, "ring 0, GDT");
         assert_eq!((USER_DATA >> 3, USER_DATA & 3), (5, 3));
         assert_eq!((USER_CODE >> 3, USER_CODE & 3), (6, 3));
-        // `sysret` loads SS = base + 8 and CS = base + 16 (D-014, STAR base 0x20).
+        // `sysret` loads SS = base + 8 and CS = base + 16 (D-014, STAR base 0x23).
         assert_eq!(USER_DATA & !3, 0x20 + 8);
         assert_eq!(USER_CODE & !3, 0x20 + 16);
     }

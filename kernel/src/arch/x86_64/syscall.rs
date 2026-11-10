@@ -160,14 +160,20 @@ fn wrmsr(msr: u32, value: u64) {
     };
 }
 
+/// STAR's user base: `sysret` loads SS = base + 8 and CS = (base + 16) | 3.
+/// The base carries RPL 3 because AMD CPUs load SS's RPL from it, where
+/// Intel and QEMU's TCG force 3; with RPL 0 the next `iretq` to user mode
+/// faults with #GP(0x28) on AMD under KVM (#195).
+const STAR_USER_BASE: u64 = USER_DATA as u64 - 8;
+
 /// Enables `syscall`/`sysret` and installs `handler` for every system call.
 /// Needs the kernel GDT (user segments) and runs with interrupts disabled.
 pub fn init(handler: fn(&mut SyscallFrame)) {
     HANDLER.store(handler as *mut (), Ordering::Release);
-    // STAR: kernel CS/SS from 0x08, user base 0x20 (sysret: SS 0x28|3,
-    // CS 0x30|3).
-    let user_base = u64::from(USER_DATA & !3) - 8;
-    wrmsr(IA32_STAR, user_base << 48 | u64::from(KERNEL_CODE) << 32);
+    wrmsr(
+        IA32_STAR,
+        STAR_USER_BASE << 48 | u64::from(KERNEL_CODE) << 32,
+    );
     wrmsr(IA32_LSTAR, pharos_syscall_entry as *const () as u64);
     wrmsr(IA32_FMASK, SFMASK);
     wrmsr(IA32_EFER, super::rdmsr(IA32_EFER) | EFER_SCE);
@@ -188,8 +194,10 @@ mod tests {
 
     #[test]
     fn star_base_matches_gdt() {
-        assert_eq!(u64::from(USER_DATA & !3) - 8, 0x20);
-        assert_eq!(u64::from(USER_CODE & !3), 0x20 + 16);
+        assert_eq!(STAR_USER_BASE, 0x23);
+        // AMD's sysret: SS = base + 8 with the base's RPL (#195).
+        assert_eq!(STAR_USER_BASE + 8, u64::from(USER_DATA));
+        assert_eq!((STAR_USER_BASE + 16) | 3, u64::from(USER_CODE));
     }
 
     #[test]

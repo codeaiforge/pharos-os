@@ -57,7 +57,7 @@ The prototype for D-004 showed that QEMU's default CPU under TCG, which CI uses,
 
 - **Instruction:** `syscall`/`sysret`. Setup:
   - `EFER.SCE` on;
-  - `STAR`: kernel CS `0x08` / SS `0x10`, user base `0x20`, so `sysret` loads CS `0x33` and SS `0x2b`;
+  - `STAR`: kernel CS `0x08` / SS `0x10`, user base `0x23`, so `sysret` loads CS `0x33` and SS `0x2b` (the base carries RPL 3: AMD CPUs take SS's RPL from it, #195);
   - `LSTAR` → the entry stub;
   - `SFMASK` clears IF, TF, DF, AC, and NT.
 - **New GDT entries:** user data `0x28` (DPL 3) and user code `0x30` (DPL 3), after the TSS.
