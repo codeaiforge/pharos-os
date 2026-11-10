@@ -341,8 +341,44 @@ extern "C" fn dispatch(frame: &mut ExceptionFrame) {
         cr2: read_cr2(),
     };
     super::_print_panic(format_args!("PHAROS: exception: {report}\n"));
+    #[cfg(target_os = "none")]
+    gp_context(frame);
     super::qemu_exit(super::QemuExit::Failure);
     super::halt()
+}
+
+/// After a #GP in the kernel (#195): the five words at the faulting RSP,
+/// which are the frame being loaded when the fault is at `iretq`, and the
+/// GDT as the CPU sees it (through GDTR). Printed after the report, so a
+/// fault here cannot hide it.
+#[cfg(target_os = "none")]
+fn gp_context(frame: &ExceptionFrame) {
+    /// Lowest address of the kernel half.
+    const KERNEL_HALF: u64 = 0xffff_8000_0000_0000;
+    if frame.vector != u64::from(GENERAL_PROTECTION)
+        || frame.cs & 3 != 0
+        || frame.rsp < KERNEL_HALF
+        || frame.rsp % 8 != 0
+    {
+        return;
+    }
+    // SAFETY: the kernel was running on this stack when it faulted, so RSP
+    // is a mapped, aligned kernel address; reading 40 bytes reaches at most
+    // the top of an `iretq` frame. A fault here would itself be reported.
+    let w = unsafe { core::ptr::read_volatile(frame.rsp as *const [u64; 5]) };
+    super::_print_panic(format_args!(
+        "  at RSP: {:#x} {:#x} {:#x} {:#x} {:#x} (iretq: RIP CS RFLAGS RSP SS)\n",
+        w[0], w[1], w[2], w[3], w[4]
+    ));
+    let state = super::gdt::segment_state();
+    let entries = (usize::from(state.gdt_limit) + 1) / 8;
+    // SAFETY: GDTR names the GDT the CPU is using: the kernel's static
+    // table, mapped and `entries` descriptors long by its limit.
+    let gdt = unsafe { core::slice::from_raw_parts(state.gdt_base as *const u64, entries) };
+    super::_print_panic(format_args!(
+        "  GDT at {:#x}, {entries} entries: {gdt:x?}; SS {:#x} DS {:#x} TR {:#x}\n",
+        state.gdt_base, state.ss, state.ds, state.tr
+    ));
 }
 
 #[cfg(target_os = "none")]
