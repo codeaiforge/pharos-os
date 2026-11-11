@@ -55,6 +55,9 @@ const CONSOLE: Handle = 1;
 const RUNTIME: Handle = 2;
 const REPORT: Handle = 3;
 const BUFFER: u64 = MAX_BUFFER;
+/// Agents the runtime's test table accepts (`agents.rs` `TEST`, less the
+/// entries whose manifests it refuses). INFO reports it while idle.
+const ACCEPTED: u8 = 22;
 
 struct Client {
     reply: Handle,
@@ -301,7 +304,7 @@ fn main(arg: u64) -> u64 {
             |c: &Client, t: u32| c.status(t).is_some_and(|s| s.state == State::Cancelled);
         let idle = |c: &Client, out: &mut [u8; 256]| {
             let (_, n) = c.call(&Request::Info, out);
-            Info::parse(&out[..n]).is_some_and(|i| i.details == [21, 0])
+            Info::parse(&out[..n]).is_some_and(|i| i.details == [ACCEPTED, 0])
         };
         let refused = c.submit(b"boss", b"falter").ok() == Some(13)
             && c.wait(13, 90).is_some_and(|(s, result)| {
@@ -376,8 +379,8 @@ fn main(arg: u64) -> u64 {
     let (_, n) = c.call(&Request::Info, &mut out);
     let info = Info::parse(&out[..n]);
     c.step(
-        "INFO: interface agents, twenty-one agents accepted, none running",
-        info.is_some_and(|i| i.name == NAME && i.details == [21, 0]),
+        "INFO: interface agents, every test agent accepted, none running",
+        info.is_some_and(|i| i.name == NAME && i.details == [ACCEPTED, 0]),
     );
     let refused = [&b"greedy"[..], b"absent", b"noentry"]
         .iter()
@@ -471,7 +474,7 @@ fn main(arg: u64) -> u64 {
         .iter()
         .all(|&t| c.status(t).is_some_and(|s| s.state == State::Cancelled));
     let (_, n) = c.call(&Request::Info, &mut out);
-    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [21, 0]);
+    let idle = Info::parse(&out[..n]).is_some_and(|i| i.details == [ACCEPTED, 0]);
     c.step(
         "cancelling running and pending tasks stops their agents",
         cancelled && all && idle,
