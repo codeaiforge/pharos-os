@@ -168,7 +168,7 @@ Host noise matters: on the reference host (i9-10900K, `powersave` governor) runs
 
 ## Release test matrix (M5.1, D-032)
 
-**Status:** design approved by the maintainer on 2026-11-10 (#187). **Implemented** (#188): the cells, `cargo xtask matrix`, and `matrix.yml`'s `cells` job. The `kvm` cell runs in CI, in the weekly list since #195 (D-009 amended). **Implemented** (#189): `cargo xtask test --repeat`, `cargo xtask soak`, and the `repeat` and `soak` jobs. **Planned:** the `s1` command and job. Implementation: #188 (matrix), #189 (soak and repeat), #190 (S1), #191 (known crash bugs), #192 (gate).
+**Status:** design approved by the maintainer on 2026-11-10 (#187). **Implemented** (#188): the cells, `cargo xtask matrix`, and `matrix.yml`'s `cells` job. The `kvm` cell runs in CI, in the weekly list since #195 (D-009 amended). **Implemented** (#189): `cargo xtask test --repeat`, `cargo xtask soak`, and the `repeat` and `soak` jobs. **Implemented** (#190): `cargo xtask s1` and the `s1` job. **Implemented** (#191): the [known crash bugs](#known-crash-bugs) triaged, none open. Implementation: #188 (matrix), #189 (soak and repeat), #190 (S1), #191 (known crash bugs), #192 (gate).
 
 ### Cells
 
@@ -296,6 +296,25 @@ At the end the runner reads the store's audit trail on the host with the store's
 - Given the file, it copies it out rather than summarizing (128 tokens, cut at the limit); asked again after the file, it calls `read_file` again. A limit of the 0.5B model, not of Pharos: the run checks that the model's output on Pharos is the host's, not its quality.
 - `cargo xtask s1`: passed in 39 s, result identical to the host's (708 bytes).
 - Mutations: the file left out of turn 2 (the model then invents a summary: the result differs), and a model with one byte changed (`infer: model qwen2.5-0.5b-instruct-q8_0 failed: hash`, the task fails). Each fails the run.
+
+### Known crash bugs
+
+**Implemented** (#191): the triage on 2026-11-11, at `09ace19` (the matrix run on it, 43066775449, found #199). Sources: every failed run in GitHub Actions (on `main` and on dispatch; mutation and `*-broken` branches fail on purpose), the open `bug` issues (none), the security reviews' findings, and the threat model's open limits. Every failure on `main` is listed with its outcome (D-032: any failure not shown to be infrastructure is a bug).
+
+| Run | Commit | Failure | Outcome |
+| --- | --- | --- | --- |
+| [43066642149](https://github.com/codeaiforge/pharos-os/actions/runs/43066642149), [43066775449](https://github.com/codeaiforge/pharos-os/actions/runs/43066775449) | `09ace19` | `agents`, `groups`: an idle check expected 21 agents, and #190 added the 22nd | #199, fixed; both kernels failed on every boot without it |
+| [42793383308](https://github.com/codeaiforge/pharos-os/actions/runs/42793383308), [42793389747](https://github.com/codeaiforge/pharos-os/actions/runs/42793389747), [42787996179](https://github.com/codeaiforge/pharos-os/actions/runs/42787996179) | `713f7ab`, `8d89fd7` | `aifail (bios)`: the trusted reserve not free | #196, fixed with a test |
+| [42788001527](https://github.com/codeaiforge/pharos-os/actions/runs/42788001527), [42793394291](https://github.com/codeaiforge/pharos-os/actions/runs/42793394291) | `8d89fd7`, `713f7ab` | `kvm`: #GP(0x28) at `iretq` on AMD | #195, fixed with a test |
+| [42821432548](https://github.com/codeaiforge/pharos-os/actions/runs/42821432548) | `462878b` | `apic_timer (kvm)`: a tick before `hlt` | #197, the check was wrong; fixed |
+| [42640888639](https://github.com/codeaiforge/pharos-os/actions/runs/42640888639), [42048789818](https://github.com/codeaiforge/pharos-os/actions/runs/42048789818) | `2f64de8`, `0cebbab` | `exhaustion`: the trusted task woke over 40 ms late, while `memprobe` mapped 64 MiB | #198, fixed with a test (`user_memory`) |
+| [42238649579](https://github.com/codeaiforge/pharos-os/actions/runs/42238649579) | `4e8549f` | `supervision`: a record twice in the trail | Fixed in `1518005` (M4.1 review F2), unit-tested |
+| [41652628559](https://github.com/codeaiforge/pharos-os/actions/runs/41652628559) | `6798458` | `trust` hung: a lost wakeup in kernel-side IPC | Fixed in `cef4ece` (M3.4 review F2). No test: the race is a few instructions wide against a 10 ms tick. Not seen since in any push, matrix, or repeat run |
+| [42581217608](https://github.com/codeaiforge/pharos-os/actions/runs/42581217608) | `2d5f87c` | Limine download: HTTP 504 | Infrastructure (cached since) |
+| 42671377905, 42671651920 | `65c770b`, `20da4e2` | GitHub internal error, no jobs ran | Infrastructure |
+| 40552290015 to 40562001568 (5 runs) | `330a98a` to `6d58529` | `minimum supported Rust (1.85)`: `let` chains do not compile | A build failure, not a crash; fixed on 2026-10-27 |
+
+Locally, the matrix found #193 and #194 and the repeat pass found #198 again; all three are fixed with tests. Every one of #193–#199 is closed. No security review finding and no open limit in the threat model is a crash, hang, or panic. They are recorded behaviours: a record can be in the trail twice (M4.1 F2), and a runaway service can starve its peers while `trust` stays usable (M4.6 F4). Any later failure gets a new `bug` issue in M5.1 ([Reporting a failure](#reporting-a-failure)).
 
 ### Test plan
 
