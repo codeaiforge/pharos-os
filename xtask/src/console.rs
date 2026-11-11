@@ -30,6 +30,18 @@ pub fn fifos(dir: &Path) -> Result<PathBuf, String> {
     fifos_named(dir, PIPE)
 }
 
+/// New FIFOs named `name` in `dir`, for a script that must not share its
+/// FIFOs with an earlier one's: a [`Script`]'s readers keep theirs open for
+/// the process's life, so they would read a second boot's console in the
+/// same runner (`test --repeat`, #189). Later [`fifos`] calls keep these.
+// ponytail: the old readers stay blocked on the old FIFOs, a few threads per boot; stop them on drop if a runner ever boots many times
+pub fn fresh(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    for end in ["in", "out"] {
+        let _ = fs::remove_file(dir.join(name).with_extension(end));
+    }
+    fifos_named(dir, name)
+}
+
 /// [`fifos`] named `name`.
 pub fn fifos_named(dir: &Path, name: &str) -> Result<PathBuf, String> {
     let base = dir.join(name);
@@ -272,6 +284,31 @@ mod tests {
         );
         assert_eq!(advance(AGAIN, 2, at, "added removed added").2, vec!["ok\n"]);
         assert_eq!(advance(AGAIN, 2, 99, "short").0, 2, "past the end");
+    }
+
+    #[test]
+    fn fresh_fifos_are_not_the_held_ones() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("pharos-fresh-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let inode = |base: &Path| fs::metadata(base.with_extension("out")).unwrap().ino();
+        let first = fresh(&dir, PIPE).unwrap();
+        // Held open, as an earlier boot's Script holds them.
+        let _held = open_pair(&first).unwrap();
+        let before = inode(&first);
+        let second = fresh(&dir, PIPE).unwrap();
+        assert_ne!(
+            inode(&second),
+            before,
+            "the second boot shares the first's FIFOs"
+        );
+        assert_eq!(fifos(&dir).unwrap(), second);
+        assert_eq!(
+            inode(&second),
+            inode(&fifos(&dir).unwrap()),
+            "fifos keeps fresh ones"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

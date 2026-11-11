@@ -54,6 +54,8 @@ const BOOT_MARKER: &str = "PHAROS: boot ok";
 const TESTS_MARKER: &str = "PHAROS: tests ok";
 /// Environment variable `test` uses to pass its time limit to `runner`.
 const TEST_TIMEOUT_ENV: &str = "PHAROS_TEST_TIMEOUT";
+/// Boots per test kernel, passed by `test --repeat` to `runner` (#189).
+const TEST_REPEAT_ENV: &str = "PHAROS_TEST_REPEAT";
 /// Set to `1` to make `runner` capture each test kernel's network traffic.
 const PCAP_ENV: &str = "PHAROS_PCAP";
 /// Default time limit per headless boot under TCG (D-009).
@@ -87,7 +89,7 @@ COMMANDS:
                             --kernel boots the given ELF (for example a test
                             kernel) instead of building the kernel.
                             Succeeds only if the kernel reports success.
-    test [--timeout <SECS>] [--shard <N/M>]
+    test [--timeout <SECS>] [--shard <N/M>] [--repeat <N>]
                             Boot check: build, make the image, and boot it headless
                             under UEFI and BIOS. Then kernel tests: boot every test
                             kernel in kernel/tests/ under UEFI. A boot passes only
@@ -100,7 +102,8 @@ COMMANDS:
                             --shard N/M runs the N-th of M shares of the test
                             kernels, balanced by their CI times, and the boot
                             check only in share 1 (CI runs the shares in
-                            parallel).
+                            parallel). --repeat N boots each test kernel N
+                            times in a row; one failure fails it.
     matrix --list | matrix <CELL> [test options]
                             The release test matrix (D-032, testing.md): list
                             the cells, or run `test` in one. Each cell changes
@@ -167,6 +170,8 @@ enum Task {
         /// `(n, of)`: run only the `n`-th of `of` shares of the test
         /// kernels, from 1 (CI runs them in parallel).
         shard: Option<(usize, usize)>,
+        /// Boots per test kernel (`--repeat`, at least 1).
+        repeat: u32,
     },
     Runner {
         elf: PathBuf,
@@ -296,6 +301,7 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
         Some("test") => {
             let mut secs = DEFAULT_BOOT_TIMEOUT_SECS;
             let mut shard = None;
+            let mut repeat = 1;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--timeout" => {
@@ -314,12 +320,19 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                             "--shard must be N/M with 1 <= N <= M, got '{value}'"
                         ))?);
                     }
+                    "--repeat" => {
+                        let value = args.next().ok_or("--repeat needs a number of boots")?;
+                        repeat = value.parse().ok().filter(|&n| n > 0).ok_or(format!(
+                            "--repeat must be a positive number of boots, got '{value}'"
+                        ))?;
+                    }
                     other => return Err(format!("unexpected argument '{other}'")),
                 }
             }
             return Ok(Task::Test {
                 timeout: Duration::from_secs(secs),
                 shard,
+                repeat,
             });
         }
         Some("fs") => match args.next().as_deref() {
@@ -1378,7 +1391,7 @@ fn shard(names: &[String], n: usize, of: usize) -> Vec<String> {
 /// `cargo xtask test`: boot check under UEFI and BIOS, then the kernel tests
 /// (D-009). Both parts always run; the command fails if either fails. With
 /// a shard, only its share of the kernels, and the boot check in share 1.
-fn test(paths: &Paths, timeout: Duration, part: Option<(usize, usize)>) -> Result<()> {
+fn test(paths: &Paths, timeout: Duration, part: Option<(usize, usize)>, repeat: u32) -> Result<()> {
     let boot = match part {
         Some((n, _)) if n > 1 => Ok(()),
         _ => boot_check(paths, timeout),
@@ -1405,6 +1418,7 @@ fn test(paths: &Paths, timeout: Duration, part: Option<(usize, usize)>) -> Resul
         Command::new(cargo)
             .current_dir(&paths.root)
             .env(TEST_TIMEOUT_ENV, timeout.as_secs().to_string())
+            .env(TEST_REPEAT_ENV, repeat.to_string())
             // Every kernel runs even after one fails, so a run shows all failures.
             .args([
                 "test",
@@ -3406,7 +3420,25 @@ fn crash_rounds(c: &Crash, iso: &Path, vars: &Path, logs: &Path, extra: &[OsStri
 
 /// `cargo xtask runner <ELF>`: Cargo's runner for test kernels. Wraps one
 /// test kernel in its own image and boots it headless under UEFI (D-009).
+/// With `test --repeat N`, boots it N times and fails on the first failure.
 fn runner(paths: &Paths, elf: &Path) -> Result<()> {
+    let repeat: u32 = match env::var(TEST_REPEAT_ENV) {
+        Err(_) => 1,
+        Ok(v) => v.parse().ok().filter(|&n| n > 0).ok_or(format!(
+            "{TEST_REPEAT_ENV} must be a positive number of boots, got '{v}'"
+        ))?,
+    };
+    for i in 1..=repeat {
+        if repeat > 1 {
+            println!("test kernel {}: boot {i} of {repeat}", test_name(elf));
+        }
+        runner_once(paths, elf)?;
+    }
+    Ok(())
+}
+
+/// One boot of a test kernel.
+fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     let timeout = runner_timeout(env::var(TEST_TIMEOUT_ENV).ok().as_deref())?;
     let name = test_name(elf);
     let cell = matrix::current();
@@ -3551,12 +3583,12 @@ fn runner(paths: &Paths, elf: &Path) -> Result<()> {
     let script = if steps.is_empty() {
         None
     } else {
-        let base = console::fifos(&out)?;
+        let base = console::fresh(&out, console::PIPE)?;
         let (qmp, serial) = if name == HOTPLUG_TEST {
             // The kernel's own lines too: its audit holds the removal back.
             let _ = fs::remove_file(&log);
             (
-                Some(console::fifos_named(&out, console::QMP)?),
+                Some(console::fresh(&out, console::QMP)?),
                 Some(log.as_path()),
             )
         } else {
@@ -3700,7 +3732,11 @@ fn main() -> ExitCode {
                     key,
                 } => sign::sign(&paths, &image, &out, version, key.as_deref()),
                 Task::Run { bios, gdb, kernel } => run_qemu(&paths, bios, gdb, kernel),
-                Task::Test { timeout, shard } => test(&paths, timeout, shard),
+                Task::Test {
+                    timeout,
+                    shard,
+                    repeat,
+                } => test(&paths, timeout, shard, repeat),
                 Task::Runner { elf } => runner(&paths, &elf).inspect_err(|e| matrix::summary(e)),
                 Task::Matrix { cell: None, .. } => {
                     matrix::list();
@@ -4064,6 +4100,7 @@ mod tests {
             Ok(Task::Test {
                 timeout: Duration::from_secs(DEFAULT_BOOT_TIMEOUT_SECS),
                 shard: None,
+                repeat: 1,
             })
         );
         assert_eq!(
@@ -4071,6 +4108,7 @@ mod tests {
             Ok(Task::Test {
                 timeout: Duration::from_secs(5),
                 shard: None,
+                repeat: 1,
             })
         );
         assert_eq!(
@@ -4078,8 +4116,21 @@ mod tests {
             Ok(Task::Test {
                 timeout: Duration::from_secs(DEFAULT_BOOT_TIMEOUT_SECS),
                 shard: Some((2, 4)),
+                repeat: 1,
             })
         );
+        assert_eq!(
+            parse(args(&["test", "--repeat", "3"])),
+            Ok(Task::Test {
+                timeout: Duration::from_secs(DEFAULT_BOOT_TIMEOUT_SECS),
+                shard: None,
+                repeat: 3,
+            })
+        );
+        for bad in ["0", "-1", "three"] {
+            assert!(parse(args(&["test", "--repeat", bad])).is_err(), "{bad}");
+        }
+        assert!(parse(args(&["test", "--repeat"])).is_err());
         for bad in ["0/4", "5/4", "2", "a/b", "2/"] {
             assert!(parse(args(&["test", "--shard", bad])).is_err(), "{bad}");
         }

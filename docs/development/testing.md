@@ -166,7 +166,7 @@ Host noise matters: on the reference host (i9-10900K, `powersave` governor) runs
 
 ## Release test matrix (M5.1, D-032)
 
-**Status:** design approved by the maintainer on 2026-11-10 (#187). **Implemented** (#188): the cells, `cargo xtask matrix`, and `matrix.yml`'s `cells` job. The `kvm` cell runs in CI, in the weekly list since #195 (D-009 amended). **Planned:** the `--repeat`, `soak`, and `s1` commands and jobs. Implementation: #188 (matrix), #189 (soak and repeat), #190 (S1), #191 (known crash bugs), #192 (gate).
+**Status:** design approved by the maintainer on 2026-11-10 (#187). **Implemented** (#188): the cells, `cargo xtask matrix`, and `matrix.yml`'s `cells` job. The `kvm` cell runs in CI, in the weekly list since #195 (D-009 amended). **Implemented** (#189): `cargo xtask test --repeat` and the `repeat` jobs. **Planned:** the `soak` and `s1` commands and jobs. Implementation: #188 (matrix), #189 (soak and repeat), #190 (S1), #191 (known crash bugs), #192 (gate).
 
 ### Cells
 
@@ -216,7 +216,7 @@ Each cell changes one setting from the push configuration (D-032). Every cell ru
 - `cargo xtask matrix --list` prints the cells and their QEMU settings.
 - `cargo xtask matrix <cell> [--shard N/M]` runs `cargo xtask test` in that cell. The cell reaches `cargo xtask runner` through the environment (`PHAROS_CELL`), because Cargo starts the runner. Each result line and log path names the cell, for example `test kernel system (bios): PASS` and `target/xtask/logs/bios/test-system.log`.
 - `cargo xtask test` and `matrix` run every test kernel even after one fails (`--no-fail-fast`), so a run shows all its failures. A failure report lists every failed check from the whole log, then the log's last lines. A failing kernel or boot check also writes one line to the CI job's summary (`GITHUB_STEP_SUMMARY`). `matrix.yml` prints the runner's CPU model.
-- Planned (#189): `cargo xtask test --repeat <N>` runs each test kernel N times in a row in the `push` cell. A kernel that fails once in N fails the run.
+- `cargo xtask test --repeat <N>` (and `matrix <cell> --repeat <N>`) boots each test kernel N times in a row, printing `boot i of N`. A kernel that fails once in N fails the run; its later boots are not run. The runner makes new console FIFOs for every boot: an earlier boot's script still reads the old ones, which failed the second boot of every kernel with a console script before the fix (#189, `console::fresh`, host-tested).
 - Planned (#189, #190): `cargo xtask soak --minutes <M>` and `PHAROS_MODEL=<file> cargo xtask s1` (below).
 
 The cell table lives in `xtask` as data, with a host test that every cell differs from `push` in exactly one setting and every exception names a kernel that exists.
@@ -228,7 +228,7 @@ The cell table lives in `xtask` as data, with a host test that every cell differ
 - **Triggers:** `schedule`, weekly on Sunday at 02:00 UTC, on `main`; and `workflow_dispatch` with a `cells` input (default: all), so a branch or a release commit can be run on demand.
 - **Jobs:**
   - `cells` (implemented): the 8 cells × 4 shares, `fail-fast: false`, each running `cargo xtask matrix <cell> --shard N/4`; `kvm` with a step that fails if the runner has no `/dev/kvm` and otherwise opens it to the job;
-  - planned, `repeat`: `--repeat 3` in `push`, 4 shares, about 17 minutes each;
+  - `repeat` (implemented): `--repeat 3` in `push`, 4 shares, as 4 more entries of the same job matrix (named `repeat 3 (N of 4)`, 60-minute limit); the dispatch input `repeat: no` leaves them out;
   - planned, `soak`: 60 minutes;
   - planned, `s1`: the scenario kernel, output checked only.
 - **Cost:** about 28 × 6 + 4 × 17 + 65 + the S1 job ≈ 330 billed minutes a run, or about 1,400 a month weekly. The S1 time under TCG is measured in #190.
@@ -265,7 +265,7 @@ At the end the runner reads the store's audit trail on the host with the store's
 
 ### Repeat pass
 
-`cargo xtask test --repeat 3` in `push` runs every test kernel 3 times. It targets timing checks such as `exhaustion`'s "waited at most 40 ms past each 20 ms wait", which failed once on `main` at a docs-only commit (run 42640888639; #191).
+`cargo xtask test --repeat 3` in `push` runs every test kernel 3 times. It targets timing checks such as `exhaustion`'s "waited at most 40 ms past each 20 ms wait", which failed once on `main` at a docs-only commit (run 42640888639; #191). The first local run (2026-11-11, push cell, reference host, 43 minutes): the boot check and every boot of the 75 kernels passed except one `exhaustion` boot, which failed the same check, 50 ms late (#198).
 
 ### S1 end to end
 
