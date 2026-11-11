@@ -159,4 +159,39 @@ fn run(t: &mut TestRun) {
             && free_frames() == before
             && Arc::strong_count(&held) == 1,
     );
+
+    // A mapping larger than memory (#198): the kernel maps until the
+    // trusted reserve refuses it, then rolls back every page it mapped.
+    // Both in batches with interrupts let in, so a trusted task's sleeps
+    // stay within the `classes` kernel's bound; rolled back whole, about
+    // 50,000 pages kept interrupts off for about 250 ms under TCG.
+    let probe = process::spawn_elf_limited(&programs, b"bin/memprobe", 7, Vec::new(), 1 << 22);
+    t.check("memprobe started to map 16 GiB", probe.is_ok());
+    let probe = probe.unwrap_or(u64::MAX);
+    let mut late = Duration::ZERO;
+    let start = time::uptime();
+    while process::by_id(probe).is_some() && time::uptime() - start < Duration::from_secs(60) {
+        let before = time::uptime();
+        sched::sleep(Duration::from_millis(20));
+        late = late.max(time::uptime() - before - Duration::from_millis(20));
+    }
+    kprintln!(
+        "  latest 20 ms sleep while mapping 16 GiB: {} us late",
+        late.as_micros()
+    );
+    t.check(
+        "a mapping larger than memory is refused (NO_MEMORY)",
+        process::exits()
+            .iter()
+            .any(|e| e.task == probe && e.code == 0),
+    );
+    t.check(
+        "meanwhile a trusted task's 20 ms sleeps ended at most 40 ms late",
+        late <= Duration::from_millis(40),
+    );
+    sched::sleep(Duration::from_millis(100));
+    t.check(
+        "after it, every process ended and every frame returned",
+        process::count() == live && free_frames() == before,
+    );
 }

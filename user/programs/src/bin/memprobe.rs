@@ -14,6 +14,9 @@
 //!   in a loop until stopped, so a stop lands while it maps however fast
 //!   the machine is (under KVM one mapping takes less than the kernel's
 //!   30 ms wait).
+//! - Argument 7 (the `user_memory` kernel, #198): maps 16 GiB in one call,
+//!   more than any matrix cell has; exits 0 if it is refused (`NO_MEMORY`),
+//!   after the kernel has mapped what it could and rolled it back.
 //! - Argument 5 (the `shared_memory` kernel, #122): see
 //!   [`revoked_while_mapping`].
 //! - Argument 4 (the `exhaustion` kernel, #120, #122): maps 64 MiB and
@@ -125,6 +128,7 @@ fn main(arg: u64) -> u64 {
             return u64::from(!held);
         }
         2 => return u64::from(mem_map(4096) != Err(Error::NoMemory)),
+        7 => return u64::from(mem_map(16 * 1024 * MIB) != Err(Error::NoMemory)),
         5 => return revoked_while_mapping(),
         6 => loop {
             let Ok(a) = mem_map(64 * MIB) else { return 1 };
