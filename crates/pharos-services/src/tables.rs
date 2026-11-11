@@ -1,6 +1,7 @@
 //! The tables: argument 0 boot, 1 the `services` test kernel, 2 the
 //! `network` test kernel, 3 the `supervision` test kernel, 4 the
-//! `health` test kernel ([`table`]).
+//! `health` test kernel, 5 `aifail`, 6 `compromised`, 7 `soak`
+//! ([`table`]).
 
 use crate::rights::{GRANT, RECEIVE, SEND};
 use crate::{
@@ -56,6 +57,7 @@ pub fn table(arg: u64) -> &'static [Service] {
         4 => HEALTH,
         5 => AIFAIL,
         6 => COMPROMISED,
+        7 => SOAK,
         _ => &[],
     }
 }
@@ -339,6 +341,37 @@ pub const AIFAIL: &[Service] = &rogue(BOOT_ENTRIES, INFER, 3);
 /// The `compromised` kernel (M4.6, #183): `infer` is `rogue` 1 and the
 /// runtime `rogue` 2, each probing what its exact manifest refuses.
 pub const COMPROMISED: &[Service] = &rogue(rogue(BOOT_ENTRIES, INFER, 1), AGENTS, 2);
+
+/// The runtime's first control client's badge (`pharos_proto::agents::CONTROL`).
+const AGENTS_CONTROL: u32 = 0x100;
+
+/// The `soak` kernel (M5.1, #189, testing.md): the boot table with the
+/// runtime on its test policy table (argument 1, which has `worker`), and
+/// `soaker`, `agentclient` 15, which runs one `worker` task after another
+/// until the machine stops.
+pub const SOAK: &[Service] = &soak(BOOT_ENTRIES);
+
+const SOAKER_CAPS: &[Give] = &[CONSOLE, send(Ep::Agents, AGENTS_CONTROL), REPORT];
+
+const fn soak(boot: [Service; 9]) -> [Service; 10] {
+    let mut table = [
+        boot[0], boot[1], boot[2], boot[3], boot[4], boot[5], boot[6], boot[7], boot[8], boot[8],
+    ];
+    table[AGENTS].arg = 1;
+    table[9] = Service {
+        name: "soaker",
+        path: b"bin/agentclient",
+        arg: 15,
+        kind: Kind::Daemon,
+        restart: Restart::Up(3),
+        caps: SOAKER_CAPS,
+        net: &[],
+        after: &[AGENTS],
+        limit: 64,
+        gains: &[],
+    };
+    table
+}
 
 /// sends `ready` and never receives on the network endpoint `init` checks
 /// it on, so it answers no health check (restarted once, then given up),

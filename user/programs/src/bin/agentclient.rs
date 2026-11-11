@@ -25,7 +25,11 @@
 //! `deputy` kernel (#138): three `boss` goals, one after the other.
 //! Argument 13: the `knowledge_agents` kernel (#144): a `scribe` task,
 //! then a `peeker` task once it is done. Argument 14: the `poison` kernel
-//! (#146): a `gullible` task.
+//! (#146): a `gullible` task. Argument 15: `soaker` in the `soak` table
+//! (#189), started by `init`: handle 3 is `init`'s report endpoint. It
+//! reports `ready`, then runs one `worker` `complete` task to its end every
+//! 10 s until stopped, printing `soak: task <n> done` or `soak: task <n>
+//! FAILED`, and forgets each (`FORGET`) once read.
 
 #![no_std]
 #![no_main]
@@ -173,6 +177,9 @@ fn main(arg: u64) -> u64 {
     }
     if arg == 1 {
         return crash(c);
+    }
+    if arg == 15 {
+        return soak(&c);
     }
     if arg == 2 {
         return permissions(c);
@@ -531,6 +538,72 @@ fn durable_cases(c: &mut Client) {
 }
 
 /// One boot of the `agents_crash` kernel.
+/// `soaker` (#189): one task after another, each line counted by the
+/// `soak` kernel.
+fn soak(c: &Client) -> u64 {
+    if send(REPORT, b"ready", 0, 0, 0).is_err() {
+        return 1;
+    }
+    let mut n: u64 = 0;
+    loop {
+        n += 1;
+        let ended = match c.submit(b"worker", b"complete") {
+            Ok(task) => {
+                let ended = c.wait(task, 60).map(|(s, r)| (s.state, s.attempts, r));
+                // Its record goes once read: the runtime keeps at most
+                // `MAX_TASKS`, ended ones until a control client forgets them.
+                let mut out = [0u8; 256];
+                let (code, _) = c.call(&Request::Forget { task }, &mut out);
+                if code != status::OK {
+                    let _ = debug_write(CONSOLE, b"soak: FORGET refused");
+                    return 2;
+                }
+                ended
+            }
+            Err(code) => {
+                let digits = [b'0' + code / 100, b'0' + code / 10 % 10, b'0' + code % 10];
+                let _ = debug_write(
+                    CONSOLE,
+                    &[&b"soak: submit refused, status "[..], &digits].concat(),
+                );
+                None
+            }
+        };
+        let done = matches!(&ended, Some((State::Done, 1, r)) if r == b"done: complete");
+        if let (false, Some((state, attempts, result))) = (done, &ended) {
+            // No `format!` in user programs: it links the unwinder.
+            let mut why = Vec::from(&b"soak: task ended in state "[..]);
+            why.extend_from_slice(&[
+                b'0' + *state as u8,
+                b',',
+                b' ',
+                b'0' + attempts % 10,
+                b':',
+                b' ',
+            ]);
+            why.extend_from_slice(&result[..result.len().min(100)]);
+            let _ = debug_write(CONSOLE, &why);
+        }
+        let mut line = Vec::from(&b"soak: task "[..]);
+        let mut digits = [0u8; 20];
+        let mut at = digits.len();
+        let mut v = n;
+        loop {
+            at -= 1;
+            digits[at] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        line.extend_from_slice(&digits[at..]);
+        line.extend_from_slice(if done { b" done" } else { b" FAILED" });
+        let _ = debug_write(CONSOLE, &line);
+        // As often as the kernel's cycles: the audit trail must last the run.
+        sleep(10_000_000);
+    }
+}
+
 fn permissions(mut c: Client) -> u64 {
     for (input, want, step) in [
         (

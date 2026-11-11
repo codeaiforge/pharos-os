@@ -41,6 +41,10 @@ name = "compromised"
 harness = false
 
 [[test]]
+name = "soak"
+harness = false
+
+[[test]]
 name = "apic_timer"
 harness = false
 

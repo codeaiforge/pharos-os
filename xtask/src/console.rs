@@ -71,15 +71,26 @@ pub type Step = (&'static str, &'static str);
 
 /// How far `steps` get on `output`, from step `done` whose match ended at
 /// byte `from`: the index of the first step still waiting, where the last
-/// match ended, and what to type for the steps it passed.
-pub fn advance(
+/// match ended, and what to type for the steps it passed. With `again`,
+/// it goes back to that step after the last one (the `soak` kernel's
+/// cycles, #189); from `again` on every step must be an [`AFTER`] step, so
+/// each round needs new output.
+pub fn advance_looping(
     steps: &[Step],
+    again: Option<usize>,
     mut done: usize,
     mut from: usize,
     output: &str,
 ) -> (usize, usize, Vec<&'static str>) {
     let mut typed = Vec::new();
-    while let Some(&(expect, send)) = steps.get(done) {
+    loop {
+        if done == steps.len() {
+            match again {
+                Some(a) if a < steps.len() => done = a,
+                _ => break,
+            }
+        }
+        let (expect, send) = steps[done];
         let found = match expect.strip_prefix(AFTER) {
             Some(text) => output
                 .get(from..)
@@ -97,6 +108,11 @@ pub fn advance(
     (done, from, typed)
 }
 
+/// Whether `steps` from `again` on can loop: each an [`AFTER`] step.
+pub fn loops(steps: &[Step], again: usize) -> bool {
+    again < steps.len() && steps[again..].iter().all(|(e, _)| e.starts_with(AFTER))
+}
+
 /// A script playing the user on the trusted console, in a thread. The
 /// FIFOs are opened read-write, which on Linux never waits for QEMU; the
 /// thread ends with the runner's process.
@@ -107,6 +123,8 @@ type State = (usize, usize, String, Vec<Instant>);
 pub struct Script {
     state: Arc<Mutex<State>>,
     steps: &'static [Step],
+    /// The step a looping script goes back to ([`advance_looping`]).
+    again: Option<usize>,
 }
 
 fn open_pair(base: &Path) -> Result<(std::fs::File, std::fs::File), String> {
@@ -156,6 +174,20 @@ impl Script {
         serial: Option<&Path>,
         steps: &'static [Step],
     ) -> Result<Self, String> {
+        Self::start_looping(base, qmp, serial, steps, None)
+    }
+
+    /// [`start`](Self::start), going back to step `again` after the last.
+    pub fn start_looping(
+        base: &Path,
+        qmp: Option<&Path>,
+        serial: Option<&Path>,
+        steps: &'static [Step],
+        again: Option<usize>,
+    ) -> Result<Self, String> {
+        if again.is_some_and(|a| !loops(steps, a)) {
+            return Err("a looping script's steps from its loop on must all be AFTER steps".into());
+        }
         let (input, output) = open_pair(base)?;
         let qmp = qmp.map(open_pair).transpose()?;
         let state = Arc::new(Mutex::new((0, 0, String::new(), Vec::new())));
@@ -180,7 +212,7 @@ impl Script {
                         s.2.push_str(tag);
                         s.2.push_str(line);
                     }
-                    let (done, at, typed) = advance(steps, s.0, s.1, &s.2);
+                    let (done, at, typed) = advance_looping(steps, again, s.0, s.1, &s.2);
                     let now = Instant::now();
                     s.3.resize(done, now);
                     (s.0, s.1) = (done, at);
@@ -212,7 +244,11 @@ impl Script {
             };
             reader(Box::new(tail), "serial: ");
         }
-        Ok(Self { state, steps })
+        Ok(Self {
+            state,
+            steps,
+            again,
+        })
     }
 
     /// How long step `step + 1` took to be reached after step `step`, so
@@ -230,7 +266,9 @@ impl Script {
             .lock()
             .map(|s| (s.0, s.2.clone()))
             .unwrap_or_default();
-        if let Some((expect, _)) = self.steps.get(done) {
+        // A looping script is done waiting at the start of its loop.
+        let waiting = self.again.is_some_and(|a| a == done);
+        if let Some((expect, _)) = self.steps.get(done).filter(|_| !waiting) {
             return Err(format!(
                 "the trusted console never said {expect:?}; it said:\n{output}"
             ));
@@ -248,7 +286,40 @@ impl Script {
 mod tests {
     use super::*;
 
+    fn advance(
+        steps: &[Step],
+        done: usize,
+        from: usize,
+        out: &str,
+    ) -> (usize, usize, Vec<&'static str>) {
+        advance_looping(steps, None, done, from, out)
+    }
+
     const STEPS: &[Step] = &[("ready", ""), ("worker", "list\n"), ("running", "stop\n")];
+
+    #[test]
+    fn a_looping_script_goes_round_on_new_output() {
+        const CYCLE: &[Step] = &[("ready", ""), (">go", "a\n"), (">did a", "b\n")];
+        assert!(loops(CYCLE, 1));
+        assert!(!loops(CYCLE, 0), "a step without AFTER would match forever");
+        let run = |out: &str| advance_looping(CYCLE, Some(1), 0, 0, out);
+        assert_eq!(run("ready go").2, vec!["a\n"]);
+        assert_eq!(run("ready go did a").2, vec!["a\n", "b\n"]);
+        let (done, _, typed) = run("ready go did a go did a go");
+        assert_eq!(
+            (done, typed.len()),
+            (2, 5),
+            "two rounds and the third's start"
+        );
+        let (done, at, typed) = run("ready go did a go did a");
+        assert_eq!((done, typed.len()), (1, 4), "back at the loop, waiting");
+        assert_eq!(
+            advance_looping(CYCLE, Some(1), done, at, "ready go did a go did a")
+                .2
+                .len(),
+            0
+        );
+    }
 
     #[test]
     fn steps_advance_in_order() {

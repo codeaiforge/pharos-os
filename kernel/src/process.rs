@@ -846,6 +846,11 @@ pub fn count() -> usize {
     PROCESSES.lock().len()
 }
 
+/// The live processes' task IDs, in order.
+pub fn ids() -> Vec<TaskId> {
+    PROCESSES.lock().keys().copied().collect()
+}
+
 /// Ends the calling process: forgets its state and ends its thread (the
 /// address space is freed when the thread is reaped).
 fn end_current(end: End) -> ! {
@@ -1046,23 +1051,35 @@ pub struct Exit {
 pub const LOG_ENTRIES: usize = 64;
 
 /// A log that keeps only its newest [`LOG_ENTRIES`] entries.
-struct Log<T>(IrqMutex<VecDeque<T>>);
+/// The newest entries, and how many were ever pushed.
+struct Log<T>(IrqMutex<(u64, VecDeque<T>)>);
 
 impl<T: Clone> Log<T> {
     const fn new() -> Self {
-        Self(IrqMutex::new(VecDeque::new()))
+        Self(IrqMutex::new((0, VecDeque::new())))
     }
 
     fn push(&self, entry: T) {
         let mut log = self.0.lock();
-        if log.len() == LOG_ENTRIES {
-            log.pop_front();
+        if log.1.len() == LOG_ENTRIES {
+            log.1.pop_front();
         }
-        log.push_back(entry);
+        log.1.push_back(entry);
+        log.0 += 1;
     }
 
     fn entries(&self) -> Vec<T> {
-        self.0.lock().iter().cloned().collect()
+        self.0.lock().1.iter().cloned().collect()
+    }
+
+    /// The entries pushed after the first `seen`, and the count now; `None`
+    /// if some of them are gone already.
+    fn since(&self, seen: u64) -> (u64, Option<Vec<T>>) {
+        let log = self.0.lock();
+        let new = log.0.saturating_sub(seen) as usize;
+        let kept =
+            (new <= log.1.len()).then(|| log.1.iter().skip(log.1.len() - new).cloned().collect());
+        (log.0, kept)
     }
 }
 
@@ -1104,9 +1121,20 @@ pub(crate) fn debug_write(bytes: &[u8]) {
     DEBUG_OUTPUT.push((task, bytes.to_vec()));
 }
 
+/// One `debug_write` output and the process that wrote it.
+pub type DebugLine = (TaskId, Vec<u8>);
+
 /// The newest [`LOG_ENTRIES`] `debug_write` outputs, oldest first.
 pub fn debug_output() -> Vec<(TaskId, Vec<u8>)> {
     DEBUG_OUTPUT.entries()
+}
+
+/// The `debug_write` outputs after the first `seen` ever written, oldest
+/// first, and how many have been written now: for a caller that must see
+/// each line once, however often the same text repeats (the `soak` kernel,
+/// #189). `None` if more than [`LOG_ENTRIES`] came meanwhile.
+pub fn debug_output_since(seen: u64) -> (u64, Option<Vec<DebugLine>>) {
+    DEBUG_OUTPUT.since(seen)
 }
 
 /// A process killed by a CPU exception in user mode.
@@ -1159,6 +1187,27 @@ mod tests {
     use super::*;
 
     const PAGE: u64 = FRAME_SIZE;
+
+    /// Each entry once, by count, though the text repeats (#189).
+    #[test]
+    fn a_log_gives_what_came_since() {
+        let log: Log<u8> = Log::new();
+        assert_eq!(log.since(0), (0, Some(vec![])));
+        log.push(7);
+        log.push(7);
+        assert_eq!(log.since(0), (2, Some(vec![7, 7])));
+        assert_eq!(log.since(1), (2, Some(vec![7])));
+        assert_eq!(log.since(2), (2, Some(vec![])));
+        for i in 0..LOG_ENTRIES as u8 {
+            log.push(i);
+        }
+        assert_eq!(log.since(1), (2 + LOG_ENTRIES as u64, None), "one is gone");
+        let (n, kept) = log.since(2);
+        assert_eq!(
+            (n, kept.map(|k| k.len())),
+            (2 + LOG_ENTRIES as u64, Some(LOG_ENTRIES))
+        );
+    }
 
     /// The trusted class's reserve (M4.6, #182): others stop at it, the
     /// trusted class does not.

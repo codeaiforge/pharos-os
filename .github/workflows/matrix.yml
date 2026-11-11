@@ -14,8 +14,8 @@ on:
         description: Cells to run, as a JSON list (cargo xtask matrix --list)
         required: false
         default: '["push", "bios", "mem-min", "mem-2g", "mem-4g", "cpu-skylake", "cpu-max", "kvm"]'
-      repeat:
-        description: Also run the repeat pass (every test kernel 3 times, push cell)
+      stability:
+        description: Also run the repeat pass (every test kernel 3 times) and the 60-minute soak, in push
         type: choice
         options: ["yes", "no"]
         default: "yes"
@@ -29,7 +29,7 @@ env:
 
 jobs:
   cells:
-    name: ${{ matrix.pass == 'repeat' && 'repeat 3' || matrix.cell }} (${{ matrix.shard }} of 4)
+    name: ${{ matrix.pass == 'soak' && 'soak 60 min' || format('{0} ({1} of 4)', matrix.pass == 'repeat' && 'repeat 3' || matrix.cell, matrix.shard) }}
     # The same runner image as ci.yml's QEMU job.
     runs-on: ubuntu-24.04
     strategy:
@@ -39,13 +39,15 @@ jobs:
         cell: ${{ fromJSON(inputs.cells || '["push", "bios", "mem-min", "mem-2g", "mem-4g", "cpu-skylake", "cpu-max", "kvm"]') }}
         shard: [1, 2, 3, 4]
         pass: [once]
-        # The repeat pass (testing.md): push, every kernel 3 boots in a row.
-        # A schedule has no inputs, so it runs; a dispatch can say "no".
-        include: ${{ fromJSON(inputs.repeat == 'no' && '[]' || '[{"cell":"push","shard":1,"pass":"repeat"},{"cell":"push","shard":2,"pass":"repeat"},{"cell":"push","shard":3,"pass":"repeat"},{"cell":"push","shard":4,"pass":"repeat"}]') }}
+        # The stability runs (testing.md), in push: the repeat pass, every
+        # kernel 3 boots in a row, and the soak. A schedule has no inputs,
+        # so they run; a dispatch can say "no".
+        include: ${{ fromJSON(inputs.stability == 'no' && '[]' || '[{"cell":"push","shard":1,"pass":"repeat"},{"cell":"push","shard":2,"pass":"repeat"},{"cell":"push","shard":3,"pass":"repeat"},{"cell":"push","shard":4,"pass":"repeat"},{"cell":"push","shard":1,"pass":"soak"}]') }}
     env:
       CARGO_INCREMENTAL: "0"
-    # A repeat share boots each of its kernels 3 times.
-    timeout-minutes: ${{ matrix.pass == 'repeat' && 60 || 30 }}
+    # A repeat share boots each of its kernels 3 times; the soak runs 60
+    # minutes and its limit past them (SOAK_SLACK).
+    timeout-minutes: ${{ matrix.pass == 'soak' && 75 || matrix.pass == 'repeat' && 60 || 30 }}
     # The steps up to the test step are ci.yml's QEMU job's; keep them in step.
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -113,4 +115,4 @@ jobs:
       # Pass = QEMU exit status 33 and the marker within 60 s (D-009), as on
       # push. Failing kernels are also listed in the job summary.
       - name: Boot check and test kernels in the cell
-        run: cargo xtask matrix ${{ matrix.cell }} --shard ${{ matrix.shard }}/4 ${{ matrix.pass == 'repeat' && '--repeat 3' || '' }}
+        run: ${{ matrix.pass == 'soak' && 'cargo xtask soak --minutes 60' || format('cargo xtask matrix {0} --shard {1}/4 {2}', matrix.cell, matrix.shard, matrix.pass == 'repeat' && '--repeat 3' || '') }}

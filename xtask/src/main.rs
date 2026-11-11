@@ -110,6 +110,10 @@ COMMANDS:
                             one setting from the push run (firmware, memory,
                             CPU, or KVM); a test kernel's own settings win.
                             Logs: target/xtask/logs/<CELL>/.
+    soak [--minutes <M>]    The soak (testing.md): boots the soak test kernel
+                            once for M minutes (default 60): services killed,
+                            restarted, and managed in cycles, agent tasks run,
+                            and nothing may drift. In the current cell.
     fs build <DIR> <IMAGE>  Pack the regular files under DIR into a Pharos
                             filesystem image (docs/architecture/storage.md).
     fs ls <IMAGE>           Check an image with the kernel's parser and list
@@ -180,6 +184,9 @@ enum Task {
     Matrix {
         cell: Option<String>,
         test_args: Vec<String>,
+    },
+    Soak {
+        minutes: u64,
     },
     FsBuild {
         dir: PathBuf,
@@ -280,6 +287,21 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
             return Ok(Task::Runner {
                 elf: PathBuf::from(elf),
             });
+        }
+        Some("soak") => {
+            let minutes = match (args.next().as_deref(), args.next()) {
+                (None, _) => 60,
+                (Some("--minutes"), Some(m)) => m
+                    .parse()
+                    .ok()
+                    .filter(|&m| m > 0)
+                    .ok_or(format!("--minutes must be a positive number, got '{m}'"))?,
+                _ => return Err("usage: soak [--minutes <M>]".into()),
+            };
+            if let Some(extra) = args.next() {
+                return Err(format!("unexpected argument '{extra}'"));
+            }
+            return Ok(Task::Soak { minutes });
         }
         Some("matrix") => {
             let cell = args.next().ok_or("matrix needs a cell name, or --list")?;
@@ -1600,6 +1622,100 @@ const SYSTEM_SCRIPT: &[console::Step] = &[
     ("system: slot B empty", "safe\n"),
     ("next boot: safe mode", ""),
 ];
+/// The soak (M5.1, #189, testing.md): the boot image, `init`'s `soak`
+/// table, and as many cycles as `PHAROS_SOAK_MINUTES` allows.
+const SOAK_TEST: &str = "soak";
+/// Minutes the soak runs: read when the soak kernel is built and by its
+/// runner, for the time limit. Unset: one cycle.
+const SOAK_MINUTES_ENV: &str = "PHAROS_SOAK_MINUTES";
+/// The soak's limit past its minutes: boot, the last cycle, and the checks.
+const SOAK_SLACK: Duration = Duration::from_secs(300);
+/// The user's part of each soak cycle, cued by the kernel's serial lines;
+/// from [`SOAK_AGAIN`] on, it repeats.
+const SOAK_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("system ready: 9 services", ""),
+    (">serial: soak: restart knowledge", "restart knowledge\n"),
+    (
+        ">service knowledge restarted by the user; used by trust, agents, soaker",
+        "",
+    ),
+    (">serial: soak: restart net", "stop service net\n"),
+    (">service net stopped by the user", "start net\n"),
+    (">service net started by the user", ""),
+];
+const SOAK_AGAIN: usize = 2;
+/// Each soak cycle's events: record kind, service, and detail, each one
+/// audit record from `init` and one trusted console line per cycle.
+const SOAK_EVENTS: &[(&str, &str, &str)] = &[
+    ("service", "knowledge", "killed 13"),
+    (
+        "service",
+        "knowledge",
+        "restarting 1 of 3 in 100 ms; used by trust, agents, soaker",
+    ),
+    (
+        "manage",
+        "knowledge",
+        "restarted by the user; used by trust, agents, soaker",
+    ),
+    ("manage", "net", "stopped by the user"),
+    ("manage", "net", "started by the user"),
+];
+
+/// After the soak: as many cycles as the kernel ran (its `soak: N cycles`
+/// line), each event that many audit records and trusted console lines.
+fn soak_checks(image: &Path, console: &str, log: &str) -> Result<()> {
+    let cycles: usize = log
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("soak: ")?
+                .split_once(" cycles")?
+                .0
+                .parse()
+                .ok()
+        })
+        .ok_or("soak: the kernel printed no `soak: N cycles` line")?;
+    let streams = store_image::audit(image)?;
+    let [(_, records)] = &streams[..] else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    for &(kind, actor, detail) in SOAK_EVENTS {
+        let want = format!("client 1 Event {kind} {actor} task 0/0  init outcome 1 {detail}");
+        let (all, _) = records_and_copies(records, &want);
+        let shown = console
+            .matches(&format!("service {actor} {detail}\r\n"))
+            .count();
+        if (all, shown) != (cycles, cycles) {
+            return Err(format!(
+                "soak: \"{actor} {detail}\": {all} audit records and {shown} trusted console lines, expected {cycles} each"
+            ));
+        }
+    }
+    println!(
+        "  soak: {cycles} cycles, each event one audit record and one trusted console line ({} records in the trail)",
+        records.len()
+    );
+    Ok(())
+}
+
+/// `cargo xtask soak --minutes M`: the soak kernel for M minutes, in the
+/// current cell (testing.md).
+fn soak(paths: &Paths, minutes: u64) -> Result<()> {
+    println!("Soak: {minutes} minutes (cargo test -p {KERNEL_PACKAGE} --test {SOAK_TEST}):");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    run(
+        Command::new(cargo)
+            .current_dir(&paths.root)
+            .env(SOAK_MINUTES_ENV, minutes.to_string())
+            .args(["test", "--locked", "--package", KERNEL_PACKAGE])
+            .args(["--target", KERNEL_TARGET, "--test", SOAK_TEST]),
+        true,
+    )
+    .map(|_| ())
+    .map_err(|_| "the soak failed (see above)".into())
+}
+
 /// The user managing services (#170, D-029): the boot table and image.
 const MANAGE_TEST: &str = "manage";
 /// Each command once its answer to the last one is on the console. After
@@ -3451,6 +3567,14 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         timeout.max(LARGE_FILE_TIMEOUT)
     } else if name == HEALTH_TEST {
         timeout.max(HEALTH_TIMEOUT)
+    } else if name == SOAK_TEST {
+        let minutes: u64 = match env::var(SOAK_MINUTES_ENV) {
+            Err(_) => 0,
+            Ok(v) => v.parse().map_err(|_| {
+                format!("{SOAK_MINUTES_ENV} must be a number of minutes, got '{v}'")
+            })?,
+        };
+        timeout.max(Duration::from_secs(minutes * 60) + SOAK_SLACK)
     } else {
         timeout
     };
@@ -3465,7 +3589,16 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     } else {
         build_user_programs(paths)?
     };
-    let modules = if name == SYSTEM_TEST
+    let modules = if name == SOAK_TEST {
+        // The boot image, with the manifest of the runtime's `worker` (#189).
+        let mut files = programs.clone();
+        files.extend(
+            (fs_image::TEST_MANIFESTS.iter())
+                .filter(|(path, _)| *path == "agents/worker.manifest")
+                .map(|(path, text)| (path.to_string(), text.as_bytes().to_vec())),
+        );
+        kernel_modules(paths, &files)?
+    } else if name == SYSTEM_TEST
         || name == MANAGE_TEST
         || name == HOTPLUG_TEST
         || name == AIFAIL_TEST
@@ -3573,6 +3706,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
         SUPERVISION_TEST => (SUPERVISION_SCRIPT, &[]),
         SYSTEM_TEST => (SYSTEM_SCRIPT, &[]),
+        SOAK_TEST => (SOAK_SCRIPT, &[]),
         MANAGE_TEST => (MANAGE_SCRIPT, &[]),
         COMPROMISED_TEST => (COMPROMISED_SCRIPT, COMPROMISED_REFUSED),
         AIFAIL_TEST => (AIFAIL_SCRIPT, &[]),
@@ -3591,14 +3725,20 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
                 Some(console::fresh(&out, console::QMP)?),
                 Some(log.as_path()),
             )
+        } else if name == SOAK_TEST {
+            // The kernel cues each cycle's commands on serial.
+            let _ = fs::remove_file(&log);
+            (None, Some(log.as_path()))
         } else {
             (None, None)
         };
-        Some(console::Script::start(
+        let again = (name == SOAK_TEST).then_some(SOAK_AGAIN);
+        Some(console::Script::start_looping(
             &base,
             qmp.as_deref(),
             serial,
             steps,
+            again,
         )?)
     };
     let run = boot_headless(
@@ -3611,9 +3751,15 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     )?;
     let typed = script.map_or(Ok(()), |s| {
         s.finish(refused).and_then(|output| {
-            println!("  trusted console:");
-            for line in output.lines() {
-                println!("    {line}");
+            // The soak's would be hours of it, the serial log's lines too.
+            if name != SOAK_TEST {
+                println!("  trusted console:");
+                for line in output.lines() {
+                    println!("    {line}");
+                }
+            }
+            if name == SOAK_TEST && run.status == Some(QEMU_EXIT_SUCCESS) {
+                soak_checks(&out.join(STORE_IMAGE), &output, &clean_log(&run.log))?;
             }
             if name == AUDIT_TEST {
                 audit_checks(&out.join(STORE_IMAGE), &output)?;
@@ -3746,6 +3892,7 @@ fn main() -> ExitCode {
                     cell: Some(cell),
                     test_args,
                 } => matrix::run(&cell, &test_args),
+                Task::Soak { minutes } => soak(&paths, minutes),
                 Task::FsBuild { dir, image } => fs_image::build(&dir, &image),
                 Task::FsLs { image } => fs_image::ls(&image),
                 Task::StoreBuild { dir, image, blocks } => store_image::build(&dir, &image, blocks),

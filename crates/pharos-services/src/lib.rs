@@ -371,6 +371,7 @@ mod tests {
             ("health", HEALTH),
             ("aifail", AIFAIL),
             ("compromised", COMPROMISED),
+            ("soak", SOAK),
         ] {
             assert_eq!(check(table), Ok(()), "{name}");
         }
@@ -387,9 +388,26 @@ mod tests {
         };
         assert_eq!(runtimes(BOOT), ["agents"]);
         assert_eq!(runtimes(COMPROMISED), ["agents"]);
+        assert_eq!(runtimes(SOAK), ["agents"]);
         for t in [TEST, NETWORK, SUPERVISE, HEALTH] {
             assert!(runtimes(t).is_empty());
         }
+    }
+
+    /// The `soak` table is the boot table, the runtime on its test policy
+    /// table, and one client after it (#189).
+    #[test]
+    fn the_soak_table_is_the_boot_table_and_a_client() {
+        assert_eq!(SOAK.len(), BOOT.len() + 1);
+        for (i, (a, b)) in SOAK.iter().zip(BOOT).enumerate() {
+            let arg = if i == AGENTS { 1 } else { b.arg };
+            assert_eq!(
+                (a.name, a.path, a.arg, a.caps, a.after, a.limit),
+                (b.name, b.path, arg, b.caps, b.after, b.limit)
+            );
+        }
+        let client = &SOAK[BOOT.len()];
+        assert_eq!((client.name, client.after), ("soaker", &[AGENTS][..]));
     }
 
     /// The `aifail` and `compromised` tables are the boot table with only
