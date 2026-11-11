@@ -114,6 +114,11 @@ COMMANDS:
                             once for M minutes (default 60): services killed,
                             restarted, and managed in cycles, agent tasks run,
                             and nothing may drift. In the current cell.
+    s1                      Scenario S1 end to end (testing.md): boots the s1
+                            test kernel under KVM with 2 GiB and the model in
+                            PHAROS_MODEL; the model's tool call and answer
+                            must equal the host's, and the audit trail hold
+                            them. Skipped by `test` without PHAROS_MODEL.
     fs build <DIR> <IMAGE>  Pack the regular files under DIR into a Pharos
                             filesystem image (docs/architecture/storage.md).
     fs ls <IMAGE>           Check an image with the kernel's parser and list
@@ -188,6 +193,7 @@ enum Task {
     Soak {
         minutes: u64,
     },
+    S1,
     FsBuild {
         dir: PathBuf,
         image: PathBuf,
@@ -302,6 +308,12 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                 return Err(format!("unexpected argument '{extra}'"));
             }
             return Ok(Task::Soak { minutes });
+        }
+        Some("s1") => {
+            if let Some(extra) = args.next() {
+                return Err(format!("unexpected argument '{extra}'"));
+            }
+            return Ok(Task::S1);
         }
         Some("matrix") => {
             let cell = args.next().ok_or("matrix needs a cell name, or --list")?;
@@ -1252,6 +1264,10 @@ fn test_qemu_args(name: &str) -> Vec<OsString> {
         LARGE_FILE_TEST => vec!["-m".into(), "2G".into()],
         // `memprobe` holds 192 MiB beside the services (#122).
         EXHAUSTION_TEST => vec!["-m".into(), "1G".into()],
+        // The S1 model is 676 MB; under TCG a turn takes minutes.
+        S1_TEST => ["-m", "2G", "-enable-kvm", "-cpu", "host"]
+            .map(OsString::from)
+            .to_vec(),
         _ => Vec::new(),
     }
 }
@@ -1714,6 +1730,80 @@ fn soak(paths: &Paths, minutes: u64) -> Result<()> {
     )
     .map(|_| ())
     .map_err(|_| "the soak failed (see above)".into())
+}
+
+/// Scenario S1 with the real model driving an agent (#190).
+const S1_TEST: &str = "s1";
+/// The model loads in about 7 s and each turn's prompt takes 6-13 s under
+/// KVM; the kernel waits at most 11 minutes.
+const S1_TIMEOUT: Duration = Duration::from_secs(900);
+
+fn s1(paths: &Paths) -> Result<()> {
+    bench::kvm()?;
+    if env::var_os(MODEL_ENV).is_none() {
+        return Err(format!(
+            "{MODEL_ENV} must name qwen2.5-0.5b-instruct-q8_0.gguf (inference-evaluation.md says where to get it)"
+        ));
+    }
+    println!("S1 (cargo test -p {KERNEL_PACKAGE} --test {S1_TEST}):");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    run(
+        Command::new(cargo)
+            .current_dir(&paths.root)
+            .args(["test", "--locked", "--package", KERNEL_PACKAGE])
+            .args(["--target", KERNEL_TARGET, "--test", S1_TEST]),
+        true,
+    )
+    .map(|_| ())
+    .map_err(|_| "S1 failed (see above)".into())
+}
+
+/// The `s1` result the client printed (`s1 result: <hex>` lines), decoded.
+fn s1_result(log: &str) -> Vec<u8> {
+    let hex: String = log
+        .lines()
+        .filter_map(|l| l.split_once(": s1 result: ").map(|(_, h)| h.trim()))
+        .collect();
+    (0..hex.len() / 2)
+        .filter_map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok())
+        .collect()
+}
+
+/// After the `s1` kernel: its result is the host's, and the trail holds
+/// the agent's two inferences, its one tool call, and its completion.
+fn s1_checks(image: &Path, log: &str, want: &[u8]) -> Result<()> {
+    let got = s1_result(log);
+    if got != want {
+        return Err(format!(
+            "the s1 result differs from the host's:\n  Pharos: {:?}\n  host:   {:?}",
+            String::from_utf8_lossy(&got),
+            String::from_utf8_lossy(want)
+        ));
+    }
+    println!("  result identical to the host's ({} bytes)", got.len());
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    let count = |want: &str| lines.iter().filter(|l| l.contains(want)).count();
+    for (want, n) in [
+        ("client 3 Event grant s1 task 1/1 model 1", 1),
+        ("client 3 Event grant s1 task 1/1 file report.txt", 1),
+        ("client 3 Intent infer s1 task 1/1 model 1", 2),
+        ("client 3 Intent tool s1 task 1/1 file report.txt files", 1),
+        ("client 3 Event refuse s1", 0),
+    ] {
+        if count(want) != n {
+            return Err(format!(
+                "{} records like {want:?}, expected {n}",
+                count(want)
+            ));
+        }
+    }
+    println!(
+        "  audit trail: model 1 and report.txt granted, 2 inferences, 1 tool call, no refusal"
+    );
+    Ok(())
 }
 
 /// The user managing services (#170, D-029): the boot table and image.
@@ -3563,10 +3653,16 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         println!("{label}: SKIP: {why}");
         return Ok(());
     }
+    if name == S1_TEST && env::var_os(MODEL_ENV).is_none() {
+        println!("{label}: SKIP: needs the S1 model in {MODEL_ENV} and KVM (cargo xtask s1)");
+        return Ok(());
+    }
     let timeout = if name == LARGE_FILE_TEST {
         timeout.max(LARGE_FILE_TIMEOUT)
     } else if name == HEALTH_TEST {
         timeout.max(HEALTH_TIMEOUT)
+    } else if name == S1_TEST {
+        timeout.max(S1_TIMEOUT)
     } else if name == SOAK_TEST {
         let minutes: u64 = match env::var(SOAK_MINUTES_ENV) {
             Err(_) => 0,
@@ -3644,6 +3740,13 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     if name == INFERENCE_TEST {
         store_image::tiny(&out.join(STORE_IMAGE))?;
     }
+    let s1_want = match env::var_os(MODEL_ENV) {
+        Some(model) if name == S1_TEST => Some(store_image::s1_agent(
+            &out.join(STORE_IMAGE),
+            Path::new(&model),
+        )?),
+        _ => None,
+    };
     let service_store = [
         SERVICE_TEST,
         AGENTS_TEST,
@@ -3831,6 +3934,8 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         }
         if name == BUDGETS_TEST && run.status == Some(33) {
             budgets_audit(&out.join(STORE_IMAGE))
+        } else if let Some(want) = s1_want.as_deref().filter(|_| run.status == Some(33)) {
+            s1_checks(&out.join(STORE_IMAGE), &clean_log(&run.log), want)
         } else {
             Ok(())
         }
@@ -3893,6 +3998,7 @@ fn main() -> ExitCode {
                     test_args,
                 } => matrix::run(&cell, &test_args),
                 Task::Soak { minutes } => soak(&paths, minutes),
+                Task::S1 => s1(&paths),
                 Task::FsBuild { dir, image } => fs_image::build(&dir, &image),
                 Task::FsLs { image } => fs_image::ls(&image),
                 Task::StoreBuild { dir, image, blocks } => store_image::build(&dir, &image, blocks),

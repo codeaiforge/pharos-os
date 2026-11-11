@@ -144,6 +144,9 @@
 //!   `send` whose payload looks like an answer, and its own `ANSWER` to
 //!   it. Each must be refused as `INJECTED` lists it in the code; the user
 //!   refuses the send; completes with `inject ok`.
+//! - `s1` (agent `s1`, the `s1` kernel, #190): scenario S1 driven by the
+//!   S1 model (`pharos_proto::s1`): its turn-1 call goes to `TOOL`
+//!   unchanged, turn 2 gets the file; completes with both turns' text.
 
 #![no_std]
 #![no_main]
@@ -596,6 +599,61 @@ impl Agent {
             return self.fail(b"send after the revocation was not refused");
         }
         self.complete(b"tools ok")
+    }
+
+    /// The model's text for `prompt` on `model`, or why there is none.
+    fn text(&self, model: u8, prompt: &[u8], max_new: u16) -> Result<Vec<u8>, &'static [u8]> {
+        self.buffer.write_bytes(0, prompt);
+        let req = Request::Infer {
+            model,
+            max_new,
+            prompt_len: prompt.len() as u32,
+        };
+        let mut out = [0u8; 256];
+        let (_, n) = self.call(&req, &mut out);
+        if Started::parse(&out[..n]).is_none() {
+            return Err(b"GENERATE failed");
+        }
+        let mut text = Vec::new();
+        loop {
+            let (_, n) = self.call(&Request::Next, &mut out);
+            let t = Tokens::parse(&out[..n]).ok_or(&b"NEXT failed"[..])?;
+            text.extend_from_slice(t.text);
+            if t.stop.is_some() {
+                return Ok(text);
+            }
+        }
+    }
+
+    /// Agent `s1` (#190): S1 with the model driving it. Turn 1 offers
+    /// `read_file`; the call the model writes goes to `TOOL` unchanged; turn
+    /// 2 gives it the file. Completes with both turns' text, a blank line
+    /// between, which the runner compares with the host's.
+    fn s1(&self) -> u64 {
+        use pharos_proto::s1;
+        let first = match self.text(1, s1::PROMPT.as_bytes(), s1::CALL_TOKENS) {
+            Ok(t) => t,
+            Err(why) => return self.fail(why),
+        };
+        let Some(call) = s1::call(&first) else {
+            return self.fail(b"the model wrote no tool call");
+        };
+        let (code, file) = self.tool(call);
+        if code != status::OK {
+            return self.fail(b"the model's call was refused");
+        }
+        let prompt = [
+            s1::PROMPT.as_bytes(),
+            &first,
+            s1::RESPONSE_BEFORE.as_bytes(),
+            &file,
+            s1::RESPONSE_AFTER.as_bytes(),
+        ]
+        .concat();
+        match self.text(1, &prompt, s1::ANSWER_TOKENS) {
+            Ok(answer) => self.complete(&[&first[..], b"\n\n", &answer].concat()),
+            Err(why) => self.fail(why),
+        }
     }
 
     /// The `injection` kernel's agent (#129). `want` is what each call
@@ -2474,6 +2532,7 @@ fn main(_: u64) -> u64 {
         b"glut" => a.glut(),
         b"tools" => a.tools(),
         b"inject" => a.inject(),
+        b"s1" => a.s1(),
         b"talk" => a.talk(),
         b"lead" => a.lead(task.task),
         b"help" => a.help(),

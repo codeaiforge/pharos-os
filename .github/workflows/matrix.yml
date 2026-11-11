@@ -29,7 +29,7 @@ env:
 
 jobs:
   cells:
-    name: ${{ matrix.pass == 'soak' && 'soak 60 min' || format('{0} ({1} of 4)', matrix.pass == 'repeat' && 'repeat 3' || matrix.cell, matrix.shard) }}
+    name: ${{ matrix.pass == 'soak' && 'soak 60 min' || matrix.pass == 's1' && 'S1 end to end' || format('{0} ({1} of 4)', matrix.pass == 'repeat' && 'repeat 3' || matrix.cell, matrix.shard) }}
     # The same runner image as ci.yml's QEMU job.
     runs-on: ubuntu-24.04
     strategy:
@@ -40,9 +40,9 @@ jobs:
         shard: [1, 2, 3, 4]
         pass: [once]
         # The stability runs (testing.md), in push: the repeat pass, every
-        # kernel 3 boots in a row, and the soak. A schedule has no inputs,
-        # so they run; a dispatch can say "no".
-        include: ${{ fromJSON(inputs.stability == 'no' && '[]' || '[{"cell":"push","shard":1,"pass":"repeat"},{"cell":"push","shard":2,"pass":"repeat"},{"cell":"push","shard":3,"pass":"repeat"},{"cell":"push","shard":4,"pass":"repeat"},{"cell":"push","shard":1,"pass":"soak"}]') }}
+        # kernel 3 boots in a row, and the soak; and S1 end to end under KVM
+        # (#190). A schedule has no inputs, so they run; a dispatch can say "no".
+        include: ${{ fromJSON(inputs.stability == 'no' && '[]' || '[{"cell":"push","shard":1,"pass":"repeat"},{"cell":"push","shard":2,"pass":"repeat"},{"cell":"push","shard":3,"pass":"repeat"},{"cell":"push","shard":4,"pass":"repeat"},{"cell":"push","shard":1,"pass":"soak"},{"cell":"kvm","shard":1,"pass":"s1"}]') }}
     env:
       CARGO_INCREMENTAL: "0"
     # A repeat share boots each of its kernels 3 times; the soak runs 60
@@ -112,7 +112,25 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
 
+      # The S1 model at its pinned revision and SHA-256
+      # (inference-evaluation.md), 676 MB, cached between runs.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: matrix.pass == 's1'
+        with:
+          path: ~/models
+          key: model-qwen2.5-0.5b-instruct-q8_0-ca59ca7f
+      - name: S1 model
+        if: matrix.pass == 's1'
+        run: |
+          f=~/models/qwen2.5-0.5b-instruct-q8_0.gguf
+          if [ ! -f "$f" ]; then
+            mkdir -p ~/models
+            curl -L --fail -o "$f" https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q8_0.gguf
+          fi
+          echo "ca59ca7f13d0e15a8cfa77bd17e65d24f6844b554a7b6c12e07a5f89ff76844e  $f" | sha256sum -c
+          echo "PHAROS_MODEL=$f" >> "$GITHUB_ENV"
+
       # Pass = QEMU exit status 33 and the marker within 60 s (D-009), as on
       # push. Failing kernels are also listed in the job summary.
       - name: Boot check and test kernels in the cell
-        run: ${{ matrix.pass == 'soak' && 'cargo xtask soak --minutes 60' || format('cargo xtask matrix {0} --shard {1}/4 {2}', matrix.cell, matrix.shard, matrix.pass == 'repeat' && '--repeat 3' || '') }}
+        run: ${{ matrix.pass == 'soak' && 'cargo xtask soak --minutes 60' || matrix.pass == 's1' && 'cargo xtask s1' || format('cargo xtask matrix {0} --shard {1}/4 {2}', matrix.cell, matrix.shard, matrix.pass == 'repeat' && '--repeat 3' || '') }}

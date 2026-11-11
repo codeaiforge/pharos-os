@@ -735,6 +735,46 @@ pub fn s1(path: &Path, model: &Path) -> Result<()> {
     )
 }
 
+/// Writes the `s1` kernel's store (#190): the S1 model from `model` under
+/// its manifest path and [`S1_REPORT`] as `files/report.txt`. Returns what
+/// the `s1` agent must complete with: S1 run on the host with
+/// `pharos_proto::s1`'s prompts, as the agent runs it.
+pub fn s1_agent(path: &Path, model: &Path) -> Result<Vec<u8>> {
+    use pharos_infer::session::{Engine, Session};
+    use pharos_proto::s1;
+    let data = fs::read(model).map_err(|e| format!("cannot read {}: {e}", model.display()))?;
+    let g = pharos_infer::gguf::Gguf::parse(&data).map_err(|e| format!("S1 model: {e}"))?;
+    let e = Engine::load(&g).map_err(|e| format!("S1 model: {e}"))?;
+    let turn = |prompt: &[u8], new: u16| -> Result<Vec<u8>> {
+        let tokens = e.tokenizer.encode(&String::from_utf8_lossy(prompt));
+        let mut s = Session::new(&e, &tokens, usize::from(new), &Libm)
+            .map_err(|e| format!("S1 model: {e}"))?;
+        let mut text = Vec::new();
+        while s.step(&mut text, &Libm) {}
+        Ok(text)
+    };
+    let first = turn(s1::PROMPT.as_bytes(), s1::CALL_TOKENS)?;
+    println!("  host turn 1: {:?}", String::from_utf8_lossy(&first));
+    let prompt = [
+        s1::PROMPT.as_bytes(),
+        &first,
+        s1::RESPONSE_BEFORE.as_bytes(),
+        S1_REPORT.as_bytes(),
+        s1::RESPONSE_AFTER.as_bytes(),
+    ]
+    .concat();
+    let answer = turn(&prompt, s1::ANSWER_TOKENS)?;
+    println!("  host turn 2: {:?}", String::from_utf8_lossy(&answer));
+    write_files(
+        path,
+        &[
+            (b"models/qwen2.5-0.5b-instruct-q8_0.gguf", &data),
+            (b"files/report.txt", S1_REPORT.as_bytes()),
+        ],
+    )?;
+    Ok([&first[..], b"\n\n", &answer].concat())
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

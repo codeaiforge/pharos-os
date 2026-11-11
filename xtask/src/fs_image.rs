@@ -244,7 +244,7 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// `channels` kernel's four (#133), the `groups` kernel's three (#134),
 /// the `knowledge_agents` kernel's two (#144), and the `poison` kernel's
 /// (#146).
-pub const TEST_MANIFESTS: [(&str, &str); 35] = [
+pub const TEST_MANIFESTS: [(&str, &str); 36] = [
     (
         "agents/worker.manifest",
         "# The agents test kernel's worker.\nmanifest = 1\nname = worker\nprogram = bin/testagent\n\
@@ -292,6 +292,13 @@ pub const TEST_MANIFESTS: [(&str, &str); 35] = [
         "manifest = 1\nname = reader\nprogram = bin/testagent\npages = 256\nmodels =\n\
          attempts = 1\nprogress_ms = 10000\ntask_ms = 60000\ndata = write\nnet = 10.0.2.2:47000\n\
          tools = read_file, send\nfiles = report.txt, big.txt\n",
+    ),
+    // The `s1` kernel's (#190): the S1 model and `read_file` on report.txt.
+    (
+        "agents/s1.manifest",
+        "manifest = 1\nname = s1\nprogram = bin/testagent\npages = 256\nmodels = 1\n\
+         attempts = 1\nprogress_ms = 120000\ntask_ms = 600000\ndata = none\nnet =\n\
+         tools = read_file\nfiles = report.txt\n",
     ),
     // The `groups` kernel's (#134).
     (

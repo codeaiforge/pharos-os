@@ -21,6 +21,7 @@ pub mod knowledge;
 pub mod manifest;
 pub mod net;
 pub mod permission;
+pub mod s1;
 pub mod service;
 pub mod store;
 pub mod tool;

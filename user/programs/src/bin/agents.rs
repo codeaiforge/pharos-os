@@ -960,6 +960,17 @@ const TEST: &[Entry] = &[
         knowledge_write: &[b"notes", b"ops"],
         ..knowledge_entry(b"gullible")
     },
+    // The `s1` kernel's (#190): the S1 model and `read_file` on
+    // `report.txt`. Each turn's prompt holds the runtime one `GENERATE`
+    // (about 13 s for turn 2 under KVM), so a long progress window.
+    Entry {
+        models: 1 << 1,
+        progress_ms: 120_000,
+        task_ms: 600_000,
+        tools: 1 << tool::number::READ_FILE,
+        files: &[b"report.txt"],
+        ..knowledge_entry(b"s1")
+    },
 ];
 
 /// The `knowledge_agents` kernel's (#144): `scribe` reads and writes

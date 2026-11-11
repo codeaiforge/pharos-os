@@ -29,7 +29,8 @@
 //! (#189), started by `init`: handle 3 is `init`'s report endpoint. It
 //! reports `ready`, then runs one `worker` `complete` task to its end every
 //! 10 s until stopped, printing `soak: task <n> done` or `soak: task <n>
-//! FAILED`, and forgets each (`FORGET`) once read.
+//! FAILED`, and forgets each (`FORGET`) once read. Argument 16: the `s1` kernel
+//! (#190): an `s1` task, its result printed in hexadecimal.
 
 #![no_std]
 #![no_main]
@@ -180,6 +181,9 @@ fn main(arg: u64) -> u64 {
     }
     if arg == 15 {
         return soak(&c);
+    }
+    if arg == 16 {
+        return s1(c);
     }
     if arg == 2 {
         return permissions(c);
@@ -535,6 +539,30 @@ fn durable_cases(c: &mut Client) {
         "a task outlives the runtime: its checkpoint comes back and its operation is DONE",
         recovered,
     );
+}
+
+/// The `s1` kernel (#190): one `s1` task, its result written to the
+/// debug log in hexadecimal, 64 bytes a line (`s1 result: `), for the runner
+/// to compare with the host's text.
+fn s1(mut c: Client) -> u64 {
+    let ended = c.submit(b"s1", b"s1").ok().and_then(|t| c.wait(t, 600));
+    let done = ended.as_ref().is_some_and(|(s, _)| s.state == State::Done);
+    if let Some((_, result)) = &ended {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for chunk in result.chunks(64) {
+            let mut line = Vec::from(&b"s1 result: "[..]);
+            for b in chunk {
+                line.extend_from_slice(&[HEX[usize::from(b >> 4)], HEX[usize::from(b & 15)]]);
+            }
+            let _ = debug_write(CONSOLE, &line);
+        }
+    }
+    c.step(
+        "the model's tool call ran and its answer is the result",
+        done,
+    );
+    let _ = send(REPORT, b"done", 0, 0, 0);
+    c.failed
 }
 
 /// One boot of the `agents_crash` kernel.

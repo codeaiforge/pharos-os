@@ -45,6 +45,10 @@ name = "soak"
 harness = false
 
 [[test]]
+name = "s1"
+harness = false
+
+[[test]]
 name = "apic_timer"
 harness = false
 

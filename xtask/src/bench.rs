@@ -36,7 +36,7 @@ fn round_trip_ns(log: &str) -> Option<u64> {
     rest.split(' ').next()?.parse().ok()
 }
 
-fn kvm() -> Result<()> {
+pub fn kvm() -> Result<()> {
     OpenOptions::new()
         .read(true)
         .write(true)
