@@ -159,6 +159,34 @@ struct State {
     handles: usize,
 }
 
+/// The fewest processes and handles over 1 s of samples (#200): a
+/// service holds a handle for a moment while it serves a request (one was
+/// counted after the first cycle in CI and gone by the 5-minute check). A
+/// leaked handle is in every sample, so it still counts. Says when the
+/// samples differed.
+fn settled() -> State {
+    let samples: Vec<State> = (0..50)
+        .map(|_| {
+            let s = state();
+            sched::sleep(Duration::from_millis(20));
+            s
+        })
+        .collect();
+    let key = |s: &State| (s.processes, s.handles);
+    let low = *samples.iter().min_by_key(|s| key(s)).unwrap_or(&samples[0]);
+    let high = samples.iter().map(key).max().unwrap_or(key(&low));
+    if high != key(&low) {
+        kprintln!(
+            "soak: sampled {} to {} processes, {} to {} handles; counted the fewest",
+            low.processes,
+            high.0,
+            low.handles,
+            high.1
+        );
+    }
+    low
+}
+
 fn state() -> State {
     let ids = process::ids();
     State {
@@ -215,7 +243,7 @@ fn cycle(w: &mut Watch, init: TaskId) -> Result<(), &'static str> {
 
 /// The drift checks; prints each and returns whether all held.
 fn checked(t: &mut TestRun, when: &str, first: State, audit: &manifests::Audit<'_>) -> bool {
-    let now = state();
+    let now = settled();
     let (findings, _) = audit.check();
     for f in &findings {
         kprintln!("  audit: {f}");
@@ -229,6 +257,13 @@ fn checked(t: &mut TestRun, when: &str, first: State, audit: &manifests::Audit<'
         now.handles,
         first.handles
     );
+    // Which process holds what, to find one that drifted: `id:handles`
+    // each (a restarted service has a new id).
+    let mut line = String::from("soak: handles by process:");
+    for p in process::ids().into_iter().filter_map(process::by_id) {
+        line += &alloc::format!(" {}:{}", p.record.id, p.caps.lock().len());
+    }
+    kprintln!("{line}");
     let held = [
         (
             "free frames within the margin of the first cycle's",
@@ -326,7 +361,7 @@ fn run(t: &mut TestRun) {
             break Err(step);
         }
         cycles += 1;
-        let base = *first.get_or_insert_with(state);
+        let base = *first.get_or_insert_with(settled);
         if cycles == 1 {
             drifted |= !checked(t, "after the first cycle", base, &audit);
         }

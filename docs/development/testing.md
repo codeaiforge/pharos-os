@@ -260,7 +260,7 @@ The cell table lives in `xtask` as data, with a host test that every cell differ
 **Every 5 minutes it checks:**
 
 - free frames back within a fixed margin of their value after the first cycle (the margin is set from the first local 8-hour run and written in the kernel);
-- the same processes and each service's handles exactly as after the first cycle;
+- the same processes and each service's handles exactly as after the first cycle, each count the fewest over 1 s of samples (#200: a service holds a handle for a moment while it serves a request; a leaked handle is in every sample), with each process's handles printed;
 - every boot service ready;
 - no fault and no unexpected exit.
 
@@ -274,6 +274,7 @@ At the end the runner reads the store's audit trail on the host with the store's
 - 15 minutes, every 2 s: 417 cycles passed, free frames 46,512 then 46,511, 5,014 audit records (108 bytes each, 139 of the store's 4,096 blocks). At that pace an 8-hour run would fill the 16 MiB store in about 7.5 hours, when the audit service answers `UNWRITABLE` and actions are refused (`NO_AUDIT`, as designed), so cycles and tasks now start every 10 s: 382 records in 5 minutes, about 4 MB in 8 hours.
 - 5 minutes, every 10 s: 31 cycles passed.
 - In CI, 60 minutes ([run 42996780099](https://github.com/codeaiforge/pharos-os/actions/runs/42996780099), `2120669`): 356 cycles passed, each event one audit record and one console line, 4,282 records.
+- In CI at `09ace19` ([run 43066775449](https://github.com/codeaiforge/pharos-os/actions/runs/43066775449)) it failed at 5 minutes: 73 handles against 74 after the first cycle (#200), and the same locally in 30 minutes; each process's handles matched, so one was held for a moment at the first snapshot. Sampled over 1 s, the first snapshot saw 73 to 75; 30 minutes then passed, 179 cycles, and the mutation of the runtime keeping each ended agent's handle still failed.
 
 
 ### Repeat pass
@@ -299,11 +300,12 @@ At the end the runner reads the store's audit trail on the host with the store's
 
 ### Known crash bugs
 
-**Implemented** (#191): the triage on 2026-11-11, at `09ace19` (the matrix run on it, 43066775449, found #199). Sources: every failed run in GitHub Actions (on `main` and on dispatch; mutation and `*-broken` branches fail on purpose), the open `bug` issues (none), the security reviews' findings, and the threat model's open limits. Every failure on `main` is listed with its outcome (D-032: any failure not shown to be infrastructure is a bug).
+**Implemented** (#191): the triage on 2026-11-11, at `09ace19` (the matrix run on it, 43066775449, found #199 and #200). Sources: every failed run in GitHub Actions (on `main` and on dispatch; mutation and `*-broken` branches fail on purpose), the open `bug` issues (none), the security reviews' findings, and the threat model's open limits. Every failure on `main` is listed with its outcome (D-032: any failure not shown to be infrastructure is a bug).
 
 | Run | Commit | Failure | Outcome |
 | --- | --- | --- | --- |
 | [43066642149](https://github.com/codeaiforge/pharos-os/actions/runs/43066642149), [43066775449](https://github.com/codeaiforge/pharos-os/actions/runs/43066775449) | `09ace19` | `agents`, `groups`: an idle check expected 21 agents, and #190 added the 22nd | #199, fixed; both kernels failed on every boot without it |
+| [43066775449](https://github.com/codeaiforge/pharos-os/actions/runs/43066775449) | `09ace19` | `soak`: 73 handles at 5 minutes against 74 after the first cycle | #200, fixed: the counts are the fewest over 1 s of samples |
 | [42793383308](https://github.com/codeaiforge/pharos-os/actions/runs/42793383308), [42793389747](https://github.com/codeaiforge/pharos-os/actions/runs/42793389747), [42787996179](https://github.com/codeaiforge/pharos-os/actions/runs/42787996179) | `713f7ab`, `8d89fd7` | `aifail (bios)`: the trusted reserve not free | #196, fixed with a test |
 | [42788001527](https://github.com/codeaiforge/pharos-os/actions/runs/42788001527), [42793394291](https://github.com/codeaiforge/pharos-os/actions/runs/42793394291) | `8d89fd7`, `713f7ab` | `kvm`: #GP(0x28) at `iretq` on AMD | #195, fixed with a test |
 | [42821432548](https://github.com/codeaiforge/pharos-os/actions/runs/42821432548) | `462878b` | `apic_timer (kvm)`: a tick before `hlt` | #197, the check was wrong; fixed |
@@ -314,7 +316,7 @@ At the end the runner reads the store's audit trail on the host with the store's
 | 42671377905, 42671651920 | `65c770b`, `20da4e2` | GitHub internal error, no jobs ran | Infrastructure |
 | 40552290015 to 40562001568 (5 runs) | `330a98a` to `6d58529` | `minimum supported Rust (1.85)`: `let` chains do not compile | A build failure, not a crash; fixed on 2026-10-27 |
 
-Locally, the matrix found #193 and #194 and the repeat pass found #198 again; all three are fixed with tests. Every one of #193–#199 is closed. No security review finding and no open limit in the threat model is a crash, hang, or panic. They are recorded behaviours: a record can be in the trail twice (M4.1 F2), and a runaway service can starve its peers while `trust` stays usable (M4.6 F4). Any later failure gets a new `bug` issue in M5.1 ([Reporting a failure](#reporting-a-failure)).
+Locally, the matrix found #193 and #194 and the repeat pass found #198 again; all three are fixed with tests. Every one of #193–#200 is closed. No security review finding and no open limit in the threat model is a crash, hang, or panic. They are recorded behaviours: a record can be in the trail twice (M4.1 F2), and a runaway service can starve its peers while `trust` stays usable (M4.6 F4). Any later failure gets a new `bug` issue in M5.1 ([Reporting a failure](#reporting-a-failure)).
 
 ### Test plan
 
