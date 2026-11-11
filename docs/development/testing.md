@@ -206,6 +206,7 @@ Each cell changes one setting from the push configuration (D-032). Every cell ru
 - [Run 42821432548](https://github.com/codeaiforge/pharos-os/actions/runs/42821432548), `462878b`, with the #GP report extended: every fault's `iretq` frame held user SS `0x28` (RPL 0), with the GDT correct. STAR's user base was `0x20`; on `sysret`, Intel CPUs and TCG force SS's RPL to 3, AMD CPUs take it from the base. It is now `0x23` (#195). Failing shares ran on AMD EPYC 7763 and 9V74; the share that failed on Intel (Xeon Platinum 8573C) failed only `apic_timer` (#197).
 - **[Run 42829027222](https://github.com/codeaiforge/pharos-os/actions/runs/42829027222), `eb11df6`: the `kvm` cell passed**, 4 of 4 shares, three on AMD (EPYC 7763 twice, 9V74) and one on Intel (Xeon 6973P-C). `kvm` joined the weekly list (8 cells × 4 shares).
 - **[Run 42983064214](https://github.com/codeaiforge/pharos-os/actions/runs/42983064214), `e87734e`: every job passed**, 36 of 36: the 8 cells × 4 shares (142–376 s each) and the 4 `repeat 3` shares (521–993 s), after #198.
+- **[Run 42996780099](https://github.com/codeaiforge/pharos-os/actions/runs/42996780099), `2120669`: the stability jobs passed**, 9 of 9: `push` × 4 shares (269–316 s), the 4 `repeat 3` shares (659–919 s), and `soak 60 min` (356 cycles, 4,282 audit records, 3,607 s) (#189).
 
 **A kernel's own settings win on their axis** (`test_qemu_args`, after the cell's arguments, and QEMU takes the last `-m` and `-cpu`): `vector_state` keeps `qemu64`, `vector_state_avx` keeps `-cpu max`, `large_file` keeps 2 GiB, and `exhaustion` keeps 1 GiB, so the CPU and memory cells run them unchanged.
 
@@ -271,6 +272,7 @@ At the end the runner reads the store's audit trail on the host with the store's
 - 10 minutes, cycles every 2 s: task 257 refused (`TOO_LARGE`). The runtime keeps at most 256 tasks (`MAX_TASKS`), ended ones until a control client sends `FORGET`; `soaker` now forgets each task once read. Free frames had fallen 28 meanwhile, which was those records.
 - 15 minutes, every 2 s: 417 cycles passed, free frames 46,512 then 46,511, 5,014 audit records (108 bytes each, 139 of the store's 4,096 blocks). At that pace an 8-hour run would fill the 16 MiB store in about 7.5 hours, when the audit service answers `UNWRITABLE` and actions are refused (`NO_AUDIT`, as designed), so cycles and tasks now start every 10 s: 382 records in 5 minutes, about 4 MB in 8 hours.
 - 5 minutes, every 10 s: 31 cycles passed.
+- In CI, 60 minutes ([run 42996780099](https://github.com/codeaiforge/pharos-os/actions/runs/42996780099), `2120669`): 356 cycles passed, each event one audit record and one console line, 4,282 records.
 
 
 ### Repeat pass
