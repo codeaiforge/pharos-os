@@ -319,6 +319,32 @@ At the end the runner reads the store's audit trail on the host with the store's
 
 Locally, the matrix found #193 and #194 and the repeat pass found #198 again; all three are fixed with tests. Every one of #193–#200 is closed. No security review finding and no open limit in the threat model is a crash, hang, or panic. They are recorded behaviours: a record can be in the trail twice (M4.1 F2), and a runaway service can starve its peers while `trust` stays usable (M4.6 F4). Any later failure gets a new `bug` issue in M5.1 ([Reporting a failure](#reporting-a-failure)).
 
+### Release-testing review (M5.1 gate)
+
+**Status:** written for the M5.1 gate (#192), 2026-11-12; awaiting the maintainer's approval. What each part of the release testing shows, and what it cannot.
+
+**Each cell:**
+
+| Cell | Shows | Cannot show |
+| --- | --- | --- |
+| `push` | Every kernel and service on the reference configuration, at every push and in the matrix | Anything that depends on firmware, memory size, CPU features, or real timing |
+| `bios` | Limine's BIOS path and the kernel on a BIOS memory map without UEFI tables; found #196 | `recovery` and `boot_info` (skipped, UEFI-only); real BIOS firmware other than SeaBIOS |
+| `mem-min` | The system table still boots in 144 MiB, so a growing image or a new reservation shows as a failure | The minimum is Limine's, not the kernel's; it rises with the image, so a failure may mean "raise the documented minimum" |
+| `mem-2g` | The frame allocator and direct map past 1 GiB | RAM above 4 GiB |
+| `mem-4g` | RAM above 4 GiB, around q35's PCI hole: frames, page tables, and the direct map there (the gate's broken branch fails only here) | Memory larger than 4 GiB, NUMA, other machines' memory maps; `exhaustion` and `large_file` keep their own sizes, so they never use it |
+| `cpu-skylake` | SMEP, SMAP, XSAVE, and AVX2 in every kernel and service, not only `vector_state_avx` | AVX-512, PKU, and other features Skylake-Client lacks; real CPU errata |
+| `cpu-max` | Every CPU feature TCG emulates, at once | Features TCG does not emulate; timing |
+| `kvm` | The host CPU's own behaviour and hardware timing; found #195 (AMD's `sysret`) and #197 | Which CPU it gets: hosted runners are AMD or Intel at random, so one run covers one vendor per share; no real devices (still virtio) |
+
+**Stability:**
+
+- The repeat pass (3 boots of every kernel in `push`) catches results that change between boots; it found #198 and the runner's console bug. It does not catch a flake rarer than about 1 in 3 boots per run; the weekly schedule adds boots over time.
+- The soak (1 h in CI, 2 h locally at this gate) catches leaks of frames, processes, and handles per cycle, services that stop being ready, and a broken audit chain; its mutations (a frame leaked per cycle, a handle kept per restart, a record dropped) each fail it. It cannot catch a leak slower than `FRAME_MARGIN` (32 frames) over the run, or growth the cycle does not exercise (networking beyond `stop`/`start net`, agent groups, updates). The 8-hour run is required before each release (D-032, amended).
+
+**S1 end to end:** the model, the agent, its tool call, and the audit trail together on Pharos, the output identical to the host's; locally under KVM with the speed targets (`bench-infer`). It cannot judge the answer's quality (the 0.5B model copies the file rather than summarizing it, [above](#s1-end-to-end)), and CI checks output only, not speed.
+
+**What none of it covers:** real hardware, its firmware, devices, and timing (M5.2); SMP, since every cell has one CPU; the threat model's open limits carried to M5.2 (KPTI, `rdtsc`). A green matrix is evidence for QEMU, not for a machine.
+
 ### Test plan
 
 | Issue | Delivers | Checked by |
