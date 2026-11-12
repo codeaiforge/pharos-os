@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- `trust` waited 1 s for `init`, as long as `init` waits for a service it stops, so `start` typed right after `stop service infer` could time out (`start: init is not answering`) when the 1 GiB `infer` took about 1 s to end; `aifail` failed in `mem-2g` in CI (#201). `trust` now waits 2 s (`INIT_US`), twice `init`'s wait (`INIT_STOP_US`), checked at compile time.
 - The soak counted a handle a service held for a moment as drift (#200, the 60-minute soak in matrix run 43066775449, and once locally in 30 minutes): 74 handles after the first cycle, 73 from then on. Its counts are now the fewest over 1 s of samples, and each check prints each process's handles
 - `agents` and `groups` failed on every boot since #190 (#199, push run 43066642149, and the matrix's `kvm` cell): adding the `s1` entry made the runtime's test table 22 agents, and `agentclient`'s idle checks expected 21. They now use one constant, `ACCEPTED`
 - A `mem_map` stopped or refused partway rolled back with interrupts off (#198, found by the repeat pass and once in CI, run 42640888639): `exhaustion`'s trusted task woke 50 ms late, over its 40 ms bound, and a mapping refused for lack of memory held it 275 ms under TCG. The rollback now unmaps in batches of 64 pages (`process::unmap_batched`); `user_memory` checks a refused 16 GiB mapping (`memprobe` 7) within the bound

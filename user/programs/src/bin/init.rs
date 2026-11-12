@@ -907,7 +907,7 @@ impl Init {
     fn unplug(&mut self, j: usize) {
         if let State::Running(p) | State::Ok(p) = self.state[j] {
             let _ = pharos_user::process_stop(p);
-            for _ in 0..100 {
+            for _ in 0..trust::INIT_STOP_US / 10_000 {
                 if process_status(p) != Ok(Status::Running) {
                     break;
                 }
@@ -956,7 +956,7 @@ impl Init {
     fn stop_one(&mut self, j: usize) {
         if let State::Running(p) | State::Ok(p) = self.state[j] {
             let _ = pharos_user::process_stop(p);
-            for _ in 0..100 {
+            for _ in 0..trust::INIT_STOP_US / 10_000 {
                 if process_status(p) != Ok(Status::Running) {
                     break;
                 }

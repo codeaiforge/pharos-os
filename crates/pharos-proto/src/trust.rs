@@ -48,11 +48,19 @@ pub const VERSION: u8 = 1;
 
 /// How long `trust` waits on each call it makes (M4.6 review F1): to
 /// `init` (each page of `SERVICES`, `RUNTIME`), to the audit service, to
-/// the knowledge service, and for a stopped process to end.
-pub const INIT_US: u64 = 1_000_000;
+/// the knowledge service, and for a stopped process to end. `INIT_US`
+/// is twice [`INIT_STOP_US`], so a `start` typed right after a `stop` is
+/// answered after `init`'s wait (#201: 739 ms for a 1 GiB `infer`).
+pub const INIT_US: u64 = 2_000_000;
 pub const AUDIT_US: u64 = 1_000_000;
 pub const KNOWLEDGE_US: u64 = 1_000_000;
 pub const STOP_WAIT_US: u64 = 1_000_000;
+/// How long `init` waits for a service it stops to end, serving no
+/// request meanwhile (`stop_one`): the process frees its own memory.
+pub const INIT_STOP_US: u64 = 1_000_000;
+// `trust` waits for `init` longer than `init` waits for a stopped service,
+// with time left to answer (#201); the build fails otherwise.
+const _: () = assert!(INIT_US >= 2 * INIT_STOP_US);
 /// How long `trust` keeps offering a message to the runtime, which may be
 /// busy or hung.
 pub const RUNTIME_SEND_US: u64 = 2_000_000;

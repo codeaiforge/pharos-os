@@ -306,6 +306,7 @@ At the end the runner reads the store's audit trail on the host with the store's
 | Run | Commit | Failure | Outcome |
 | --- | --- | --- | --- |
 | [43066642149](https://github.com/codeaiforge/pharos-os/actions/runs/43066642149), [43066775449](https://github.com/codeaiforge/pharos-os/actions/runs/43066775449) | `09ace19` | `agents`, `groups`: an idle check expected 21 agents, and #190 added the 22nd | #199, fixed; both kernels failed on every boot without it |
+| [43286093713](https://github.com/codeaiforge/pharos-os/actions/runs/43286093713) | `b42bfb1` (the gate's broken branch; its mutation does nothing in `mem-2g`) | `aifail (mem-2g)`: `start: init is not answering` right after `stop service infer` | #201, fixed: `trust` waits 2 s for `init`, twice `init`'s wait for a stopped service (739 ms measured for the 1 GiB `infer`); a compile-time check in `pharos_proto::trust` |
 | [43066775449](https://github.com/codeaiforge/pharos-os/actions/runs/43066775449) | `09ace19` | `soak`: 73 handles at 5 minutes against 74 after the first cycle | #200, fixed: the counts are the fewest over 1 s of samples |
 | [42793383308](https://github.com/codeaiforge/pharos-os/actions/runs/42793383308), [42793389747](https://github.com/codeaiforge/pharos-os/actions/runs/42793389747), [42787996179](https://github.com/codeaiforge/pharos-os/actions/runs/42787996179) | `713f7ab`, `8d89fd7` | `aifail (bios)`: the trusted reserve not free | #196, fixed with a test |
 | [42788001527](https://github.com/codeaiforge/pharos-os/actions/runs/42788001527), [42793394291](https://github.com/codeaiforge/pharos-os/actions/runs/42793394291) | `8d89fd7`, `713f7ab` | `kvm`: #GP(0x28) at `iretq` on AMD | #195, fixed with a test |
@@ -317,7 +318,7 @@ At the end the runner reads the store's audit trail on the host with the store's
 | 42671377905, 42671651920 | `65c770b`, `20da4e2` | GitHub internal error, no jobs ran | Infrastructure |
 | 40552290015 to 40562001568 (5 runs) | `330a98a` to `6d58529` | `minimum supported Rust (1.85)`: `let` chains do not compile | A build failure, not a crash; fixed on 2026-10-27 |
 
-Locally, the matrix found #193 and #194 and the repeat pass found #198 again; all three are fixed with tests. Every one of #193–#200 is closed. No security review finding and no open limit in the threat model is a crash, hang, or panic. They are recorded behaviours: a record can be in the trail twice (M4.1 F2), and a runaway service can starve its peers while `trust` stays usable (M4.6 F4). Any later failure gets a new `bug` issue in M5.1 ([Reporting a failure](#reporting-a-failure)).
+Locally, the matrix found #193 and #194 and the repeat pass found #198 again; all three are fixed with tests. Every one of #193–#201 is closed. No security review finding and no open limit in the threat model is a crash, hang, or panic. They are recorded behaviours: a record can be in the trail twice (M4.1 F2), and a runaway service can starve its peers while `trust` stays usable (M4.6 F4). Any later failure gets a new `bug` issue in M5.1 ([Reporting a failure](#reporting-a-failure)).
 
 ### Release-testing review (M5.1 gate)
 
