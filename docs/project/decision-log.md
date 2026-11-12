@@ -1098,6 +1098,8 @@ Two system calls per direction plus two task switches and two address-space swit
 
 **Consequences.** testing.md gains the matrix, its cells, the per-kernel exceptions, and the soak and S1 kernels (#187); `xtask` gains `matrix`, `soak`, and `s1`; a scheduled workflow joins `ci.yml` after the KVM trial on a throwaway branch; D-009 is amended for the KVM cell; #191 opens a `bug` issue per known failure, starting with `exhaustion`'s; the M5.1 gate (#192) records a green matrix run, an 8-hour soak, and a local S1 run on the gate commit.
 
+**Amended (2026-11-12, #192; the maintainer chose it):** the M5.1 gate records a 2-hour local soak instead of 8 hours, and the soak's frame margin is set from that run. The 8-hour local soak stays required before each release, the first of them included. The first 8-hour run was cut off by a power outage at about 7 h 20 min, its log lost with it. The 60-minute soak passed in CI on the gate commit ([run 43168885353](https://github.com/codeaiforge/pharos-os/actions/runs/43168885353)).
+
 ## Open and proposed decisions
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.

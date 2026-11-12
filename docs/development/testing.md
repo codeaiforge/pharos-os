@@ -244,7 +244,7 @@ The cell table lives in `xtask` as data, with a host test that every cell differ
 - xtask also writes one line per failing kernel to the job summary (`$GITHUB_STEP_SUMMARY`): cell, kernel, verdict, and the first failing check.
 - Each failure that is not shown to be infrastructure gets a `bug` issue in the current milestone (D-032). The issue names the run, commit, cell, kernel, and the log lines, and gives the local command that reproduces it (`cargo xtask matrix <cell>`). The fix comes with a test that fails without it. No rerun counts as a pass.
 - Infrastructure (a download or runner failure before QEMU starts) is noted on the run, and the run is started again.
-- **Release evidence:** a green matrix run on the commit being released, linked from the roadmap's gate line, together with the 8-hour soak and the local S1 run.
+- **Release evidence:** a green matrix run on the commit being released, linked from the roadmap's gate line, together with the 8-hour soak and the local S1 run. The M5.1 gate records a 2-hour soak instead (D-032, amended 2026-11-12).
 
 ### Soak
 
@@ -259,14 +259,14 @@ The cell table lives in `xtask` as data, with a host test that every cell differ
 
 **Every 5 minutes it checks:**
 
-- free frames back within a fixed margin of their value after the first cycle (the margin is set from the first local 8-hour run and written in the kernel);
+- free frames back within a fixed margin of their value after the first cycle (the margin is set from the 2-hour local run at the M5.1 gate and written in the kernel);
 - the same processes and each service's handles exactly as after the first cycle, each count the fewest over 1 s of samples (#200: a service holds a handle for a moment while it serves a request; a leaked handle is in every sample), with each process's handles printed;
 - every boot service ready;
 - no fault and no unexpected exit.
 
 At the end the runner reads the store's audit trail on the host with the store's checks (each record's CRC-32 and chain value, as the `system` round already does) and requires one record per event the kernel counted.
 
-**Runs:** 60 minutes in the scheduled workflow, and 8 hours locally before a release (`cargo xtask soak --minutes 480`), its summary line recorded at the gate. The runner's timeout is the duration plus 5 minutes.
+**Runs:** 60 minutes in the scheduled workflow, and 8 hours locally before a release (`cargo xtask soak --minutes 480`), its summary line recorded with the release. The M5.1 gate records a 2-hour local run (`--minutes 120`; D-032, amended 2026-11-12). The runner's timeout is the duration plus 5 minutes.
 
 **First runs** (2026-11-11, reference host, push cell):
 
@@ -275,6 +275,7 @@ At the end the runner reads the store's audit trail on the host with the store's
 - 5 minutes, every 10 s: 31 cycles passed.
 - In CI, 60 minutes ([run 42996780099](https://github.com/codeaiforge/pharos-os/actions/runs/42996780099), `2120669`): 356 cycles passed, each event one audit record and one console line, 4,282 records.
 - In CI at `09ace19` ([run 43066775449](https://github.com/codeaiforge/pharos-os/actions/runs/43066775449)) it failed at 5 minutes: 73 handles against 74 after the first cycle (#200), and the same locally in 30 minutes; each process's handles matched, so one was held for a moment at the first snapshot. Sampled over 1 s, the first snapshot saw 73 to 75; 30 minutes then passed, 179 cycles, and the mutation of the runtime keeping each ended agent's handle still failed.
+- Locally for the M5.1 gate, 2 hours at `6ad5602` (2026-11-12, push cell): 708 cycles and 708 tasks passed, 8,506 audit records. Free frames 46,457 after the first cycle and 46,456 from 80 minutes on; processes 9 and handles 73 at every check, 73 to 74 when sampled. That 1 frame sets `FRAME_MARGIN` at 32: a leak of one frame per cycle exceeds it within 6 minutes. An 8-hour run before the first release was cut off by a power outage at about 7 h 20 min, its log lost; the gate records this 2-hour run instead (D-032, amended).
 
 
 ### Repeat pass

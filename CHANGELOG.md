@@ -15,6 +15,10 @@ All notable changes to this project are documented here. The format is based on 
 - M5.1 design approved (#187, D-032): [testing.md](docs/development/testing.md#release-test-matrix-m51-d-032). 8 matrix cells, one setting changed at a time; the smallest memory measured at 144 MiB (128 MiB hangs in the bootloader); a local trial with 74 of 75 test kernels passing on `Skylake-Client` and `max` (`vector_state` tied to `qemu64`) and 73 of 75 at 144 MiB (`exhaustion` and `large_file` keep their own memory); planned `cargo xtask matrix`, `--repeat`, `soak`, and `s1`, a weekly `matrix.yml`, and the test plan for #188–#192
 - D-032 accepted (#186, M5.1): the release test matrix, 7 cells changing one axis at a time from the push configuration (firmware, memory sizes, CPU models), plus KVM as a cell, TCG staying the reference; the matrix weekly, on dispatch, and before each release, push runs unchanged; a soak kernel and 3 repeat passes; an S1 scenario kernel with the real model driving an agent; any non-infrastructure failure, flakes included, counts as a known crash bug
 
+### Changed
+
+- D-032 amended (#192): the M5.1 gate records a 2-hour local soak instead of 8 hours, after a power outage cut the 8-hour run off at about 7 h 20 min; 8 hours stays required before each release. The 2-hour run at `6ad5602` passed 708 cycles with free frames 1 below the first cycle, processes and handles unchanged, so `FRAME_MARGIN` stays 32 ([testing.md](docs/development/testing.md#soak)).
+
 ### Fixed
 
 - The soak counted a handle a service held for a moment as drift (#200, the 60-minute soak in matrix run 43066775449, and once locally in 30 minutes): 74 handles after the first cycle, 73 from then on. Its counts are now the fewest over 1 s of samples, and each check prints each process's handles

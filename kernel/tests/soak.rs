@@ -65,7 +65,8 @@ const fn parse(s: &str) -> u64 {
 const CHECK_EVERY: Duration = Duration::from_secs(300);
 /// Most free frames may differ from the first cycle's: the services' heaps
 /// and the store's caches settle at different sizes from cycle to cycle.
-// ponytail: 1 frame in 15 minutes measured; set from the first 8-hour local run (testing.md)
+// ponytail: 1 frame measured in 2 hours (708 cycles, M5.1 gate, testing.md); a leak of one
+// frame per cycle passes 32 within 6 minutes. Tighten if an 8-hour run stays this flat.
 const FRAME_MARGIN: u64 = 32;
 /// A cycle starts at most this often: the audit trail grows about 110
 /// bytes a record, and at a cycle every 2 s (12 records) an 8-hour run
