@@ -9,16 +9,17 @@ extern crate alloc;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 
 use pharos_kernel::arch::x86_64::paging::{self, Flags};
 use pharos_kernel::arch::x86_64::user_programs::TestProgram;
 use pharos_kernel::arch::x86_64::{apic, gdt, idt};
 use pharos_kernel::cap::{self, Capability, Object};
-use pharos_kernel::ipc::Endpoint;
+use pharos_kernel::ipc::{self, Endpoint, Message};
 use pharos_kernel::process::{self, USER_BASE};
 use pharos_kernel::sched::TaskId;
-use pharos_kernel::syscall::{Error, number::*};
+use pharos_kernel::syscall::{Error, MAX_MESSAGE, number::*};
 use pharos_kernel::testing::{self, TestRun};
 use pharos_kernel::{kprintln, mm, sched, time};
 
@@ -428,5 +429,48 @@ fn run(t: &mut TestRun) {
     t.check(
         "no process waits; their frames are back",
         requests.waiting() == (0, 0) && acks.waiting() == (0, 0) && free_frames() == before,
+    );
+
+    reply_wakes_a_caller_first(t);
+}
+
+/// #204: a `call` woken by an event on its reply endpoint, before any server
+/// took its request, withdraws the request, so a caller cannot leave
+/// requests queued on a server that does not receive.
+fn reply_wakes_a_caller_first(t: &mut TestRun) {
+    static RETURNED: AtomicUsize = AtomicUsize::new(0);
+    let server = Arc::new(Endpoint::new());
+    let mut withdrawn = true;
+    for round in 0..3 {
+        let queued = server.waiting().0;
+        let reply = Arc::new(Endpoint::new());
+        let (to, back) = (server.clone(), reply.clone());
+        let caller = sched::spawn(move || {
+            let message = Message {
+                data: [0; MAX_MESSAGE],
+                len: 1,
+                cap: None,
+                badge: 0,
+            };
+            let _ = ipc::call(&to, message, &back, None);
+            RETURNED.fetch_add(1, Ordering::Relaxed);
+        });
+        if caller.is_err() {
+            withdrawn = false;
+            break;
+        }
+        // The caller has queued its request and waits.
+        settle(|| server.waiting().0 == queued + 1);
+        ipc::notify(&reply, 1);
+        settle(|| RETURNED.load(Ordering::Relaxed) == round + 1);
+        let (returned, waiting) = (RETURNED.load(Ordering::Relaxed), server.waiting());
+        if returned != round + 1 || waiting != (0, 0) {
+            kprintln!("round {round}: {returned} calls returned, server queues {waiting:?}");
+        }
+        withdrawn &= returned == round + 1 && waiting == (0, 0);
+    }
+    t.check(
+        "a caller woken by its reply endpoint withdraws its request (3 rounds)",
+        withdrawn,
     );
 }

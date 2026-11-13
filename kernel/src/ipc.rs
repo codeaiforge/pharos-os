@@ -292,9 +292,15 @@ mod kernel {
             }
             None => {
                 let woken = sched::block_until(deadline);
-                if !woken && endpoint.remove_sender(me).is_some() {
-                    reply.remove_receiver(me);
-                    return Some(Received::TimedOut);
+                // Still queued: no server took it, so the deadline passed or
+                // an event on `reply` woke us first. Withdraw it either way,
+                // or it stays queued for good (#204).
+                if endpoint.remove_sender(me).is_some() {
+                    if !woken {
+                        reply.remove_receiver(me);
+                        return Some(Received::TimedOut);
+                    }
+                    return finish_wait(reply, me, true);
                 }
             }
         }
