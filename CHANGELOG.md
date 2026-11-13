@@ -25,6 +25,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- A system-call buffer in device registers mapped with `mmio_map` is refused with `BAD_ADDRESS` (#202, M5.4 review): the kernel copied through the direct map, which does not cover device memory, and faulted, halting the system; `devprobe`'s new step `debug_write`s from its mapped registers (a kernel page fault without the fix)
 - `call` woken by an event on its reply endpoint before a server took its request now withdraws the request (#204, M5.4 review): it stayed queued, one 256-byte message per call on the kernel heap, while the server did not receive; the `ipc` kernel's new round shows 1, 2, then 3 left queued without the fix
 - `trust` waited 1 s for `init`, as long as `init` waits for a service it stops, so `start` typed right after `stop service infer` could time out (`start: init is not answering`) when the 1 GiB `infer` took about 1 s to end; `aifail` failed in `mem-2g` in CI (#201). `trust` now waits 2 s (`INIT_US`), twice `init`'s wait (`INIT_STOP_US`), checked at compile time.
 - The soak counted a handle a service held for a moment as drift (#200, the 60-minute soak in matrix run 43066775449, and once locally in 30 minutes): 74 handles after the first cycle, 73 from then on. Its counts are now the fewest over 1 s of samples, and each check prints each process's handles

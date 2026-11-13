@@ -676,7 +676,9 @@ impl AddressSpace {
             let addr = virt + at as u64;
             let piece = (FRAME_SIZE - addr % FRAME_SIZE).min((len - at) as u64) as usize;
             let t = self.translate(addr).ok_or(MapError::NotMapped)?;
-            if !t.flags.user || (write && !t.flags.writable) {
+            // Uncached user pages are device registers (`mmio_map`), which
+            // the direct map does not cover: refused as buffers (#202).
+            if !t.flags.user || t.flags.uncached || (write && !t.flags.writable) {
                 return Err(MapError::AccessDenied);
             }
             *pieces.get_mut(count).ok_or(MapError::WrongHalf)? = (t.phys, at, piece);

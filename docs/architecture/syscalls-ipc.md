@@ -79,7 +79,7 @@ The prototype for D-004 showed that QEMU's default CPU under TCG, which CI uses,
 
 - The kernel **never dereferences a user virtual address**. A user buffer is validated and then copied through the direct map:
   1. Check `addr + len` without overflow, inside `[0x1000, 0x7ffffffff000)`, and `len` within the call's limit.
-  2. Translate each page in the process's address space; the page must be present and user-accessible (and writable for writes into it).
+  2. Translate each page in the process's address space; the page must be present and user-accessible (and writable for writes into it), and not device registers mapped with `mmio_map` (uncached), which the direct map does not cover (#202: such a buffer faulted the kernel).
   3. Copy page by page between the frame's direct-map address and a kernel buffer.
 - **Implementation:** `AddressSpace::read_user` and `write_user` in the hardware layer. They check the range (`user_range_ok`), then every page (present, user, and writable for writes), before copying anything through the direct map. Host tests cover the range checks, including a randomized test. Stateless argument checks are in `syscall::decode`, fuzzed on the host with 200,000 random calls.
 - **Check order:** call number, length, address range (`decode`); then handle and rights (the capability table); then the pages (`read_user`).
@@ -163,7 +163,7 @@ Error codes (`rax`):
 | 2 | `INVALID_HANDLE` | Handle not in the caller's table |
 | 3 | `REVOKED` | The capability was revoked |
 | 4 | `MISSING_RIGHT` | The capability lacks a needed right |
-| 5 | `BAD_ADDRESS` | A buffer is outside user space, unmapped, or lacks access |
+| 5 | `BAD_ADDRESS` | A buffer is outside user space, unmapped, lacks access, or is device registers |
 | 6 | `TOO_LARGE` | A length exceeds the call's limit, or a `spawn` page limit exceeds the caller's (M3.0) |
 | 7 | `NO_MEMORY` | The kernel could not allocate, or a `mem_map` would pass the page limit or 1,024 mappings (M3.0) |
 | 8 | `NOT_FOUND` | No file with this path (M2.8), no such BAR, or no such MSI-X entry (M2.9) |

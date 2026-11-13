@@ -34,6 +34,17 @@ pub mod probe {
         call(number::DEBUG_WRITE, [console, addr, len, 0, 0, 0])
     }
 
+    /// `debug_write` of `len` bytes from the start of `mapped`, for a
+    /// mapping of device registers (`mmio_map`), which the kernel must
+    /// refuse as a buffer (#202). The kernel only reads it.
+    pub fn debug_write_mapped(
+        console: Handle,
+        mapped: &crate::Mapped,
+        len: u64,
+    ) -> Result<u64, Error> {
+        call(number::DEBUG_WRITE, [console, mapped.addr(), len, 0, 0, 0])
+    }
+
     /// `read` of `len` bytes of `file` into kernel address `addr`.
     pub fn read_into(file: Handle, addr: u64, len: u64) -> Result<u64, Error> {
         kernel(addr)?;

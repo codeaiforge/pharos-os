@@ -172,6 +172,11 @@ fn main(arg: u64) -> u64 {
             regs.read8(in_page + DEVICE_STATUS) == 1,
         );
         regs.write8(in_page + DEVICE_STATUS, 0);
+        report(
+            &mut f,
+            "registers as a buffer: BAD_ADDRESS",
+            pharos_user::probe::debug_write_mapped(CONSOLE, &regs, 16) == Err(Error::BadAddress),
+        );
     }
     report(
         &mut f,

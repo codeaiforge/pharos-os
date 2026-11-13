@@ -31,13 +31,14 @@ fn free_frames() -> usize {
 }
 
 /// Steps `devprobe` must report as passed.
-const STEPS: [&str; 21] = [
+const STEPS: [&str; 22] = [
     "config_read vendor and device",
     "config_read a byte",
     "mmio_map the common configuration",
     "one queue",
     "status reset",
     "status write reaches the device",
+    "registers as a buffer: BAD_ADDRESS",
     "mapping the same address again: IN_USE",
     "BAR 6: NOT_FOUND",
     "past the BAR: BAD_ADDRESS",
