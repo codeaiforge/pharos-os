@@ -805,10 +805,28 @@ impl Trust {
         }
         let valid = cap != 0 && process_status(cap).is_ok();
         match parse(msg) {
+            // A runtime sends this once at start, before any request: what
+            // an earlier one left open can no longer be answered, and its
+            // numbers start again at 1 (#206).
             Ok(Request::Channel) if badge == RUNTIME && cap != 0 && !valid => {
                 if let Some(old) = self.channel.replace(cap) {
                     let _ = delete(old);
                 }
+                for i in 0..self.open.len() {
+                    let number = core::mem::take(&mut self.open[i]);
+                    if number == 0 {
+                        continue;
+                    }
+                    let confirm = self.confirms.contains(&number);
+                    let label: &[u8] = if confirm { b"confirm #" } else { b"approve #" };
+                    let mut a = [0u8; 20];
+                    self.say(&[
+                        label,
+                        decimal(u64::from(number), &mut a),
+                        b": the runtime ended",
+                    ]);
+                }
+                self.confirms = [0; 4];
             }
             Ok(Request::Approve {
                 number,

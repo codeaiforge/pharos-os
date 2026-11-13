@@ -8,8 +8,9 @@
 //! wrong badge, which `trust` must drop. `cargo xtask runner` types on the
 //! trusted console (`TRUST_SCRIPT`): `list`, `stop worker`, a bad command,
 //! `list`, `stop all`. The kernel checks both agents end while the runtime
-//! spins, then the runtime ends, and what each process holds. Runs under
-//! UEFI (D-009).
+//! spins, then the runtime ends, and what each process holds. Last, an
+//! approval left open ends with a new runtime's `CHANNEL` (#206). Runs
+//! under UEFI (D-009).
 
 #![no_std]
 #![no_main]
@@ -39,6 +40,10 @@ pharos_kernel::test_kernel!(run);
 const VERSION: u8 = 1;
 const RUNTIME_OP: u8 = 1;
 const REGISTER_OP: u8 = 2;
+const CHANNEL_OP: u8 = 3;
+const APPROVE_OP: u8 = 5;
+/// `pharos_proto::permission`: the kind of `model <n>`.
+const MODEL: u8 = 1;
 const INIT_BADGE: u32 = 0;
 const RUNTIME_BADGE: u32 = 2;
 
@@ -227,8 +232,18 @@ fn run(t: &mut TestRun) {
         "trust still runs",
         process::by_id(trust).is_some_and(|p| p.record.end().is_none()),
     );
-    // Let the runner read the last answer before QEMU exits.
-    sched::sleep(Duration::from_millis(500));
+
+    // #206: an approval left open, then a new runtime's `CHANNEL`. The
+    // runner must see `approve #1: the runtime ended`, and `yes 1` must
+    // then be `no request #1`.
+    let mut approve = vec![VERSION, APPROVE_OP, 1, 0, 6];
+    approve.extend_from_slice(b"tester");
+    approve.extend_from_slice(&[1, 0, 0, 0, MODEL, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    send(&endpoint, &approve, process(), RUNTIME_BADGE);
+    let channel = Capability::new(Object::Endpoint(Endpoint::new()), SEND);
+    send(&endpoint, &[VERSION, CHANNEL_OP], channel, RUNTIME_BADGE);
+    // Let the runner type and read the last answer before QEMU exits.
+    sched::sleep(Duration::from_secs(2));
 }
 
 fn mm_ready() -> bool {

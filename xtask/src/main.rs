@@ -2215,6 +2215,13 @@ const TRUST_SCRIPT: &[console::Step] = &[
         "stop all\n",
     ),
     ("stopped all", ""),
+    // #206: an approval the old runtime left open ends with it.
+    (
+        "approve #1: tester task 1 wants model 2 for this task? (yes 1 / no 1)",
+        "",
+    ),
+    ("approve #1: the runtime ended", "yes 1\n"),
+    ("no request #1", ""),
 ];
 /// The impostor the kernel registers under `init`'s badge must be dropped.
 const TRUST_REFUSED: &[&str] = &["impostor"];
