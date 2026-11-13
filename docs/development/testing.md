@@ -322,7 +322,7 @@ Locally, the matrix found #193 and #194 and the repeat pass found #198 again; al
 
 ### Release-testing review (M5.1 gate)
 
-**Status:** written for the M5.1 gate (#192), 2026-11-12; awaiting the maintainer's approval. What each part of the release testing shows, and what it cannot.
+**Status:** written for the M5.1 gate (#192) and approved by the maintainer on 2026-11-12. What each part of the release testing shows, and what it cannot.
 
 **Each cell:**
 
