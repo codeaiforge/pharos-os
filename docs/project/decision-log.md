@@ -1100,9 +1100,9 @@ Two system calls per direction plus two task switches and two address-space swit
 
 **Amended (2026-11-12, #192; the maintainer chose it):** the M5.1 gate records a 2-hour local soak instead of 8 hours, and the soak's frame margin is set from that run. The 8-hour local soak stays required before each release, the first of them included. The first 8-hour run was cut off by a power outage at about 7 h 20 min, its log lost with it. The 60-minute soak passed in CI on the gate commit ([run 43168885353](https://github.com/codeaiforge/pharos-os/actions/runs/43168885353)).
 
-## Open and proposed decisions
+## Accepted decisions (filed with the open ones)
 
-Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
+D-011, D-012, and D-018 were opened before their milestones and accepted in place; they stay here so their history reads in order.
 
 ### D-011: CPU/GPU support and memory/VRAM constraints
 
@@ -1215,3 +1215,9 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
    - The runtime starts each agent with no capabilities, hands a `STOP` capability on it to the trusted service, and only then grants the agent anything. An agent the runtime never reported holds nothing, and stopping the runtime ends it too.
 9. **Delegation with expiry: left to M3.4, with D-012** (decided there: expiry on runtime grants only, D-012 item 9). M3.3 grants an agent only what a reviewed table allows (below), so it needs no time-limited grants yet.
 10. **Human approval in M3.3: none needed, because nothing beyond the reviewed table is granted.** The runtime grants an agent only capabilities listed for it in a compiled-in table, like `init`'s; a manifest asking for more is refused. Approvals for anything beyond it come with M3.4's permission model.
+
+## Open and proposed decisions
+
+Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
+
+None open.

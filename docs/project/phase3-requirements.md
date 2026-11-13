@@ -2,7 +2,7 @@
 
 - **Status:** **Approved** by the maintainer on 2026-10-29 (issue #66, [M3.1](implementation-roadmap.md#m31--requirements-and-inference-runtime-evaluation)). The three items marked **Decision** were confirmed as recommended; the speed target becomes binding only after #69 shows the native engine can reach it.
 - **Scope:** what the first agents on Pharos do, on what hardware, and what they need from a model. It sets the inputs for the runtime evaluation (#69), D-010, D-011, and the targets for [M3.0](implementation-roadmap.md#m30--platform-prerequisites-for-hosting-agents).
-- **Nothing here is implemented.** Phase 3 has not started on Pharos; see the roadmap for status.
+- **Implemented in Phase 3** (done, v0.3.0), as the requirements were written before it; see the roadmap for each milestone's status.
 
 ## Principles carried into every requirement
 

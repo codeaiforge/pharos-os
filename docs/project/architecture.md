@@ -1,28 +1,29 @@
 # Architecture
 
-This document has two parts: what is **implemented** today, and the **proposed** architecture. The proposed architecture is a direction, not an approved design; the decisions it depends on are open in the [decision log](decision-log.md).
+This document has two parts: what is **implemented** today, and the **proposed** architecture. The proposed architecture below was written before Phase 2; most of it is now implemented, and the decisions it names are accepted in the [decision log](decision-log.md).
 
 ## Implemented architecture
 
+Phases 1–4 and M5.1 are done (v0.4.0; [roadmap](implementation-roadmap.md)). This overview is refreshed for facts only; M6.0 rewrites the document if D-033 is accepted.
+
 ```text
 Cargo workspace (stable Rust, edition 2024)
+├── kernel             pharos-kernel for x86_64-unknown-none: the capability microkernel
+├── crates/            no_std libraries shared by the kernel, user programs, and host tools:
+│                      pharos-elf, pharos-fs, pharos-image, pharos-infer, pharos-proto,
+│                      pharos-services, pharos-store
+├── user/pharos-user   the user-space system-call library (its only unsafe module)
+├── user/programs      init, the services, drivers, and test programs
 ├── tools/pharos-cli   binary `pharos` (host): read-only development CLI, std only
-├── xtask              binary `xtask` (host): builds the kernel and the boot ISO, std only
-└── kernel             `pharos-kernel` for x86_64-unknown-none:
-                       ├── library (no_std): Limine protocol structures, boot-info logic,
-                       │                     SpinLock, x86-64 hardware layer (console, halt)
-                       └── binary (no_main): entry point, Limine requests
+└── xtask              binary `xtask` (host): builds images, runs QEMU tests and the matrix
 ```
 
-- **Kernel (M2.2–M2.6, minimal):**
-  - Limine boots it on UEFI and BIOS. It checks the protocol revision and reports boot information over COM1.
-  - It handles CPU exceptions and local APIC timer interrupts ([interrupts.md](../architecture/interrupts.md)).
-  - It manages physical memory, runs on its own page tables, and has a heap ([memory.md](../architecture/memory.md)).
-  - It calibrates a 100 Hz timer and schedules kernel tasks preemptively ([scheduling.md](../architecture/scheduling.md)).
-  - It has no user processes, system calls, IPC, or drivers beyond serial, the interrupt controller, and the timer.
-  - CI boots it and runs its test kernels in QEMU on every push.
-- `unsafe` is forbidden in host crates. In the kernel it is denied by default and allowed only in the hardware layer and the Limine protocol module, each block documented (enforced by lints).
-- No package has third-party dependencies. The CLI and `xtask` do not depend on the kernel crate.
+- **Kernel:** Limine boots it on UEFI and BIOS. It handles exceptions and local APIC timer interrupts, manages memory with its own page tables, schedules threads preemptively on one CPU in three classes, and runs user processes in ring 3, each in its own address space, with system calls, synchronous IPC that passes capabilities, and capabilities for memory, devices, interrupts, and processes ([architecture docs](../architecture/README.md)).
+- **User space:** `init` starts and supervises the services from audited manifests: virtio-blk, virtio-net, and virtio-console drivers; storage (`store`, copy-on-write with a SHA-256-chained audit trail); networking (own stack, UDP and ICMP); `audit`; local inference (`infer`, own `no_std` engine, CPU only); `knowledge`; the agent runtime; and `trust`, the trusted console no agent can reach. Boot uses signed A/B root images with a factory fallback.
+- **Agents:** untrusted processes holding only what the runtime grants: revocable permissions, default-deny networking per destination, budgets, two tools (`read_file`, and `send` confirmed by the user per call), channels and groups, every consequential action audited or refused.
+- **Tests:** 78 QEMU test kernels and host tests on every push; the release matrix (8 cells), repeat passes, a soak, and S1 end to end weekly ([testing.md](../development/testing.md)).
+- `unsafe` is forbidden in host crates. In the kernel it is allowed only in the hardware layer, the Limine module, and `mm::raw`; in user space only in `user/pharos-user/src/syscall.rs`; each block documented (AGENTS.md §5). Two third-party dependencies: `ed25519-compact` and `libm`.
+- Runs only in QEMU (TCG and KVM), x86-64, one CPU.
 
 ## Proposed architecture (planned)
 
@@ -61,7 +62,7 @@ Host tooling (outside the OS): pharos CLI, build, QEMU test harness
 
 ### Capability model (direction)
 
-Agents start with no authority. The user or a policy grants specific capabilities (for example: read one directory, call one tool, reach one network host). Grants are logged, can be limited by time and resources, and can be revoked. The exact mechanism (kernel-level capabilities versus a user-space policy service, or both) is an open decision.
+Agents start with no authority. The user or a policy grants specific capabilities (for example: read one directory, call one tool, reach one network host). Grants are logged, can be limited by time and resources, and can be revoked. The mechanism is decided: kernel-enforced capabilities, with policy in the agent runtime (D-012).
 
 ### Kernel style
 
