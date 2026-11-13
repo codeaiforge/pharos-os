@@ -14,6 +14,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use pharos_kernel::arch::x86_64::user_programs::TestProgram;
 use pharos_kernel::arch::x86_64::{apic, gdt, idt};
 use pharos_kernel::cap::{Capability, GRANT, Object, READ, SEND, WRITE};
 use pharos_kernel::ipc::Endpoint;
@@ -151,4 +152,41 @@ fn run(t: &mut TestRun) {
     sched::sleep(Duration::from_millis(100));
     t.check("every process ended", process::count() == live);
     t.check("every frame returned", free_frames() == before);
+
+    failed_starts_free_their_space(t);
+}
+
+/// #205: a process that cannot start gives back its address space: its
+/// page tables and loaded pages.
+fn failed_starts_free_their_space(t: &mut TestRun) {
+    let program = TestProgram::SyscallTable.bytes();
+    let before = free_frames();
+    let bad_entry = process::load(program)
+        .is_ok_and(|space| process::start(space, 0x7000_0000, 0, Vec::new()).is_err());
+    t.check(
+        "a bad entry point: refused, and every frame returned",
+        bad_entry && free_frames() == before,
+    );
+
+    // No frame left for the kernel stack: the test holds every free one.
+    let no_stack = process::load(program).is_ok_and(|space| {
+        let held: Vec<_> = {
+            let mut frames = mm::frames();
+            let Some(frames) = frames.as_mut() else {
+                return false;
+            };
+            core::iter::from_fn(|| frames.alloc().ok()).collect()
+        };
+        let refused = process::start(space, 0, 0, Vec::new()).is_err();
+        if let Some(frames) = mm::frames().as_mut() {
+            for frame in held {
+                let _ = frames.free(frame);
+            }
+        }
+        refused
+    });
+    t.check(
+        "no frame for its kernel stack: refused, and every frame returned",
+        no_stack && free_frames() == before,
+    );
 }

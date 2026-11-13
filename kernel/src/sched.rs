@@ -328,17 +328,22 @@ pub fn init() -> Result<(), SchedError> {
     Ok(())
 }
 
-/// A new task of class `class` with its own stack, not yet queued; it runs
-/// in `space` if given, else in the kernel address space.
+/// A kernel stack for a new task, once the scheduler is set up.
+fn task_stack() -> Result<KernelStack, SchedError> {
+    if SCHEDULER.lock().is_none() {
+        return Err(SchedError::NotInitialized);
+    }
+    KernelStack::new().map_err(SchedError::Stack)
+}
+
+/// A new task of class `class` on `stack`, not yet queued; it runs in
+/// `space` if given, else in the kernel address space.
 fn new_task(
     entry: Entry,
     space: Option<AddressSpace>,
     class: Class,
+    stack: KernelStack,
 ) -> Result<Arc<Task>, SchedError> {
-    if SCHEDULER.lock().is_none() {
-        return Err(SchedError::NotInitialized);
-    }
-    let stack = KernelStack::new().map_err(SchedError::Stack)?;
     let context = match space {
         Some(space) => Context::with_space(stack, task_start, space),
         None => Context::new(stack, task_start),
@@ -369,18 +374,26 @@ pub fn spawn_class(
     class: Class,
     entry: impl FnOnce() + Send + 'static,
 ) -> Result<TaskId, SchedError> {
-    queue(new_task(Box::new(entry), None, class)?)
+    queue(new_task(Box::new(entry), None, class, task_stack()?)?)
 }
 
 /// Like [`spawn_class`], but the task runs in the process address space
 /// `space` (CR3 switches with it). The task owns `space`; it is destroyed,
-/// with all its user pages, when the task is reaped.
+/// with all its user pages, when the task is reaped. On failure `space` is
+/// handed back, so the caller can free it (#205).
 pub fn spawn_in(
     space: AddressSpace,
     class: Class,
     entry: impl FnOnce() + Send + 'static,
-) -> Result<TaskId, SchedError> {
-    queue(new_task(Box::new(entry), Some(space), class)?)
+) -> Result<TaskId, (SchedError, Option<AddressSpace>)> {
+    let stack = match task_stack() {
+        Ok(stack) => stack,
+        Err(error) => return Err((error, Some(space))),
+    };
+    // ponytail: past `task_stack` the scheduler exists and is never torn
+    // down, so these fail only if that changes; the space is then lost.
+    let task = new_task(Box::new(entry), Some(space), class, stack).map_err(|e| (e, None))?;
+    queue(task).map_err(|e| (e, None))
 }
 
 fn queue(task: Arc<Task>) -> Result<TaskId, SchedError> {
@@ -419,6 +432,7 @@ pub fn enable_preemption() -> Result<(), SchedError> {
         }),
         None,
         AGENTS,
+        task_stack()?,
     )?;
     SCHEDULER
         .lock()

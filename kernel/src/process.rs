@@ -688,24 +688,34 @@ pub fn start_class(
     class: sched::Class,
 ) -> Result<TaskId, ProcessError> {
     let limit = budget.pages;
+    // Every error path frees `space`: it has no `Drop` (#205).
+    let fail = |space: AddressSpace, error| {
+        if let Some(frames) = mm::frames().as_mut() {
+            space.destroy(frames);
+        }
+        Err(error)
+    };
     if space.translate(USER_BASE.saturating_add(entry)).is_none() {
-        return Err(ProcessError::BadEntry);
+        return fail(space, ProcessError::BadEntry);
     }
     let mut table = CapTable::new();
     table.set_limit(usize::try_from(budget.handles).unwrap_or(usize::MAX));
     for cap in caps {
-        table
-            .insert(cap)
-            .map_err(|_| ProcessError::TooManyCapabilities)?;
+        if table.insert(cap).is_err() {
+            return fail(space, ProcessError::TooManyCapabilities);
+        }
     }
     // Started from a process's `spawn`: that process is the parent.
     let parent = current().map(|p| p.record.id);
     // Register the process before its thread can run (no preemption here).
     without_interrupts(|| {
-        let id = sched::spawn_in(space, class, move || {
+        let id = match sched::spawn_in(space, class, move || {
             context::enter_user(USER_BASE + entry, STACK_TOP, arg)
-        })
-        .map_err(ProcessError::Sched)?;
+        }) {
+            Ok(id) => id,
+            Err((error, Some(space))) => return fail(space, ProcessError::Sched(error)),
+            Err((error, None)) => return Err(ProcessError::Sched(error)),
+        };
         let process = Arc::new(Process {
             caps: IrqMutex::new(table),
             inbox: IrqMutex::new(None),
