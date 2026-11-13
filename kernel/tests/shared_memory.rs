@@ -269,4 +269,69 @@ fn run(t: &mut TestRun) {
         during
             && probe.is_some_and(|id| process::exits().iter().any(|e| e.task == id && e.code == 0)),
     );
+
+    sweep_keeps_the_trusted_reserve(t, &programs);
+}
+
+/// #203: sweeping a revoked mapping of an agent never takes the frames kept
+/// for the trusted class: pages it cannot replace are left unmapped.
+fn sweep_keeps_the_trusted_reserve(t: &mut TestRun, programs: &Fs) {
+    let probe = process::load_elf(programs, b"bin/memprobe")
+        .and_then(|(space, entry)| {
+            let budget = process::Budget::kernel(32_900);
+            let entry = entry - process::USER_BASE;
+            process::start_class(space, entry, 5, Vec::new(), budget, sched::AGENTS)
+        })
+        .ok();
+    let p = probe.and_then(process::by_id);
+    let mut parent = None;
+    for _ in 0..200 {
+        parent = p.as_ref().and_then(|p| p.caps.lock().get(1, 0).ok());
+        if parent.is_some() {
+            break;
+        }
+        sched::sleep(Duration::from_millis(10));
+    }
+    let given = match (&p, &parent) {
+        (Some(p), Some(parent)) => p.caps.lock().insert(parent.derive(READ)) == Ok(2),
+        _ => false,
+    };
+    // Its view of the 64 MiB is mapped: two shared mappings recorded.
+    for _ in 0..200 {
+        if p.as_ref().is_some_and(|p| p.shared.lock().len() == 2) {
+            break;
+        }
+        sched::sleep(Duration::from_millis(1));
+    }
+    let mapped = p.as_ref().is_some_and(|p| p.shared.lock().len() == 2);
+    // Leave only the reserve and a few pages free, then revoke.
+    let reserve = process::TRUSTED_RESERVE as usize;
+    let held: Vec<_> = {
+        let mut frames = mm::frames();
+        match frames.as_mut() {
+            Some(frames) => {
+                let spare = frames.stats().free.saturating_sub(reserve + 64);
+                (0..spare).filter_map(|_| frames.alloc().ok()).collect()
+            }
+            None => Vec::new(),
+        }
+    };
+    let revoked = parent.as_ref().is_some_and(|c| process::revoke(c) > 0);
+    let after = free_frames();
+    if let Some(frames) = mm::frames().as_mut() {
+        for frame in held {
+            let _ = frames.free(frame);
+        }
+    }
+    drop(p);
+    if let Some(id) = probe {
+        wait_end(id);
+    }
+    if after < reserve {
+        kprintln!("sweep left {after} frames free, reserve {reserve}");
+    }
+    t.check(
+        "sweeping an agent's revoked 64 MiB mapping keeps the trusted reserve free",
+        given && mapped && revoked && after >= reserve,
+    );
 }

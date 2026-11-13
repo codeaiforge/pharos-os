@@ -951,8 +951,9 @@ pub fn stop(id: TaskId) -> bool {
 /// returning (capabilities.md, #104). A mapping's pages become fresh
 /// zeroed pages the process owns, with the same access, so its next read
 /// sees zeros and its writes reach nothing shared; no process faults
-/// because another revoked memory it was using. If no frame is free, the
-/// page is left unmapped. A device is stopped (no DMA, no MSI) before its
+/// because another revoked memory it was using. If no frame is free, or
+/// only the trusted reserve for a process outside the trusted class (#203),
+/// the page is left unmapped. A device is stopped (no DMA, no MSI) before its
 /// buffers are unmapped. Returns the number of capabilities revoked.
 pub fn revoke(cap: &Capability) -> usize {
     let revoked = cap.revoke();
@@ -997,26 +998,40 @@ fn sweep_revoked() {
             writable: false,
             ..Flags::USER_DATA
         };
-        let mut pages: Vec<(u64, Flags)> = Vec::new();
-        for s in &shared {
-            let flags = if s.writable {
-                Flags::USER_DATA
-            } else {
-                read_only
-            };
-            let n = s.memory.frames().len() as u64;
-            pages.extend((0..n).map(|i| (s.start + i * FRAME_SIZE, flags)));
-        }
-        for d in &devices {
-            pages.extend((0..d.pages).map(|i| (d.start + i * FRAME_SIZE, Flags::USER_DATA)));
-        }
+        // One entry per mapping, not per page: the kernel heap is fixed (#203).
+        let ranges = shared
+            .iter()
+            .map(|s| {
+                let flags = if s.writable {
+                    Flags::USER_DATA
+                } else {
+                    read_only
+                };
+                (s.start, s.memory.frames().len() as u64, flags)
+            })
+            .chain(devices.iter().map(|d| (d.start, d.pages, Flags::USER_DATA)));
+        let class = sched::class_of(id).unwrap_or(sched::AGENTS);
+        // ponytail: one pass with interrupts off, so revoking a large mapping
+        // stalls the system while its pages are zeroed (#203). Pausing would
+        // let the process `mem_unmap` the range meanwhile, its frames then
+        // freed as its own; upgrade path: mark the range busy while swept.
         sched::with_space(id, |space| {
             let mut guard = mm::frames();
             let Some(frames) = guard.as_mut() else { return };
-            for (virt, flags) in pages {
-                // Not owned: the object or the device holds the frame.
-                let _ = space.unmap(virt);
-                let _ = space.map_new_page(virt, flags, &[], frames);
+            for (start, pages, flags) in ranges {
+                for i in 0..pages {
+                    let virt = start + i * FRAME_SIZE;
+                    // Not owned: the object or the device holds the frame.
+                    let _ = space.unmap(virt);
+                    // Never from the trusted reserve for another class
+                    // (#203): the page is then left unmapped, as with no
+                    // frame free. A shared range stays counted in the
+                    // process's `mem_map` reservation, so its new pages are
+                    // charged; device ranges are bounded by the device limits.
+                    if may_take(frames.stats().free as u64, 1 + tables_for(1), class) {
+                        let _ = space.map_new_page(virt, flags, &[], frames);
+                    }
+                }
             }
         });
         // Dropped after the frame allocator's lock: one may have been the
