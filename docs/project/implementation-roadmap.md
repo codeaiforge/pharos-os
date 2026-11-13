@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), Phase 3 — AI Agent Platform (v0.3.0), and Phase 4 — Full Operating System (v0.4.0) are done. Current milestone: M5.1 — QEMU regression and release testing.** Everything in Phase 5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), Phase 3 — AI Agent Platform (v0.3.0), and Phase 4 — Full Operating System (v0.4.0) are done. Current milestone: M5.2 — Hardware compatibility testing.** M5.1 is done; the rest of Phase 5 is **planned, not implemented**.
 
 ## How to read this roadmap
 
@@ -43,7 +43,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | 2 | Core System | Done (v0.2.0) |
 | 3 | AI Agent Platform | Done (v0.3.0; gate passed 2026-11-06 with M3.8) |
 | 4 | Full Operating System | Done (v0.4.0; gate passed 2026-11-09 with M4.6) |
-| 5 | Deployment and Release | **Current** (M5.1) |
+| 5 | Deployment and Release | **Current** (M5.2) |
 
 ---
 
@@ -563,7 +563,7 @@ Ordering notes:
 
 ## Phase 5 — Deployment and Release
 
-**Status: Current** (M5.1).
+**Status: Current** (M5.2).
 
 - **Objective and scope:** Make the system releasable: broad testing, hardware compatibility, performance, security review, and reproducible artifacts.
 - **Deliverables:** M5.1–M5.5.
@@ -577,7 +577,7 @@ Ordering notes:
 
 ### M5.1 — QEMU regression and release testing
 
-- **Objective and scope:** Broaden the QEMU regression suite (running since M2.3) into a release test matrix. **Status: Current.** Issues #186–#192. D-032 accepted (#186): 7 cells, one axis at a time from the push configuration (firmware UEFI or BIOS; memory the smallest that boots, 256 MiB, 2 GiB, 4 GiB; CPU `qemu64`, `Skylake-Client`, `max`), plus KVM as a cell after a trial on a branch, TCG staying the reference; push unchanged, the matrix (`cargo xtask matrix`) weekly, on dispatch, and green on each released commit; a `soak` kernel (1 h scheduled, 8 h before a release) and 3 repeat passes; an S1 scenario kernel with the real model driving an agent, local under KVM at the gate and scheduled in CI; any non-infrastructure failure, flakes included, is a known crash bug with a `bug` issue. Design approved (#187, 2026-11-10: [testing.md](../development/testing.md#release-test-matrix-m51-d-032)): 8 cells, the smallest size measured at 144 MiB, 74 of 75 kernels passing on `Skylake-Client` and `max` in a local trial (`vector_state` tied to `qemu64`), `matrix.yml` weekly and on dispatch, the soak cycle and its checks, the S1 scenario kernel, and the test plan for #188–#192. Matrix implemented (#188); `kvm` runs in CI after the AMD `sysret` fix (#195), so the weekly run has 8 cells. Stability tests implemented (#189): `cargo xtask test --repeat 3` and the `soak` kernel, both passing in CI (run 42996780099, the soak 60 minutes, 356 cycles). S1 end to end implemented (#190): `cargo xtask s1`, the model driving an agent on Pharos, passed locally under KVM; weekly in `matrix.yml`. Known crash bugs triaged (#191, [testing.md](../development/testing.md#known-crash-bugs)): every failure in CI on `main` fixed (#193–#200 and two earlier) or infrastructure; none open.
+- **Objective and scope:** Broaden the QEMU regression suite (running since M2.3) into a release test matrix. **Status: Done** — gate passed 2026-11-13: the full matrix with the stability jobs passed on `main` at `1df4b65` ([run 43387408792](https://github.com/codeaiforge/pharos-os/actions/runs/43387408792)), all 38 jobs, the 60-minute soak, the repeat pass, and S1 included; frame addresses cut to 32 bits on a throwaway branch failed CI ([run 43286093713](https://github.com/codeaiforge/pharos-os/actions/runs/43286093713)) in `mem-4g` alone (its other failure, `aifail` in `mem-2g`, was a real bug, #201, fixed); the 2-hour local soak (D-032 amended) passed 708 cycles with free frames 46,457 then 46,456; S1 passed locally under KVM in 39 s, first token 6.34 s and 13.8 tokens/s; the [release-testing review](../development/testing.md#release-testing-review-m51-gate) approved; #193–#201 closed, no `bug` issue open. The 8-hour soak stays required before each release. Issues #186–#192. D-032 accepted (#186): 7 cells, one axis at a time from the push configuration (firmware UEFI or BIOS; memory the smallest that boots, 256 MiB, 2 GiB, 4 GiB; CPU `qemu64`, `Skylake-Client`, `max`), plus KVM as a cell after a trial on a branch, TCG staying the reference; push unchanged, the matrix (`cargo xtask matrix`) weekly, on dispatch, and green on each released commit; a `soak` kernel (1 h scheduled, 8 h before a release) and 3 repeat passes; an S1 scenario kernel with the real model driving an agent, local under KVM at the gate and scheduled in CI; any non-infrastructure failure, flakes included, is a known crash bug with a `bug` issue. Design approved (#187, 2026-11-10: [testing.md](../development/testing.md#release-test-matrix-m51-d-032)): 8 cells, the smallest size measured at 144 MiB, 74 of 75 kernels passing on `Skylake-Client` and `max` in a local trial (`vector_state` tied to `qemu64`), `matrix.yml` weekly and on dispatch, the soak cycle and its checks, the S1 scenario kernel, and the test plan for #188–#192. Matrix implemented (#188); `kvm` runs in CI after the AMD `sysret` fix (#195), so the weekly run has 8 cells. Stability tests implemented (#189): `cargo xtask test --repeat 3` and the `soak` kernel, both passing in CI (run 42996780099, the soak 60 minutes, 356 cycles). S1 end to end implemented (#190): `cargo xtask s1`, the model driving an agent on Pharos, passed locally under KVM; weekly in `matrix.yml`. Known crash bugs triaged (#191, [testing.md](../development/testing.md#known-crash-bugs)): every failure in CI on `main` fixed (#193–#200 and two earlier) or infrastructure; none open.
 - **Deliverables:** Test matrix (firmware, memory sizes, CPU models); long-running stability tests.
 - **Prerequisites:** Phase 4 gate.
 - **Acceptance criteria:** Full matrix passes; no known crash bugs open.
@@ -589,7 +589,7 @@ Ordering notes:
 
 ### M5.2 — Hardware compatibility testing
 
-- **Objective and scope:** Validate on a documented set of real machines, with explicit authorization for each test. **Status: Planned.**
+- **Objective and scope:** Validate on a documented set of real machines, with explicit authorization for each test. **Status: Current.**
 - **Deliverables:** Hardware compatibility list; test reports.
 - **Prerequisites:** M5.1.
 - **Acceptance criteria:** Boots and passes the smoke suite on each listed machine.
@@ -677,4 +677,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3 (released as v0.3.0 at its gate commit, `693c896`, tagged after the fact). M4.1 (integration of kernel and user-space services) and M4.2 (security model and privilege separation) passed their gates on 2026-11-06, M4.3 (reliable boot and recovery) on 2026-11-08, and M4.4 (device and service management), M4.5 (system configuration and diagnostics), and M4.6 (integration of AI services without unrestricted kernel access) on 2026-11-09, which closed Phase 4 (released as v0.4.0). The current milestone is **M5.1 — QEMU regression and release testing**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3 (released as v0.3.0 at its gate commit, `693c896`, tagged after the fact). M4.1 (integration of kernel and user-space services) and M4.2 (security model and privilege separation) passed their gates on 2026-11-06, M4.3 (reliable boot and recovery) on 2026-11-08, and M4.4 (device and service management), M4.5 (system configuration and diagnostics), and M4.6 (integration of AI services without unrestricted kernel access) on 2026-11-09, which closed Phase 4 (released as v0.4.0). M5.1 (QEMU regression and release testing) passed its gate on 2026-11-13. The current milestone is **M5.2 — Hardware compatibility testing**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
