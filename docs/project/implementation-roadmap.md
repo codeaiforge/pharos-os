@@ -2,14 +2,15 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), Phase 3 — AI Agent Platform (v0.3.0), and Phase 4 — Full Operating System (v0.4.0) are done. Current milestone: M5.2 — Hardware compatibility testing.** M5.1 is done; the rest of Phase 5 is **planned, not implemented**.
+**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), Phase 3 — AI Agent Platform (v0.3.0), and Phase 4 — Full Operating System (v0.4.0) are done. Current milestone: M5.4 — Security review and threat-model update.** M5.1 is done; the rest of Phase 5 is **planned, not implemented**. The roadmap runs to Phase 8: Phases 6–8 are **planned, not implemented**, and follow D-033 (accepted 2026-11-13).
 
 ## How to read this roadmap
 
-- Work is split into five phases, each made of milestones (`M<phase>.<n>`).
+- Work is split into eight phases, each made of milestones (`M<phase>.<n>`).
 - Each milestone lists: objective and scope, deliverables, prerequisites, acceptance criteria, validation, risks, out-of-scope items, definition of done, and a gate.
 - A **gate** states what must pass before work that depends on this milestone starts.
-- Status labels: **Current**, **Planned**, **Done** (only after its gate passed).
+- Status labels: **Current**, **Planned**, **Done** (only after its gate passed), **Superseded** (folded into a later milestone, which is linked).
+- Phases 6–8 depend on [D-033](decision-log.md#d-033-repositioning-pharos-as-an-agent-cell-and-authority-broker-and-the-three-tiers), accepted on 2026-11-13; see [Agent tiers](#agent-tiers-d-033).
 
 ### Standard definition of done
 
@@ -43,7 +44,10 @@ The phases are not strictly sequential. These tracks run through every phase:
 | 2 | Core System | Done (v0.2.0) |
 | 3 | AI Agent Platform | Done (v0.3.0; gate passed 2026-11-06 with M3.8) |
 | 4 | Full Operating System | Done (v0.4.0; gate passed 2026-11-09 with M4.6) |
-| 5 | Deployment and Release | **Current** (M5.2) |
+| 5 | Deployment and Release | **Current** (M5.4) |
+| 6 | Authority broker and demo engine (Tier 3) | Planned (D-033) |
+| 7 | Skins, pilots, and the WASM tier (Tier 2) | Planned (D-033) |
+| 8 | Real hardware and long-term targets | Planned (D-033) |
 
 ---
 
@@ -563,13 +567,13 @@ Ordering notes:
 
 ## Phase 5 — Deployment and Release
 
-**Status: Current** (M5.2).
+**Status: Current** (M5.4).
 
-- **Objective and scope:** Make the system releasable: broad testing, hardware compatibility, performance, security review, and reproducible artifacts.
-- **Deliverables:** M5.1–M5.5.
+- **Objective and scope:** Make the system releasable: broad testing, the KVM microVM reference platform, security review, and reproducible artifacts. Reordered and narrowed on 2026-11-13 with D-033: M5.4 comes next after M5.1; M5.2 is narrowed to the KVM microVM reference platform, with bare metal moved to M8.1; M5.3 is folded into M6.10; M5.5 becomes v0.5, the microVM release.
+- **Deliverables:** M5.1, M5.2, M5.4, M5.5 (M5.3 superseded).
 - **Prerequisites:** Phase 4 gate (automated QEMU regression testing has run since M2.3).
 - **Acceptance criteria:** Documented release criteria are met.
-- **Validation:** Automated: full regression suite. Manual: hardware testing; external security review if available.
+- **Validation:** Automated: full regression suite. Manual: reference-platform testing; a security review independent of the authoring agents (M5.4).
 - **Risks and mitigations:** Release pressure overriding quality → release criteria are a hard gate.
 - **Out of scope:** Commercial support commitments.
 - **Definition of done:** Standard.
@@ -587,49 +591,41 @@ Ordering notes:
 - **Definition of done:** Standard.
 - **Gate:** Matrix green.
 
-### M5.2 — Hardware compatibility testing
+### M5.2 — KVM microVM as the reference platform
 
-- **Objective and scope:** Validate on a documented set of real machines, with explicit authorization for each test. **Status: Current.**
-- **Deliverables:** Hardware compatibility list; test reports.
-- **Prerequisites:** M5.1.
-- **Acceptance criteria:** Boots and passes the smoke suite on each listed machine.
-- **Validation:** Manual: documented test procedure per machine.
-- **Risks and mitigations:** Bricking or data loss → test on dedicated hardware only; never on a machine with important data.
-- **Out of scope:** Exhaustive hardware coverage.
+- **Objective and scope:** Make a standard KVM host the reference platform: Pharos runs as a microVM with virtio devices only, on hosts the maintainer authorizes. **Status: Planned.** Narrowed on 2026-11-13 with D-033: it was "Hardware compatibility testing"; bare metal and its drivers move to M8.1. A KVM host is real hardware, so the limits D-031 requires before real-hardware use stay here: the Meltdown class (KPTI, or refusing to boot on a CPU that reports the vulnerability), `rdtsc` in user mode, and DMA by user-space drivers (a compromised driver can still program its virtio device to write anywhere in guest memory, kernel included). D-044 decides each.
+- **Deliverables:** The reference platform written down (host kernel, VMM, required CPU features); the mitigations D-044 chooses; a report from at least one authorized host besides CI's `kvm` cell.
+- **Prerequisites:** M5.1; D-044 accepted.
+- **Acceptance criteria:** The release matrix and S1 pass on the reference platform; the threat model's KPTI, `rdtsc`, and driver-DMA rows are closed, or carried to M8.1 with the reason D-044 gives.
+- **Validation:** Automated: the `kvm` cell; a test kernel that checks the chosen mitigations (for KPTI, that no kernel page outside the entry trampoline is mapped while user code runs); a throwaway branch that maps them again must fail CI. Manual: the host report.
+- **Risks and mitigations:** KPTI touches every kernel entry and exit and the TLB → its own change, reviewed as M5.4 reviews the trusted base; a user's host with a vulnerable CPU → refuse to boot unless D-044 says otherwise.
+- **Out of scope:** Bare metal, VT-d or AMD-Vi, SMP, other architectures (Phase 8).
 - **Definition of done:** Standard.
-- **Gate:** Compatibility list published.
+- **Gate:** Reference platform documented; matrix green on it; the three limits closed or carried by decision.
 
 ### M5.3 — Performance, reliability, and resource optimization
 
-- **Objective and scope:** Measure and improve boot time, inference throughput, memory use, and stability. **Status: Planned.**
-- **Deliverables:** Benchmarks; performance budget; fixes.
-- **Prerequisites:** M5.1.
-- **Acceptance criteria:** Performance budget met on reference hardware; no regressions beyond thresholds.
-- **Validation:** Automated: benchmark tracking.
-- **Risks and mitigations:** Optimizations weakening security → security review of performance changes.
-- **Out of scope:** Micro-optimizations without measurements.
-- **Definition of done:** Standard.
-- **Gate:** Budget met.
+**Status: Superseded, folded into [M6.10](#m610--scale-isolation-and-performance)** (2026-11-13, D-033). Performance is measured against the broker's latency and throughput budget in Phase 6, not on its own.
 
 ### M5.4 — Security review and threat-model update
 
-- **Objective and scope:** Full security review before release. **Status: Planned.**
-- **Deliverables:** Updated threat model; review report; fixes; security reporting process reviewed.
+- **Objective and scope:** Full security review of the trusted base before release, independent of the agents that wrote it. **Status: Current.** Reordered on 2026-11-13: next after M5.1, ahead of M5.2. The 17 earlier milestone reviews were all AI-assisted by the same tooling that wrote the code, so their evidence shares the code's blind spots. The trusted base (`kernel`, `init`, `trust`, the agent runtime, `audit`, `store`) is reviewed by a human reviewer, or at least by a model family different from the one that wrote the code, given the code and the threat model rather than the earlier reviews' conclusions.
+- **Deliverables:** Updated threat model; review report naming the reviewer and how they are independent; fixes; security reporting process reviewed.
 - **Prerequisites:** M5.1.
-- **Acceptance criteria:** No open critical or high findings; every `unsafe` block reviewed; dependencies audited.
-- **Validation:** Manual: review; external audit if resources allow.
-- **Risks and mitigations:** Limited reviewer capacity → prioritize TCB and agent isolation.
-- **Out of scope:** Certification.
+- **Acceptance criteria:** No open critical or high findings; every `unsafe` block reviewed; dependencies audited (`ed25519-compact`, `libm`); the report states the reviewer's independence.
+- **Validation:** Manual: the independent review; external audit if resources allow.
+- **Risks and mitigations:** Limited reviewer capacity → the trusted base and agent isolation first; waiting for a reviewer → Phase 6 decision records and designs may proceed meanwhile once D-033 is accepted, with no implementation.
+- **Out of scope:** Certification (M8.6).
 - **Definition of done:** Standard.
-- **Gate:** Review sign-off.
+- **Gate:** Sign-off by the independent reviewer and the maintainer.
 
 ### M5.5 — Reproducible builds, release artifacts, documentation, and release criteria
 
-- **Objective and scope:** Produce verifiable releases. **Status: Planned.**
-- **Deliverables:** Reproducible build procedure; signed artifacts; user documentation; written release criteria; Secure Boot enforcement and a secret-keyed audit anchor, moved here from M4.3 (D-028).
-- **Prerequisites:** M5.2, M5.3, M5.4.
-- **Acceptance criteria:** Two independent builds produce bit-identical artifacts; release criteria documented and met.
-- **Validation:** Automated: reproducibility check. Manual: maintainer approval.
+- **Objective and scope:** Produce verifiable releases: **v0.5, the microVM release** (renamed on 2026-11-13, D-033). **Status: Planned.**
+- **Deliverables:** Reproducible build procedure; signed artifacts; user documentation for running Pharos as a microVM on the reference platform; written release criteria; Secure Boot enforcement and a secret-keyed audit anchor, moved here from M4.3 (D-028); an authenticated slot record; measured boot, and the audit chain's head signed and exportable, so a verifier outside Pharos can check a trail (anchoring it outside the system is M6.7). A virtual TPM on the reference platform is an option to evaluate; with one, the host is in the trusted base for the anchor, as it is for Tier 3 (D-036).
+- **Prerequisites:** M5.2, M5.4.
+- **Acceptance criteria:** Two independent builds produce bit-identical artifacts; release criteria documented and met; the 8-hour soak passes on the release commit (D-032 amended); a trail rewritten consistently from the disk is rejected by the verifier.
+- **Validation:** Automated: reproducibility check; an anchor test kernel, and a throwaway branch that skips the anchor check must fail CI. Manual: maintainer approval.
 - **Risks and mitigations:** Non-determinism in toolchains → pin toolchain for release builds; document environment.
 - **Out of scope:** App stores, package-manager distribution.
 - **Definition of done:** Standard.
@@ -637,9 +633,298 @@ Ordering notes:
 
 ---
 
+## Agent tiers (D-033)
+
+Phases 6–8 follow D-033, accepted on 2026-11-13. They are planned; nothing in them is started. D-033 repositions Pharos as the execution cell where an agent's limits are a property of the machine, not a promise from software: it runs as a microVM on ordinary KVM hosts, holds all agent authority (capabilities, credentials, approvals, audit), and lets organizations put agents into regulated operations without giving them the keys. Agents run in three tiers:
+
+| Tier | Where the agent runs | For | Guarantee |
+| --- | --- | --- | --- |
+| **1. Native** | Inside Pharos, as `no_std` Rust under the runtime (implemented) | High-assurance agents written by the project: approvals, signing, the verifier | Enforced by the Pharos kernel end to end |
+| **2. WASM** | Inside Pharos, in a WASM runtime run as an unprivileged service (planned, M7.5) | Third-party tools, skills, MCP servers; Python or JavaScript compiled to WASM | A sandbox inside a cell, holding only the capabilities granted |
+| **3. Foreign** | In a Linux microVM beside Pharos, with no credentials and no network device (planned, M6.3) | Existing agent frameworks, coding agents, anything that needs a full OS | Every external action goes through a Pharos capability, approval, and audit record. Containment of the guest is the host's VM configuration, so the host kernel and hypervisor are in the trusted base until M8.2 |
+
+Order of delivery: Tier 3 first (Phase 6, which the demo needs), Tier 2 next (Phase 7), Tier 1 throughout. In Tier 3, Pharos's own contribution is the broker, not containment; the claim "a property of the machine" holds end to end only for Tiers 1 and 2 until M8.2.
+
+Rules for every planned milestone below: nothing moves into the kernel (each component is a user-space service or sits outside the system, and a change that seems to need the kernel is an open question for review, not a plan item); model output stays untrusted input (AGENTS.md §7); each names its test kernel or harness and a throwaway branch that must fail CI; each that changes a trust boundary lists a security review; each phase gate updates the threat model.
+
+---
+
+## Phase 6 — Authority broker and demo engine (Tier 3)
+
+**Status: Planned** (D-033).
+
+- **Objective and scope:** Pharos brokers all authority for foreign agents in a Linux microVM, reaches real services over TLS without agents ever holding credentials, and produces evidence an auditor can read. The phase ends with a recorded five-beat demo: (1) a real Python agent does useful work; (2) it is attacked or makes a mistake (prompt injection, a malicious tool, a destructive command); (3) Pharos refuses the action; (4) a human approves the legitimate action after seeing its full payload, then pulls the kill switch; (5) Pharos produces a one-page evidence report.
+- **Deliverables:** M6.0–M6.10.
+- **Prerequisites:** D-033 accepted; M5.2 and M5.4. Decision records and designs for M6.0–M6.3 may start once D-033 is accepted, while M5.4's review runs; implementation starts after M5.4. M5.5 (v0.5) is required before the Phase 6 gate, not before the phase.
+- **Acceptance criteria:** The five-beat demo runs end to end on the reference platform with a real Python agent in Tier 3.
+- **Validation:** Automated: the demo as a scenario run in the matrix's `kvm` cell. Manual: the recorded demo; independent review of M6.1–M6.4.
+- **Risks and mitigations:** Growth into a general-purpose OS → POSIX stays a non-goal (Tier 3 covers it) and every component is a user-space service; overstating Tier 3's containment → D-036 and the threat model say the host is trusted; a demo that only defeats known attacks → an adaptive-attack evaluation at the gate.
+- **Out of scope:** POSIX on Pharos; a graphical interface; bare metal (M8.1).
+- **Definition of done:** Standard; threat model updated.
+- **Gate:** The five-beat demo recorded; independent review of M6.1–M6.4 with no open critical or high findings; an adaptive-attack evaluation published, with attacks written against Pharos's own defenses rather than taken from a fixed corpus; M5.5 done.
+
+### M6.0 — Repositioning: vision and architecture
+
+- **Objective and scope:** Update `vision.md` and `architecture.md` for the agent cell, the broker, the three tiers, and the organizational scope. **Status: Planned.**
+- **Deliverables:** Vision goals and non-goals as D-033 decides; architecture overview; a comparison with the alternatives D-033 weighs (sandboxes on Linux, a runtime on seL4, Windows' agent workspace), every claim sourced.
+- **Prerequisites:** D-033 accepted.
+- **Acceptance criteria:** Every claimed difference cites a source or a Pharos test; status labels honest; the maintainer approves.
+- **Validation:** Manual: maintainer review; link check. No test kernel: documentation only.
+- **Risks and mitigations:** Claims ahead of the evidence → each labelled implemented, placeholder, or planned.
+- **Out of scope:** Marketing material.
+- **Definition of done:** Standard.
+- **Gate:** Maintainer approval.
+
+### M6.1 — TCP and TLS as a user-space service
+
+- **Objective and scope:** TCP and TLS as user-space services, `no_std` and fuzzed, so an allowed action reaches an HTTPS service. Agents never hold sockets; they keep holding destination capabilities as today (D-012, D-015). **Status: Planned.**
+- **Deliverables:** TCP (in the network service or beside it, per D-034); a TLS client; certificate validation against a pinned root set; host fuzz targets for every new parser (D-020 pattern).
+- **Prerequisites:** D-034 accepted; M5.2.
+- **Acceptance criteria:** An HTTPS round trip to a test server in a QEMU regression kernel (`tls`); a wrong, expired, or mismatched certificate refused; the fuzzers run in CI for a fixed budget without findings.
+- **Validation:** Automated: `tls`; a throwaway branch that skips the name check must fail CI. Manual: security review of the new trust boundary.
+- **Risks and mitigations:** The largest parser surface to date → host fuzzing, no `unsafe`, candidates judged on their size in the trusted base (D-034).
+- **Out of scope:** TLS servers, HTTP/2, QUIC.
+- **Definition of done:** Standard.
+- **Gate:** `tls` in CI; review approved.
+
+### M6.2 — Credential vault and egress gateway
+
+- **Objective and scope:** Agents never hold credentials. A vault holds secrets as capabilities; an egress gateway injects them at the boundary into requests an allow-list permits (endpoint, method, path). **Status: Planned.**
+- **Deliverables:** Vault and gateway services; the allow-list format; rotation; every use and refusal audited, with no secret in the trail.
+- **Prerequisites:** D-035 accepted; M6.1.
+- **Acceptance criteria:** Test kernel `vault`: a granted request succeeds with its secret injected; the agent never sees the secret through its memory, the response, errors, or audit records; an endpoint, method, or path not listed is refused and audited.
+- **Validation:** Automated: `vault`; a throwaway branch where the gateway echoes the injected header back must fail CI. Manual: security review.
+- **Risks and mitigations:** A service reflecting the credential → the gateway strips known secret values from responses; secrets reaching a prompt → they never enter an agent's or model's input.
+- **Out of scope:** Hardware security modules (a later option in D-035).
+- **Definition of done:** Standard.
+- **Gate:** `vault` in CI; review approved.
+
+### M6.3 — Foreign-agent bridge (Tier 3)
+
+- **Objective and scope:** A Linux guest running an unmodified agent framework reaches nothing but the Pharos runtime: no network device, no credentials, one channel. virtio-vsock, a candidate, connects a guest to its host, not to another guest: with Pharos and the Linux guest as two microVMs, the channel passes through a relay on the host, and "no network device" and "one channel" are enforced by the host's VM configuration. D-036 states that the host kernel and hypervisor are in the trusted base for this design; removing them is M8.2. **Status: Planned.**
+- **Deliverables:** A guest image (minimal Linux, the framework, a client library for the runtime's protocol); the bridge and host relay per D-036; a launch tool that refuses a guest configuration with a network device or shared filesystem; a hostile-guest suite.
+- **Prerequisites:** D-036 accepted; M6.2.
+- **Acceptance criteria:** From inside the guest, the network, other guests, host files, and every Pharos service but the runtime are unreachable; every action through the bridge needs a capability and leaves an audit record.
+- **Validation:** Automated: a `bridge` scenario under KVM; a throwaway branch that gives the guest a network device must fail CI. Manual: security review.
+- **Risks and mitigations:** The relay is a new trusted component → minimal, framing only, reviewed.
+- **Out of scope:** Pharos as the hypervisor (M8.2); GPU passthrough.
+- **Definition of done:** Standard.
+- **Gate:** `bridge` in CI; review approved.
+
+### M6.4 — Approval of the full payload, routed by risk
+
+- **Objective and scope:** The approver sees the exact bytes an action sends; actions policy marks need two approvers, never the requester. Closes the threat model's reopened limit (the user confirms a `send`'s destination and size, not its payload). Showing a full payload on the trusted path is the hard part: `trust`'s console has 64-byte lines, and the dashboard (M6.8) is outside the trusted base, so it cannot approve. D-037 designs that display. Done after M6.5, which gives it distinct approvers. **Status: Planned.**
+- **Deliverables:** Payload display on the trusted path; four-eyes approval; segregation of duties; timeouts that deny.
+- **Prerequisites:** D-037 accepted; M6.3, M6.5.
+- **Acceptance criteria:** Test kernel `approval`: the bytes sent equal the bytes shown (checked by hash at the gateway); a payload changed after approval is refused; a marked action waits for two distinct approvers, and the requester's approval is refused; no answer denies.
+- **Validation:** Automated: `approval`; a throwaway branch where the gateway sends a payload other than the one approved must fail CI. Manual: security review; approvals per task counted in the demo scenarios and held to a budget (approval fatigue).
+- **Risks and mitigations:** Approval fatigue → only marked actions reach a human; payloads too long for the console → D-037.
+- **Out of scope:** Approval from the dashboard or from mobile devices.
+- **Definition of done:** Standard.
+- **Gate:** `approval` in CI; review approved; the threat-model limit closed.
+
+### M6.5 — Identity and organization model
+
+- **Objective and scope:** Human principals, roles, tenants, and a named human owner for every agent; every audit actor resolves to a person or an agent, not only a badge. Identity stays attribution, never authority (D-018 item 2). **Status: Planned.**
+- **Deliverables:** Identity records and roles managed from the trusted path; an owner required in agent policy; actor resolution in audit; an import path from an external directory evaluated (Entra ID or LDAP, for example).
+- **Prerequisites:** D-038 accepted; M6.3.
+- **Acceptance criteria:** Test kernel `identity`: an agent without an owner refused at start; every audit record's actor resolves; a role alone grants no capability.
+- **Validation:** Automated: `identity`; a throwaway branch that grants by role must fail CI.
+- **Risks and mitigations:** Identity turning into authority → D-018's rule restated and tested.
+- **Out of scope:** Single sign-on on Pharos; federation.
+- **Definition of done:** Standard.
+- **Gate:** `identity` in CI.
+
+### M6.6 — Runtime policy
+
+- **Objective and scope:** Signed, versioned policy loaded without a rebuild, with a dry run and a diff that shows what each change widens; never wider than the compiled ceilings (D-030's rule kept). **Status: Planned.**
+- **Deliverables:** Policy format and loader; signature and version checks; dry run; the diff on the trusted console; the language D-039 chooses (Cedar, Rego, or a small custom one, as options).
+- **Prerequisites:** D-039 accepted; M6.5.
+- **Acceptance criteria:** Test kernel `policy`: an unsigned or older policy refused; a policy above a ceiling refused, not narrowed; the dry run lists exactly the grants that change; a widening needs the user's yes.
+- **Validation:** Automated: `policy`; a throwaway branch that accepts an unsigned policy must fail CI. Manual: security review.
+- **Risks and mitigations:** A policy engine in the trusted base → its size is a criterion in D-039.
+- **Out of scope:** A policy authoring interface.
+- **Definition of done:** Standard.
+- **Gate:** `policy` in CI; review approved.
+
+### M6.7 — Evidence and observability
+
+- **Objective and scope:** Evidence an auditor can read, anchored outside the system. **Status: Planned.**
+- **Deliverables:** Export over OTLP using the OpenTelemetry GenAI semantic conventions at a pinned version (the conventions are still marked Development); the audit chain's signed heads (M5.5) anchored outside the system, target per D-040; a one-page evidence report generated from a real run; content-addressed hashes of prompts and outputs linked to audit records, with no content in the trail.
+- **Prerequisites:** D-040 accepted; M5.5, M6.1.
+- **Acceptance criteria:** Test `evidence`: the report regenerated from exported records matches the trail on Pharos; an outside verifier detects a dropped or rewritten record; no prompt text in any audit record.
+- **Validation:** Automated: `evidence`; a throwaway branch whose export skips a record must fail CI.
+- **Risks and mitigations:** Private data in telemetry → hashes only by default.
+- **Out of scope:** A hosted evidence service.
+- **Definition of done:** Standard.
+- **Gate:** `evidence` in CI.
+
+### M6.8 — Read-only dashboard
+
+- **Objective and scope:** A web dashboard **outside the trusted base**, fed from the evidence export: agents, grants, pending approvals, spend, refusals, and drift between declared and used capabilities. It displays and proposes; only `trust` commits. Decision: D-040. **Status: Planned.**
+- **Deliverables:** The dashboard, outside Pharos; a drift report.
+- **Prerequisites:** M6.7.
+- **Acceptance criteria:** Everything shown comes from exported records; the dashboard holds no capability or credential for Pharos, and a proposal is a file the user loads through `trust`.
+- **Validation:** Automated: the dashboard's tests, including one that fails if it gains a write path into Pharos; a throwaway branch adding one must fail CI.
+- **Risks and mitigations:** Users mistaking it for the approval path → every proposal says where it is approved.
+- **Out of scope:** Approvals in the dashboard.
+- **Definition of done:** Standard.
+- **Gate:** Dashboard tests in CI.
+
+### M6.9 — Model broker
+
+- **Objective and scope:** Frontier and local models behind one service: an allow-list of models, redaction before a prompt leaves, costs counted per agent and per tenant, and no agent reaching a provider directly. Model output stays untrusted input: the broker returns text the runtime parses and checks as today (D-023) and never acts on it. Larger local models run off Pharos, for example on a GPU host reached through a capability, an option in D-041; `pharos-infer` stays the small, deterministic local engine and the fallback. This changes the vision's non-goal on cloud inference, through D-033. **Status: Planned.**
+- **Deliverables:** Broker service; provider adapters through the gateway (M6.2 holds the API keys); redaction; costs in the D-022 budgets.
+- **Prerequisites:** D-041 accepted; M6.2.
+- **Acceptance criteria:** Test `broker`: a model not listed refused; redaction applied before egress (shown with a mock provider); no provider key reaches an agent; cost recorded per agent and tenant; the local engine answers when no provider is reachable.
+- **Validation:** Automated: `broker`; a throwaway branch with redaction off must fail CI. Manual: security review.
+- **Risks and mitigations:** Data leaving the system → allow-list, redaction, per-tenant opt-in, audit; remote models changing → the evidence records which model and version answered.
+- **Out of scope:** Fine-tuning; hosting models for others.
+- **Definition of done:** Standard.
+- **Gate:** `broker` in CI; review approved.
+
+### M6.10 — Scale, isolation, and performance
+
+- **Objective and scope:** One runtime per tenant, so a compromised runtime reaches only its own cell; more than 4 concurrent agents; inter-agent messages that survive a runtime restart; a written latency and throughput budget for the broker, met on the reference platform; SMP decided (adopt or defer, with reasons). Absorbs M5.3 (boot time, memory use, stability). **Status: Planned.**
+- **Deliverables:** Per-tenant runtimes; durable channels; the performance budget and benchmark tracking; the SMP decision in D-042.
+- **Prerequisites:** D-042 accepted; M6.5, M6.9.
+- **Acceptance criteria:** Test kernel `tenants`: a hostile runtime in one tenant reaches nothing of another's; the budget met; regressions beyond thresholds fail benchmark tracking.
+- **Validation:** Automated: `tenants` and benchmark tracking; a throwaway branch that shares one runtime endpoint across tenants must fail CI.
+- **Risks and mitigations:** Optimizations weakening security → security review of performance changes (from M5.3).
+- **Out of scope:** Micro-optimizations without measurements.
+- **Definition of done:** Standard.
+- **Gate:** Budget met; `tenants` in CI.
+
+---
+
+## Phase 7 — Skins, pilots, and the WASM tier (Tier 2)
+
+**Status: Planned** (D-033).
+
+- **Objective and scope:** Turn the demo engine into vertical demos and a pilot package, and move risky third-party code inside Pharos through a WASM tier.
+- **Deliverables:** M7.1–M7.8.
+- **Prerequisites:** Phase 6 gate.
+- **Acceptance criteria:** A pilot runs in shadow mode against a real external system.
+- **Validation:** Automated: each skin as a scenario in CI. Manual: the pilot's evidence report reviewed by someone outside the project.
+- **Risks and mitigations:** Skins forking the trusted base → a skin is data, never code in the trusted base.
+- **Out of scope:** Production deployments with real authority.
+- **Definition of done:** Standard; threat model updated.
+- **Gate:** First pilot: shadow mode against a real external system, its evidence report reviewed by someone outside the project.
+
+### M7.1 — Skin framework
+
+- **Objective and scope:** A vertical scenario is data, not code: a scenario script, a mock service, and an evidence template. **Status: Planned.**
+- **Deliverables:** The skin format and runner.
+- **Prerequisites:** Phase 6 gate.
+- **Acceptance criteria:** Adding a skin changes nothing in the trusted base.
+- **Validation:** Automated: a sample skin as a scenario; a check that fails when a skin touches a trusted-base path, and a throwaway branch that does must fail CI.
+- **Risks and mitigations:** Scenario logic creeping into services → the check above.
+- **Out of scope:** A skin marketplace.
+- **Definition of done:** Standard.
+- **Gate:** Sample skin in CI.
+
+### M7.2 — Skins: production gateway and security operations
+
+- **Objective and scope:** (a) A coding agent's "clean up staging" becomes "delete production" and is refused. (b) An injected alert tries to disable an executive's account, is refused, then routed for approval. **Status: Planned.**
+- **Deliverables:** Two skins with their mock services and evidence templates.
+- **Prerequisites:** M7.1.
+- **Acceptance criteria:** Both refusals and the routing shown in their evidence reports.
+- **Validation:** Automated: both skins as scenarios; a throwaway branch that allows the destructive call must fail CI.
+- **Risks and mitigations:** Demos that only work scripted → the agent is a real framework in Tier 3.
+- **Out of scope:** Integrations with named products.
+- **Definition of done:** Standard.
+- **Gate:** Both skins in CI.
+
+### M7.3 — Skin: banking, and a Plan API for external decision systems
+
+- **Objective and scope:** Reconciliation, then an attempted payment release blocked pending four-eyes approval. A Plan API stub accepts a plan from an external recommender and returns outcomes and evidence. **Status: Planned.**
+- **Deliverables:** The banking skin; the Plan API stub.
+- **Prerequisites:** M7.1, M6.4.
+- **Acceptance criteria:** The release waits for two distinct approvers; the Plan API returns the evidence for each step.
+- **Validation:** Automated: the skin as a scenario; a throwaway branch that releases with one approval must fail CI.
+- **Risks and mitigations:** The Plan API becoming an authority path → a plan is untrusted input, compiled and approved as in M7.4.
+- **Out of scope:** Real payment networks.
+- **Definition of done:** Standard.
+- **Gate:** The skin in CI.
+
+### M7.4 — Plans, least-privilege compiler, shadow simulation
+
+- **Objective and scope:** A plan (tasks with dependencies) is compiled into exactly the capabilities it needs and shown as a diff for approval; a shadow run records or mocks every capability and reports what the plan would touch, send, and cost before anything real is granted. A plan, whether written by a model or an external system, is untrusted input: the compiler validates it and grants nothing on its own. **Status: Planned.**
+- **Deliverables:** Plan format; the compiler; shadow mode.
+- **Prerequisites:** M7.1, M6.6.
+- **Acceptance criteria:** Test `plans`: the compiled grants are the minimum for the plan; a shadow run touches no real service; a plan asking for more than policy allows is refused.
+- **Validation:** Automated: `plans`; a throwaway branch where shadow mode reaches a real endpoint must fail CI.
+- **Risks and mitigations:** A compiler bug widening grants → its output checked against policy ceilings by the runtime, not trusted.
+- **Out of scope:** Plan optimization.
+- **Definition of done:** Standard.
+- **Gate:** `plans` in CI.
+
+### M7.5 — WASM runtime (Tier 2) as an unprivileged service
+
+- **Objective and scope:** WASI calls mapped onto Pharos capabilities, with no ambient authority. Runtime options to evaluate in D-043 (wasmi, or wasmtime's `no_std` support, for example), judged on `no_std` fit, size in the trusted base, determinism, and fuzzing. A module's output is untrusted input, as model output is. **Status: Planned.**
+- **Deliverables:** The WASM service; the WASI-to-capability mapping; fuel or CPU limits mapped onto D-022.
+- **Prerequisites:** D-043 accepted; Phase 6 gate.
+- **Acceptance criteria:** A hostile-module suite passes: a module reaches only its granted capabilities, and exhaustion stops it within its budget.
+- **Validation:** Automated: `wasm` test kernel; a throwaway branch that maps a WASI call to an ungranted capability must fail CI. Manual: security review.
+- **Risks and mitigations:** An interpreter in the trusted path → it runs unprivileged, and its size is a criterion in D-043.
+- **Out of scope:** A JIT compiler.
+- **Definition of done:** Standard.
+- **Gate:** `wasm` in CI; review approved.
+
+### M7.6 — MCP adapter
+
+- **Objective and scope:** MCP tool servers run in Tier 2 or Tier 3 with signed, pinned tool manifests; an unsigned or changed manifest is refused. Tool output is untrusted input. Pharos is the capability-enforcing host: each tool call is a capability, approval, and audit record. **Status: Planned.**
+- **Deliverables:** The adapter; manifest signing and pinning.
+- **Prerequisites:** M7.5, M6.3.
+- **Acceptance criteria:** Test `mcp`: an unsigned or changed manifest refused; a tool description that changes after pinning refused; a call outside the grants refused.
+- **Validation:** Automated: `mcp`; a throwaway branch that accepts a changed manifest must fail CI. Manual: security review.
+- **Risks and mitigations:** Tool poisoning through descriptions → descriptions pinned with the manifest, shown to the user at grant time.
+- **Out of scope:** An MCP registry.
+- **Definition of done:** Standard.
+- **Gate:** `mcp` in CI; review approved.
+
+### M7.7 — Pilot package
+
+- **Objective and scope:** Shadow mode against a customer's own APIs, on the same codebase as the demo. **Status: Planned.**
+- **Deliverables:** Install and teardown documented; evidence export mapped to the customer's regime.
+- **Prerequisites:** M7.4, M7.6.
+- **Acceptance criteria:** A pilot installs, runs in shadow mode, and tears down by the documented procedure.
+- **Validation:** Automated: install and teardown in CI. Manual: a pilot run.
+- **Risks and mitigations:** A pilot fork → one codebase, no pilot-only branches.
+- **Out of scope:** Support contracts.
+- **Definition of done:** Standard.
+- **Gate:** Phase 7 gate.
+
+### M7.8 — Information-flow labels
+
+- **Objective and scope:** Label data with its origin and carry the labels through agents, the knowledge service's provenance (D-025), and tool calls, so policy can refuse a flow, for example untrusted content reaching an external send, not only an action. **Status: Planned.**
+- **Deliverables:** The label model per D-045; labels on knowledge entries, tool results, and messages; policy rules on flows.
+- **Prerequisites:** D-045 accepted; M6.6.
+- **Acceptance criteria:** Test `flows`: a send whose payload derives from content labelled untrusted is refused or routed for approval, per policy; labels survive the knowledge service and agent channels.
+- **Validation:** Automated: `flows`; a throwaway branch that drops a label in a channel must fail CI. Manual: security review.
+- **Risks and mitigations:** Label creep making everything untrusted → D-045 decides how labels are declassified, only by the user on the trusted path.
+- **Out of scope:** Labels inside a model's computation.
+- **Definition of done:** Standard.
+- **Gate:** `flows` in CI; review approved.
+
+---
+
+## Phase 8 — Real hardware and long-term targets
+
+**Status: Planned** (D-033). Each milestone is short until its phase comes near; each gets the full fields then.
+
+- **M8.1 — Bare metal.** The former M5.2 scope: hardware compatibility testing on authorized machines; VT-d or AMD-Vi for driver DMA; any limit D-044 carried here; SMP if M6.10 deferred it.
+- **M8.2 — Pharos as the hypervisor for Tier 3 guests,** which removes the host from the trusted base.
+- **M8.3 — ARM64 port evaluated.**
+- **M8.4 — Industrial protocols** (OPC UA or Modbus, for example) as capability-gated services, for operational technology.
+- **M8.5 — Real-time scheduling evaluated,** for robotics and other control loops.
+- **M8.6 — Certification readiness:** a gap analysis against IEC 62443 and the EU Cyber Resilience Act.
+
+---
+
 ## Open decisions
 
-Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part and D-018 on 2026-11-01; D-012 (final, with D-018) on 2026-11-03; D-022 on 2026-11-04; D-023, D-024, and D-025 on 2026-11-05; the rest are open.
+Full entries are in the [decision log](decision-log.md). D-001 to D-003 were accepted on 2026-10-26; D-009, D-006, D-005, D-013, D-004, D-014, D-007, and D-008 on 2026-10-27; D-015 on 2026-10-28; D-020, D-010, D-011 (requirements part), D-016, and D-017 on 2026-10-29; D-019 and D-021 on 2026-10-31; D-011's implementation part and D-018 on 2026-11-01; D-012 (final, with D-018) on 2026-11-03; D-022 on 2026-11-04; D-023, D-024, and D-025 on 2026-11-05; D-026 to D-032 with their milestones. D-033 was accepted on 2026-11-13; D-034 to D-045 are open.
 
 | ID | Decision | Needed by | Key evaluation criteria |
 | --- | --- | --- | --- |
@@ -674,7 +959,20 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-030 | System configuration and diagnostics | M4.5 | **Accepted** (#174): settings only, within compiled ceilings; `etc/system.conf` in the signed root image; the manifest format; checked at build, update offer, and boot, refused not narrowed; `INFO` health checks every 10 s, an unresponsive daemon restarted by its policy; `trust`'s `health` and `config` |
 | D-031 | AI services as unprivileged system services | M4.6 | **Accepted** (#180): the M4.2 manifests, each capability justified; hostile programs under `infer`'s and the runtime's exact manifests; crash, hang, and exhaust, then the rest checked; KPTI and `rdtsc` carried to M5.2 |
 | D-032 | Release test matrix and stability tests | M5.1 | **Accepted** (#186): 7 cells, one axis at a time; KVM a cell, TCG the reference; the matrix weekly, on dispatch, and before each release; soak and repeat passes; an S1 scenario kernel with the real model; any non-infrastructure failure, flakes included, is a known crash bug; amended 2026-11-12 (#192): a 2-hour local soak at the M5.1 gate, 8 hours before each release |
+| D-033 | Repositioning: Pharos as an agent cell and authority broker, and the three tiers | M6.0 (and the Phase 5 scope edits) | **Accepted** (2026-11-13): vision goals and non-goals; POSIX stays a non-goal; cloud inference brokered; single user to multi-tenant; what it rules out; licence and Cyber Resilience Act questions |
+| D-034 | TCP and TLS stack | M6.1 | **Open:** candidates and their `no_std` fit, MSRV against the workspace's 1.85, size in the trusted base, crypto provider, fuzzing plan, certificate validation model |
+| D-035 | Credential vault and egress gateway | M6.2 | **Open:** secret storage, injection model, allow-list format, rotation, audit |
+| D-036 | Foreign-agent bridge | M6.3 | **Open:** channel (vsock is guest-to-host), host relay or alternatives, guest image, what the host must guarantee, the path to M8.2 |
+| D-037 | Payload approval and risk routing | M6.4 | **Open:** a trusted display for full payloads given 64-byte console lines, four-eyes approval, segregation of duties, timeouts, what is marked |
+| D-038 | Identity and organization model | M6.5 | **Open:** principals, roles, tenants, ownership; badges to identities; directory import |
+| D-039 | Runtime policy and its language | M6.6 | **Open:** candidates, relation to D-030's compiled ceilings, signing and versioning, dry run, diffs |
+| D-040 | Evidence export, observability, and anchoring | M6.7, M6.8 | **Open:** OTLP and the GenAI conventions version, anchoring target, report format, content addressing, privacy |
+| D-041 | Model broker | M6.9 | **Open:** provider allow-list, redaction, cost accounting, off-Pharos local inference, fallback, model output as untrusted input |
+| D-042 | Multi-tenant runtime and scale | M6.10 | **Open:** one runtime per tenant, limits, message durability, the SMP decision |
+| D-043 | WASM runtime and WASI-to-capability mapping | M7.5 | **Open:** candidates, determinism, fuel or CPU limits on D-022, trusted-base size |
+| D-044 | Reference platform and the limits required on a real host | M5.2 | **Open:** KPTI or refusing vulnerable CPUs, `rdtsc` in user mode, DMA isolation for user-space drivers under KVM |
+| D-045 | Information-flow labels | M7.8 | **Open:** label model, propagation through knowledge, channels, and tools, declassification only on the trusted path |
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3 (released as v0.3.0 at its gate commit, `693c896`, tagged after the fact). M4.1 (integration of kernel and user-space services) and M4.2 (security model and privilege separation) passed their gates on 2026-11-06, M4.3 (reliable boot and recovery) on 2026-11-08, and M4.4 (device and service management), M4.5 (system configuration and diagnostics), and M4.6 (integration of AI services without unrestricted kernel access) on 2026-11-09, which closed Phase 4 (released as v0.4.0). M5.1 (QEMU regression and release testing) passed its gate on 2026-11-13. The current milestone is **M5.2 — Hardware compatibility testing**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3 (released as v0.3.0 at its gate commit, `693c896`, tagged after the fact). M4.1 (integration of kernel and user-space services) and M4.2 (security model and privilege separation) passed their gates on 2026-11-06, M4.3 (reliable boot and recovery) on 2026-11-08, and M4.4 (device and service management), M4.5 (system configuration and diagnostics), and M4.6 (integration of AI services without unrestricted kernel access) on 2026-11-09, which closed Phase 4 (released as v0.4.0). M5.1 (QEMU regression and release testing) passed its gate on 2026-11-13. The current milestone is **M5.4 — Security review and threat-model update**, reordered ahead of M5.2. After it the order is M5.2 (narrowed to the KVM microVM reference platform) → M5.5 (v0.5, the microVM release) → Phase 6 (D-033, accepted 2026-11-13); M5.3 is folded into M6.10. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

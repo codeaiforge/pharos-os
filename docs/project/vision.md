@@ -1,5 +1,7 @@
 # Vision
 
+> **Changed by [D-033](decision-log.md#d-033-repositioning-pharos-as-an-agent-cell-and-authority-broker-and-the-three-tiers) (accepted 2026-11-13):** Pharos is repositioned as an agent cell and authority broker for organizations, with three agent tiers ([roadmap](implementation-roadmap.md#agent-tiers-d-033)). M6.0 rewrites this document; until then the sections below are the earlier vision, and D-033 overrides them where they differ (cloud inference brokered, multi-tenant).
+
 ## Purpose
 
 Pharos OS by CodeAIForge explores how to run AI agents locally and safely by designing the operating system around them, rather than adding agents on top of a system that grants them broad, ambient access.

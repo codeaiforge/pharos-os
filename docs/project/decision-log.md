@@ -1220,4 +1220,245 @@ D-011, D-012, and D-018 were opened before their milestones and accepted in plac
 
 Each entry lists the milestone by which it must be decided. **Proposed** entries carry a recommendation but are not decisions until accepted. Decisions may be made earlier if evidence is available.
 
-None open.
+### D-033: Repositioning: Pharos as an agent cell and authority broker, and the three tiers
+
+- **Status:** Accepted
+- **Needed by:** M6.0 (the Phase 5 scope edits of 2026-11-13 follow it too)
+- **Date accepted:** 2026-11-13
+
+**Context.** The vision is a local-first, single-user system that runs agents and their model on Pharos. Phases 1–4 and M5.1 built and tested that: a capability microkernel, agents as untrusted processes with revocable grants, default-deny networking, a trusted console no agent can reach, audit-or-refuse, and local inference as an unprivileged service. Two facts limit it as a product. Organizations' agents are Python and TypeScript frameworks that need a full OS, which POSIX on Pharos would bring, and POSIX is a non-goal. And the local engine is CPU-only, SSE2, single-threaded by design (D-011) and runs a 0.5B model, which copies a file rather than summarizing it ([testing.md](../development/testing.md#s1-end-to-end)). The intended scope has grown: Pharos as the execution cell where an agent's limits are a property of the machine, not a promise from software, running as a microVM on ordinary KVM hosts, holding all agent authority (capabilities, credentials, approvals, audit), so organizations can put agents into regulated operations without giving them the keys.
+
+**Options.**
+1. *Keep the vision:* a local-first OS that runs its own model and agents. Pros: no change; the guarantees hold end to end. Cons: no path to the agents organizations run; model quality bounded by CPU inference.
+2. *An agent cell and authority broker with three tiers* (the [roadmap's table](implementation-roadmap.md#agent-tiers-d-033)): Tier 1 native `no_std` agents (implemented), Tier 2 WASM inside Pharos (M7.5), Tier 3 foreign agents in a Linux microVM beside Pharos, holding nothing (M6.3). Pharos holds every credential, approval, and audit record; models, local or remote, are reached through a broker (M6.9). Pros: reaches existing agents without POSIX; keeps the kernel and trusted base unchanged in kind. Cons: in Tier 3 the guest's containment is the host's VM configuration, so the host kernel and hypervisor join the trusted base until M8.2, and the claim holds end to end only for Tiers 1 and 2.
+3. *The same broker as user-space software on Linux.* Pros: far cheaper to adopt; sandboxes on Linux (microVMs, default-deny egress, approval prompts) already cover containment for many users. Cons: ambient authority below the broker, a confirmation path the agent may share, sandboxes that can fail open.
+4. *The same runtime on seL4,* whose kernel is formally verified and has Rust bindings and x86_64 support. Pros: a stronger kernel argument. Cons: replaces the Pharos kernel and its tests; the agent runtime, not the kernel, is what is new.
+
+**Evaluation criteria.** Reaches the agents organizations already run; keeps authority below the agent with no ambient authority, no fail-open path, and a confirmation path agents cannot reach; trusted base size; honesty of the guarantee per tier; work for one maintainer; evidence a buyer can check.
+
+**Decision (the maintainer chose the recommendation, 2026-11-13).** Option 2, with the runtime kept portable enough that option 4 stays open. Changes to the vision:
+- Goals: the agent cell and broker, the three tiers, and organizational governance (identity, policy, payload approval, evidence).
+- Non-goals: POSIX stays a non-goal (Tier 3 covers it). Cloud inference moves from non-goal to brokered (M6.9): never reached by an agent directly, and its output untrusted input. Single user moves to multi-tenant (M6.5, M6.10).
+- Ruled out: agents holding credentials or sockets; POSIX or Linux binaries on Pharos; a general-purpose desktop; any component of the broker in the kernel.
+
+**Consequences.** The maintainer also chose, 2026-11-13: the Phase 6 overlap (decision records and designs during M5.4's review, implementation after it); Apache-2.0 kept, the licence decided before the first outside pilot (M7.7); grant or research funding first, so Cyber Resilience Act duties come with a commercial release later. M6.0 rewrites `vision.md` and `architecture.md`; Phases 6–8 become the plan; M5.2 narrows to the KVM reference platform, M5.3 folds into M6.10, and M5.5 becomes v0.5. Still open:
+- *Licence:* Apache-2.0 lets anyone embed the broker; to decide before M7.7.
+- *Cyber Resilience Act:* a commercial release in the EU brings vulnerability reporting duties (an early warning within 24 hours for an actively exploited vulnerability) and support periods. The first releases are research and grant-funded; the duties are planned for with the first commercial one (M8.6).
+
+**Evidence.** In-model defenses against prompt injection fail under adaptive attack (12 published defenses bypassed, most above 90%: Nasr, Carlini et al., [arXiv 2510.09023](https://arxiv.org/abs/2510.09023)), which favours enforcement outside the model, the design Pharos has. No shipping product or published system was found that combines a capability kernel, inference as an unprivileged service, a console no agent can reach, and audit-or-refuse; agent-OS research reaching the same design in user space (AIOS, [arXiv 2403.16971](https://arxiv.org/abs/2403.16971)) shows the direction is contested. Buyers name over-privileged agents and data leakage as top blockers, in vendor-sponsored surveys only. No buyer was found asking for a new OS. A strategic assessment made outside the repository collected these sources.
+
+### D-034: TCP and TLS stack
+
+- **Status:** Open
+- **Needed by:** M6.1
+- **Date accepted:**
+
+**Context.** D-015 chose an own minimal stack with UDP and no TCP. The broker must reach business services over HTTPS. TCP and TLS are the largest parsers Pharos would run, and they sit on the egress path.
+
+**Options.** (a) smoltcp for TCP. Checked locally: `no_std`, 0BSD licence; version 0.14.0 needs Rust 1.91 and 0.12.0 needs 1.80, against the workspace's `rust-version` 1.85 (the `msrv` CI job). (b) TCP added to the own stack. (c) rustls for TLS. Checked locally (0.23.46): `#![no_std]`, Apache-2.0, ISC, or MIT, Rust 1.71; it needs a crypto provider, and the default ones (ring, aws-lc-rs) bring C or assembly; a pure-Rust provider is unverified. (d) Another `no_std` TLS crate, not evaluated. Unverified: each crate's transitive dependency count and its fit with Pharos's allocator.
+
+**Evaluation criteria.** `no_std` without `unsafe` in Pharos code; MSRV within the workspace's; licence compatible with Apache-2.0; size in the trusted base; host fuzzing (D-020); certificate validation against a pinned root set; maintenance.
+
+**Decision.** (empty while Open)
+
+**Consequences.** A TLS service and fuzz targets; D-015 amended.
+
+**Evidence.** The local checks above.
+
+### D-035: Credential vault and egress gateway
+
+- **Status:** Open
+- **Needed by:** M6.2
+- **Date accepted:**
+
+**Context.** Agents must never hold credentials, yet their allowed actions need them. Secrets must be injected at the boundary into requests an allow-list permits.
+
+**Options.** Storage: sealed in `store` (keyed by M5.5's anchor key), or an external vault or HSM later. Injection: the gateway adds headers per allow-list entry. Allow-list: endpoint, method, and path per grant.
+
+**Evaluation criteria.** No path from a secret to an agent or model input; rotation without a rebuild; every use and refusal audited without the secret; trusted-base size.
+
+**Decision.** (empty while Open)
+
+**Consequences.** Vault and gateway services; policy entries naming credentials by handle.
+
+**Evidence.** None yet.
+
+### D-036: Foreign-agent bridge
+
+- **Status:** Open
+- **Needed by:** M6.3
+- **Date accepted:**
+
+**Context.** Tier 3 agents run in a Linux guest with no network device and no credentials, reaching only the Pharos runtime. virtio-vsock connects a guest to its host, not to another guest: with Pharos and the Linux guest as two microVMs, every message passes through the host, and the guest's containment is the host's VM configuration. The host kernel and hypervisor are therefore in the trusted base for this design.
+
+**Options.** (a) vsock to a relay on the host. (b) vhost-user or another host-mediated device. (c) The Linux guest nested under Pharos, which needs Pharos as a hypervisor (M8.2). (d) A shared-memory device between the guests, if the VMM supports one.
+
+**Evaluation criteria.** What the host must guarantee, and how it is checked (the launch tool refuses a network device or shared filesystem); relay size and parsing; why a trusted host is acceptable for v1; the path to M8.2.
+
+**Decision.** (empty while Open)
+
+**Consequences.** The threat model states that Tier 3 trusts the host; Pharos's own contribution in Tier 3 is the broker, not containment.
+
+**Evidence.** None yet.
+
+### D-037: Payload approval and risk routing
+
+- **Status:** Open
+- **Needed by:** M6.4
+- **Date accepted:**
+
+**Context.** The user confirms a `send`'s destination and size, not its payload (accepted at the M3.6 review, reopened 2026-11-13). The approver must see the exact bytes. The trusted console has 64-byte lines, and the dashboard is outside the trusted base, so it cannot approve. This is the hardest part of Phase 6.
+
+**Options.** Display: paged payloads on `trust`; structured rendering per content type; a hash shown on the console and the payload shown elsewhere (weaker: the other display is not trusted). Approval: one approver, or two for marked actions; segregation of duties by identity (D-038). Timeouts deny.
+
+**Evaluation criteria.** The bytes sent equal the bytes approved; usable for real payloads; approvals per task (fatigue); no path through which an agent shapes the prompt.
+
+**Decision.** (empty while Open)
+
+**Consequences.** The threat-model limit closes at M6.4.
+
+**Evidence.** None yet.
+
+### D-038: Identity and organization model
+
+- **Status:** Open
+- **Needed by:** M6.5
+- **Date accepted:**
+
+**Context.** Audit actors are badges today. Organizations need people, roles, tenants, and an owner for every agent, without identity becoming authority (D-018).
+
+**Options.** Local identity records managed on the trusted path; import from an external directory (Entra ID or LDAP, for example); mapping of badges to identities in `init` or the runtime.
+
+**Evaluation criteria.** Every actor resolves; no grant by role; trusted-base size; what an import trusts.
+
+**Decision.** (empty while Open)
+
+**Consequences.** Owners required in agent policy; four-eyes approval possible (D-037).
+
+**Evidence.** None yet.
+
+### D-039: Runtime policy and its language
+
+- **Status:** Open
+- **Needed by:** M6.6
+- **Date accepted:**
+
+**Context.** Policy is compiled in today, within compiled ceilings (D-030). Organizations need signed, versioned policy loaded without a rebuild.
+
+**Options.** Cedar, Rego, or a small custom language, judged on `no_std` fit and trusted-base size; signature with D-028's key handling; dry run and a diff of what widens.
+
+**Evaluation criteria.** Never wider than the ceilings, refused rather than narrowed; analysability; size; host fuzzing of the parser.
+
+**Decision.** (empty while Open)
+
+**Consequences.** D-030's rule kept; the trusted console shows each widening.
+
+**Evidence.** None yet.
+
+### D-040: Evidence export, observability, and anchoring
+
+- **Status:** Open
+- **Needed by:** M6.7, M6.8
+- **Date accepted:**
+
+**Context.** The audit trail is SHA-256-chained (D-017); M5.5 adds a secret-keyed anchor and a signed, exportable chain head. Auditors need evidence outside the system, anchored where Pharos cannot rewrite it.
+
+**Options.** Export over OTLP with the OpenTelemetry GenAI semantic conventions at a pinned version (still marked Development); an anchoring target (an append-only log outside the system, for example); a report format; content-addressed hashes of prompts and outputs linked to records.
+
+**Evaluation criteria.** An outside verifier detects a dropped or rewritten record; no private content by default; a stable format.
+
+**Decision.** (empty while Open)
+
+**Consequences.** The dashboard (M6.8) reads only the export.
+
+**Evidence.** None yet.
+
+### D-041: Model broker
+
+- **Status:** Open
+- **Needed by:** M6.9
+- **Date accepted:**
+
+**Context.** Cloud inference is a non-goal today; D-033 makes it brokered. Larger local models need GPUs, which Pharos has no driver for (D-011).
+
+**Options.** Providers through the gateway (M6.2) with an allow-list; redaction before a prompt leaves; local models off Pharos (a GPU host reached through a capability, over the guest-to-host channel); `pharos-infer` as the deterministic local fallback; costs in D-022's budgets.
+
+**Evaluation criteria.** No agent reaches a provider; model output stays untrusted input, parsed and checked by the runtime (D-023); evidence names the model and version; per-tenant opt-in for data leaving.
+
+**Decision.** (empty while Open)
+
+**Consequences.** D-011 stands for inference on Pharos.
+
+**Evidence.** None yet.
+
+### D-042: Multi-tenant runtime and scale
+
+- **Status:** Open
+- **Needed by:** M6.10
+- **Date accepted:**
+
+**Context.** One runtime is every agent's reference monitor (D-031); a compromised runtime controls all of them. Pharos runs on one CPU (D-013).
+
+**Options.** One runtime per tenant; limits per tenant from D-022; durable channels in `store`; SMP adopted or deferred.
+
+**Evaluation criteria.** A compromised runtime reaches only its own tenant; the broker's latency and throughput budget; kernel change size for SMP.
+
+**Decision.** (empty while Open)
+
+**Consequences.** M5.3's performance work is measured here.
+
+**Evidence.** None yet.
+
+### D-043: WASM runtime and WASI-to-capability mapping
+
+- **Status:** Open
+- **Needed by:** M7.5
+- **Date accepted:**
+
+**Context.** Third-party tools and MCP servers should run inside Pharos with only their grants (Tier 2).
+
+**Options.** wasmi, or wasmtime's `no_std` support, for example; not checked locally.
+
+**Evaluation criteria.** `no_std` fit; size in the trusted base; determinism; fuel or CPU limits mapped onto D-022; fuzzing; licence and MSRV.
+
+**Decision.** (empty while Open)
+
+**Consequences.** A `wasm` service; the MCP adapter (M7.6) on top.
+
+**Evidence.** None yet.
+
+### D-044: Reference platform and the limits required on a real host
+
+- **Status:** Open
+- **Needed by:** M5.2
+- **Date accepted:**
+
+**Context.** D-031 carried no KPTI and `rdtsc` in user mode to M5.2, required before real-hardware use; D-008 left the IOMMU open. A customer's KVM host is real hardware: a guest kernel on a Meltdown-vulnerable CPU is exposed to its own user space, and a compromised user-space driver can program its virtio device to write anywhere in guest memory.
+
+**Options.** Meltdown class: KPTI; or refuse to boot on a CPU that reports the vulnerability. `rdtsc`: `CR4.TSD` (other timers remain), or accepted with reasons. Driver DMA: a virtual IOMMU (virtio-iommu, for example), or drivers kept in the trusted base with the limit stated; VT-d and AMD-Vi on bare metal in M8.1.
+
+**Evaluation criteria.** Closes or honestly carries each limit; kernel change size and `unsafe`; test kernels that fail when a mitigation is removed.
+
+**Decision.** (empty while Open)
+
+**Consequences.** The threat model's rows close or move to M8.1 with reasons.
+
+**Evidence.** None yet.
+
+### D-045: Information-flow labels
+
+- **Status:** Open
+- **Needed by:** M7.8
+- **Date accepted:**
+
+**Context.** Capabilities limit what an agent may do, not where data came from. The knowledge service records provenance (D-025). Labels carried through agents and tools would let policy refuse a flow, such as untrusted content reaching an external send.
+
+**Options.** Labels per message, entry, and tool result; propagation rules; declassification only by the user on the trusted path.
+
+**Evaluation criteria.** Refuses the flows that matter without labelling everything untrusted; cost; test coverage.
+
+**Decision.** (empty while Open)
+
+**Consequences.** Policy rules on flows (M6.6).
+
+**Evidence.** None yet.

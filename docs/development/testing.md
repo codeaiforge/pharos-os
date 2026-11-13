@@ -344,7 +344,7 @@ Locally, the matrix found #193 and #194 and the repeat pass found #198 again; al
 
 **S1 end to end:** the model, the agent, its tool call, and the audit trail together on Pharos, the output identical to the host's; locally under KVM with the speed targets (`bench-infer`). It cannot judge the answer's quality (the 0.5B model copies the file rather than summarizing it, [above](#s1-end-to-end)), and CI checks output only, not speed.
 
-**What none of it covers:** real hardware, its firmware, devices, and timing (M5.2); SMP, since every cell has one CPU; the threat model's open limits carried to M5.2 (KPTI, `rdtsc`). A green matrix is evidence for QEMU, not for a machine.
+**What none of it covers:** real hardware, its firmware, devices, and timing (M5.2 for the KVM reference platform, M8.1 for bare metal); SMP, since every cell has one CPU; the threat model's open limits carried to M5.2 (KPTI, `rdtsc`). A green matrix is evidence for QEMU, not for a machine.
 
 ### Test plan
 
