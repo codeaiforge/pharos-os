@@ -188,7 +188,7 @@ Checked on 2026-11-14:
 - **Supported versions:** "the latest release and `main`" matches the releases (v0.1.0 to v0.4.0).
 - **Corrected:** `SECURITY.md` still said Pharos is not bootable. Its scope named only the host workspace, the CLI, CI, and docs, and called the threat model the "planned system". It now lists the kernel, user space, and the signing tools, gives examples of reportable issues taken from the threat model, and says what is not a vulnerability: documented limits, real hardware, model text that crosses no capability boundary, and the generated test key. A leaked release key is reported the same way.
 - **Unchanged, the maintainer's policy:** no committed response time, and no disclosure timeline.
-- **Settings for the maintainer** (not changed here): secret scanning and push protection are off, and so are Dependabot security updates. With two dependencies, Dependabot matters less than secret scanning, which backs AGENTS.md section 4.
+- **Settings:** secret scanning, push protection, and Dependabot alerts and security updates were off; at the maintainer's request they were turned on on 2026-11-14, and the repository API confirms them.
 
 ## Acceptance criteria (M5.4)
 
@@ -197,7 +197,7 @@ Checked on 2026-11-14:
 | No open critical or high findings | Both highs (#202, #204) are fixed, and so is #220, medium by the main session's proposal and high by Gemini's. |
 | Every `unsafe` block reviewed | **Kernel only:** `arch/x86_64.rs` and its submodules, `limine.rs`, and `mm/raw.rs`, by the Claude and Gemini kernel reviews (gpt-5.6-luna found nothing). Whether every block was read is in each reviewer's coverage notes, not checked block by block here. **User space:** `user/pharos-user/src/syscall.rs` (D-008, D-016), by the main session and Gemini, every block; #220 came of it. |
 | Dependencies audited (`ed25519-compact` 2.6.0, `libm` 0.2.16) | Done by the main session (above): no advisories, no transitive dependencies, MIT. Not read line by line. |
-| Security reporting process reviewed (SECURITY.md) | Done by the main session (see [the reporting process](#the-reporting-process)). Private vulnerability reporting is on; `SECURITY.md`'s status and scope were out of date and are corrected. Two repository settings are left to the maintainer. |
+| Security reporting process reviewed (SECURITY.md) | Done by the main session (see [the reporting process](#the-reporting-process)). Private vulnerability reporting is on; `SECURITY.md`'s status and scope were out of date and are corrected. Secret scanning, push protection, and Dependabot security updates are now on. |
 | The report states the reviewer's independence | Above. |
 | Gate: sign-off by the independent reviewer and the maintainer | The independent review is gemini-3.8-flash's; the maintainer signed off on 2026-11-14. **Passed.** |
 | Threat model updated | Rows for #203 (the one-pass stall, to M6.10), #212 and D-046, and #215; the other fixes are within existing rows. |
