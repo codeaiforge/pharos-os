@@ -4,7 +4,7 @@
 //! and Limine loads no TSS. [`init`] loads a static GDT (null, kernel code,
 //! kernel data, TSS, user data, user code) and a static TSS whose interrupt
 //! stack table (IST) gives the double-fault handler its own stack, and whose
-//! ring-0 stack pointer ([`set_kernel_stack`]) is the running thread's kernel
+//! ring-0 stack pointer (`set_kernel_stack`) is the running thread's kernel
 //! stack for interrupts and exceptions taken in user mode (M2.7).
 //!
 //! The user segments follow the TSS in the order `sysret` expects (D-014):
@@ -223,8 +223,10 @@ pub fn kernel_gdt_loaded() -> bool {
 /// Sets the TSS ring-0 stack pointer: where the CPU switches to when an
 /// interrupt or exception arrives in user mode. The scheduler sets it to the
 /// top of each thread's kernel stack on every switch. Interrupts must be
-/// disabled (the value must match the running thread).
-pub fn set_kernel_stack(top: u64) {
+/// disabled (the value must match the running thread), and `top` must be
+/// the top of that thread's kernel stack: the CPU writes below it on the
+/// next interrupt from user mode.
+pub(super) fn set_kernel_stack(top: u64) {
     let tss = &raw mut TSS_SEGMENT;
     // SAFETY: one CPU, interrupts disabled: nothing else writes the TSS, and
     // the CPU reads `rsp0` only on a privilege change, which cannot happen
@@ -234,7 +236,7 @@ pub fn set_kernel_stack(top: u64) {
     super::syscall::KERNEL_STACK_TOP.store(top, core::sync::atomic::Ordering::Relaxed);
 }
 
-/// The TSS ring-0 stack pointer (see [`set_kernel_stack`]).
+/// The TSS ring-0 stack pointer (see `set_kernel_stack`).
 pub fn kernel_stack() -> u64 {
     let tss = &raw const TSS_SEGMENT;
     // SAFETY: as in `double_fault_stack_top`; an unaligned read of a packed

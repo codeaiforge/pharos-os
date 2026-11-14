@@ -460,6 +460,9 @@ impl AddressSpace {
     }
 
     /// Maps the page at `virt` to `phys`. Both must be aligned to `size`.
+    /// The space owns `phys` from now on (`destroy` and `unmap_owned` free it),
+    /// so it must be a frame the caller allocated for this mapping alone;
+    /// device memory and DMA buffers go through [`Self::map_device`].
     pub fn map(
         &mut self,
         virt: u64,
@@ -1029,7 +1032,9 @@ fn mmio_page(phys: u64) -> Result<u64, MapError> {
 
 /// Writes the device register at physical address `phys` (4-byte aligned).
 /// For registers only the kernel may touch, such as the MSI-X table.
-pub fn mmio_write32(phys: u64, value: u32) -> Result<(), MapError> {
+/// `phys` must be inside a device's memory BAR, never RAM: this function
+/// cannot tell the two apart (#218: an unchecked MSI-X offset once could).
+pub(super) fn mmio_write32(phys: u64, value: u32) -> Result<(), MapError> {
     if phys % 4 != 0 {
         return Err(MapError::Misaligned);
     }
@@ -1041,8 +1046,9 @@ pub fn mmio_write32(phys: u64, value: u32) -> Result<(), MapError> {
     Ok(())
 }
 
-/// Reads the device register at physical address `phys` (4-byte aligned).
-pub fn mmio_read32(phys: u64) -> Result<u32, MapError> {
+/// Reads the device register at physical address `phys` (4-byte aligned),
+/// which must be inside a device's memory BAR, as for [`mmio_write32`].
+pub(super) fn mmio_read32(phys: u64) -> Result<u32, MapError> {
     if phys % 4 != 0 {
         return Err(MapError::Misaligned);
     }

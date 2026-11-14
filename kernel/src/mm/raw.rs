@@ -125,7 +125,7 @@ static BITMAP_STORAGE_TAKEN: AtomicBool = AtomicBool::new(false);
 /// May be called once; later calls return `None`. The caller must pass a
 /// range inside one usable memory-map region that nothing else uses (the
 /// frame allocator reserves it right after).
-pub(crate) fn bitmap_storage(hhdm: u64, phys: u64, words: usize) -> Option<&'static mut [u64]> {
+pub(super) fn bitmap_storage(hhdm: u64, phys: u64, words: usize) -> Option<&'static mut [u64]> {
     if BITMAP_STORAGE_TAKEN.swap(true, Ordering::AcqRel) {
         return None;
     }
