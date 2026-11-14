@@ -34,7 +34,8 @@
 //! - `ask` (agent `asker`, #106): `ASK` for a network destination (not
 //!   askable) is refused at once, and model 2 is refused before it asks;
 //!   asked for 2 s, model 2 is pending until the user answers `yes`, then
-//!   generates, and is refused again once the 2 s are over; `data write`
+//!   generates, its session ends with the 2 s (#210), and it is refused
+//!   again; `data write`
 //!   is refused by the user and refused again without a new prompt; `data
 //!   read` is refused when nobody answers in time; completes with `ask ok`.
 //! - `keeper-c` (#108): writes its file, logs `audit me` (the kernel then
@@ -1599,21 +1600,23 @@ impl Agent {
             return self.fail(b"the approval did not grant model 2");
         }
         let granted = uptime();
-        if !self.generate(4).1 {
+        // More than one `NEXT` holds (16 tokens each), so the session
+        // stays open past the grant's 2 s (#210).
+        if !self.generate(40).1 {
             return self.fail(b"GENERATE with the approved model failed");
         }
-        loop {
-            let (_, n) = self.call(&Request::Next, &mut out);
-            match Tokens::parse(&out[..n]) {
-                Some(t) if t.stop.is_none() => {}
-                Some(_) => break,
-                None => return self.fail(b"NEXT failed"),
-            }
+        let (_, n) = self.call(&Request::Next, &mut out);
+        if !Tokens::parse(&out[..n]).is_some_and(|t| t.stop.is_none()) {
+            return self.fail(b"NEXT failed or ended the session");
         }
         let over = granted + 2_500_000;
         while uptime() < over {
             self.call(&Request::Info, &mut out);
             sleep(200_000);
+        }
+        let (_, n) = self.call(&Request::Next, &mut out);
+        if Tokens::parse(&out[..n]).is_some() {
+            return self.fail(b"NEXT generated after model 2 expired");
         }
         if self.generate(4).0 != status::NO_ACCESS {
             return self.fail(b"model 2 was not refused after its 2 s");

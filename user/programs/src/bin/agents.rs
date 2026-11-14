@@ -1786,6 +1786,11 @@ impl Runtime {
                 wait = wait.min(u.saturating_sub(now));
             }
             if !gone.is_empty() {
+                // A session on an expired model ends with it, as on
+                // revocation (#210).
+                if gone.contains(&Permission::Model(s.session_model)) {
+                    self.cancel_session(i);
+                }
                 let agent = self.agent_of(task);
                 for p in gone {
                     self.permission_event(&agent, task, action::EXPIRE, p, outcome::OK, b"");
