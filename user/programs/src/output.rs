@@ -1,6 +1,8 @@
 //! The trusted console's output lines (`trust`, agents.md): each line is
-//! built from parts into one transmit buffer, its `\r\n` always kept, and
-//! `stop all`'s last line says what it did not stop.
+//! built from parts into one transmit buffer, its `\r\n` always kept;
+//! `stop all`'s last line says what it did not stop; and the lines the
+//! agent runtime makes `trust` print are limited in rate, so they cannot
+//! crowd out `trust`'s own and `init`'s.
 
 /// Copies `parts` into `out`, cut so that `\r\n` still fits, and appends
 /// it (#226): a cut line never runs into the next one. Returns the length.
@@ -34,6 +36,65 @@ pub fn stop_all(held: bool, running: usize) -> (&'static [u8], Option<usize>, &'
             Some(n),
             b" still running",
         ),
+    }
+}
+
+/// Lines from the runtime that may be shown at once (#228): more than a
+/// `usage` answer for every agent slot and group.
+pub const BURST: u64 = 32;
+/// The time to earn one more, in microseconds: 20 lines a second.
+pub const EVERY_US: u64 = 50_000;
+
+/// A token bucket for one source of lines (#228): [`BURST`] at once, then
+/// one per [`EVERY_US`]. Lines it refuses are counted, so the user can be
+/// told once how many were not shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limit {
+    tokens: u64,
+    at: u64,
+    dropped: u64,
+}
+
+impl Default for Limit {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Limit {
+    pub const fn new() -> Self {
+        Self {
+            tokens: BURST,
+            at: 0,
+            dropped: 0,
+        }
+    }
+
+    /// Whether a line may be shown at `now` (microseconds since boot); one
+    /// that may not is counted as not shown.
+    pub fn admit(&mut self, now: u64) -> bool {
+        let earned = now.saturating_sub(self.at) / EVERY_US;
+        if earned > 0 {
+            self.tokens = self.tokens.saturating_add(earned).min(BURST);
+            // At most `now - at`: no overflow, and time is never banked.
+            self.at += earned * EVERY_US;
+        }
+        if self.tokens == 0 {
+            self.skip();
+            return false;
+        }
+        self.tokens -= 1;
+        true
+    }
+
+    /// Counts a line not shown for another reason (the console was busy).
+    pub fn skip(&mut self) {
+        self.dropped = self.dropped.saturating_add(1);
+    }
+
+    /// The lines not shown since the last call.
+    pub fn take_dropped(&mut self) -> u64 {
+        core::mem::take(&mut self.dropped)
     }
 }
 
@@ -95,5 +156,30 @@ mod tests {
                 &b" still running"[..]
             )
         );
+    }
+
+    #[test]
+    fn a_flood_is_limited_and_counted() {
+        let mut l = Limit::new();
+        let t = 5_000_000;
+        let shown = (0..100).filter(|_| l.admit(t)).count();
+        assert_eq!(shown as u64, BURST, "a burst, then nothing");
+        assert_eq!((l.take_dropped(), l.take_dropped()), (68, 0), "told once");
+        assert!(!l.admit(t + EVERY_US - 1));
+        assert!(l.admit(t + EVERY_US), "one earned back");
+        assert!(!l.admit(t + EVERY_US));
+        // A second's flood (both ends included): 20 lines, not more.
+        let shown = (0..=1000)
+            .filter(|i| l.admit(t + EVERY_US + i * 1000))
+            .count();
+        assert_eq!(shown, 20);
+        // A long quiet time earns a burst, not more.
+        let later = t + 3_600_000_000;
+        assert_eq!((0..100).filter(|_| l.admit(later)).count() as u64, BURST);
+        l.take_dropped();
+        l.skip();
+        assert_eq!(l.take_dropped(), 1);
+        // Time going back (`uptime` failing gives 0) earns nothing.
+        assert!(!l.admit(0));
     }
 }

@@ -58,7 +58,7 @@
 #![no_std]
 #![no_main]
 
-use pharos_programs::output;
+use pharos_programs::output::{self, Limit};
 use pharos_programs::virtio_console::{Console, RX_BUFFER, TX_BUFFER};
 use pharos_proto::knowledge::{self, Author};
 use pharos_proto::permission::Permission;
@@ -71,6 +71,7 @@ use pharos_proto::{agents, audit, status};
 use pharos_user::{
     Handle, Received, Status, Usage as Use, call_timeout, delete, endpoint_create, irq_create,
     irq_notify, process_status, process_stop, process_usage, receive, send, sleep, try_send,
+    uptime,
 };
 
 pharos_user::entry!(main);
@@ -83,6 +84,8 @@ const KNOWLEDGE: Handle = 5;
 // Its waits, shared with `init`, which outlasts each (M4.6 review F1).
 use pharos_proto::trust::{AUDIT_US, INIT_US, KNOWLEDGE_US, RUNTIME_SEND_US, STOP_WAIT_US};
 const BASE: u64 = 0x1000_0000;
+/// Transmit buffers the runtime's lines never take (#228).
+const RESERVED: usize = 4;
 /// Two lines: one console line holds at most 256 bytes.
 const HELP: &[u8] = b"commands: list, stop <agent>, stop group <group>, stop all, \
 revoke <agent> <permission>, yes <n>, no <n>, audit, usage, verify <scope> <key> <version> <hash>";
@@ -112,14 +115,46 @@ struct Trust {
     /// For `call`s to the audit service.
     reply: Option<Handle>,
     agents: [Option<Agent>; SLOTS as usize],
+    /// The rate of lines the runtime's messages make (#228).
+    limit: Limit,
+    /// Whether the line being said is one of them.
+    limited: bool,
 }
 
 impl Trust {
     /// One line on the trusted console, `\r\n` added (cut to fit, #226).
     /// Dropped if the console is full: output never makes the service wait.
+    ///
+    /// A line the runtime's message makes (#228) is shown only within
+    /// [`Limit`]'s rate and while more than [`RESERVED`] transmit buffers
+    /// are free, which are kept for `trust`'s own and `init`'s lines. The
+    /// next one shown is preceded by how many were not.
     fn say(&mut self, parts: &[&[u8]]) {
         let mut line = [0u8; TX_BUFFER];
         let n = output::line(parts, &mut line);
+        if self.limited {
+            if !self.limit.admit(uptime()) {
+                return;
+            }
+            if self.console.free() <= RESERVED {
+                self.limit.skip();
+                return;
+            }
+            let dropped = self.limit.take_dropped();
+            if dropped > 0 {
+                let mut d = [0u8; 20];
+                let mut note = [0u8; TX_BUFFER];
+                let k = output::line(
+                    &[
+                        b"trust: ",
+                        decimal(dropped, &mut d),
+                        b" lines from the runtime not shown (too many)",
+                    ],
+                    &mut note,
+                );
+                let _ = self.console.send(&note[..k]);
+            }
+        }
         let _ = self.console.send(&line[..n]);
     }
 
@@ -819,9 +854,17 @@ impl Trust {
         }
     }
 
-    /// A message on the endpoint. Keeps the capability only for a valid
-    /// request from the badge allowed to send it.
+    /// A message on the endpoint; what the runtime's makes `trust` say is
+    /// limited (#228).
     fn message(&mut self, msg: &[u8], cap: Handle, badge: u32) {
+        self.limited = badge == RUNTIME;
+        self.handle(msg, cap, badge);
+        self.limited = false;
+    }
+
+    /// Keeps the capability only for a valid request from the badge
+    /// allowed to send it.
+    fn handle(&mut self, msg: &[u8], cap: Handle, badge: u32) {
         // `init`'s health check (M4.5): any answer counts.
         if badge == INIT && cap != 0 && msg == [trust::VERSION, pharos_proto::op::INFO] {
             let _ = try_send(cap, &[status::OK]);
@@ -1239,6 +1282,8 @@ fn main(_: u64) -> u64 {
         confirms: [0; 4],
         reply: endpoint_create().ok(),
         agents: [None; SLOTS as usize],
+        limit: Limit::new(),
+        limited: false,
     };
     if send(REPORT, b"ready", 0, 0, 0).is_err() {
         return 4;

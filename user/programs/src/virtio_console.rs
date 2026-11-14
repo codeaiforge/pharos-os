@@ -156,6 +156,16 @@ impl Console {
         Ok(())
     }
 
+    /// Transmit buffers not in flight, after freeing those the device is
+    /// done with; 0 if the device broke the queue rules.
+    pub fn free(&mut self) -> usize {
+        if self.reclaim().is_err() {
+            return 0;
+        }
+        let size = usize::from(self.tx.size);
+        self.busy[..size].iter().filter(|b| !**b).count()
+    }
+
     /// Writes `bytes` (at most [`TX_BUFFER`]). Fails, without waiting, if
     /// every transmit buffer is in flight.
     pub fn send(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
