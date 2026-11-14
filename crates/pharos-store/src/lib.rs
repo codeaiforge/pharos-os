@@ -45,6 +45,9 @@ pub const MAX_INDEX: usize = 1 << 20;
 pub const RECORD_HEADER: usize = 40;
 /// Largest record payload.
 pub const MAX_RECORD: usize = BLOCK - 64;
+/// The share of a store's blocks and of its object table kept for the
+/// audit trail (D-046, #212): one part in this many.
+pub const RESERVE_PART: u64 = 8;
 /// Smallest store: two superblocks, an index block, a data block.
 pub const MIN_BLOCKS: u64 = 4;
 /// First block after the superblock slots.
@@ -568,6 +571,18 @@ impl<D: Device> Store<D> {
     /// Blocks no generation uses.
     pub fn free_blocks(&self) -> u64 {
         self.used[FIRST as usize..].iter().filter(|u| !**u).count() as u64
+    }
+
+    /// True if writing `bytes` to `path` leaves the audit trail's reserve
+    /// free ([`RESERVE_PART`] of the blocks and of the object table), as
+    /// every other namespace must (D-046). One block more than the data,
+    /// for the index.
+    pub fn leaves_reserve(&self, path: &[u8], bytes: u64) -> bool {
+        let total = (self.used.len() as u64).saturating_sub(FIRST);
+        let objects = self.current.objects.len() as u64 + u64::from(self.find(path).is_err());
+        let max = MAX_OBJECTS as u64;
+        objects <= max - max / RESERVE_PART
+            && self.free_blocks() >= bytes.div_ceil(BLOCK as u64) + 1 + total / RESERVE_PART
     }
 
     fn find(&self, path: &[u8]) -> Result<usize, usize> {

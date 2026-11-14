@@ -2297,6 +2297,16 @@ impl Runtime {
                 let path = data_path(agent, name);
                 let write = Some(Permission::DataWrite);
                 let budget = limits.entry.budget;
+                // At most `MAX_FILES` files, whatever its budget: `data_kb`
+                // counts bytes, so empty files were free (D-046, #212).
+                let prefix = data_path(agent, b"");
+                let names = self.store.list(&prefix).map_err(|_| status::INTERNAL)?;
+                let new = !names
+                    .iter()
+                    .any(|n| n.strip_prefix(prefix.as_slice()) == Some(name));
+                if new && names.len() >= agents::MAX_FILES {
+                    self.charge(i, &budget, write, |_, _| Err(Over::Data))?;
+                }
                 if budget.data_kb != u32::MAX {
                     let (stored, old) = self.data_stored(agent, name)?;
                     let new = u64::from(len);

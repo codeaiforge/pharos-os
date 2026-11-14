@@ -1724,6 +1724,14 @@ impl Agent {
                 return self.fail(b"files past 1 KiB were not refused");
             }
         }
+        // Empty files are counted too (#212): with `a` and `b`, 64 files,
+        // then the 65th is over.
+        let name = |n: u8| [b'e', b'0' + n / 10, b'0' + n % 10];
+        if !(0..62).all(|n| self.put(&name(n), b"") == status::OK)
+            || self.put(&name(62), b"") != over
+        {
+            return self.fail(b"files past 64 were not refused");
+        }
         self.complete(b"spend ok")
     }
 

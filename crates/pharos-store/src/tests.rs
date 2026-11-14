@@ -6,6 +6,7 @@ extern crate std;
 use super::*;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -564,4 +565,22 @@ fn fuzzed_images_never_panic() {
         }
     }
     assert!(mounted > 0, "some mutations leave a valid slot");
+}
+
+#[test]
+fn writes_leave_the_audit_reserve() {
+    // 64 blocks: 62 after the superblocks, 7 kept (D-046).
+    let mut s = Store::format(Mem::new(64)).unwrap();
+    let block = [7u8; BLOCK];
+    let mut n = 0;
+    while s.leaves_reserve(format!("data/{n}").as_bytes(), BLOCK as u64) {
+        s.write(format!("data/{n}").as_bytes(), &block).unwrap();
+        n += 1;
+    }
+    assert!(n > 10, "most of the store is usable: {n}");
+    assert!(s.free_blocks() >= 62 / RESERVE_PART, "the reserve is free");
+    // The audit trail may still use it.
+    assert!(s.append(b"audit/log/1", b"record").is_ok());
+    // Rewriting an existing file adds no object; a smaller one still fits.
+    assert!(!s.leaves_reserve(b"data/0", BLOCK as u64 * 8));
 }

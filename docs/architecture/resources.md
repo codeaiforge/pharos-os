@@ -53,7 +53,7 @@ What M3.5 builds on:
   - `cpu_ms`: CPU time;
   - `tokens`: inference tokens, prompt plus generated;
   - `net_sends` and `net_bytes`: datagrams and their payload bytes;
-  - `data_kb`: the agent's stored files in total (across attempts and tasks, since they persist);
+  - `data_kb`: the agent's stored files in total (across attempts and tasks, since they persist); whatever it is, an agent keeps at most 64 files (`agents::MAX_FILES`, D-046, #212), and a new file past them is `OVER_LIMIT`, recorded as `over data`;
   - `file_kb`: granted files read with `read_file` (#127, tools.md);
   - `messages`: messages sent to other agents (#133, coordination.md);
   - `rate`: requests per second, with a burst of the same number;

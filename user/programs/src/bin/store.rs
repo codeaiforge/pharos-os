@@ -218,6 +218,9 @@ impl Service {
         if writing && read_only {
             return Err(Status::ReadOnly);
         }
+        // Only the audit trail may use the store's last eighth (D-046,
+        // #212): no other client can leave it no room.
+        let audit = prefix == b"audit";
         if writing && self.broken {
             return Err(Status::IoError);
         }
@@ -259,6 +262,9 @@ impl Service {
             }
             Request::Write { path: p, len, at } => {
                 let n = full(p, &mut path)?;
+                if !audit && !self.store.leaves_reserve(&path[..n], len) {
+                    return Err(Status::NoSpace);
+                }
                 let buffer = buffer
                     .filter(|b| range_ok(b, at, len))
                     .ok_or(Status::NoBuffer)?;
@@ -269,6 +275,9 @@ impl Service {
             }
             Request::Append { path: p, record } => {
                 let n = full(p, &mut path)?;
+                if !audit && !self.store.leaves_reserve(&path[..n], record.len() as u64) {
+                    return Err(Status::NoSpace);
+                }
                 match self.store.append(&path[..n], record) {
                     Ok((number, head)) => {
                         out[1..9].copy_from_slice(&number.to_le_bytes());

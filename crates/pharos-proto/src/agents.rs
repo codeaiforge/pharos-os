@@ -232,6 +232,8 @@ pub const CONTROL: u32 = 0x100;
 pub const TRUST: u32 = 0x80;
 /// Largest file an agent keeps with `DATA_PUT`.
 pub const MAX_DATA: u32 = 64 << 10;
+/// Most files one agent keeps, whatever its `data_kb` (D-046, #212).
+pub const MAX_FILES: usize = 64;
 /// Most tasks kept.
 pub const MAX_TASKS: usize = 256;
 /// Longest `LOG` line and `FAIL` reason.

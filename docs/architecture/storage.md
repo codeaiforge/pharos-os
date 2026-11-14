@@ -219,7 +219,7 @@ All integers are little-endian. Blocks are 4 KiB (8 virtio-blk sectors).
 - **Mount:** read both slots; take the valid one with the higher generation, or the other if it is not valid; if neither is valid, the store is refused. Then check every extent is in range and no two objects share a block.
 - **Reads** check each object's CRC-32 (files: the whole content when read from start to end; streams: each record's CRC and chain value).
 - **A crash at any point** leaves either the old generation (step 1, or a torn step-2 write that fails its CRC) or the new one (step 2 complete). Nothing else is reachable.
-- **Full store:** a write that does not fit is refused (`NO_SPACE`) before anything is written. A device error fails the operation and the service stops accepting writes until restarted (reads continue).
+- **Full store:** a write that does not fit is refused (`NO_SPACE`) before anything is written. The last eighth of the blocks and of the object table is kept for the audit trail (D-046, #212): a write or append from any other namespace that would leave less than that free is refused the same way (`pharos_store::Store::leaves_reserve`, checked by the service), so no client can starve it. A device error fails the operation and the service stops accepting writes until restarted (reads continue).
 
 ### The storage service
 

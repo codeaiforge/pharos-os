@@ -1462,3 +1462,27 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 **Consequences.** Policy rules on flows (M6.6).
 
 **Evidence.** None yet.
+
+### D-046: Store space, and a full audit trail
+
+- **Status:** Accepted
+- **Needed by:** M5.4
+- **Date accepted:** 2026-11-14 (issue #212)
+
+**Context.** The M5.4 review of the trusted base found that the store has no limit per namespace (#212). One writer can fill its 4096-object table or its blocks, and so deny storage to every service. That includes the audit trail, so every consequential action would then be refused. An agent with `data write` could do this with empty files, since its `data_kb` counts bytes only. The audit trail is never pruned, so in time it fills the store by itself.
+
+**Options.**
+1. *What happens when the audit trail is full:* (a) refuse, so the audit service answers `UNWRITABLE` and every consequential action is refused; (b) rotate automatically, dropping the oldest records.
+2. *How the audit trail keeps its space:* (a) a reserve of the store's blocks and objects that only the audit namespace may use; (b) a fixed quota per namespace.
+
+**Evaluation criteria.** No client, and so no agent, can starve the audit trail; no record is lost without the user's decision; least new trusted code.
+
+**Decision (the maintainer chose the recommendation, 2026-11-14).**
+1. **A full audit trail refuses; it is never rotated automatically (1a).** Rotation would let an agent flood harmless actions to push the records of what it did out of the trail, and regulated users must keep records. Refusing is already the rule whenever a record cannot be stored (D-018). Stopping agents still works, because `trust` records its own commands only on a best-effort basis.
+2. **A reserve for the audit trail (2a):** an eighth of the store's blocks and of its object table. A write from any other namespace that would leave less than that free is refused as full. Fixed quotas per namespace were rejected: the models namespace holds weights of hundreds of megabytes on one disk and a few kilobytes on another, so no fixed split fits every store.
+3. **Agents are bounded by file count as well as bytes:** at most 64 files per agent, in the runtime.
+4. **Planned, M5.5:** a warning on the trusted console as the audit trail fills, and, on the user's command, export of the trail with its signed head, then a new stream that refers to the archived head (#217).
+
+**Consequences.** Once the audit trail has used the whole store, agent work stops until the user exports it (M5.5). The other namespaces have seven eighths of the store between them, with no split among themselves: the knowledge service can still fill its share and deny the runtime's task records, which stays a limit for M6.10.
+
+**Evidence.** The review findings (Claude reviewer S-4 and R4; gemini-3.8-flash SEC-M54-002), confirmed by reading the code (#212).
