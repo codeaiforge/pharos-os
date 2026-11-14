@@ -100,6 +100,22 @@ fn run(t: &mut TestRun) {
         mapping.is_some_and(|m| !m.flags.writable && !m.flags.executable && !m.flags.user),
     );
 
+    // `module_bytes` refuses the kernel image, which has the modules'
+    // memory-map kind (#225): the recorded range must cover the kernel's
+    // code and its writable data, and no module.
+    static DATA: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+    let phys = |virt: u64| paging::translate_kernel(virt).map(|m| m.phys);
+    let in_image = |p: Option<u64>| {
+        p.zip(paging::kernel_image_phys())
+            .is_some_and(|(p, (start, end))| start <= p && p < end)
+    };
+    t.check(
+        "the kernel image's range covers its code and data, not a module",
+        in_image(phys(run as *const () as u64))
+            && in_image(phys(&DATA as *const _ as u64))
+            && !in_image(phys(virt)),
+    );
+
     let odd = storage::ram_disk("odd");
     t.check(
         "odd: 1000 bytes, one whole block",

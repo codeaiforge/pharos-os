@@ -154,7 +154,7 @@ Two new kernel objects, and one new right (`READ = 1 << 4`):
   - every offset and size checked with overflow checks before use;
   - fixed limits: 1024 entries, 104-byte paths, 16 MiB images;
   - fuzzed on the host with at least 100,000 mutated images, expecting no panic.
-- **Kernel memory:** the module memory is read-only and outside the frame allocator, and mounting allocates at most 128 KiB, after the size check.
+- **Kernel memory:** the module memory is read-only and outside the frame allocator, and mounting allocates at most 128 KiB, after the size check. `mm::raw::module_bytes` makes the slice only for a range inside one "executable and modules" region and outside the kernel image, which has the same memory-map kind but holds the data the kernel writes (`storage::module_range_ok`, #225).
 - **Processes:** no ambient authority. A process reaches files only with a filesystem capability with `READ`. File capabilities narrow rights, pass over IPC only with `GRANT`, and can be revoked. User buffers go through the M2.7 copy paths.
 - **`unsafe`:** only the slice over module memory, in `mm::raw`, and the module request structures, in `limine.rs`.
 - **Limits:**

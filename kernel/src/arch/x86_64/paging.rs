@@ -859,6 +859,10 @@ fn direct_map_flags(kind: u64) -> Option<Flags> {
 
 static KERNEL_SPACE: IrqMutex<Option<AddressSpace>> = IrqMutex::new(None);
 
+/// Physical range of the kernel image (`IMAGE_END` 0 until known).
+static IMAGE_START: AtomicU64 = AtomicU64::new(0);
+static IMAGE_END: AtomicU64 = AtomicU64::new(0);
+
 /// Builds the kernel address space (see the module docs) and switches to it.
 #[cfg(target_os = "none")]
 /// `entries` are memory-map entries `(base, length, kind)`. Call once, after
@@ -900,10 +904,15 @@ pub fn init_kernel_space(
         (stack_bottom, stack_top, Flags::DATA),
         (df_bottom, df_top, Flags::DATA),
     ];
+    let (mut image_start, mut image_end) = (u64::MAX, 0);
     for (start, end, flags) in segments.into_iter().chain(stacks) {
         let len = end.next_multiple_of(FRAME_SIZE) - start;
         space.map_range(start, phys(start), len, flags, frames)?;
+        image_start = image_start.min(phys(start));
+        image_end = image_end.max(phys(start) + len);
     }
+    IMAGE_START.store(image_start, Ordering::Relaxed);
+    IMAGE_END.store(image_end, Ordering::Relaxed);
 
     // Process address spaces copy the kernel-half PML4 entries, so every
     // one must exist now and never change (1 MiB of tables).
@@ -1016,6 +1025,15 @@ pub fn hhdm() -> u64 {
 /// True once the kernel's own page tables are active.
 pub fn kernel_space_active() -> bool {
     kernel_root() == Some(active_root())
+}
+
+/// The kernel image's physical range `[start, end)`: every segment and
+/// both stacks, as [`init_kernel_space`] mapped them. `None` before that.
+/// Its memory-map kind is the boot modules' kind, so module checks must
+/// exclude it (#225).
+pub fn kernel_image_phys() -> Option<(u64, u64)> {
+    let end = IMAGE_END.load(Ordering::Relaxed);
+    (end != 0).then(|| (IMAGE_START.load(Ordering::Relaxed), end))
 }
 
 /// Root table of the kernel address space, once built.

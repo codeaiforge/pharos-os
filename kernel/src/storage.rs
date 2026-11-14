@@ -91,6 +91,21 @@ pub fn inside_module_region(
     })
 }
 
+/// True if `len` bytes at `phys` may be read as a boot module: inside one
+/// "executable and modules" entry ([`inside_module_region`]) and clear of
+/// the kernel image `[image.0, image.1)`, which has the same kind but holds
+/// `.data`, `.bss`, and the stacks the kernel writes (#225).
+pub fn module_range_ok(
+    entries: impl Iterator<Item = (u64, u64, u64)>,
+    image: (u64, u64),
+    phys: u64,
+    len: u64,
+) -> bool {
+    let end = phys.saturating_add(len);
+    let overlaps_image = phys < image.1 && image.0 < end;
+    !overlaps_image && inside_module_region(entries, phys, len)
+}
+
 #[cfg(target_arch = "x86_64")]
 pub use global::*;
 
@@ -203,5 +218,20 @@ mod tests {
             !inside_module_region(huge.into_iter(), u64::MAX - 5, 1),
             "region end overflows"
         );
+    }
+
+    #[test]
+    fn module_range_excludes_the_kernel_image() {
+        // Limine reports the kernel image and the modules with one kind.
+        let map = [(0x10_0000, 0x10_0000, MODULES_KIND)];
+        let image = (0x10_0000, 0x14_0000);
+        let ok = |phys, len| module_range_ok(map.into_iter(), image, phys, len);
+        assert!(ok(0x14_0000, 0x1000), "a module after the image");
+        assert!(ok(0x1f_f000, 0x1000), "the region's last page");
+        assert!(!ok(0x13_f000, 0x1000), "the image's last page (.bss)");
+        assert!(!ok(0x13_ff00, 0x200), "runs out of the image");
+        assert!(!ok(0x10_0000, 0x10_0000), "the whole region");
+        assert!(!ok(0x20_0000, 0x1000), "outside the region");
+        assert!(!ok(u64::MAX, 2), "overflow");
     }
 }
