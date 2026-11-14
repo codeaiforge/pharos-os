@@ -1,8 +1,10 @@
 //! One task attempt's permissions in the agent runtime (capabilities.md,
 //! #105): built from the policy entry and the manifest when the attempt
 //! starts, checked on every request that needs one, revocable at any time,
-//! and gone at their deadline. Nothing here outlives the attempt.
+//! and gone at their deadline. Only [`Kept`] outlives the attempt: what
+//! the runtime keeps by task, for the task's later attempts.
 
+use crate::tasks::Tasks;
 use alloc::vec::Vec;
 use pharos_proto::knowledge::SCOPES;
 use pharos_proto::manifest::{Data, Dest};
@@ -119,9 +121,63 @@ impl Grants {
     }
 }
 
+/// What the agent runtime keeps by task for its later attempts:
+/// approvals (#106), revocations, and refusals (also in the task's record,
+/// #207).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Kept {
+    /// Revoked, kept for the task's restarts.
+    pub revoked: Vec<(u32, Permission)>,
+    /// Approved (and until when), kept for its restarts.
+    pub approved: Vec<(u32, Permission, Option<u64>)>,
+    /// Refused, or not answered: not asked again.
+    pub refused: Vec<(u32, Permission)>,
+}
+
+impl Kept {
+    /// Drops what it keeps for tasks that have ended or are gone, unless
+    /// an attempt of one still runs (`running`): no later attempt needs it
+    /// (#233). A task not ended keeps everything, as it may run again.
+    pub fn prune(&mut self, tasks: &Tasks, running: impl Fn(u32) -> bool) {
+        let live = |id: u32| running(id) || tasks.find(id).is_some_and(|i| !tasks.list[i].ended());
+        self.revoked.retain(|(t, _)| live(*t));
+        self.approved.retain(|(t, ..)| live(*t));
+        self.refused.retain(|(t, _)| live(*t));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tasks::{Files, StoreFailed};
+    use pharos_proto::agents::State;
+    use std::collections::BTreeMap;
+
+    /// Files in memory.
+    #[derive(Default)]
+    struct Mem(BTreeMap<Vec<u8>, Vec<u8>>);
+
+    impl Files for Mem {
+        fn write(&mut self, path: &[u8], bytes: &[u8]) -> Result<(), StoreFailed> {
+            self.0.insert(path.to_vec(), bytes.to_vec());
+            Ok(())
+        }
+        fn read(&mut self, path: &[u8]) -> Result<Option<Vec<u8>>, StoreFailed> {
+            Ok(self.0.get(path).cloned())
+        }
+        fn delete(&mut self, path: &[u8]) -> Result<(), StoreFailed> {
+            self.0.remove(path);
+            Ok(())
+        }
+        fn list(&mut self, prefix: &[u8]) -> Result<Vec<Vec<u8>>, StoreFailed> {
+            Ok(self
+                .0
+                .keys()
+                .filter(|k| k.starts_with(prefix))
+                .cloned()
+                .collect())
+        }
+    }
 
     const NET: Permission = Permission::Net {
         addr: [10, 0, 2, 2],
@@ -252,6 +308,39 @@ mod tests {
             Some(None),
             "write covers read"
         );
+    }
+
+    #[test]
+    fn kept_until_the_task_ends_or_is_forgotten() {
+        let mut f = Mem::default();
+        let (mut tasks, _) = Tasks::load(&mut f, |_| Some(3)).unwrap();
+        let [a, b, c, d] =
+            [b"a", b"b", b"c", b"d"].map(|n| tasks.submit(&mut f, n, &[], b"").unwrap());
+        let mut kept = Kept::default();
+        for t in [a, b, c, d, 99] {
+            kept.revoked.push((t, Permission::Model(2)));
+            kept.approved.push((t, NET, None));
+            kept.refused.push((t, Permission::DataWrite));
+        }
+        // `a` waits, `b` runs, `c` ended while its last attempt still
+        // runs, `d` ended and is forgotten, 99 is gone.
+        let at = |tasks: &Tasks, id| tasks.find(id).unwrap();
+        tasks.start(&mut f, at(&tasks, b)).unwrap();
+        for t in [c, d] {
+            tasks
+                .finish(&mut f, at(&tasks, t), State::Done, b"")
+                .unwrap();
+        }
+        tasks.forget(&mut f, d).unwrap();
+        kept.prune(&tasks, |id| id == c);
+        assert_eq!(kept.revoked, [a, b, c].map(|t| (t, Permission::Model(2))));
+        assert_eq!(kept.approved, [a, b, c].map(|t| (t, NET, None)));
+        assert_eq!(kept.refused, [a, b, c].map(|t| (t, Permission::DataWrite)));
+        // `c`'s attempt ended too; `a` and `b` have not.
+        kept.prune(&tasks, |_| false);
+        assert_eq!(kept.revoked, [a, b].map(|t| (t, Permission::Model(2))));
+        assert_eq!(kept.approved.len(), 2);
+        assert_eq!(kept.refused.len(), 2);
     }
 
     #[test]

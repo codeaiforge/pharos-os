@@ -99,7 +99,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use pharos_programs::budgets::{self, Bucket, GroupUse, Over, Usage};
-use pharos_programs::grants::Grants;
+use pharos_programs::grants::{Grants, Kept};
 use pharos_programs::groups;
 use pharos_programs::mailbox::{self, Mailboxes};
 use pharos_programs::tasks::{self, Begin, Files, StoreFailed, Tasks};
@@ -1312,16 +1312,13 @@ struct Runtime {
     controls: [Option<(u32, Mapped)>; MAX_CONTROLS],
     infer_buffer: Mapped,
     reply: Handle,
-    /// Permissions revoked from running tasks, kept for their restarts.
-    revoked: Vec<(u32, Permission)>,
+    /// Approved, revoked, and refused by task, kept for its restarts, and
+    /// dropped once it ends (#233).
+    kept: Kept,
     /// Approval requests waiting for the user (#106).
     pending: Vec<Pending>,
     next_request: u16,
     approve_us: u64,
-    /// Approved for a task (and until when), kept for its restarts.
-    approved: Vec<(u32, Permission, Option<u64>)>,
-    /// Refused, or not answered, for a task: not asked again.
-    refused: Vec<(u32, Permission)>,
     /// The policy table's groups, and what each has used this minute.
     groups: &'static [Group],
     group_use: Vec<GroupUse>,
@@ -1744,10 +1741,10 @@ impl Runtime {
         if limits.propose {
             g.add(Permission::UpdatePropose, None);
         }
-        for (_, p, until) in self.approved.iter().filter(|(t, ..)| *t == id) {
+        for (_, p, until) in self.kept.approved.iter().filter(|(t, ..)| *t == id) {
             g.add(*p, *until);
         }
-        for (_, p) in self.revoked.iter().filter(|(t, _)| *t == id) {
+        for (_, p) in self.kept.revoked.iter().filter(|(t, _)| *t == id) {
             g.revoke(p);
         }
         let delegated = self.delegated(id, now);
@@ -3247,7 +3244,8 @@ impl Runtime {
             .flatten()
             .find(|s| t.parent != 0 && s.task == t.parent);
         let revoked = |p: &Permission| {
-            self.revoked
+            self.kept
+                .revoked
                 .iter()
                 .any(|(r, q)| *r == id && (q.covers(p) || p.covers(q)))
         };
@@ -3365,9 +3363,9 @@ impl Runtime {
     /// it too (#207).
     fn close(&mut self, task: u32, p: Permission, refused: bool) {
         let list = if refused {
-            &mut self.refused
+            &mut self.kept.refused
         } else {
-            &mut self.revoked
+            &mut self.kept.revoked
         };
         list.push((task, p));
         // ponytail: a record the store does not take, or one already
@@ -3398,7 +3396,7 @@ impl Runtime {
             return Asked::Granted;
         }
         let closed = |list: &[(u32, Permission)]| list.iter().any(|(t, q)| *t == task && *q == p);
-        if !askable(entry, &p) || closed(&self.revoked) || closed(&self.refused) {
+        if !askable(entry, &p) || closed(&self.kept.revoked) || closed(&self.kept.refused) {
             return Asked::Refused;
         }
         if self
@@ -3481,7 +3479,7 @@ impl Runtime {
         }
         if how == trust::Resolution::Granted {
             let until = (q.for_ms > 0).then(|| uptime() + u64::from(q.for_ms) * 1000);
-            self.approved.push((q.task, q.permission, until));
+            self.kept.approved.push((q.task, q.permission, until));
             for s in self.slots.iter_mut().flatten().filter(|s| s.task == q.task) {
                 s.grants.add(q.permission, until);
             }
@@ -3737,6 +3735,14 @@ impl Runtime {
         for id in self.tasks.orphans() {
             let _ = self.cancel(id, b"goal ended");
         }
+    }
+
+    /// Drops what is kept for tasks that ended or were forgotten, once no
+    /// attempt of theirs runs (#233).
+    fn prune(&mut self) {
+        let slots = &self.slots;
+        let running = |id: u32| slots.iter().flatten().any(|s| s.task == id);
+        self.kept.prune(&self.tasks, running);
     }
 
     /// `USAGE` from `trust` (#119): what each running attempt has used, and
@@ -4083,12 +4089,14 @@ fn main(arg: u64) -> u64 {
         controls: Default::default(),
         infer_buffer,
         reply,
-        revoked,
+        kept: Kept {
+            revoked,
+            approved: Vec::new(),
+            refused,
+        },
         pending: Vec::new(),
         next_request: 0,
         approve_us: APPROVE_US[usize::from(arg == 1)],
-        approved: Vec::new(),
-        refused,
         groups,
         group_use: alloc::vec![GroupUse::default(); groups.len()],
         infer_health: Health {
@@ -4114,6 +4122,7 @@ fn main(arg: u64) -> u64 {
         let stranded = r.retry_stranded();
         // Before starting any: a subtask of an ended goal never starts.
         r.cancel_orphans();
+        r.prune();
         r.start_pending();
         let wait = r
             .check_deadlines()
