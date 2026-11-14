@@ -11,7 +11,8 @@
 //! (read-write). A boot is the next number after the highest `log/<n>`;
 //! its first record is a `boot` event. An entry the store does not take
 //! (full, failing, or not answering within 10 s) answers `UNWRITABLE`, and
-//! the caller refuses the action. A restarted service starts a new stream.
+//! the caller refuses the action. A restarted service starts a new stream;
+//! until the store says which (#214), every entry is `UNWRITABLE`.
 
 #![no_std]
 #![no_main]
@@ -116,9 +117,54 @@ impl Audit {
         }
     }
 
+    /// Opens this boot's stream: the next number after the highest
+    /// `log/<n>`, with its `boot` record first. False if the store cannot
+    /// say which that is or does not take the record: nothing is appended
+    /// until then (#214), so no record lands in an earlier boot's stream.
+    fn open(&mut self) -> bool {
+        let Some(boot) = self.last_boot().and_then(|b| b.checked_add(1)) else {
+            return false;
+        };
+        let mut d = [0u8; 20];
+        let digits = decimal(u64::from(boot), &mut d);
+        self.path[..4].copy_from_slice(b"log/");
+        self.path[4..4 + digits.len()].copy_from_slice(digits);
+        self.path_len = 4 + digits.len();
+        self.boot = boot;
+        let first = Entry {
+            kind: Kind::Event,
+            refers: 0,
+            actor: b"",
+            task: 0,
+            attempt: 0,
+            action: action::BOOT,
+            permission: None,
+            service: b"",
+            outcome: outcome::OK,
+            detail: b"",
+        };
+        if self.write(client::AUDIT, first).is_none() {
+            self.boot = 0;
+            return false;
+        }
+        let mut d = [0u8; 20];
+        let digits = decimal(u64::from(boot), &mut d);
+        say(&[b"audit: boot ", digits, b", log/", digits]);
+        true
+    }
+
+    /// Stores `entry` from `client` in this boot's stream, opened first if
+    /// it is not yet; its sequence number, or `None` if not stored.
+    fn append(&mut self, client: u8, entry: Entry<'_>) -> Option<u64> {
+        if self.boot == 0 && !self.open() {
+            return None;
+        }
+        self.write(client, entry)
+    }
+
     /// Stores `entry` from `client`; its sequence number, or `None` if the
     /// store did not take it.
-    fn append(&mut self, client: u8, entry: Entry<'_>) -> Option<u64> {
+    fn write(&mut self, client: u8, entry: Entry<'_>) -> Option<u64> {
         let rec = Record {
             sequence: self.records,
             time: uptime(),
@@ -174,6 +220,14 @@ impl Audit {
                     1
                 }
             },
+            // Opened first if it is not yet (#214): boot 0 means none.
+            Request::Head if self.boot == 0 && !self.open() => Head {
+                boot: 0,
+                records: 0,
+                head: [0; 32],
+            }
+            .encode(out)
+            .unwrap_or(0),
             Request::Head => Head {
                 boot: self.boot,
                 records: self.records,
@@ -197,37 +251,10 @@ fn main(_: u64) -> u64 {
         records: 0,
         head: [0; 32],
     };
-    // With no store, the service still runs and answers `UNWRITABLE`.
-    let boot = a.last_boot().map_or(1, |b| b + 1);
-    a.boot = boot;
-    let mut d = [0u8; 20];
-    let digits = decimal(u64::from(boot), &mut d);
-    a.path[..4].copy_from_slice(b"log/");
-    a.path[4..4 + digits.len()].copy_from_slice(digits);
-    a.path_len = 4 + digits.len();
-    let first = Entry {
-        kind: Kind::Event,
-        refers: 0,
-        actor: b"",
-        task: 0,
-        attempt: 0,
-        action: action::BOOT,
-        permission: None,
-        service: b"",
-        outcome: outcome::OK,
-        detail: b"",
-    };
-    let stored = a.append(client::AUDIT, first).is_some();
-    let mut d = [0u8; 20];
-    let digits = decimal(u64::from(boot), &mut d);
-    if stored {
-        say(&[b"audit: boot ", digits, b", log/", digits]);
-    } else {
-        say(&[
-            b"audit: boot ",
-            digits,
-            b": the store does not take records",
-        ]);
+    // With no store, the service still runs and answers `UNWRITABLE`
+    // until it can open its stream (#214).
+    if !a.open() {
+        say(&[b"audit: the store does not take records; not yet a stream"]);
     }
     if send(REPORT, b"ready", 0, 0, 0).is_err() {
         return 2;

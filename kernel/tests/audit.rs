@@ -3,8 +3,10 @@
 //! `store`, `audit` (namespace `audit`), and `trust` with an audit
 //! capability, as `init` does, then `auditclient` in mode 0: records from
 //! two clients, an intent and its outcome, malformed entries refused. Then
-//! it kills the audit service (`process::kill`) and starts it again on the
-//! same endpoint and store, and runs `auditclient` in mode 1: a new stream,
+//! it kills the audit service (`process::kill`) and the storage service,
+//! starts the audit service again on the same endpoint while the store is
+//! down (it must open no stream, #214), then the store, and runs
+//! `auditclient` in mode 1: a new stream, opened once the store answers,
 //! then the store fills and `APPEND` answers `UNWRITABLE` while `HEAD`
 //! still answers. The runner types `audit` on the trusted console, and
 //! afterwards checks the image with `cargo xtask store audit`'s code and
@@ -148,15 +150,22 @@ fn run(t: &mut TestRun) {
         Endpoint::new(),
     );
     let ep = |e: &Arc<Endpoint>, rights| Capability::new(Object::Endpoint(e.clone()), rights);
-    let caps = vec![
+    let store_caps = vec![
         Capability::new(Object::DebugConsole, WRITE),
         Capability::new(Object::Device(disk), MAP | CONFIG | IRQ),
         ep(&store, RECEIVE),
         ep(&report, SEND),
     ];
-    if start(t, &programs, b"bin/store", caps, &report, 10_240).is_none() {
+    let Some(store_id) = start(
+        t,
+        &programs,
+        b"bin/store",
+        store_caps.clone(),
+        &report,
+        10_240,
+    ) else {
         return;
-    }
+    };
     let audit_caps = vec![
         Capability::new(Object::DebugConsole, WRITE),
         ep(&audit, RECEIVE),
@@ -210,8 +219,22 @@ fn run(t: &mut TestRun) {
         "the kernel killed the audit service",
         process::kill(first, KILLED),
     );
+    // #214: the store too, and the audit service started while it is
+    // down (its look-up times out after 10 s), then the store again. Its
+    // stream must be a new one, opened once the store answers.
+    t.check(
+        "the kernel killed the storage service",
+        process::kill(store_id, KILLED),
+    );
     sched::sleep(Duration::from_millis(200));
     if start(t, &programs, b"bin/audit", audit_caps, &report, 0).is_none() {
+        return;
+    }
+    t.check(
+        "with no store, the audit service opened no stream",
+        said("audit: the store does not take records; not yet a stream"),
+    );
+    if start(t, &programs, b"bin/store", store_caps, &report, 10_240).is_none() {
         return;
     }
     let (id, passed) = client(&programs, &audit, 1);
