@@ -1639,18 +1639,22 @@ impl Runtime {
                 }
             }
             let (agents, groups) = (&self.agents, self.groups);
+            // A subtask of an ended goal whose cancellation is not yet
+            // recorded never starts (#231).
+            let orphans = self.tasks.orphans();
             let runnable = |t: &tasks::Task| {
-                agents
-                    .iter()
-                    .find(|l| l.entry.name == t.agent)
-                    .is_some_and(|l| {
-                        match groups.iter().position(|g| g.name == l.entry.budget.group) {
-                            Some(g) => {
-                                budgets::room(&groups[g], in_group[g].0, in_group[g].1, l.pages)
+                !orphans.contains(&t.id)
+                    && agents
+                        .iter()
+                        .find(|l| l.entry.name == t.agent)
+                        .is_some_and(|l| {
+                            match groups.iter().position(|g| g.name == l.entry.budget.group) {
+                                Some(g) => {
+                                    budgets::room(&groups[g], in_group[g].0, in_group[g].1, l.pages)
+                                }
+                                None => true,
                             }
-                            None => true,
-                        }
-                    })
+                        })
             };
             let Some(i) = self.tasks.next(&mut self.store, runnable) else {
                 return;
@@ -1989,7 +1993,10 @@ impl Runtime {
     /// refused their retry. Returns whether any are still left.
     fn retry_stranded(&mut self) -> bool {
         let slots = &self.slots;
-        let has = |id: u32| slots.iter().flatten().any(|s| s.task == id);
+        // An orphan stopped before its cancellation was recorded is not
+        // retried (#231).
+        let orphans = self.tasks.orphans();
+        let has = |id: u32| orphans.contains(&id) || slots.iter().flatten().any(|s| s.task == id);
         let agents = &self.agents;
         let max = |name: &[u8]| {
             agents
@@ -3764,9 +3771,23 @@ impl Runtime {
     }
 
     /// Cancels the open subtasks of goals that ended, however they ended
-    /// (#136). One the store or trail refuses is tried again next pass.
+    /// (#136). Each running one is stopped and its grants dropped first,
+    /// as a revocation takes effect whatever the trail does (#231); the
+    /// cancellation is recorded and stored when the trail and the store
+    /// take it, tried again each pass until then, and the task is neither
+    /// started nor retried meanwhile.
     fn cancel_orphans(&mut self) {
         for id in self.tasks.orphans() {
+            let slot = (self.slots.iter()).position(|s| {
+                s.as_ref()
+                    .is_some_and(|s| s.task == id && s.ending.is_none())
+            });
+            if let Some(i) = slot {
+                if let Some(s) = self.slots[i].as_mut() {
+                    s.grants = Grants::default();
+                }
+                self.end(i, Ending::Cancelled);
+            }
             let _ = self.cancel(id, b"goal ended");
         }
     }

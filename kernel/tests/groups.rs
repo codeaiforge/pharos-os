@@ -6,7 +6,8 @@
 //! `boss`. A second goal has crashing and hung workers fail and a steered
 //! worker's result refused by the verifier, so it is not verified, and its
 //! end cancels its last subtask (#136, #137); `stop group crew` ends a
-//! third. Afterwards
+//! third. A fourth goal's end, after the kernel kills the audit service,
+//! still stops its subtask (#231). Afterwards
 //! the runner checks the audit trail. Runs under UEFI
 //! (D-009).
 
@@ -60,8 +61,17 @@ fn run(t: &mut TestRun) {
     };
     let (client, steps) = common::client(t, &services, 11);
     let mut passed: Vec<Vec<u8>> = Vec::new();
+    let mut killed = false;
     let start = time::uptime();
     while time::uptime() - start < Duration::from_secs(120) {
+        // The fourth goal asks for it (#231).
+        if !killed
+            && process::debug_output()
+                .iter()
+                .any(|(id, l)| *id == runtime && l == b"agents: boss: audit me")
+        {
+            killed = process::kill(services.audit_id, 13);
+        }
         match ipc::poll(&steps, Duration::from_millis(100)) {
             Some(m) if m.bytes() == b"done" => break,
             Some(m) => {
@@ -76,6 +86,7 @@ fn run(t: &mut TestRun) {
         "a goal whose subtasks failed is not verified",
         "a goal's end cancels its open subtasks",
         "stop group ends the group's goal, its subtasks, and its request",
+        "with the trail gone, a goal's end still stops its subtasks",
     ] {
         let want = alloc::format!("ok {step}");
         t.check(step, passed.iter().any(|l| l == want.as_bytes()));
@@ -100,6 +111,7 @@ fn run(t: &mut TestRun) {
     for line in &said {
         kprintln!("  runtime: {}", core::str::from_utf8(line).unwrap_or("?"));
     }
+    t.check("the kernel killed the audit service", killed);
     for name in ["boss", "helper", "aide"] {
         let want = alloc::format!("agents: {name} manifest accepted");
         t.check(

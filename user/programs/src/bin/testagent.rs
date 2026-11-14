@@ -1393,6 +1393,19 @@ impl Agent {
         self.complete(b"falter ok")
     }
 
+    /// A goal that ends while the audit trail is gone (#231): its subtask
+    /// (task 22) runs, the kernel kills the audit service, and the goal
+    /// fails, which is not audited.
+    fn abandon(&self) -> u64 {
+        if self.subtask(b"helper", b"wait", &[]).is_err() {
+            return self.fail(b"the subtask was refused");
+        }
+        sleep(1_000_000);
+        self.call(&Request::Log { text: b"audit me" }, &mut [0; 256]);
+        sleep(2_000_000);
+        self.fail(b"abandoned")
+    }
+
     /// The `deputy` kernel's goal (#138): a compromised worker, a worker
     /// that passes on a delegation and floods it with an injected
     /// instruction, and `boss` steered by that instruction. Nothing works
@@ -2599,6 +2612,7 @@ fn main(_: u64) -> u64 {
         b"deputy" => a.deputy(),
         b"stand" => a.stand(),
         b"falter" => a.falter(),
+        b"abandon" => a.abandon(),
         b"trap" => a.trap(),
         b"rogue" => a.rogue(),
         b"plant" => a.plant(),

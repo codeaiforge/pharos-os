@@ -324,6 +324,20 @@ fn main(arg: u64) -> u64 {
             "stop group ends the group's goal, its subtasks, and its request",
             stood && cancelled(&c, 19) && cancelled(&c, 20) && idle(&c, &mut out),
         );
+        // #231: a fourth goal (21) ends after the kernel killed the audit
+        // service; its subtask (22) is stopped at once, though its
+        // cancellation cannot be recorded, and is not run again.
+        let abandoned = c.submit(b"boss", b"abandon").ok() == Some(21)
+            && c.wait(21, 30)
+                .is_some_and(|(s, r)| s.state == State::Failed && r == b"abandoned");
+        sleep(2_000_000);
+        let held = c
+            .status(22)
+            .is_some_and(|s| s.state == State::Running && s.attempts == 1);
+        c.step(
+            "with the trail gone, a goal's end still stops its subtasks",
+            abandoned && held && idle(&c, &mut out),
+        );
         let _ = send(REPORT, b"done", 0, 0, 0);
         return c.failed;
     }
