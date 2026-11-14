@@ -58,6 +58,7 @@
 #![no_std]
 #![no_main]
 
+use pharos_programs::output;
 use pharos_programs::virtio_console::{Console, RX_BUFFER, TX_BUFFER};
 use pharos_proto::knowledge::{self, Author};
 use pharos_proto::permission::Permission;
@@ -114,16 +115,11 @@ struct Trust {
 }
 
 impl Trust {
-    /// One line on the trusted console, `\r\n` added. Dropped if the
-    /// console is full: output never makes the service wait.
+    /// One line on the trusted console, `\r\n` added (cut to fit, #226).
+    /// Dropped if the console is full: output never makes the service wait.
     fn say(&mut self, parts: &[&[u8]]) {
         let mut line = [0u8; TX_BUFFER];
-        let mut n = 0;
-        for p in parts.iter().chain([&&b"\r\n"[..]]) {
-            let take = p.len().min(line.len() - n);
-            line[n..n + take].copy_from_slice(&p[..take]);
-            n += take;
-        }
+        let n = output::line(parts, &mut line);
         let _ = self.console.send(&line[..n]);
     }
 

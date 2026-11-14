@@ -28,6 +28,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- `trust` keeps a line's `\r\n` when it cuts an over-long line (#226, M5.4 review): `say` cut the terminator off a line that filled the 256-byte buffer, so the next line ran onto the same row. `pharos_programs::output::line` keeps two bytes for it; a host unit test covers it.
 - NMI (vector 2) and machine check (vector 18) run on their own IST stacks (IST2, IST3) (#222, M5.4 review), so one that arrives while the system-call entry or exit is in ring 0 on the user's RSP does not push its frame there. A host test in `idt.rs` and the new `ist_stacks` test kernel cover it.
 - Limine's responses can no longer be used after bootloader memory is reclaimed (#223, M5.4 review): they, their strings, the memory-map entries, and the module list are borrowed from a single `limine::BootMemory` token that `mm::reclaim_bootloader_memory` consumes, so a use after the reclaim does not compile. `'static` responses (test kernels) rule out the reclaim, and the frame allocator refuses to free a reclaimable frame before it. Host tests in `limine.rs` and `frame.rs`, and the `reclaim` test kernel, cover it.
 - `module_bytes` refuses ranges in the kernel image (#225, M5.4 review): the kernel image has the same memory-map kind as boot modules, so the check accepted a range over `.data` or `.bss`. `storage::module_range_ok` excludes the image's physical range, which `init_kernel_space` now records; a host unit test in `storage.rs` and the `ramdisk` test kernel cover it.
