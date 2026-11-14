@@ -247,7 +247,6 @@ mod kernel {
     use crate::device::DeviceHandle;
     use crate::ipc::Endpoint;
     use crate::mm::raw::IrqMutex;
-    use crate::pci::Bar;
     use crate::sched;
 
     /// The endpoint each bound vector notifies (`irq_notify`). Kept beside
@@ -292,15 +291,9 @@ mod kernel {
         /// unmasks it, and enables MSI-X on the device.
         pub fn create(device: Arc<DeviceHandle>, entry: u16) -> Result<Arc<Self>, IrqError> {
             let msix = device.pci.msix.ok_or(IrqError::NoEntry)?;
-            if entry >= msix.table_size {
-                return Err(IrqError::NoEntry);
-            }
-            let Some(Some(Bar::Memory { base, .. })) =
-                device.pci.bars.get(usize::from(msix.table_bar))
-            else {
-                return Err(IrqError::NoEntry);
-            };
-            let table_entry = base + u64::from(msix.table_offset) + 16 * u64::from(entry);
+            let table_entry = msix
+                .entry_address(&device.pci.bars, entry)
+                .ok_or(IrqError::NoEntry)?;
             let owner = Arc::as_ptr(&device) as usize;
             let index = VECTORS.lock().alloc(owner, entry)?;
             // From here on, dropping `irq` masks the entry and frees the vector.

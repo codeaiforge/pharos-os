@@ -129,6 +129,26 @@ pub struct Msix {
     pub pba_offset: u32,
 }
 
+impl Msix {
+    /// The physical address of table entry `entry`, if its 16 bytes lie
+    /// inside the table's memory BAR. The offset comes from the device, so
+    /// an address past the BAR could be RAM (#218).
+    pub fn entry_address(&self, bars: &[Option<Bar>; 6], entry: u16) -> Option<u64> {
+        if entry >= self.table_size {
+            return None;
+        }
+        let Some(Some(Bar::Memory { base, size, .. })) = bars.get(usize::from(self.table_bar))
+        else {
+            return None;
+        };
+        let at = u64::from(self.table_offset) + 16 * u64::from(entry);
+        if at + 16 > *size {
+            return None;
+        }
+        base.checked_add(at)
+    }
+}
+
 /// Removes memory BARs that overlap an entry of the boot memory map
 /// (`(base, length)`: RAM, the kernel, modules, firmware tables, the
 /// framebuffer) or run past the end of the address space. Device registers
@@ -520,5 +540,38 @@ mod tests {
                 pba_offset: 0x3800
             }
         );
+    }
+
+    #[test]
+    fn msix_entries_stay_inside_their_bar() {
+        let mut bars = [None; 6];
+        bars[1] = Some(Bar::Memory {
+            base: 0xfe00_0000,
+            size: 0x4000,
+            prefetchable: false,
+            wide: false,
+        });
+        let m = Msix {
+            offset: 0x50,
+            table_size: 4,
+            table_bar: 1,
+            table_offset: 0x3fc0,
+            pba_bar: 1,
+            pba_offset: 0x3800,
+        };
+        assert_eq!(m.entry_address(&bars, 3), Some(0xfe00_3ff0));
+        assert_eq!(m.entry_address(&bars, 4), None, "past the table");
+        // A table offset past the BAR could point the kernel's write at RAM.
+        let past = Msix {
+            table_offset: 0x3ff8,
+            ..m
+        };
+        assert_eq!(past.entry_address(&bars, 0), None);
+        let far = Msix {
+            table_offset: 0x8000_0000,
+            ..m
+        };
+        assert_eq!(far.entry_address(&bars, 0), None);
+        assert_eq!(Msix { table_bar: 2, ..m }.entry_address(&bars, 0), None);
     }
 }
