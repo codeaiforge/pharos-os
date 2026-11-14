@@ -3,7 +3,9 @@
 - **Scope:** the trusted base, reviewed whole rather than as the changes of one milestone:
   - the kernel's system-call layer: `syscall.rs`, `cap.rs`, `ipc.rs`, `process.rs`, and the user-memory copies in `arch/x86_64/paging.rs`;
   - every kernel `unsafe` module: `arch/x86_64.rs` and its submodules, `limine.rs`, `mm/raw.rs`;
-  - `trust`, the agent runtime (`agents` and its `pharos_programs` modules), `init`, `store`, and `audit`, with their `pharos_proto` interfaces and `pharos-fs`.
+  - `trust`, the agent runtime (`agents` and its `pharos_programs` modules), `init`, `store`, and `audit`, with their `pharos_proto` interfaces and `pharos-fs`;
+  - user space's only `unsafe` module, `user/pharos-user/src/syscall.rs`, with the wrappers in `lib.rs`;
+  - the two registry dependencies, `ed25519-compact` 2.6.0 and `libm` 0.2.16.
 - **Design under review:** the [threat model](threat-model.md) (Part 1), AGENTS.md sections 5 and 7, and the architecture pages each scope names.
 - **Dates:** 2026-11-13 to 2026-11-14, milestone M5.4. The code under review is `main` from `37ab5b7` onward; the fixes are listed below.
 - **Status:** **awaiting the maintainer's verdict.** Validity and severity of every finding are the maintainer's to decide. The severities below are the reviewers' proposals, with the main session's opinion where it differs.
@@ -42,6 +44,8 @@ Each fix has a test that fails without it. Each fix also has a throwaway branch:
 | #216 | Low to medium | Claude (S-2) | A store answer lost after a committed append made the next audit record reuse its sequence number | `ddea515` | `sequence` unit test (a lost answer cannot be made on purpose in QEMU) |
 | #212 | Medium | Claude (R4, S-4); Gemini (SEC-M54-002) | The store had no limit per namespace: one writer, an agent with empty files among them, could fill it and deny the audit trail. Decided by D-046 | `4be5074` | `pharos-store` unit test; `budgets` |
 | #215 | Medium | Claude (S-5) | `init` carried out the user's commands whatever happened to their audit record, and dropped the oldest queued record silently after 32 | `a7ab8f9` | `manage` |
+| #218 | Medium | Claude (kernel `unsafe` F2) | The MSI-X table offset comes from the device and was never checked against its BAR's size, so the kernel's 16-byte entry write could land in RAM | `1050f95` | `pci` unit test |
+| #219 | Medium | Claude (system calls F5) | `dma_alloc` and `mmio_map` accepted a hole the revocation sweep left in a `mem_map` reservation; `mem_unmap` then freed the DMA frame the device still held | `841db94` | `syscall` decoder unit test (the whole chain needs frames to run out during a sweep) |
 
 **CI on the throwaway branches:**
 - Confirmed to fail at their test only (2026-11-14, the `push` cell):
@@ -73,12 +77,13 @@ Checking the findings against the code changed some of them:
 
 ## Findings not fixed
 
-### Medium, not yet verified
+### Medium, filed, not fixed
 
-These were reported in the kernel scopes and were neither verified nor filed. **They must be decided before the M5.4 gate:**
-- **Kernel `unsafe` F2:** the MSI-X table address is never checked against its BAR's size. It needs a hostile device, and the trust model has no IOMMU (an accepted limit until M8.1).
-- **Kernel `unsafe` F3, and Gemini SEC-05:** several safe kernel functions would be unsound if misused (`gdt`, `paging`, `x86_64.rs`, `mm/raw.rs`, `context.rs`). No current caller misuses them.
-- **System calls F5:** a page the revocation sweep cannot replace leaves a hole inside a reservation, which `dma_alloc` might then map.
+- **#220, `pharos-user`:** `mem_unmap` is a safe function that takes any address, and `Mapped` is `Copy`. Safe code can unmap a heap chunk or keep a `Mapped` past its unmap; the next `mem_map` can then change memory under live references. Found by both reviewers (Gemini F1, rated high). No current program does it. The proposed fix changes `pharos-user`'s public API, so it waits for the maintainer.
+
+### Medium, verified, for the maintainer
+
+- **Kernel `unsafe` F3, and Gemini SEC-05:** checked against the code; each function is as described. Safe kernel functions whose `unsafe` block trusts an unchecked argument: `gdt::set_kernel_stack`, `paging::load_root`, `run_on_kernel_stack`, `mm::raw::bitmap_storage`, `paging::fill_frame_for_test` and `write_rodata_probe` (compiled into every kernel), `mmio_write32`/`mmio_read32`, `AddressSpace::map`, and `Context::leave_space`. No current caller passes a bad value, and none is reachable from ring 3. Making them `unsafe fn` would move `unsafe` into callers outside the allowed modules (`kmain` in `main.rs`), so the fix is a design choice: narrower types (`&KernelStack`, a frame the space owns), or the test helpers behind a feature. The main session proposes **low**: hardening, not a reachable defect.
 
 ### Low and informational
 
@@ -120,6 +125,25 @@ For the maintainer to accept or file:
   - Fixed 16-byte audit path buffer (Gemini SEC-M54-004): holds, since `log/` plus 10 digits is 14 bytes.
 - **Carried by D-046:** the knowledge service can still fill the non-audit share of the store and deny the runtime's task records (to M6.10). A warning as the audit trail fills, and export then rotation on the user's command, are planned for M5.5 (#217).
 
+### `pharos-user` low findings (Gemini)
+
+- F2: `memmove` calls `memcpy` for overlapping ranges, which `memcpy`'s comment forbids. The forward copy is correct there (`dest` at or before `src`), and raw pointers carry no `noalias`; the comment is wrong, not the code.
+- F3: `registers_contain` would report a false match for 0 with SSE, from lanes it never writes. Its only caller passes a nonzero marker.
+- F4: the vector probes run AVX instructions on the caller's word; without AVX, that is a `#UD` that ends the process, not undefined behaviour.
+
+Checked and sound by both: the entry stub's stack alignment and `ud2` after `pharos_main`; `raw`'s registers and clobbers (it and `call` are private to the crate; every public wrapper takes Rust slices); the direction flag, which the kernel clears on every entry (`SFMASK` for system calls, `cld` for interrupts), so `memmove`'s `std` cannot reach it; `Mapped`'s bounds and alignment checks, with no reference into device memory; the heap's size classes, alignment, overflow, and lock.
+
+## Dependency audit
+
+Both crates are the only registry packages in `Cargo.lock`, checksums pinned. Checked on 2026-11-14 by the main session:
+
+| Crate | Used by | License | Transitive dependencies | Advisories (OSV, which mirrors RustSec) | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `ed25519-compact` 2.6.0 | `pharos-image` (update signatures: verified on Pharos, signed on the host) | MIT | none (`default-features = false`: no `getrandom`, `ct-codecs`, `ed25519`) | none, any version | No build script. One `unsafe` block (volatile wipe). Verification rejects a non-canonical `s` and checks with the cofactor, so it accepts a few more signatures than a strict check; Pharos's key is fixed and an image is named by its hash, not its signature, so malleability does not matter. 2.6.1 (2026-11-07) rewrote signing's base-point table and fixes nothing for verification: staying on 2.6.0 is the proposal. |
+| `libm` 0.2.16 | `pharos-programs` (inference arithmetic), `xtask` | MIT | none | none, any version | Maintained by the Rust project (`compiler-builtins`); newest release. Its build script only reads environment variables. Its runtime FMA detection runs `xgetbv` only when CPUID reports OSXSAVE, which the kernel sets with AVX (`fpu.rs`). |
+
+Not done: a line-by-line read of either crate's arithmetic, and `cargo audit`/`cargo deny`, which are not installed.
+
 ## What held up
 
 Neither reviewer found any of these:
@@ -147,9 +171,9 @@ What the reviewers said they did not reach:
 
 | Criterion | State |
 | --- | --- |
-| No open critical or high findings | Both highs (#202, #204) are fixed. Three medium kernel findings are not yet verified (above). |
-| Every `unsafe` block reviewed | **Kernel only:** `arch/x86_64.rs` and its submodules, `limine.rs`, and `mm/raw.rs`, by the Claude and Gemini kernel reviews (gpt-5.6-luna found nothing). Whether every block was read is in each reviewer's coverage notes, not checked block by block here. **Not reviewed:** `user/pharos-user/src/syscall.rs`, the only `unsafe` in user space (D-008, D-016). |
-| Dependencies audited (`ed25519-compact` 2.6.0, `libm` 0.2.16) | **Not done.** |
+| No open critical or high findings | Both highs (#202, #204) are fixed. #220 is medium by the main session's proposal and high by Gemini's; the maintainer decides. |
+| Every `unsafe` block reviewed | **Kernel only:** `arch/x86_64.rs` and its submodules, `limine.rs`, and `mm/raw.rs`, by the Claude and Gemini kernel reviews (gpt-5.6-luna found nothing). Whether every block was read is in each reviewer's coverage notes, not checked block by block here. **User space:** `user/pharos-user/src/syscall.rs` (D-008, D-016), by the main session and Gemini, every block; #220 came of it. |
+| Dependencies audited (`ed25519-compact` 2.6.0, `libm` 0.2.16) | Done by the main session (above): no advisories, no transitive dependencies, MIT. Not read line by line. |
 | Security reporting process reviewed (SECURITY.md) | **Not done.** |
 | The report states the reviewer's independence | Above. |
 | Threat model updated | Rows for #203 (the one-pass stall, to M6.10), #212 and D-046, and #215; the other fixes are within existing rows. |
