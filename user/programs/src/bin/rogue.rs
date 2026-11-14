@@ -23,12 +23,12 @@
 #![no_main]
 
 use pharos_proto::{service, status, store, trust};
-use pharos_user::probe::{KERNEL_HALF, debug_write_from, read_into};
+use pharos_user::probe::{self, KERNEL_HALF, debug_write_from, read_into};
 use pharos_user::rights::{READ, SEND};
 use pharos_user::{
-    Handle, Received, call_timeout, config_read, debug_write, dma_alloc, endpoint_create,
-    irq_create, mem_map, mem_share, mem_unmap, mmio_map, open, process_stop, receive,
-    receive_timeout, send, sleep, spawn, try_send, try_send_cap,
+    Error, Handle, Received, call_timeout, config_read, debug_write, dma_alloc, endpoint_create,
+    irq_create, mem_map, mmio_map, open, process_stop, receive, receive_timeout, send, sleep,
+    spawn, try_send, try_send_cap,
 };
 
 pharos_user::entry!(main);
@@ -191,8 +191,14 @@ impl Probes {
         if let Some(f) = file {
             self.expect_refused(b"read into the kernel", read_into(f, k, 16).is_err());
         }
-        self.expect_refused(b"mem_share of the kernel", mem_share(k, 4096).is_err());
-        self.expect_refused(b"mem_unmap of the kernel", mem_unmap(k, 4096).is_err());
+        self.expect_refused(
+            b"mem_share of the kernel",
+            probe::mem_share(k, 4096).is_err(),
+        );
+        self.expect_refused(
+            b"mem_unmap of the kernel",
+            probe::mem_unmap(k, 4096) == Error::BadAddress,
+        );
         self.expect_refused(
             b"memory past its limit",
             mem_map((pages + 1) * 4096).is_err(),

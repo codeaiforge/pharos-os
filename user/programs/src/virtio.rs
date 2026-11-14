@@ -118,7 +118,7 @@ impl Transport {
         }
         let (bar, offset, _) = find(device, COMMON_CFG).ok_or("no common configuration")?;
         let (common, c) = map(device, bar, offset, COMMON_LEN, at).ok_or("cannot map common")?;
-        let t = find(device, NOTIFY_CFG)
+        let rest = find(device, NOTIFY_CFG)
             .ok_or("no notify configuration")
             .and_then(|(bar, offset, multiplier)| {
                 let (notify, notify_base) =
@@ -126,20 +126,23 @@ impl Transport {
                 let (bar, offset, _) = find(device, DEVICE_CFG).ok_or("no device configuration")?;
                 let (config, d) =
                     map(device, bar, offset, config_len, at + 0x2000).ok_or("cannot map config")?;
-                Ok(Self {
-                    common,
-                    c,
-                    notify,
-                    notify_base,
-                    multiplier,
-                    config,
-                    d,
-                })
+                Ok((notify, notify_base, multiplier, config, d))
             });
-        if t.is_err() {
-            common.write8(c + DEVICE_STATUS, FAILED);
+        match rest {
+            Ok((notify, notify_base, multiplier, config, d)) => Ok(Self {
+                common,
+                c,
+                notify,
+                notify_base,
+                multiplier,
+                config,
+                d,
+            }),
+            Err(why) => {
+                common.write8(c + DEVICE_STATUS, FAILED);
+                Err(why)
+            }
         }
-        t
     }
 
     fn status(&self, v: u8) {
@@ -213,6 +216,10 @@ impl Transport {
             .checked_add(n)
             .filter(|&n| n + 2 <= 4096)
             .ok_or("notify address outside the page")?;
+        let notify = self
+            .notify
+            .try_clone()
+            .ok_or("notify is not device memory")?;
         common.write16(c + QUEUE_ENABLE, 1);
         Ok(Queue {
             mem,
@@ -221,7 +228,7 @@ impl Transport {
             index,
             avail: 0,
             used: 0,
-            notify: self.notify,
+            notify,
             n,
         })
     }
@@ -399,7 +406,7 @@ impl Blk {
         };
         let q = match t
             .negotiate(features)
-            .and_then(|()| t.queue(0, entry, mem, 0, phys))
+            .and_then(|()| t.queue(0, entry, mem.try_clone().ok_or("not DMA memory")?, 0, phys))
         {
             Ok(q) => q,
             Err(why) => {

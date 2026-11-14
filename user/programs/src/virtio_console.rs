@@ -68,7 +68,13 @@ impl Console {
             let rx = dma_alloc(device, 1, at + 0x20_0000).map_err(|_| "no DMA pages")?;
             let tx = dma_alloc(device, 1, at + 0x30_0000).map_err(|_| "no DMA pages")?;
             t.negotiate(0)?;
-            let rxq = t.queue(0, entry, rings, 0, phys)?;
+            let rxq = t.queue(
+                0,
+                entry,
+                rings.try_clone().ok_or("not DMA memory")?,
+                0,
+                phys,
+            )?;
             let txq = t.queue(1, entry, rings, 4096, phys + 4096)?;
             Ok((rxq, txq, rx, tx))
         })();

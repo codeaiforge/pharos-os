@@ -49,8 +49,8 @@ use pharos_proto::trust::{self, Request};
 use pharos_user::rights::{READ, STOP, WAIT};
 use pharos_user::{
     Class, Error, Grant, Limits, Received, Status, call_timeout, debug_write, endpoint_create,
-    mem_map_buffer, process_status, process_stop, receive, send, sleep, spawn, spawn_with,
-    try_send, yield_now,
+    mem_map, process_status, process_stop, receive, send, sleep, spawn, spawn_with, try_send,
+    yield_now,
 };
 
 pharos_user::entry!(main);
@@ -107,7 +107,7 @@ fn main(arg: u64) -> u64 {
             sleep(u64::MAX);
             1
         }
-        9 => match mem_map_buffer(1 << 20) {
+        9 => match mem_map(1 << 20) {
             Ok(buffer) => {
                 for page in 0..256 {
                     buffer.write_bytes(page * 4096, &[1]);

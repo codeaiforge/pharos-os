@@ -45,7 +45,7 @@ use pharos_proto::agents::{
 use pharos_proto::{Info, status};
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
-    Handle, Mapped, Received, call_timeout, debug_write, delete, endpoint_create, mem_map_buffer,
+    Handle, Mapped, Received, call_timeout, debug_write, delete, endpoint_create, mem_map,
     mem_share, send, sleep,
 };
 
@@ -97,7 +97,7 @@ impl Client {
 
     /// Attaches the buffer (again, after the runtime was replaced).
     fn attach(&self) -> bool {
-        let Ok(memory) = mem_share(self.buffer.addr(), BUFFER) else {
+        let Ok(memory) = mem_share(&self.buffer) else {
             return false;
         };
         let mut msg = [0u8; 16];
@@ -168,7 +168,7 @@ fn main(arg: u64) -> u64 {
     let Ok(reply) = endpoint_create() else {
         return 100;
     };
-    let Ok(buffer) = mem_map_buffer(BUFFER) else {
+    let Ok(buffer) = mem_map(BUFFER) else {
         return 101;
     };
     let mut c = Client {

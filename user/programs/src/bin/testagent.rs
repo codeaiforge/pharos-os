@@ -173,8 +173,8 @@ use pharos_user::rights::SEND;
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
     Handle, Mapped, Received, call_timeout, config_read, debug_write, delete, dma_alloc,
-    endpoint_create, irq_create, mem_map, mem_map_buffer, mem_share, mem_unmap, mmio_map, open,
-    process_stop, receive_timeout, revoke, send, sleep, spawn, try_send, uptime,
+    endpoint_create, irq_create, mem_map, mem_share, mem_unmap, mmio_map, open, process_stop,
+    receive_timeout, revoke, send, sleep, spawn, try_send, uptime,
 };
 
 pharos_user::entry!(main);
@@ -1743,15 +1743,15 @@ impl Agent {
         let mut refused = false;
         while pages.len() < 65 {
             match mem_map(4096) {
-                Ok(addr) => pages.push(addr),
+                Ok(page) => pages.push(page),
                 Err(_) => {
                     refused = true;
                     break;
                 }
             }
         }
-        for addr in &pages {
-            let _ = mem_unmap(*addr, 4096);
+        for page in pages {
+            let _ = mem_unmap(page);
         }
         if !refused {
             return self.fail(b"more pages than its 64 were mapped");
@@ -2002,7 +2002,7 @@ impl Agent {
     /// capability, kept.
     fn attach(&self, m: &Mapped) -> Option<Handle> {
         let len = m.len() as u64;
-        let memory = mem_share(m.addr(), len).ok()?;
+        let memory = mem_share(m).ok()?;
         let mut msg = [0u8; 16];
         let n = encode(&Request::Attach { len }, &mut msg)?;
         send(RUNTIME, &msg[..n], memory, READ | WRITE, 0).ok()?;
@@ -2135,7 +2135,7 @@ impl Agent {
 
         // A buffer the agent revokes under the runtime: the runtime reads
         // zeros and does not crash.
-        let Ok(small) = mem_map_buffer(4096) else {
+        let Ok(small) = mem_map(4096) else {
             return self.fail(b"no small buffer");
         };
         let Some(memory) = self.attach(&small) else {
@@ -2517,10 +2517,10 @@ fn main(_: u64) -> u64 {
     let Ok(reply) = endpoint_create() else {
         return 10;
     };
-    let Ok(buffer) = mem_map_buffer(BUFFER) else {
+    let Ok(buffer) = mem_map(BUFFER) else {
         return 11;
     };
-    let Ok(memory) = mem_share(buffer.addr(), BUFFER) else {
+    let Ok(memory) = mem_share(&buffer) else {
         return 12;
     };
     let mut msg = [0u8; 16];

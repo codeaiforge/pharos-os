@@ -23,7 +23,7 @@ use pharos_proto::{Info, Reader, status};
 use pharos_store::sha256;
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
-    Handle, Mapped, Received, call_timeout, debug_write, delete, endpoint_create, mem_map_buffer,
+    Handle, Mapped, Received, call_timeout, debug_write, delete, endpoint_create, mem_map,
     mem_share, send,
 };
 
@@ -86,7 +86,7 @@ impl Client {
 
     fn attach(&self, to: Handle) -> bool {
         let len = self.buffer.len() as u64;
-        mem_share(self.buffer.addr(), len).is_ok_and(|memory| {
+        mem_share(&self.buffer).is_ok_and(|memory| {
             let mut msg = [0u8; 16];
             let sent = knowledge::encode(&Request::Attach { len }, &mut msg)
                 .is_some_and(|n| send(to, &msg[..n], memory, READ | WRITE, 0).is_ok());
@@ -360,7 +360,7 @@ fn second(c: &mut Client) {
 }
 
 fn main(arg: u64) -> u64 {
-    let (Ok(reply), Ok(buffer)) = (endpoint_create(), mem_map_buffer(MIN_BUFFER)) else {
+    let (Ok(reply), Ok(buffer)) = (endpoint_create(), mem_map(MIN_BUFFER)) else {
         return 100;
     };
     let mut c = Client {

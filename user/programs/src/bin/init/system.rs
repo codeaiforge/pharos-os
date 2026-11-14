@@ -17,7 +17,7 @@ use pharos_services::Service;
 use pharos_services::config::{self, Config};
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
-    Handle, Mapped, Received, call_timeout, fs_mount, mem_map_buffer, mem_share, revoke, send,
+    Handle, Mapped, Received, call_timeout, fs_mount, mem_map, mem_share, revoke, send,
 };
 
 /// A 16 MiB image takes about a second to read under QEMU.
@@ -59,8 +59,8 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
 impl Slots {
     /// Maps and shares the buffer and attaches it at the store.
     pub fn open(store: Handle, reply: Handle) -> Option<Self> {
-        let buffer = mem_map_buffer(BUFFER).ok()?;
-        let memory = mem_share(buffer.addr(), buffer.len() as u64).ok()?;
+        let buffer = mem_map(BUFFER).ok()?;
+        let memory = mem_share(&buffer).ok()?;
         let slots = Self {
             store,
             reply,

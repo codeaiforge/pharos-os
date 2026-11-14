@@ -13,7 +13,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use pharos_user::{Error, Handle, debug_write, delete, fs_mount, mem_map_buffer, mem_share, open};
+use pharos_user::{Error, Handle, debug_write, delete, fs_mount, mem_map, mem_share, open};
 
 pharos_user::entry!(main);
 
@@ -52,12 +52,12 @@ fn hello(fs: Handle) -> Option<Vec<u8>> {
 fn main(_: u64) -> u64 {
     let mut failures = 0;
     let (first, second) = (image(b"first"), image(b"second"));
-    let Ok(buffer) = mem_map_buffer(BUFFER) else {
+    let Ok(buffer) = mem_map(BUFFER) else {
         report(&mut failures, "map the buffer", false);
         return failures;
     };
     buffer.write_bytes(0, &first);
-    let Ok(memory) = mem_share(buffer.addr(), BUFFER) else {
+    let Ok(memory) = mem_share(&buffer) else {
         report(&mut failures, "share the buffer", false);
         return failures;
     };

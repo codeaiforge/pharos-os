@@ -32,7 +32,7 @@ use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::{Info, Writer, refusal};
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
-    Handle, Mapped, Received, call_timeout, debug_write, delete, endpoint_create, mem_map_buffer,
+    Handle, Mapped, Received, call_timeout, debug_write, delete, endpoint_create, mem_map,
     mem_map_cap, mem_share, mem_unmap, receive_timeout, send, try_send, uptime,
 };
 
@@ -140,8 +140,8 @@ impl Service {
     /// Maps the window and attaches it to the storage service (once).
     fn window(&mut self) -> Option<&Mapped> {
         if self.window.is_none() {
-            let buf = mem_map_buffer(WINDOW).ok()?;
-            let memory = mem_share(buf.addr(), WINDOW).ok()?;
+            let buf = mem_map(WINDOW).ok()?;
+            let memory = mem_share(&buf).ok()?;
             let mut msg = [0u8; 16];
             let n = store::encode(&StoreRequest::Attach { len: WINDOW }, &mut msg)?;
             let sent = send(STORE, &msg[..n], memory, READ | WRITE, 0);
@@ -212,7 +212,7 @@ impl Service {
         };
         if matches!(result, Err(Step::Read)) {
             if let Some(w) = self.window.take() {
-                let _ = mem_unmap(w.addr(), w.len() as u64);
+                let _ = mem_unmap(w);
             }
         }
         let step: &[u8] = match result {
@@ -245,12 +245,12 @@ impl Service {
             .position(|c| c.as_ref().is_some_and(|c| c.badge == badge))
             .or_else(|| self.clients.iter().position(Option::is_none));
         let Some(slot) = slot else {
-            let _ = mem_unmap(buffer.addr(), buffer.len() as u64);
+            let _ = mem_unmap(buffer);
             return;
         };
         // The slot is this client's or empty: a new buffer keeps the record.
         let ended = self.clients[slot].take().and_then(|old| {
-            let _ = mem_unmap(old.buffer.addr(), old.buffer.len() as u64);
+            let _ = mem_unmap(old.buffer);
             old.ended
         });
         self.clients[slot] = Some(Client {
@@ -451,7 +451,7 @@ impl Service {
             for slot in self.clients.iter_mut() {
                 if slot.as_ref().is_some_and(|c| c.badge == client) {
                     if let Some(c) = slot.take() {
-                        let _ = mem_unmap(c.buffer.addr(), c.buffer.len() as u64);
+                        let _ = mem_unmap(c.buffer);
                     }
                 }
             }

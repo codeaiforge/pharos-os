@@ -30,8 +30,7 @@ use pharos_proto::{Info, versions};
 use pharos_store::sha256;
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
-    Handle, Mapped, Received, call_reply, debug_write, endpoint_create, mem_map_buffer, mem_share,
-    send,
+    Handle, Mapped, Received, call_reply, debug_write, endpoint_create, mem_map, mem_share, send,
 };
 
 pharos_user::entry!(main);
@@ -96,8 +95,8 @@ impl Client {
     /// Maps a buffer of `len` bytes and attaches it; returns it if the
     /// service reports that size.
     fn attach(&self, len: u64) -> Option<Mapped> {
-        let buf = mem_map_buffer(len).ok()?;
-        let memory = mem_share(buf.addr(), len).ok()?;
+        let buf = mem_map(len).ok()?;
+        let memory = mem_share(&buf).ok()?;
         let mut msg = [0u8; 16];
         let n = encode(&Request::Attach { len }, &mut msg)?;
         send(self.service, &msg[..n], memory, READ | WRITE, 0).ok()?;

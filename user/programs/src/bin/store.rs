@@ -140,13 +140,13 @@ impl Service {
             None => match self.clients.iter().position(Option::is_none) {
                 Some(i) => i,
                 None => {
-                    let _ = mem_unmap(buffer.addr(), buffer.len() as u64);
+                    let _ = mem_unmap(buffer);
                     return;
                 }
             },
         };
         if let Some(old) = self.clients[slot].replace(Client { badge, buffer }) {
-            let _ = mem_unmap(old.buffer.addr(), old.buffer.len() as u64);
+            let _ = mem_unmap(old.buffer);
         }
     }
 
@@ -202,7 +202,7 @@ impl Service {
                 .position(|c| c.as_ref().is_some_and(|c| c.badge == client))
             {
                 if let Some(old) = self.clients[i].take() {
-                    let _ = mem_unmap(old.buffer.addr(), old.buffer.len() as u64);
+                    let _ = mem_unmap(old.buffer);
                 }
             }
             return Ok(1);
@@ -229,7 +229,7 @@ impl Service {
             .iter()
             .flatten()
             .find(|c| c.badge == badge)
-            .map(|c| c.buffer);
+            .map(|c| &c.buffer);
         let result = match req {
             Request::Stat { path: p } => {
                 let n = full(p, &mut path)?;

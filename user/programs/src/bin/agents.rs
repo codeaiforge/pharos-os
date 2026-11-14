@@ -121,9 +121,9 @@ use pharos_user::Limits as SpawnLimits;
 use pharos_user::rights::{READ, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
     Class, Grant, Handle, Mapped, Received, Status, Usage as Use, call_timeout, debug_write,
-    delete, endpoint_create, mem_map_buffer, mem_map_cap, mem_share, mem_unmap, open,
-    process_status, process_stop, process_usage, read, receive_timeout, send, sleep, spawn_with,
-    try_send, try_send_cap, uptime,
+    delete, endpoint_create, mem_map, mem_map_cap, mem_share, mem_unmap, open, process_status,
+    process_stop, process_usage, read, receive_timeout, send, sleep, spawn_with, try_send,
+    try_send_cap, uptime,
 };
 
 pharos_user::entry!(main);
@@ -1067,7 +1067,7 @@ impl Store {
     /// after the service restarted and lost it (#100).
     fn attach(&self) -> bool {
         let len = self.buffer.len() as u64;
-        let attached = mem_share(self.buffer.addr(), len).is_ok_and(|memory| {
+        let attached = mem_share(&self.buffer).is_ok_and(|memory| {
             let mut msg = [0u8; 16];
             let sent = store::encode(&StoreRequest::Attach { len }, &mut msg)
                 .is_some_and(|n| send(self.handle, &msg[..n], memory, READ | WRITE, 0).is_ok());
@@ -1122,7 +1122,7 @@ impl Knowledge {
     /// restarted and lost it.
     fn attach(&self) -> bool {
         let len = self.buffer.len() as u64;
-        mem_share(self.buffer.addr(), len).is_ok_and(|memory| {
+        mem_share(&self.buffer).is_ok_and(|memory| {
             let mut msg = [0u8; 16];
             let sent = knowledge::encode(&KnowledgeRequest::Attach { len }, &mut msg)
                 .is_some_and(|n| send(KNOWLEDGE, &msg[..n], memory, READ | WRITE, 0).is_ok());
@@ -1428,7 +1428,7 @@ fn done(out: &mut [u8; 256]) -> usize {
 }
 
 fn unmap(m: Mapped) {
-    let _ = mem_unmap(m.addr(), m.len() as u64);
+    let _ = mem_unmap(m);
 }
 
 fn why(w: Why) -> &'static [u8] {
@@ -3957,7 +3957,7 @@ const ATTACH_US: u64 = 100_000;
 /// longer than [`ATTACH_US`] (M4.6, #182): it sends only while the
 /// service is waiting for a request.
 fn attach_prompt(buffer: &Mapped) -> bool {
-    mem_share(buffer.addr(), infer::MAX_BUFFER).is_ok_and(|memory| {
+    mem_share(buffer).is_ok_and(|memory| {
         let mut msg = [0u8; 16];
         let len = infer::MAX_BUFFER;
         let sent = infer::encode(&InferRequest::Attach { len }, &mut msg).is_some_and(|n| {
@@ -3989,7 +3989,7 @@ fn main(arg: u64) -> u64 {
         return 1;
     };
     // The runtime's prompt buffer at the inference service.
-    let Ok(infer_buffer) = mem_map_buffer(infer::MAX_BUFFER) else {
+    let Ok(infer_buffer) = mem_map(infer::MAX_BUFFER) else {
         return 2;
     };
     // A hung inference service must not stop the runtime (M4.6, #182):
@@ -4016,7 +4016,7 @@ fn main(arg: u64) -> u64 {
         }
     }
     // The runtime's buffer at the storage service, for task files.
-    let Ok(buffer) = mem_map_buffer(STORE_BUFFER) else {
+    let Ok(buffer) = mem_map(STORE_BUFFER) else {
         return 5;
     };
     let mut store = Store {
@@ -4029,7 +4029,7 @@ fn main(arg: u64) -> u64 {
         return 6;
     }
     // Granted files (#127): optional, as handle 10 is.
-    let files = mem_map_buffer(FILES_BUFFER).ok().and_then(|buffer| {
+    let files = mem_map(FILES_BUFFER).ok().and_then(|buffer| {
         let files = Store {
             handle: FILES,
             buffer,
@@ -4040,7 +4040,7 @@ fn main(arg: u64) -> u64 {
     });
     // Proposed updates (#165): optional, as handle 12 is; one data file
     // at a time goes through it.
-    let incoming = mem_map_buffer(u64::from(agents::MAX_DATA))
+    let incoming = mem_map(u64::from(agents::MAX_DATA))
         .ok()
         .and_then(|buffer| {
             let s = Store {
@@ -4052,16 +4052,14 @@ fn main(arg: u64) -> u64 {
             s.attach().then_some(s)
         });
     // Shared knowledge (#144): optional, as handle 11 is.
-    let knowledge = mem_map_buffer(knowledge::MIN_BUFFER)
-        .ok()
-        .and_then(|buffer| {
-            let k = Knowledge {
-                buffer,
-                reply,
-                health: Health::default(),
-            };
-            k.attach().then_some(k)
-        });
+    let knowledge = mem_map(knowledge::MIN_BUFFER).ok().and_then(|buffer| {
+        let k = Knowledge {
+            buffer,
+            reply,
+            health: Health::default(),
+        };
+        k.attach().then_some(k)
+    });
     let attempts = |name: &[u8]| {
         agents
             .iter()

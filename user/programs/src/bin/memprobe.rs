@@ -32,6 +32,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
+use pharos_user::probe;
 use pharos_user::rights::WRITE;
 use pharos_user::{
     Error, Grant, Received, Status, debug_write, endpoint_create, mem_map, mem_map_cap, mem_share,
@@ -90,11 +91,11 @@ fn child(arg: u64, limit: Option<u32>) -> Option<u64> {
 /// runs. Exits 0 if the map is refused (`REVOKED`) or its pages read zeros
 /// once revoked, 9 if they still show the marker, other codes on errors.
 fn revoked_while_mapping() -> u64 {
-    let Ok(buffer) = pharos_user::mem_map_buffer(64 * MIB) else {
+    let Ok(buffer) = pharos_user::mem_map(64 * MIB) else {
         return 1;
     };
     buffer.write_bytes(0, &[0xab]);
-    if mem_share(buffer.addr(), 64 * MIB).is_err() {
+    if mem_share(&buffer).is_err() {
         return 2;
     }
     let mapped = loop {
@@ -132,17 +133,17 @@ fn main(arg: u64) -> u64 {
         5 => return revoked_while_mapping(),
         6 => loop {
             let Ok(a) = mem_map(64 * MIB) else { return 1 };
-            if mem_unmap(a, 64 * MIB).is_err() {
+            if mem_unmap(a).is_err() {
                 return 2;
             }
         },
         4 => {
             let Ok(a) = mem_map(64 * MIB) else { return 1 };
-            if mem_unmap(a, 64 * MIB).is_err() {
+            if mem_unmap(a).is_err() {
                 return 2;
             }
             let Ok(b) = mem_map(128 * MIB) else { return 3 };
-            let Ok(memory) = mem_share(b, 128 * MIB) else {
+            let Ok(memory) = mem_share(&b) else {
                 return 4;
             };
             if mem_map_cap(memory, true, 128 * MIB).is_err() {
@@ -161,7 +162,8 @@ fn main(arg: u64) -> u64 {
     let mut f = 0;
     let (a, b) = (mem_map(16 * MIB), mem_map(16 * MIB));
     report(&mut f, "mem_map up to the limit", a.is_ok() && b.is_ok());
-    let (a, b) = (a.unwrap_or(0), b.unwrap_or(0));
+    let (Ok(a), Ok(b)) = (a, b) else { return f };
+    let at = a.addr();
     report(
         &mut f,
         "one page past the limit: NO_MEMORY",
@@ -170,39 +172,39 @@ fn main(arg: u64) -> u64 {
     report(
         &mut f,
         "mappings are placed in the map region",
-        a == REGION && b == REGION + 16 * MIB,
+        at == REGION && b.addr() == REGION + 16 * MIB,
     );
     report(
         &mut f,
         "length 0: TOO_LARGE",
         mem_map(0) == Err(Error::TooLarge),
     );
+    // Probes the kernel must refuse; one it accepts ends this process.
     report(
         &mut f,
         "part of a mapping: BAD_ADDRESS",
-        mem_unmap(a, 4096) == Err(Error::BadAddress)
-            && mem_unmap(a + 4096, 16 * MIB - 4096) == Err(Error::BadAddress),
+        probe::mem_unmap(at, 4096) == Error::BadAddress
+            && probe::mem_unmap(at + 4096, 16 * MIB - 4096) == Error::BadAddress,
     );
     report(
         &mut f,
         "no mapping there: BAD_ADDRESS",
-        mem_unmap(REGION + 1024 * MIB, 4096) == Err(Error::BadAddress)
-            && mem_unmap(0x40_0000, 4096) == Err(Error::BadAddress),
+        probe::mem_unmap(REGION + 1024 * MIB, 4096) == Error::BadAddress
+            && probe::mem_unmap(0x40_0000, 4096) == Error::BadAddress,
     );
+    // Length rounding is the decoder's (kernel unit test `rejects_bad_arguments`).
     report(
         &mut f,
-        "unmapping (length rounded up) returns the limit",
-        mem_unmap(a, 16 * MIB).is_ok()
-            && mem_unmap(b, 16 * MIB - 100).is_ok()
-            && mem_map(all).and_then(|c| mem_unmap(c, all)).is_ok(),
+        "unmapping returns the limit",
+        mem_unmap(a).is_ok() && mem_unmap(b).is_ok() && mem_map(all).and_then(mem_unmap).is_ok(),
     );
     report(
         &mut f,
         "a refused unmap changed nothing",
-        mem_unmap(a, 16 * MIB) == Err(Error::BadAddress),
+        probe::mem_unmap(at, 16 * MIB) == Error::BadAddress,
     );
     // 16 x 32 MiB is twice the machine's 256 MiB: frames must come back.
-    let rounds = (0..16).all(|_| mem_map(all).and_then(|c| mem_unmap(c, all)).is_ok());
+    let rounds = (0..16).all(|_| mem_map(all).and_then(mem_unmap).is_ok());
     report(&mut f, "16 rounds of 32 MiB: frames are freed", rounds);
 
     // The allocator: 8 MiB vectors are their own mapping, freed each round.
@@ -233,7 +235,7 @@ fn main(arg: u64) -> u64 {
         "a child may not get more pages than are left: TOO_LARGE",
         held.is_ok() && spawn_limited(SELF, 1, &[], None, LIMIT) == Err(Error::TooLarge),
     );
-    let _ = held.and_then(|h| mem_unmap(h, 4096));
+    let _ = held.and_then(mem_unmap);
     report(
         &mut f,
         "a child given half the limit maps it all, and no more",

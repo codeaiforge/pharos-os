@@ -13,9 +13,13 @@ pub use syscall::{Mapped, vector};
 /// Probes for tests (M4.6, #183): system calls given a kernel-half
 /// address, which the kernel must refuse (`BAD_ADDRESS`). Each refuses a
 /// user address itself, so a wrong answer from the kernel cannot read or
-/// write this process's own memory behind Rust's back.
+/// write this process's own memory behind Rust's back. [`mem_unmap`]
+/// takes any address but ends the process if the kernel accepts it.
 pub mod probe {
-    use super::{Error, Handle, call, number};
+    use super::{Error, Handle, call, exit, number};
+
+    /// Exit code of a process whose [`mem_unmap`] probe the kernel accepted.
+    pub const UNMAP_ACCEPTED: u64 = 0xdead_0220;
 
     /// The first kernel-half address (syscalls-ipc.md).
     pub const KERNEL_HALF: u64 = 0xffff_8000_0000_0000;
@@ -49,6 +53,23 @@ pub mod probe {
     pub fn read_into(file: Handle, addr: u64, len: u64) -> Result<u64, Error> {
         kernel(addr)?;
         call(number::READ, [file, addr, len, 0, 0, 0])
+    }
+
+    /// `mem_share` of `len` bytes at kernel address `addr`.
+    pub fn mem_share(addr: u64, len: u64) -> Result<Handle, Error> {
+        kernel(addr)?;
+        call(number::MEM_SHARE, [addr, len, 0, 0, 0, 0])
+    }
+
+    /// `mem_unmap` of `len` bytes at any `addr`, which the kernel must
+    /// refuse; returns its error. If it accepts, memory Rust may still
+    /// reference is gone, so the process ends at once with
+    /// [`UNMAP_ACCEPTED`] (#220).
+    pub fn mem_unmap(addr: u64, len: u64) -> Error {
+        match call(number::MEM_UNMAP, [addr, len, 0, 0, 0, 0]) {
+            Ok(_) => exit(UNMAP_ACCEPTED),
+            Err(e) => e,
+        }
     }
 }
 
@@ -573,7 +594,7 @@ pub fn config_read(device: Handle, offset: u8, width: u8) -> Result<u32, Error> 
 /// device at user address `at` (page-aligned, unused).
 pub fn mmio_map(device: Handle, bar: u8, offset: u64, len: u64, at: u64) -> Result<Mapped, Error> {
     call(number::MMIO_MAP, [device, bar.into(), offset, len, at, 0])?;
-    Ok(Mapped::new(at, len))
+    Ok(Mapped::new_device(at, len))
 }
 
 /// Allocates `pages` contiguous, zeroed DMA pages for the device at user
@@ -581,7 +602,7 @@ pub fn mmio_map(device: Handle, bar: u8, offset: u64, len: u64, at: u64) -> Resu
 /// uses.
 pub fn dma_alloc(device: Handle, pages: u64, at: u64) -> Result<(Mapped, u64), Error> {
     let phys = call(number::DMA_ALLOC, [device, pages, at, 0, 0, 0])?;
-    Ok((Mapped::new(at, pages * 4096), phys))
+    Ok((Mapped::new_device(at, pages * 4096), phys))
 }
 
 /// Routes MSI-X table entry `entry` of `device` (needs `IRQ`) to a new
@@ -602,32 +623,38 @@ pub fn irq_wait_timeout(interrupt: Handle, micros: u64) -> Result<u64, Error> {
     call(number::IRQ_WAIT, [interrupt, micros, 0, 0, 0, 0])
 }
 
-/// Maps `len` bytes (rounded up to whole pages) of zeroed memory and
-/// returns its address. Fails with [`Error::NoMemory`] beyond this process's
-/// page limit.
-pub fn mem_map(len: u64) -> Result<u64, Error> {
-    call(number::MEM_MAP, [len, 0, 0, 0, 0, 0])
-}
-
-/// Unmaps one whole earlier [`mem_map`] mapping (`addr` and `len` as
-/// mapped); anything else is [`Error::BadAddress`].
-pub fn mem_unmap(addr: u64, len: u64) -> Result<u64, Error> {
-    call(number::MEM_UNMAP, [addr, len, 0, 0, 0, 0])
-}
-
-/// [`mem_map`] with a [`Mapped`] view of the memory, for buffers to share
-/// or fill through volatile accesses.
-pub fn mem_map_buffer(len: u64) -> Result<Mapped, Error> {
-    let addr = mem_map(len)?;
+/// Maps `len` bytes (rounded up to whole pages) of zeroed memory. Fails
+/// with [`Error::NoMemory`] beyond this process's page limit.
+pub fn mem_map(len: u64) -> Result<Mapped, Error> {
+    let addr = map_raw(len)?;
     Ok(Mapped::new(addr, len.div_ceil(4096) * 4096))
 }
 
-/// Turns the whole [`mem_map`] mapping at `addr` (`len` bytes as mapped)
-/// into shared memory and returns a `Memory` capability with `READ`,
-/// `GRANT`, and `WRITE` (if the mapping is writable). Pass it with
-/// [`send`], narrowed to `READ` for read-only access.
-pub fn mem_share(addr: u64, len: u64) -> Result<Handle, Error> {
-    call(number::MEM_SHARE, [addr, len, 0, 0, 0, 0])
+/// Unmaps a whole [`mem_map`] or [`mem_map_cap`] mapping and returns its
+/// pages to this process's limit; anything else is [`Error::BadAddress`].
+/// Taking `mapped` by value means no copy of it outlives the memory (#220).
+pub fn mem_unmap(mapped: Mapped) -> Result<u64, Error> {
+    unmap_raw(mapped.addr(), mapped.len() as u64)
+}
+
+/// For the heap, whose chunks safe code never sees as a [`Mapped`].
+pub(crate) fn map_raw(len: u64) -> Result<u64, Error> {
+    call(number::MEM_MAP, [len, 0, 0, 0, 0, 0])
+}
+
+pub(crate) fn unmap_raw(addr: u64, len: u64) -> Result<u64, Error> {
+    call(number::MEM_UNMAP, [addr, len, 0, 0, 0, 0])
+}
+
+/// Turns the whole [`mem_map`] mapping `mapped` into shared memory and
+/// returns a `Memory` capability with `READ`, `GRANT`, and `WRITE` (if the
+/// mapping is writable). Pass it with [`send`], narrowed to `READ` for
+/// read-only access.
+pub fn mem_share(mapped: &Mapped) -> Result<Handle, Error> {
+    call(
+        number::MEM_SHARE,
+        [mapped.addr(), mapped.len() as u64, 0, 0, 0, 0],
+    )
 }
 
 /// Maps the shared memory behind `memory` (needs `READ`, and `WRITE` if
@@ -766,5 +793,14 @@ mod tests {
         assert_eq!(m.read8(2), 0, "bytes before are untouched");
         let past = std::panic::catch_unwind(|| m.write_bytes(4090, &[0; 7]));
         assert!(past.is_err(), "past the end");
+    }
+
+    #[test]
+    fn only_device_memory_can_be_cloned() {
+        let mut page = [0u64; 512];
+        let at = page.as_mut_ptr() as u64;
+        assert_eq!(Mapped::new(at, 4096).try_clone(), None, "a buffer (#220)");
+        let device = Mapped::new_device(at, 4096);
+        assert_eq!(device.try_clone(), Some(Mapped::new_device(at, 4096)));
     }
 }

@@ -17,9 +17,7 @@
 
 use pharos_proto::store::{Request, encode};
 use pharos_user::rights::{READ, WRITE};
-use pharos_user::{
-    debug_write, delete, endpoint_create, mem_map_buffer, mem_share, receive, send, sleep,
-};
+use pharos_user::{debug_write, delete, endpoint_create, mem_map, mem_share, receive, send, sleep};
 
 pharos_user::entry!(main);
 
@@ -63,10 +61,10 @@ fn main(arg: u64) -> u64 {
         }
         5 => {
             let len = 4 << 20;
-            let Ok(buffer) = mem_map_buffer(len) else {
+            let Ok(buffer) = mem_map(len) else {
                 return 1;
             };
-            let Ok(memory) = mem_share(buffer.addr(), len) else {
+            let Ok(memory) = mem_share(&buffer) else {
                 return 2;
             };
             let mut msg = [0u8; 16];

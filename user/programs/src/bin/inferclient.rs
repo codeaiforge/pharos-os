@@ -43,7 +43,7 @@ use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::{Info, versions};
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
-    Error, Handle, Mapped, Received, call_timeout, debug_write, endpoint_create, mem_map_buffer,
+    Error, Handle, Mapped, Received, call_timeout, debug_write, endpoint_create, mem_map,
     mem_share, send, sleep, uptime,
 };
 
@@ -103,8 +103,8 @@ fn status(r: &([u8; 256], usize)) -> Status {
 
 /// Maps a `len`-byte buffer and sends it to `to` with `ATTACH`.
 fn attach(to: Handle, msg: &[u8], len: u64) -> Option<Mapped> {
-    let buf = mem_map_buffer(len).ok()?;
-    let memory = mem_share(buf.addr(), len).ok()?;
+    let buf = mem_map(len).ok()?;
+    let memory = mem_share(&buf).ok()?;
     send(to, msg, memory, READ | WRITE, 0).ok()?;
     Some(buf)
 }

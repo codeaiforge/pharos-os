@@ -19,8 +19,8 @@
 
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
-    Error, Mapped, Received, debug_write, delete, mem_map, mem_map_buffer, mem_map_cap, mem_share,
-    mem_unmap, receive, revoke, send, sleep,
+    Error, Mapped, Received, debug_write, delete, mem_map, mem_map_cap, mem_share, mem_unmap,
+    receive, revoke, send, sleep,
 };
 
 pharos_user::entry!(main);
@@ -63,12 +63,12 @@ fn next(endpoint: u64) -> ([u8; 16], u64) {
 
 fn sharer(b_ends_first: bool) -> u64 {
     let mut f = 0;
-    let Ok(buf) = mem_map_buffer(LEN) else {
+    let Ok(buf) = mem_map(LEN) else {
         report(&mut f, "A: map a two-page buffer", false);
         return f;
     };
     buf.write_bytes(0, b"from A");
-    let shared = mem_share(buf.addr(), LEN);
+    let shared = mem_share(&buf);
     report(&mut f, "A: share the buffer", shared.is_ok());
     report(
         &mut f,
@@ -98,7 +98,7 @@ fn sharer(b_ends_first: bool) -> u64 {
     report(
         &mut f,
         "A: unmap while B still maps it",
-        mem_unmap(buf.addr(), LEN).is_ok(),
+        mem_unmap(buf).is_ok(),
     );
     let _ = send(OUT, b"revoked", 0, 0, 0);
     f
@@ -125,7 +125,7 @@ fn receiver(ends_first: bool) -> u64 {
     report(
         &mut f,
         "B: a received mapping cannot be shared again",
-        mem_share(m1.addr(), LEN).err() == Some(Error::BadAddress),
+        mem_share(&m1).err() == Some(Error::BadAddress),
     );
     let m2 = mem_map_cap(ro, false, LEN);
     report(

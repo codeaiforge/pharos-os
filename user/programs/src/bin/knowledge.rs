@@ -23,7 +23,7 @@ use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::{refusal, status};
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
-    Handle, Mapped, Received, call_timeout, debug_write, delete, endpoint_create, mem_map_buffer,
+    Handle, Mapped, Received, call_timeout, debug_write, delete, endpoint_create, mem_map,
     mem_map_cap, mem_share, receive, send, try_send, uptime,
 };
 
@@ -89,7 +89,7 @@ impl Store {
     /// after it restarted and lost it.
     fn attach(&self) -> bool {
         let len = self.buffer.len() as u64;
-        let attached = mem_share(self.buffer.addr(), len).is_ok_and(|memory| {
+        let attached = mem_share(&self.buffer).is_ok_and(|memory| {
             let mut msg = [0u8; 16];
             let sent = store::encode(&StoreRequest::Attach { len }, &mut msg)
                 .is_some_and(|n| send(STORE, &msg[..n], memory, READ | WRITE, 0).is_ok());
@@ -202,11 +202,11 @@ impl Buffers {
         match at {
             Some(at) => {
                 if let Some((_, old)) = self.0[at].replace((badge, m)) {
-                    let _ = pharos_user::mem_unmap(old.addr(), old.len() as u64);
+                    let _ = pharos_user::mem_unmap(old);
                 }
             }
             None => {
-                let _ = pharos_user::mem_unmap(m.addr(), m.len() as u64);
+                let _ = pharos_user::mem_unmap(m);
             }
         }
     }
@@ -269,7 +269,7 @@ fn handle(
 }
 
 fn main(_: u64) -> u64 {
-    let (Ok(reply), Ok(buffer)) = (endpoint_create(), mem_map_buffer(STORE_BUFFER)) else {
+    let (Ok(reply), Ok(buffer)) = (endpoint_create(), mem_map(STORE_BUFFER)) else {
         return 1;
     };
     let mut f = Store { buffer, reply };

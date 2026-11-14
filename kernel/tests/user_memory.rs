@@ -38,7 +38,7 @@ const STEPS: [&str; 17] = [
     "length 0: TOO_LARGE",
     "part of a mapping: BAD_ADDRESS",
     "no mapping there: BAD_ADDRESS",
-    "unmapping (length rounded up) returns the limit",
+    "unmapping returns the limit",
     "a refused unmap changed nothing",
     "16 rounds of 32 MiB: frames are freed",
     "allocator: 16 large vectors of 8 MiB",

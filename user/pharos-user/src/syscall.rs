@@ -150,18 +150,25 @@ pub fn raw(number: u64, args: [u64; 6]) -> (u64, u64) {
 
 /// Memory the kernel mapped for this process: device registers
 /// ([`crate::mmio_map`]), a DMA buffer ([`crate::dma_alloc`]), or a buffer
-/// that may be shared ([`crate::mem_map_buffer`], [`crate::mem_map_cap`]).
+/// that may be shared ([`crate::mem_map`], [`crate::mem_map_cap`]).
 /// Accesses are volatile, bounds-checked, and naturally aligned; a bad
 /// offset is a program bug and panics (ending the process). Values are
 /// created only after the kernel confirmed the mapping. Device memory stays
-/// mapped as long as the process; a buffer until [`crate::mem_unmap`], after
-/// which using its `Mapped` is a program bug (it faults, or reaches whatever
-/// this process maps there next, never another process's memory). Writing
-/// a read-only shared mapping is a page fault that ends the process.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// mapped as long as the process; a buffer until [`crate::mem_unmap`],
+/// which takes the `Mapped`, so it cannot be used after (#220: only device
+/// memory, which cannot be unmapped, has [`Mapped::try_clone`]). Writing a read-only shared mapping is a page fault
+/// that ends the process.
+///
+/// ```compile_fail
+/// let m = pharos_user::mem_map(4096).unwrap();
+/// let _ = pharos_user::mem_unmap(m);
+/// m.read8(0); // used after unmapping: does not compile
+/// ```
+#[derive(Debug, PartialEq, Eq)]
 pub struct Mapped {
     base: usize,
     len: usize,
+    device: bool,
 }
 
 impl Mapped {
@@ -171,7 +178,23 @@ impl Mapped {
         Self {
             base: base as usize,
             len: len as usize,
+            device: false,
         }
+    }
+
+    /// [`Mapped::new`] for device registers or a DMA buffer, which the
+    /// kernel never unmaps before the process ends (#219).
+    pub(crate) fn new_device(base: u64, len: u64) -> Self {
+        Self {
+            device: true,
+            ..Self::new(base, len)
+        }
+    }
+
+    /// A second view of device memory, for drivers that share it; `None`
+    /// for a buffer, which [`crate::mem_unmap`] could unmap under it.
+    pub fn try_clone(&self) -> Option<Self> {
+        self.device.then_some(Self { ..*self })
     }
 
     /// Size in bytes.
@@ -184,8 +207,7 @@ impl Mapped {
         self.len == 0
     }
 
-    /// The start address (for [`crate::mem_share`] and
-    /// [`crate::mem_unmap`]).
+    /// The start address.
     pub fn addr(&self) -> u64 {
         self.base as u64
     }
@@ -785,11 +807,11 @@ mod heap {
         static ARENA: Arena = Arena(UnsafeCell::new([0; HEAP_SIZE]));
 
         fn map(len: usize) -> usize {
-            crate::mem_map(len as u64).map_or(0, |addr| addr as usize)
+            crate::map_raw(len as u64).map_or(0, |addr| addr as usize)
         }
 
         fn unmap(addr: usize, len: usize) {
-            let _ = crate::mem_unmap(addr as u64, len as u64);
+            let _ = crate::unmap_raw(addr as u64, len as u64);
         }
 
         struct Locked {
