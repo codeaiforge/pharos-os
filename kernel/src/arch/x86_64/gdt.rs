@@ -12,6 +12,11 @@
 //!
 //! Descriptor layout: Intel SDM vol. 3A, sections 3.4.5 (segment descriptors)
 //! and 8.2.3 (64-bit TSS descriptor).
+//!
+//! The IST also gives the NMI (IST2) and machine-check (IST3) handlers
+//! their own stacks (#222): either can arrive while the system-call entry
+//! or exit runs in ring 0 on the user's RSP, so neither may use the stack
+//! it interrupted.
 
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +36,12 @@ pub const USER_CODE: u16 = 0x30 | 3;
 pub const DOUBLE_FAULT_IST: u8 = 1;
 /// Size of the double-fault stack.
 pub const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
+/// IST slot of the NMI stack (vector 2).
+pub const NMI_IST: u8 = 2;
+/// IST slot of the machine-check stack (vector 18).
+pub const MACHINE_CHECK_IST: u8 = 3;
+/// Size of the NMI and the machine-check stack each.
+pub const IST_STACK_SIZE: usize = 16 * 1024;
 
 /// Access byte: present, ring 0, code, executable, readable.
 const ACCESS_CODE: u8 = 0x9a;
@@ -95,12 +106,20 @@ impl Tss {
 #[repr(C, align(4096))]
 struct Stack([u8; DOUBLE_FAULT_STACK_SIZE]);
 
+#[repr(C, align(4096))]
+struct IstStack([u8; IST_STACK_SIZE]);
+
 /// `linker.ld` places this in its own segment after an unmapped guard page,
 /// like the kernel stack.
 // SAFETY: `.double_fault_stack` is a NOLOAD section in `linker.ld` reserved
 // for this one static; placing it there has no other effect.
 #[unsafe(link_section = ".double_fault_stack")]
 static mut DOUBLE_FAULT_STACK: Stack = Stack([0; DOUBLE_FAULT_STACK_SIZE]);
+/// In `.bss`, so without a guard page (the kernel's page tables map the
+/// image's segments and the two guarded stacks only). Both handlers are
+/// fatal and shallow.
+static mut NMI_STACK: IstStack = IstStack([0; IST_STACK_SIZE]);
+static mut MACHINE_CHECK_STACK: IstStack = IstStack([0; IST_STACK_SIZE]);
 static mut TSS_SEGMENT: Tss = Tss::new();
 /// Descriptors in the GDT (the TSS takes two).
 const GDT_ENTRIES: usize = 7;
@@ -121,6 +140,8 @@ pub fn init() {
         return;
     }
     let stack_top = (&raw const DOUBLE_FAULT_STACK) as u64 + DOUBLE_FAULT_STACK_SIZE as u64;
+    let nmi_top = nmi_stack_bounds().1;
+    let machine_check_top = machine_check_stack_bounds().1;
     let tss = &raw mut TSS_SEGMENT;
     let gdt = &raw mut GDT;
     let [tss_low, tss_high] = tss_descriptor(tss as u64);
@@ -129,6 +150,8 @@ pub fn init() {
     // Unaligned field writes go through `write_unaligned` (the TSS is packed).
     unsafe {
         (&raw mut (*tss).ist[(DOUBLE_FAULT_IST - 1) as usize]).write_unaligned(stack_top);
+        (&raw mut (*tss).ist[(NMI_IST - 1) as usize]).write_unaligned(nmi_top);
+        (&raw mut (*tss).ist[(MACHINE_CHECK_IST - 1) as usize]).write_unaligned(machine_check_top);
         *gdt = [
             0,
             descriptor(0, 0xf_ffff, ACCESS_CODE, FLAGS_CODE64),
@@ -246,16 +269,38 @@ pub fn kernel_stack() -> u64 {
 
 /// Top of the double-fault stack as stored in the TSS (0 before [`init`]).
 pub fn double_fault_stack_top() -> u64 {
+    ist_top(DOUBLE_FAULT_IST)
+}
+
+/// The stack pointer TSS IST slot `slot` (1–7) holds; 0 before [`init`],
+/// for an unused slot, or for a slot outside 1–7.
+pub fn ist_top(slot: u8) -> u64 {
+    let Some(index) = usize::from(slot).checked_sub(1).filter(|&i| i < 7) else {
+        return 0;
+    };
     let tss = &raw const TSS_SEGMENT;
     // SAFETY: after `init` nothing writes the TSS (the CPU only reads it), so
-    // this unaligned read of a packed field races with nothing.
-    unsafe { (&raw const (*tss).ist[(DOUBLE_FAULT_IST - 1) as usize]).read_unaligned() }
+    // this unaligned read of a packed field races with nothing. `index` is
+    // below 7, the length of `ist`.
+    unsafe { (&raw const (*tss).ist[index]).read_unaligned() }
 }
 
 /// Bounds of the double-fault stack, `(bottom, top)`.
 pub fn double_fault_stack_bounds() -> (u64, u64) {
     let bottom = (&raw const DOUBLE_FAULT_STACK) as u64;
     (bottom, bottom + DOUBLE_FAULT_STACK_SIZE as u64)
+}
+
+/// Bounds of the NMI stack, `(bottom, top)`.
+pub fn nmi_stack_bounds() -> (u64, u64) {
+    let bottom = (&raw const NMI_STACK) as u64;
+    (bottom, bottom + IST_STACK_SIZE as u64)
+}
+
+/// Bounds of the machine-check stack, `(bottom, top)`.
+pub fn machine_check_stack_bounds() -> (u64, u64) {
+    let bottom = (&raw const MACHINE_CHECK_STACK) as u64;
+    (bottom, bottom + IST_STACK_SIZE as u64)
 }
 
 #[cfg(test)]

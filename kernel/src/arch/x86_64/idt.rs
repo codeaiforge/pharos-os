@@ -16,6 +16,9 @@
 //! expected exception into a test result. Other vectors from 33 to 254 are not
 //! present, so an interrupt on them raises a general-protection fault. The double fault
 //! runs on its own stack (TSS IST1), so a kernel stack overflow is reported.
+//! NMI (IST2) and machine check (IST3) have their own stacks too (#222), so
+//! one that arrives while the system-call entry or exit is in ring 0 on the
+//! user's RSP does not push its frame there.
 
 // The dispatcher and its helpers are reached only from the kernel-target
 // entry stubs; host builds compile them for unit tests of the pure parts.
@@ -25,10 +28,12 @@ use core::fmt;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 /// Vector numbers used by name elsewhere.
+pub const NMI: u8 = 2;
 pub const BREAKPOINT: u8 = 3;
 pub const DOUBLE_FAULT: u8 = 8;
 pub const GENERAL_PROTECTION: u8 = 13;
 pub const PAGE_FAULT: u8 = 14;
+pub const MACHINE_CHECK: u8 = 18;
 
 /// Saved state at exception entry, in stack order (lowest address first).
 /// Must match the push order in the entry stubs.
@@ -292,6 +297,34 @@ pub fn touch_unmapped_probe() {
     };
 }
 
+/// Raises vector 2 with `int 2`, which enters through the NMI gate (and its
+/// IST stack) like a real NMI, for tests. Fatal: the handler (or a test's
+/// fatal hook) does not return.
+pub fn raise_nmi_vector() {
+    // SAFETY: `int 2` enters the NMI handler through its gate. The handler
+    // is fatal (report and halt, or the test's fatal hook, which does not
+    // return), so execution does not continue here.
+    unsafe { core::arch::asm!("int 2", options(nomem, nostack)) };
+}
+
+/// Raises vector 18 with `int 18`, which enters through the machine-check
+/// gate (and its IST stack), for tests. Fatal, like [`raise_nmi_vector`].
+pub fn raise_machine_check_vector() {
+    // SAFETY: as for `raise_nmi_vector`, through the machine-check gate.
+    unsafe { core::arch::asm!("int 18", options(nomem, nostack)) };
+}
+
+/// The IST slot each exception vector's gate names (0 for none).
+pub const fn ist_for(vector: u8) -> u8 {
+    use super::gdt::{DOUBLE_FAULT_IST, MACHINE_CHECK_IST, NMI_IST};
+    match vector {
+        NMI => NMI_IST,
+        DOUBLE_FAULT => DOUBLE_FAULT_IST,
+        MACHINE_CHECK => MACHINE_CHECK_IST,
+        _ => 0,
+    }
+}
+
 /// First vector for device interrupts (MSI-X, drivers.md).
 pub const FIRST_DEVICE_VECTOR: u8 = 48;
 /// Number of device-interrupt vectors (48–63).
@@ -383,9 +416,9 @@ fn gp_context(frame: &ExceptionFrame) {
 
 #[cfg(target_os = "none")]
 mod entry {
-    use super::{ExceptionFrame, FIRST_DEVICE_VECTOR, dispatch, gate};
+    use super::{ExceptionFrame, FIRST_DEVICE_VECTOR, dispatch, gate, ist_for};
     use crate::arch::x86_64::apic;
-    use crate::arch::x86_64::gdt::{DOUBLE_FAULT_IST, KERNEL_CODE};
+    use crate::arch::x86_64::gdt::KERNEL_CODE;
 
     // One stub per vector, then the common path. `.quad` builds a table of
     // stub addresses; it needs the static relocation model, which only the
@@ -476,12 +509,9 @@ mod entry {
         let handlers = unsafe { &pharos_isr_table };
         for (vector, &handler) in handlers.iter().enumerate() {
             // The double fault gets its own stack, so a stack overflow is
-            // reported instead of escalating to a triple fault.
-            let ist = if vector == super::DOUBLE_FAULT as usize {
-                DOUBLE_FAULT_IST
-            } else {
-                0
-            };
+            // reported instead of escalating to a triple fault; NMI and
+            // machine check get theirs, so they never use a user RSP (#222).
+            let ist = ist_for(vector as u8);
             // SAFETY: the IDT is only written here, before `lidt` makes the
             // CPU read it, and with interrupts disabled (`init` runs early).
             unsafe { (*idt).0[vector] = gate(handler, KERNEL_CODE, ist) };
@@ -561,6 +591,20 @@ mod tests {
     fn error_code_vectors() {
         let with: Vec<u8> = (0..32).filter(|&v| has_error_code(v)).collect();
         assert_eq!(with, [8, 10, 11, 12, 13, 14, 17, 21, 29, 30]);
+    }
+
+    #[test]
+    fn nmi_machine_check_and_double_fault_have_their_own_stacks() {
+        use crate::arch::x86_64::gdt::{DOUBLE_FAULT_IST, MACHINE_CHECK_IST, NMI_IST};
+        assert_eq!(ist_for(NMI), NMI_IST);
+        assert_eq!(ist_for(DOUBLE_FAULT), DOUBLE_FAULT_IST);
+        assert_eq!(ist_for(MACHINE_CHECK), MACHINE_CHECK_IST);
+        let mut slots = [NMI_IST, DOUBLE_FAULT_IST, MACHINE_CHECK_IST];
+        slots.sort_unstable();
+        assert!(slots.windows(2).all(|w| w[0] != w[1]), "distinct slots");
+        assert!(slots.iter().all(|s| (1..=7).contains(s)));
+        let others: Vec<u8> = (0..32).filter(|&v| ist_for(v) != 0).collect();
+        assert_eq!(others, [2, 8, 18], "no other vector switches stacks");
     }
 
     #[test]

@@ -69,6 +69,10 @@ name = "double_fault"
 harness = false
 
 [[test]]
+name = "ist_stacks"
+harness = false
+
+[[test]]
 name = "exceptions"
 harness = false
 

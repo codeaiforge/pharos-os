@@ -16,7 +16,7 @@ The kernel must report CPU exceptions instead of rebooting, survive a stack over
 `kmain` (and every test kernel, through `test_kernel!`) runs in this order:
 
 1. Switch from Limine's boot stack to the 64 KiB kernel stack, which has an unmapped guard page below it (`linker.ld`; kept unmapped by the kernel's own page tables).
-2. Load the kernel's GDT and TSS (`arch::x86_64::gdt`): kernel code and data, the TSS, then user data (`0x28`) and user code (`0x30`), in the order `sysret` needs (D-014). TSS IST1 is a 16 KiB double-fault stack. TSS `rsp0` is set on every task switch to the incoming thread's kernel stack top, so interrupts and exceptions from user mode land there.
+2. Load the kernel's GDT and TSS (`arch::x86_64::gdt`): kernel code and data, the TSS, then user data (`0x28`) and user code (`0x30`), in the order `sysret` needs (D-014). TSS IST1 is a 16 KiB double-fault stack; IST2 and IST3 are 16 KiB stacks for NMI and machine check (#222), because either can arrive while the system-call entry or exit runs in ring 0 on the user's RSP. Those two are in `.bss`, without guard pages. TSS `rsp0` is set on every task switch to the incoming thread's kernel stack top, so interrupts and exceptions from user mode land there.
 3. Load the IDT (`arch::x86_64::idt`).
 4. Build the frame allocator and the kernel's own page tables ([memory.md](memory.md)).
 5. Map and enable the local APIC (`arch::x86_64::apic::init`).
@@ -31,7 +31,9 @@ All IDT entries are 64-bit interrupt gates (interrupts disabled on entry) using 
 | Vector | Source | Handling |
 | --- | --- | --- |
 | 3 | Breakpoint (`int3`) | Report, continue |
+| 2 | NMI | Runs on IST2; fatal report |
 | 8 | Double fault | Runs on IST1; fatal report |
+| 18 | Machine check | Runs on IST3; fatal report |
 | 0–31 (others), from ring 0 | CPU exceptions | Fatal: report vector, decoded error code, CR2 for page faults, registers; signal failure to QEMU; halt |
 | 0–31, from ring 3 | CPU exceptions in user mode | The user-fault handler (`idt::set_user_fault_handler`, installed by `process::init`) prints `PHAROS: process <id> killed: <report>` and ends the process; the kernel continues |
 | 32 | Local APIC timer | Count the tick, send EOI, then call the tick handler (the scheduler, once preemption is enabled), which may switch tasks |
@@ -72,6 +74,7 @@ Test kernels in `kernel/tests/`, run by `cargo xtask test` locally and in CI ([t
 - `gdt`: our GDT, segment selectors, task register, and IST1 stack.
 - `exceptions`: breakpoints continue with registers intact; a page fault on an unmapped page reports the right CR2 and error code.
 - `double_fault`: unbounded recursion hits the guard page and is reported as a double fault on IST1.
+- `ist_stacks`: vector 2 (`int 2`) runs on the NMI stack and vector 18 (`int 18`, raised from the NMI handler) on the machine-check stack; TSS IST2 and IST3 hold their tops; the stacks do not overlap each other, the double-fault stack, or the kernel stack.
 - `apic_timer`: the local APIC is mapped and the timer delivers at least 20 interrupts.
 - `device_irq`: a virtio-blk completion interrupt wakes a driver blocked in `irq_wait` (see [drivers.md](drivers.md)).
 - `timer`: calibration is accepted; the TSC clock agrees with the PIT, `delay` waits long enough, uptime never goes backwards, and 20 ticks take about 200 ms (wide bounds for TCG). Checked to fail with a tick period or TSC rate off by a factor of 10.
@@ -87,4 +90,4 @@ Each was checked once to fail when the feature it tests is broken. The boot chec
 ## 7. Open questions
 
 - IOAPIC and ACPI MADT parsing for legacy (non-MSI) device interrupts.
-- Per-CPU stacks and their guard pages (SMP). The kernel and double-fault stacks have guard pages since #27.
+- Per-CPU stacks and their guard pages (SMP). The kernel and double-fault stacks have guard pages since #27; the NMI and machine-check stacks (#222) have none yet. Vector 1 (debug) needs an IST stack too once debug registers are used.
