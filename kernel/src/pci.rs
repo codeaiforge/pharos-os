@@ -116,6 +116,22 @@ pub fn capabilities(
     (caps, None)
 }
 
+/// Highest offset of a usable PCI Express capability: its Slot Control
+/// and Slot Status register (offset + 0x18 to + 0x1b) must end inside the
+/// 256-byte configuration space.
+pub const MAX_EXPRESS_OFFSET: u8 = 0xff - 0x1b;
+
+/// The PCI Express capability in `caps`, if it lies at or below
+/// [`MAX_EXPRESS_OFFSET`]. The offset comes from the device; past it the
+/// slot registers' offsets would wrap, and the hotplug driver's slot write
+/// would land in a low register such as Command (#224).
+pub fn express(caps: &[Capability]) -> Option<Capability> {
+    caps.iter()
+        .find(|c| c.id == CAP_EXPRESS)
+        .filter(|c| c.offset <= MAX_EXPRESS_OFFSET)
+        .copied()
+}
+
 /// An MSI-X capability's fields.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Msix {
@@ -540,6 +556,18 @@ mod tests {
                 pba_offset: 0x3800
             }
         );
+    }
+
+    #[test]
+    fn express_capability_fits_in_config_space() {
+        let cap = |id, offset| Capability { id, offset };
+        let caps = [cap(CAP_MSIX, 0x40), cap(CAP_EXPRESS, MAX_EXPRESS_OFFSET)];
+        assert_eq!(express(&caps), Some(caps[1]));
+        // At 0xec, offset + 0x18 wraps to 0x04, the Command register.
+        let high = [cap(CAP_EXPRESS, 0xec)];
+        assert_eq!(express(&high), None);
+        assert_eq!(express(&[cap(CAP_EXPRESS, 0xe8)]), None);
+        assert_eq!(express(&[cap(CAP_MSIX, 0x40)]), None);
     }
 
     #[test]

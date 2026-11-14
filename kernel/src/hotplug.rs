@@ -364,7 +364,7 @@ mod kernel {
             }
             let first = hw::read32(port, 0x34) as u8 & !0b11;
             let (caps, _) = pci::capabilities(first, |o| hw::read32(port, o));
-            let Some(cap) = caps.iter().find(|c| c.id == pci::CAP_EXPRESS) else {
+            let Some(cap) = pci::express(&caps) else {
                 continue;
             };
             let slot_caps = hw::read32(port, cap.offset + 0x14);

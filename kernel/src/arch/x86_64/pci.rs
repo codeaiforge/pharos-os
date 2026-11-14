@@ -98,7 +98,8 @@ pub fn probe_bar(address: Address, index: u8) -> (u32, u32) {
 
 /// Writes the Slot Control register of the PCI Express capability at
 /// `cap` (offset `cap + 0x18`), and `clear` into Slot Status, whose event
-/// bits are cleared by writing ones (hotplug).
+/// bits are cleared by writing ones (hotplug). `cap` must come from
+/// [`crate::pci::express`], which keeps `cap + 0x1b` below 0x100.
 pub fn write_slot(address: Address, cap: u8, control: u16, clear: u16) {
     let _guard = LOCK.lock();
     write32_locked(
