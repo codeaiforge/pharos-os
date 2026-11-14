@@ -221,6 +221,8 @@ struct Init {
     /// Records the audit service has not taken yet, oldest first (#152):
     /// it may be starting, or blocked on a restarting store.
     unsent: VecDeque<Vec<u8>>,
+    /// Records dropped from a full queue since the trail last took one.
+    dropped: u64,
     /// When to try them again, and the wait after the next failure.
     retry_at: u64,
     retry_us: u64,
@@ -475,16 +477,49 @@ impl Init {
         }
     }
 
-    /// Queues `entry` for the audit trail and sends what it can.
+    /// Queues `entry` for the audit trail and sends what it can. Past
+    /// [`MAX_UNSENT`] the oldest is dropped, and counted: the trail later
+    /// says how many (#215).
     fn append(&mut self, entry: &audit::Entry<'_>) {
         let mut msg = [0u8; 256];
         if let Some(n) = audit::encode(&audit::Request::Append(*entry), &mut msg) {
             if self.unsent.len() == MAX_UNSENT {
                 self.unsent.pop_front();
+                self.dropped = self.dropped.saturating_add(1);
             }
             self.unsent.push_back(msg[..n].to_vec());
             self.flush();
         }
+    }
+
+    /// A user's command, recorded before it is carried out (#215): true
+    /// only if the audit service stored it, after every record queued
+    /// before it. Never queued: one not stored is refused, not done.
+    fn record_now(&mut self, action: u8, actor: &[u8], detail: &[u8]) -> bool {
+        self.retry_at = 0;
+        self.flush();
+        let entry = audit::Entry {
+            kind: audit::Kind::Event,
+            refers: 0,
+            actor,
+            task: 0,
+            attempt: 0,
+            action,
+            permission: None,
+            service: b"init",
+            outcome: audit::outcome::OK,
+            detail: &supervise::cut_list(detail, audit::MAX_DETAIL),
+        };
+        let mut msg = [0u8; 256];
+        let mut out = [0u8; 256];
+        let Some(n) = audit::encode(&audit::Request::Append(entry), &mut msg) else {
+            return false;
+        };
+        self.unsent.is_empty()
+            && self.up(b"bin/audit")
+            && call_timeout(self.audit, &msg[..n], self.reply, &mut out, AUDIT_US)
+                .is_ok_and(|r| matches!(r, Received::Message { len, .. } if len >= 1))
+            && out[0] == status::OK
     }
 
     /// Sends queued records, oldest first, once the audit service is ready
@@ -512,6 +547,16 @@ impl Init {
             }
             self.unsent.pop_front();
             self.retry_us = AUDIT_US;
+            if self.unsent.is_empty() && self.dropped > 0 {
+                let mut d = [0u8; 20];
+                let n = core::mem::take(&mut self.dropped);
+                let what = [
+                    b"records dropped while the trail was down: ",
+                    decimal(n, &mut d),
+                ]
+                .concat();
+                self.record(b"init", &what);
+            }
         }
     }
 
@@ -781,17 +826,16 @@ impl Init {
                     })
             }
         };
-        let answer = match decided {
-            Ok(_) => Managed::Ok,
-            Err(m) => m,
+        let answer = |m: Managed<'_>| {
+            let mut out = [0u8; 48];
+            if let Some(n) = m.write(&mut out) {
+                let _ = try_send(reply, &out[..n]);
+            }
         };
-        let mut out = [0u8; 48];
-        if let Some(n) = answer.write(&mut out) {
-            let _ = try_send(reply, &out[..n]);
-        }
         let (j, plan) = match decided {
             Ok(d) => d,
             Err(Managed::Protected) => {
+                answer(Managed::Protected);
                 // Only `trust`'s badge gets here: the user tried.
                 let j = found.unwrap_or(0);
                 let what = b"stop refused: protected";
@@ -799,7 +843,10 @@ impl Init {
                 self.record_as(audit::action::MANAGE, self.table[j].name.as_bytes(), what);
                 return;
             }
-            Err(_) => return,
+            Err(m) => {
+                answer(m);
+                return;
+            }
         };
         let users = self.users(j);
         let (word, code): (&[u8], _) = match plan {
@@ -816,8 +863,21 @@ impl Init {
         }
         let shown_users: &[&[u8]] = if plan == Plan::Start { &[] } else { &users };
         let me = self.table[j].name.as_bytes();
+        // Recorded before it is done, or not done (#215); except for the
+        // audit trail's own services, so the user can always bring it back.
+        let own = matches!(self.table[j].path, b"bin/audit" | b"bin/store");
+        if own {
+            self.record_as(audit::action::MANAGE, me, &what);
+        } else if !self.record_now(audit::action::MANAGE, me, &what) {
+            answer(Managed::NoAudit);
+            let _ = debug_write(
+                CONSOLE,
+                &[&b"init: "[..], me, b" not ", word, b": not recorded"].concat(),
+            );
+            return;
+        }
+        answer(Managed::Ok);
         let _ = debug_write(CONSOLE, &[&b"init: "[..], me, b" ", &what].concat());
-        self.record_as(audit::action::MANAGE, me, &what);
         // Reported first, so a stop or restart of `trust` is still said
         // by the `trust` that is about to end.
         self.tell_trust(Event::ByUser, me, [code, 0, 0], shown_users);
@@ -1693,6 +1753,16 @@ impl Init {
         } else {
             Mode::Recovery
         };
+        let asked = [
+            b"next boot: ",
+            mode_word(mode),
+            b" mode asked on the trusted path",
+        ]
+        .concat();
+        if !self.record_now(audit::action::SYSTEM, b"init", &asked) {
+            let _ = try_send(reply, &[listing::managed::NO_AUDIT]);
+            return;
+        }
         let mut record = self.record;
         record.next = mode;
         let saved = self.slots.as_ref().is_some_and(|s| s.save(&record));
@@ -1841,6 +1911,21 @@ impl Init {
         if !self.idle(reply) {
             return;
         }
+        // The user's answer recorded first, or not acted on (#215).
+        let mut d = [0u8; 20];
+        let word: &[u8] = if apply { b"apply" } else { b"discard" };
+        let asked = [
+            b"update #",
+            decimal(number.into(), &mut d),
+            b": ",
+            word,
+            b" asked on the trusted path",
+        ]
+        .concat();
+        if !self.record_now(audit::action::SYSTEM, b"init", &asked) {
+            let _ = try_send(reply, &[listing::managed::NO_AUDIT]);
+            return;
+        }
         let offer = match self.offers.take(number, uptime()) {
             Ok(offer) => offer,
             Err(gone) => {
@@ -1949,6 +2034,14 @@ impl Init {
     /// and the slots tried again in place.
     fn roll_back(&mut self, reply: Handle) {
         if !self.idle(reply) {
+            return;
+        }
+        if !self.record_now(
+            audit::action::SYSTEM,
+            b"init",
+            b"rollback asked on the trusted path",
+        ) {
+            let _ = try_send(reply, &[listing::managed::NO_AUDIT]);
             return;
         }
         let mut record = self.record;
@@ -2088,6 +2181,7 @@ fn main(arg: u64) -> u64 {
         restarts: [0; MAX_SERVICES],
         recorded: [false; MAX_SERVICES],
         unsent: VecDeque::new(),
+        dropped: 0,
         to_trust: core::cell::RefCell::new(VecDeque::new()),
         to_trust_since: core::cell::Cell::new(0),
         retry_at: 0,

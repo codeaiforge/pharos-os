@@ -96,6 +96,10 @@ pub mod managed {
     pub const NOT_RUNNING: u8 = OWN + 2;
     /// A dependency does not run; its name follows.
     pub const NEEDS: u8 = OWN + 3;
+    /// The audit trail did not take the command's record, so it was not
+    /// carried out (#215). Also `init`'s answer to `APPLY`, `ROLLBACK`,
+    /// and `NEXT` for the same reason.
+    pub const NO_AUDIT: u8 = OWN + 4;
 }
 
 /// A service's state, as `init` holds it.
@@ -263,6 +267,8 @@ pub enum Managed<'a> {
     NotRunning,
     /// This dependency (a table name) does not run.
     Needs(&'a [u8]),
+    /// Not recorded, so not done (#215).
+    NoAudit,
 }
 
 impl<'a> Managed<'a> {
@@ -275,6 +281,7 @@ impl<'a> Managed<'a> {
             Self::Protected => w.bytes(&[managed::PROTECTED])?,
             Self::Running => w.bytes(&[managed::RUNNING])?,
             Self::NotRunning => w.bytes(&[managed::NOT_RUNNING])?,
+            Self::NoAudit => w.bytes(&[managed::NO_AUDIT])?,
             Self::Needs(name) => {
                 if !valid_name(name) {
                     return None;
@@ -294,6 +301,7 @@ impl<'a> Managed<'a> {
             [managed::PROTECTED] => Self::Protected,
             [managed::RUNNING] => Self::Running,
             [managed::NOT_RUNNING] => Self::NotRunning,
+            [managed::NO_AUDIT] => Self::NoAudit,
             [managed::NEEDS, len, name @ ..]
                 if usize::from(*len) == name.len() && valid_name(name) =>
             {
@@ -672,6 +680,7 @@ mod tests {
             Managed::Protected,
             Managed::Running,
             Managed::NotRunning,
+            Managed::NoAudit,
             Managed::Needs(b"store"),
         ] {
             let mut buf = [0u8; 48];

@@ -1845,10 +1845,19 @@ const MANAGE_SCRIPT: &[console::Step] = &[
     ("health: knowledge ready, restarts 0 of 3, ", ""),
     ("health: agents ready, restarts 0 of 3, ", ""),
     ("health: agent runtime running", "config\n"),
+    // #215: the kernel stops the audit service once `health` is
+    // answered; a command is then not done, `start audit` still is.
+    ("config: from factory image; every compiled value", ""),
+    (">service audit stopped; not restarted", "restart net\n"),
     (
-        "config: from factory image; every compiled value",
-        "restart trust\n",
+        "restart: not done: the audit trail does not take records",
+        "start audit\n",
     ),
+    (
+        "service audit started by the user\r\nservice audit ready",
+        "restart net\n",
+    ),
+    ("service net restarted by the user", "restart trust\n"),
     // 20 more restarts: each `trust` gets its console's DMA pages back
     // when the last one ends (review F1; 16 used to exhaust them).
     (
@@ -2032,18 +2041,30 @@ const MANAGE_EVENTS: &[(&str, &str, Option<&str>)] = &[
         "restarted by the user; used by agents",
         Some("restarted by the user; used by agents"),
     ),
+    // #215: the restart refused while the audit service was stopped has
+    // no record; `start audit` and the restart after it have one each.
+    ("audit", "started by the user", Some("started by the user")),
+    (
+        "net",
+        "restarted by the user",
+        Some("restarted by the user"),
+    ),
 ];
 /// `restart trust` is typed 21 times ([`MANAGE_SCRIPT`]).
 const MANAGE_TRUST_RESTARTS: usize = 21;
 
 /// After the `manage` kernel (#170): each action one `manage` record from
 /// `init` and, but for the refused stop, one `trust` line; a refusal that
-/// changed nothing has no record.
+/// changed nothing has no record, nor a command not done because it could
+/// not be recorded (#215).
 fn manage_checks(image: &Path, console: &str) -> Result<()> {
+    // Two streams: the audit service is stopped and started again (#215).
     let streams = store_image::audit(image)?;
-    let [(_, records)] = &streams[..] else {
-        return Err(format!("expected one audit stream, got {}", streams.len()));
-    };
+    if streams.len() != 2 {
+        return Err(format!("expected two audit streams, got {}", streams.len()));
+    }
+    let records: Vec<String> = streams.into_iter().flat_map(|(_, r)| r).collect();
+    let records = &records;
     for &(actor, detail, line) in MANAGE_EVENTS {
         let want = format!("client 1 Event manage {actor} task 0/0  init outcome 1 {detail}");
         let (all, _) = records_and_copies(records, &want);

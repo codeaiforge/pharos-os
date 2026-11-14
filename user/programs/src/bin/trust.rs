@@ -379,6 +379,9 @@ impl Trust {
             Some(Some(Managed::Running)) => self.say(&[word, name, b" is running"]),
             Some(Some(Managed::NotRunning)) => self.say(&[word, name, b" is not running"]),
             Some(Some(Managed::Needs(d))) => self.say(&[word, name, b" needs ", d]),
+            Some(Some(Managed::NoAudit)) => {
+                self.say(&[word, b"not done: the audit trail does not take records"])
+            }
             Some(None) => self.say(&[word, b"refused"]),
             None => self.say(&[word, b"init is not answering"]),
         }
@@ -482,6 +485,9 @@ impl Trust {
                 self.say(&[b"next boot: ", word, b" mode"]);
                 self.record(audit::action::SYSTEM, None, &[b"next boot ", word].concat());
             }
+            Some([listing::managed::NO_AUDIT]) => {
+                self.say(&[b"next boot: not done: the audit trail does not take records"])
+            }
             Some(_) => self.say(&[b"next boot: the slot record cannot be written"]),
             None => self.say(&[b"next boot: init is not answering"]),
         }
@@ -532,6 +538,9 @@ impl Trust {
             Some([status::BUSY]) => {
                 self.say(&[b"update: not now (booting, updating, or not in normal mode)"])
             }
+            Some([listing::managed::NO_AUDIT]) => {
+                self.say(&[b"update: not done: the audit trail does not take records"])
+            }
             Some(_) => self.say(&[b"update: refused"]),
             None => self.say(&[b"update: init is not answering"]),
         }
@@ -548,6 +557,9 @@ impl Trust {
             Some([status::NOT_FOUND]) => self.say(&[b"rollback: no good slot to roll back to"]),
             Some([status::BUSY]) => {
                 self.say(&[b"rollback: not now (booting, updating, or not in normal mode)"])
+            }
+            Some([listing::managed::NO_AUDIT]) => {
+                self.say(&[b"rollback: not done: the audit trail does not take records"])
             }
             Some(_) => self.say(&[b"rollback: the slot record cannot be written"]),
             None => self.say(&[b"rollback: init is not answering"]),

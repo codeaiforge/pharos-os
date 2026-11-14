@@ -11,7 +11,10 @@
 //! `RESTART audit` itself (services the script never manages) under the
 //! knowledge service's badge and an unknown one: `init` answers
 //! management only on `trust`'s badge, so no answer may come and neither
-//! may happen. The runner checks the trusted console and the trail.
+//! may happen. Once `health` is answered, the kernel stops the audit
+//! service: `restart net` must then not be done (not recorded, #215),
+//! `start audit` must be, and then `restart net`, before the restarts of
+//! `trust`. The runner checks the trusted console and the trail.
 //! Runs under UEFI (D-009).
 
 #![no_std]
@@ -119,6 +122,7 @@ fn run(t: &mut TestRun) {
     let mut summary = None;
     let mut audit = None;
     let mut net_before = None;
+    let mut audit_stopped = false;
     let start = time::uptime();
     // About 10 s needed; under the runner's 60 s limit.
     while time::uptime() - start < Duration::from_secs(50) {
@@ -149,6 +153,16 @@ fn run(t: &mut TestRun) {
                     events.is_some(),
                 );
             }
+        }
+        // #215: `health` answered (the first listing), the audit service
+        // stopped (as a fault would), so the next command cannot be
+        // recorded.
+        if !audit_stopped && has(&lines, "init: services listed for trust") {
+            let id = lines
+                .iter()
+                .find(|(_, l)| l.starts_with(b"audit: boot "))
+                .map(|(id, _)| *id);
+            audit_stopped = id.is_some_and(process::stop);
         }
         if has(&lines, LAST) {
             break;
@@ -186,6 +200,18 @@ fn run(t: &mut TestRun) {
             "init: trust restarted by the user; used by agents",
         ),
         ("the new trust stopped the runtime", LAST),
+        (
+            "with the audit service stopped, a restart is not done (#215)",
+            "init: net not restarted by the user: not recorded",
+        ),
+        (
+            "but the audit service can be started",
+            "init: audit started by the user",
+        ),
+        (
+            "and then the restart is done",
+            "init: net restarted by the user",
+        ),
     ] {
         t.check(&alloc::format!("{what}: {line}"), has(&lines, line));
     }
