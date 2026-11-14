@@ -46,6 +46,7 @@ Each fix has a test that fails without it. Each fix also has a throwaway branch:
 | #215 | Medium | Claude (S-5) | `init` carried out the user's commands whatever happened to their audit record, and dropped the oldest queued record silently after 32 | `a7ab8f9` | `manage` |
 | #218 | Medium | Claude (kernel `unsafe` F2) | The MSI-X table offset comes from the device and was never checked against its BAR's size, so the kernel's 16-byte entry write could land in RAM | `1050f95` | `pci` unit test |
 | #219 | Medium | Claude (system calls F5) | `dma_alloc` and `mmio_map` accepted a hole the revocation sweep left in a `mem_map` reservation; `mem_unmap` then freed the DMA frame the device still held | `841db94` | `syscall` decoder unit test (the whole chain needs frames to run out during a sweep) |
+| #220 | Medium (Gemini: high) | Claude and Gemini (`pharos-user` F1) | `mem_unmap` took any address and `Mapped` was `Copy`, so safe code could unmap memory live references still pointed into | `db2c59a` | `compile_fail` doctest and `pharos-user` unit test; the change is to types, so there is no throwaway branch: without the fix the doctest compiles |
 
 **CI on the throwaway branches:**
 - Confirmed to fail at their test only (2026-11-14, the `push` cell):
@@ -65,6 +66,8 @@ Each fix has a test that fails without it. Each fix also has a throwaway branch:
 - **Unit tests,** which run in the CI workflow rather than the release matrix (the `push` cell passed for both, as expected):
   - #208: run 43613138229 (`groups::tests::only_what_the_supervisor_holds_and_no_longer`);
   - #216: run 43613141112 (`sequence::tests::a_lost_answer_is_not_a_reused_number`).
+  - #218: run 43627303835 (`pci::tests::msix_entries_stay_inside_their_bar`);
+  - #219: run 43627306518 (`syscall::tests::rejects_bad_arguments`).
 
 ## Corrections to the findings
 
@@ -77,13 +80,9 @@ Checking the findings against the code changed some of them:
 
 ## Findings not fixed
 
-### Medium, filed, not fixed
+### Medium, verified, hardened
 
-- **#220, `pharos-user`:** `mem_unmap` is a safe function that takes any address, and `Mapped` is `Copy`. Safe code can unmap a heap chunk or keep a `Mapped` past its unmap; the next `mem_map` can then change memory under live references. Found by both reviewers (Gemini F1, rated high). No current program does it. The proposed fix changes `pharos-user`'s public API, so it waits for the maintainer.
-
-### Medium, verified, for the maintainer
-
-- **Kernel `unsafe` F3, and Gemini SEC-05:** checked against the code; each function is as described. Safe kernel functions whose `unsafe` block trusts an unchecked argument: `gdt::set_kernel_stack`, `paging::load_root`, `run_on_kernel_stack`, `mm::raw::bitmap_storage`, `paging::fill_frame_for_test` and `write_rodata_probe` (compiled into every kernel), `mmio_write32`/`mmio_read32`, `AddressSpace::map`, and `Context::leave_space`. No current caller passes a bad value, and none is reachable from ring 3. Making them `unsafe fn` would move `unsafe` into callers outside the allowed modules (`kmain` in `main.rs`), so the fix is a design choice: narrower types (`&KernelStack`, a frame the space owns), or the test helpers behind a feature. The main session proposes **low**: hardening, not a reachable defect.
+- **Kernel `unsafe` F3, and Gemini SEC-05:** checked against the code; each function is as described. Safe kernel functions whose `unsafe` block trusts an unchecked argument: `gdt::set_kernel_stack`, `paging::load_root`, `run_on_kernel_stack`, `mm::raw::bitmap_storage`, `paging::fill_frame_for_test` and `write_rodata_probe` (compiled into every kernel), `mmio_write32`/`mmio_read32`, `AddressSpace::map`, and `Context::leave_space`. No current caller passes a bad value, and none is reachable from ring 3. Making them `unsafe fn` would move `unsafe` into callers outside the allowed modules (`kmain` in `main.rs`), so the fix is a design choice: narrower types (`&KernelStack`, a frame the space owns), or the test helpers behind a feature. The main session proposes **low**: hardening, not a reachable defect. The maintainer kept them safe functions; `3753e95` narrows `set_kernel_stack`, `mmio_read32`, `mmio_write32`, and `bitmap_storage` to their callers' module and documents what each caller must guarantee. The test helpers stay public, since the test kernels call them. Revisit if these functions gain callers.
 
 ### Low and informational
 
@@ -171,7 +170,7 @@ What the reviewers said they did not reach:
 
 | Criterion | State |
 | --- | --- |
-| No open critical or high findings | Both highs (#202, #204) are fixed. #220 is medium by the main session's proposal and high by Gemini's; the maintainer decides. |
+| No open critical or high findings | Both highs (#202, #204) are fixed, and so is #220, medium by the main session's proposal and high by Gemini's. |
 | Every `unsafe` block reviewed | **Kernel only:** `arch/x86_64.rs` and its submodules, `limine.rs`, and `mm/raw.rs`, by the Claude and Gemini kernel reviews (gpt-5.6-luna found nothing). Whether every block was read is in each reviewer's coverage notes, not checked block by block here. **User space:** `user/pharos-user/src/syscall.rs` (D-008, D-016), by the main session and Gemini, every block; #220 came of it. |
 | Dependencies audited (`ed25519-compact` 2.6.0, `libm` 0.2.16) | Done by the main session (above): no advisories, no transitive dependencies, MIT. Not read line by line. |
 | Security reporting process reviewed (SECURITY.md) | **Not done.** |
