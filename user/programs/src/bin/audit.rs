@@ -17,6 +17,7 @@
 #![no_std]
 #![no_main]
 
+use pharos_programs::sequence::Sequence;
 use pharos_proto::audit::{
     self, Entry, Head, Kind, MAX_RECORD, Record, Request, UNWRITABLE, action, client, outcome,
 };
@@ -40,7 +41,8 @@ struct Audit {
     path: [u8; 16],
     path_len: usize,
     boot: u32,
-    records: u64,
+    /// The next sequence number (#216).
+    sequence: Sequence,
     head: [u8; 32],
 }
 
@@ -131,6 +133,7 @@ impl Audit {
         self.path[4..4 + digits.len()].copy_from_slice(digits);
         self.path_len = 4 + digits.len();
         self.boot = boot;
+        self.sequence = Sequence::default();
         let first = Entry {
             kind: Kind::Event,
             refers: 0,
@@ -162,11 +165,26 @@ impl Audit {
         self.write(client, entry)
     }
 
+    /// The stream's record count, from the store.
+    fn count(&self) -> Option<u64> {
+        let mut out = [0u8; 256];
+        let req = StoreRequest::Stat {
+            path: &self.path[..self.path_len],
+        };
+        match self.store(&req, &mut out)? {
+            (StoreStatus::Ok, 18) => Some(u64::from_le_bytes(out[10..18].try_into().ok()?)),
+            _ => None,
+        }
+    }
+
     /// Stores `entry` from `client`; its sequence number, or `None` if the
     /// store did not take it.
     fn write(&mut self, client: u8, entry: Entry<'_>) -> Option<u64> {
+        let mut sequence = self.sequence;
+        let next = sequence.next(|| self.count());
+        self.sequence = sequence;
         let rec = Record {
-            sequence: self.records,
+            sequence: next?,
             time: uptime(),
             client,
             entry,
@@ -178,15 +196,19 @@ impl Audit {
             record: &bytes[..n],
         };
         let mut out = [0u8; 256];
-        match self.store(&req, &mut out)? {
-            (StoreStatus::Ok, 41) => {
+        match self.store(&req, &mut out) {
+            Some((StoreStatus::Ok, 41)) => {
                 let mut number = [0u8; 8];
                 number.copy_from_slice(&out[1..9]);
-                self.records = u64::from_le_bytes(number) + 1;
+                self.sequence.stored(u64::from_le_bytes(number));
                 self.head.copy_from_slice(&out[9..41]);
                 Some(rec.sequence)
             }
-            _ => None,
+            // Perhaps taken, its answer lost: counted before the next.
+            _ => {
+                self.sequence.failed();
+                None
+            }
         }
     }
 
@@ -230,7 +252,7 @@ impl Audit {
             .unwrap_or(0),
             Request::Head => Head {
                 boot: self.boot,
-                records: self.records,
+                records: self.sequence.records(),
                 head: self.head,
             }
             .encode(out)
@@ -248,7 +270,7 @@ fn main(_: u64) -> u64 {
         path: [0; 16],
         path_len: 0,
         boot: 0,
-        records: 0,
+        sequence: Sequence::default(),
         head: [0; 32],
     };
     // With no store, the service still runs and answers `UNWRITABLE`

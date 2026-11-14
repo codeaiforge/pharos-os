@@ -13,6 +13,7 @@ pub mod mailbox;
 pub mod manage;
 pub mod models;
 pub mod net;
+pub mod sequence;
 pub mod supervise;
 pub mod system;
 pub mod tasks;
