@@ -5,6 +5,7 @@
 //! budgets, and (for a sensitive tool) the user's confirmation, and audits
 //! before it runs anything.
 
+use alloc::vec::Vec;
 use pharos_proto::permission::Permission;
 use pharos_proto::tool::{self, Fault, Invalid, MAX_CALL, TOOLS, Value, number};
 
@@ -37,6 +38,24 @@ pub enum Refused {
 /// item 5).
 pub fn sensitive(tool: u8) -> bool {
     tool == number::SEND
+}
+
+/// A sensitive call waiting for the user, or answered and not yet taken
+/// (#128): its destination and payload, compared with each repeat.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Confirm {
+    pub number: u16,
+    pub permission: Permission,
+    pub data: Vec<u8>,
+    pub answer: Option<bool>,
+}
+
+/// Takes the call in `confirm` if `gone` (revoked or expired) covers its
+/// destination, answered or not (#234): a yes given under one grant does
+/// not carry over to the same destination granted again. The caller ends
+/// the request of one still waiting for the user.
+pub fn take_for(confirm: &mut Option<Confirm>, gone: &Permission) -> Option<Confirm> {
+    confirm.take_if(|c| gone.covers(&c.permission))
 }
 
 fn string<'s>(v: Option<Value<'s>>) -> Option<&'s [u8]> {
@@ -121,6 +140,30 @@ mod tests {
             ))
         );
         assert!(sensitive(number::SEND) && !sensitive(number::READ_FILE));
+    }
+
+    #[test]
+    fn a_confirmation_ends_with_its_grant() {
+        let to = |port| Permission::Net {
+            addr: [10, 0, 2, 2],
+            port,
+        };
+        for answer in [None, Some(true), Some(false)] {
+            let mut c = Some(Confirm {
+                number: 2,
+                permission: to(47_000),
+                data: b"hello".to_vec(),
+                answer,
+            });
+            // Another destination leaves it.
+            assert_eq!(take_for(&mut c, &to(47_001)), None);
+            assert!(c.is_some());
+            // Its own takes it, answered or not (#234).
+            let taken = take_for(&mut c, &to(47_000));
+            assert_eq!(taken.map(|t| t.answer), Some(answer), "{answer:?}");
+            assert_eq!(c, None, "{answer:?}");
+        }
+        assert_eq!(take_for(&mut None, &to(47_000)), None);
     }
 
     #[test]

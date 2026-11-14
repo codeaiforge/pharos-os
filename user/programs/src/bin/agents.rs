@@ -103,7 +103,7 @@ use pharos_programs::grants::Grants;
 use pharos_programs::groups;
 use pharos_programs::mailbox::{self, Mailboxes};
 use pharos_programs::tasks::{self, Begin, Files, StoreFailed, Tasks};
-use pharos_programs::tools;
+use pharos_programs::tools::{self, Confirm};
 use pharos_proto::agents::{
     self, Asked, Assigned, Begun, CHECKPOINT_AT, CONTROL, MAX_BUFFER, MAX_CHECKPOINT, MAX_INPUT,
     MAX_RESULT, MAX_RUNNING, NAME, NO_AUDIT, NO_SESSION, Request, SLOTS, State, TaskStatus,
@@ -1341,15 +1341,6 @@ struct Pending {
     call: bool,
 }
 
-/// A sensitive call waiting for the user, or answered and not yet taken
-/// (#128): its destination and payload, compared with each repeat.
-struct Confirm {
-    number: u16,
-    permission: Permission,
-    data: Vec<u8>,
-    answer: Option<bool>,
-}
-
 /// Every task's revoked (or, if `refused`, refused) permissions, as the
 /// runtime keeps them (#207).
 fn closed(tasks: &Tasks, refused: bool) -> Vec<(u32, Permission)> {
@@ -1824,6 +1815,10 @@ impl Runtime {
                 // revocation (#210).
                 if gone.contains(&Permission::Model(s.session_model)) {
                     self.cancel_session(i);
+                }
+                // A call to it too, as on revocation (#234).
+                for p in &gone {
+                    self.drop_confirm(i, p);
                 }
                 let agent = self.agent_of(task);
                 for p in gone {
@@ -2588,18 +2583,9 @@ impl Runtime {
                     .as_ref()
                     .is_some_and(|s| s.grants.allows(&p, now));
                 if !granted {
-                    // Revoked while the user was asked: that call ends.
-                    let waiting = self.slots[i]
-                        .as_ref()
-                        .and_then(|s| s.confirm.as_ref())
-                        .filter(|c| c.permission == p && c.answer.is_none())
-                        .map(|c| c.number);
-                    if let Some(number) = waiting {
-                        self.resolve(number, trust::Resolution::Refused);
-                    }
-                    if let Some(s) = self.slots[i].as_mut().filter(|_| waiting.is_some()) {
-                        s.confirm = None;
-                    }
+                    // Revoked or expired while the user was asked, or
+                    // since: that call ends.
+                    self.drop_confirm(i, &p);
                     self.note(i, refusal::NO_GRANT, Some(p));
                     return Err(status::NO_ACCESS);
                 }
@@ -3357,19 +3343,21 @@ impl Runtime {
             audit::outcome::OK,
             detail,
         );
-        // A call to it waiting for the user ends at once, as a session
-        // does (D-012 item 8; M3.6 review F1).
-        let waiting = self.slots[i]
-            .as_mut()
-            .and_then(|s| {
-                s.confirm
-                    .take_if(|c| c.answer.is_none() && permission.covers(&c.permission))
-            })
-            .map(|c| c.number);
-        if let Some(number) = waiting {
-            self.resolve(number, trust::Resolution::Refused);
-        }
+        self.drop_confirm(i, &permission);
         true
+    }
+
+    /// Ends slot `i`'s call to a destination `gone` covers (revoked or
+    /// expired): one waiting for the user at once, as a session does
+    /// (D-012 item 8; M3.6 review F1), and an answered one too, so its yes
+    /// does not hold for the destination granted again (#234).
+    fn drop_confirm(&mut self, i: usize, gone: &Permission) {
+        let taken = self.slots[i]
+            .as_mut()
+            .and_then(|s| tools::take_for(&mut s.confirm, gone));
+        if let Some(c) = taken.filter(|c| c.answer.is_none()) {
+            self.resolve(c.number, trust::Resolution::Refused);
+        }
     }
 
     /// Keeps `p` revoked from task `task` (or, if `refused`, refused to
