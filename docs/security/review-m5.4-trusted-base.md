@@ -49,8 +49,18 @@ Each fix has a test that fails without it. Each fix also has a throwaway branch:
   - #202: run 43481504187;
   - #205: run 43481510032;
   - #203: run 43481514964;
-  - #206: run 43481521810.
-- **Not yet run:** #208, #210, #209, #211, #207, #213, #214, #216, #212, #215. Their branches are local until the maintainer pushes them.
+  - #206: run 43481521810;
+  - #210: run 43611659904 (`permissions`);
+  - #209: run 43611662483 (`exhaustion`);
+  - #211: run 43611665410 (`agents`);
+  - #207: run 43611668129 (`permissions`);
+  - #213: run 43611670918 (`system`);
+  - #214: run 43611673550 (`audit`);
+  - #212: runs 43611679675 and 43613143640 (`exhaustion` and `budgets`, both through the `spend` agent's file limit; the `pharos-store` unit test passes there, since the branch removes only the store's use of the reserve check);
+  - #215: run 43611682311 (`manage`).
+- **Unit tests,** which run in the CI workflow rather than the release matrix (the `push` cell passed for both, as expected):
+  - #208: run 43613138229 (`groups::tests::only_what_the_supervisor_holds_and_no_longer`);
+  - #216: run 43613141112 (`sequence::tests::a_lost_answer_is_not_a_reused_number`).
 
 ## Corrections to the findings
 
