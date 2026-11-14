@@ -124,6 +124,21 @@ For the maintainer to accept or file:
   - Fixed 16-byte audit path buffer (Gemini SEC-M54-004): holds, since `log/` plus 10 digits is 14 bytes.
 - **Carried by D-046:** the knowledge service can still fill the non-audit share of the store and deny the runtime's task records (to M6.10). A warning as the audit trail fills, and export then rotation on the user's command, are planned for M5.5 (#217).
 
+### Proposed verdicts on the lows
+
+The maintainer decides; this is the main session's proposal.
+- **File as low issues:**
+  - kernel F4 (skip `DEVICE` frames in `unmap_owned`), F7, F9, F11, and F6 before real hardware;
+  - `trust` T3, T4, T6;
+  - runtime R8, R11, R12, Gemini SEC-02, and R5 and R9 to confirm first;
+  - S-6, S-8, Gemini SEC-M54-003.
+- **Accept as documented limits:**
+  - kernel F5 and F10 (invariants that hold today), F8 (covert channels are outside the threat model), `debug_write`'s 256 bytes;
+  - `trust` Gemini F3 (the runtime enforces approvals), Gemini F4 and T5 (documented), T7;
+  - runtime R10 (within the sender's budget), Gemini SEC-03 (fails closed);
+  - S-7 (not reachable with today's tables).
+- **No action:** T2 (moot after #206), Gemini SEC-M54-004 (holds), the revocation sweep and D-046 (already scheduled), and the three `pharos-user` lows below (a comment fix for F2 at most).
+
 ### `pharos-user` low findings (Gemini)
 
 - F2: `memmove` calls `memcpy` for overlapping ranges, which `memcpy`'s comment forbids. The forward copy is correct there (`dest` at or before `src`), and raw pointers carry no `noalias`; the comment is wrong, not the code.
@@ -166,6 +181,15 @@ What the reviewers said they did not reach:
 - `trust`'s half of `service.rs`;
 - the test modules.
 
+## The reporting process
+
+Checked on 2026-11-14:
+- **Channel:** GitHub private vulnerability reporting is enabled (`private-vulnerability-reporting` API: `enabled: true`), and the advisory link in `SECURITY.md` is the repository's.
+- **Supported versions:** "the latest release and `main`" matches the releases (v0.1.0 to v0.4.0).
+- **Corrected:** `SECURITY.md` still said Pharos is not bootable. Its scope named only the host workspace, the CLI, CI, and docs, and called the threat model the "planned system". It now lists the kernel, user space, and the signing tools, gives examples of reportable issues taken from the threat model, and says what is not a vulnerability: documented limits, real hardware, model text that crosses no capability boundary, and the generated test key. A leaked release key is reported the same way.
+- **Unchanged, the maintainer's policy:** no committed response time, and no disclosure timeline.
+- **Settings for the maintainer** (not changed here): secret scanning and push protection are off, and so are Dependabot security updates. With two dependencies, Dependabot matters less than secret scanning, which backs AGENTS.md section 4.
+
 ## Acceptance criteria (M5.4)
 
 | Criterion | State |
@@ -173,6 +197,6 @@ What the reviewers said they did not reach:
 | No open critical or high findings | Both highs (#202, #204) are fixed, and so is #220, medium by the main session's proposal and high by Gemini's. |
 | Every `unsafe` block reviewed | **Kernel only:** `arch/x86_64.rs` and its submodules, `limine.rs`, and `mm/raw.rs`, by the Claude and Gemini kernel reviews (gpt-5.6-luna found nothing). Whether every block was read is in each reviewer's coverage notes, not checked block by block here. **User space:** `user/pharos-user/src/syscall.rs` (D-008, D-016), by the main session and Gemini, every block; #220 came of it. |
 | Dependencies audited (`ed25519-compact` 2.6.0, `libm` 0.2.16) | Done by the main session (above): no advisories, no transitive dependencies, MIT. Not read line by line. |
-| Security reporting process reviewed (SECURITY.md) | **Not done.** |
+| Security reporting process reviewed (SECURITY.md) | Done by the main session (see [the reporting process](#the-reporting-process)). Private vulnerability reporting is on; `SECURITY.md`'s status and scope were out of date and are corrected. Two repository settings are left to the maintainer. |
 | The report states the reviewer's independence | Above. |
 | Threat model updated | Rows for #203 (the one-pass stall, to M6.10), #212 and D-046, and #215; the other fixes are within existing rows. |

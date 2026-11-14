@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format is based on 
 ### Changed
 
 - Stale documents corrected: `architecture.md`'s implemented section (it said the kernel had no user processes or IPC), `knowledge.md`'s status, `phase3-requirements.md` (it said nothing was implemented), and the decision log, where D-011, D-012, and D-018 sat under open decisions though accepted
+- `SECURITY.md` updated (M5.4): it said Pharos is not bootable and scoped reports to the host tools; it now covers the kernel, user space, and image signing, with examples from the threat model of what to report and what is not a vulnerability
 - D-032 amended (#192): the M5.1 gate records a 2-hour local soak instead of 8 hours, after a power outage cut the 8-hour run off at about 7 h 20 min; 8 hours stays required before each release. The 2-hour run at `6ad5602` passed 708 cycles with free frames 1 below the first cycle, processes and handles unchanged, so `FRAME_MARGIN` stays 32 ([testing.md](docs/development/testing.md#soak)).
 
 ### Fixed
