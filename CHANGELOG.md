@@ -28,6 +28,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- `stop all` says what it did not stop (#227, M5.4 review): it answered `stopped all` even without the runtime's capability, or after a `still running`. It now asks `init` for the runtime once more, and answers `stop all: <n> still running` or `stop all: no runtime capability held; …` when not everything was stopped. A host unit test covers it.
 - `trust` keeps a line's `\r\n` when it cuts an over-long line (#226, M5.4 review): `say` cut the terminator off a line that filled the 256-byte buffer, so the next line ran onto the same row. `pharos_programs::output::line` keeps two bytes for it; a host unit test covers it.
 - NMI (vector 2) and machine check (vector 18) run on their own IST stacks (IST2, IST3) (#222, M5.4 review), so one that arrives while the system-call entry or exit is in ring 0 on the user's RSP does not push its frame there. A host test in `idt.rs` and the new `ist_stacks` test kernel cover it.
 - Limine's responses can no longer be used after bootloader memory is reclaimed (#223, M5.4 review): they, their strings, the memory-map entries, and the module list are borrowed from a single `limine::BootMemory` token that `mm::reclaim_bootloader_memory` consumes, so a use after the reclaim does not compile. `'static` responses (test kernels) rule out the reclaim, and the frame allocator refuses to free a reclaimable frame before it. Host tests in `limine.rs` and `frame.rs`, and the `reclaim` test kernel, cover it.

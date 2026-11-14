@@ -138,7 +138,8 @@ impl Trust {
     }
 
     /// Stops `process` and waits up to [`STOP_WAIT_US`] for it to end.
-    fn stop(&mut self, label: &[u8], process: Handle) {
+    /// Returns whether it ended.
+    fn stop(&mut self, label: &[u8], process: Handle) -> bool {
         let _ = process_stop(process);
         let mut waited = 0;
         while waited < STOP_WAIT_US && process_status(process) == Ok(Status::Running) {
@@ -146,8 +147,14 @@ impl Trust {
             waited += 10_000;
         }
         match process_status(process) {
-            Ok(Status::Running) => self.say(&[b"stopping ", label, b": still running"]),
-            _ => self.say(&[b"stopped ", label]),
+            Ok(Status::Running) => {
+                self.say(&[b"stopping ", label, b": still running"]);
+                false
+            }
+            _ => {
+                self.say(&[b"stopped ", label]);
+                true
+            }
         }
     }
 
@@ -275,15 +282,25 @@ impl Trust {
             }
             // The runtime first: its agents end with it (children stop
             // with their parent). Then each agent, in case one is not its.
+            // Without the runtime's capability (`init` did not answer a
+            // restarted `trust` in time), it is asked for once more, and
+            // the last line says what was not stopped (#227).
             Command::StopAll => {
+                if self.runtime.is_none() {
+                    self.ask_runtime();
+                }
+                let mut running = 0;
                 if let Some(runtime) = self.runtime {
-                    self.stop(b"runtime", runtime);
+                    running += usize::from(!self.stop(b"runtime", runtime));
                 }
                 let agents = self.agents;
                 for a in agents.iter().flatten() {
-                    self.stop(&a.name[..a.len], a.process);
+                    running += usize::from(!self.stop(&a.name[..a.len], a.process));
                 }
-                self.say(&[b"stopped all"]);
+                let (start, n, end) = output::stop_all(self.runtime.is_some(), running);
+                let mut d = [0u8; 20];
+                let n = n.map_or(&b""[..], |n| decimal(n as u64, &mut d));
+                self.say(&[start, n, end]);
                 self.record(audit::action::STOP, None, b"all");
             }
             Command::Revoke(name, permission) => {
