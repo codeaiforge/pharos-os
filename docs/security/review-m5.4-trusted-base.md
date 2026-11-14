@@ -21,7 +21,7 @@ M5.4 asks for a reviewer independent of the agents that wrote the code: a person
 
 Both reviewers followed one written method: attack surface first, then tracing every input, every `unsafe` invariant, object lifetimes, information flow, and denial of service. They had to quote code exactly with `file:line`, give a concrete trigger, and mark a finding unconfirmed without one. A third model, gpt-5.6-luna, reviewed the kernel's `unsafe` code and found nothing. It was not used again.
 
-Every finding below was checked against the code by the main session (Claude Code) before it was filed. The main session wrote neither review, but it is the same family that wrote the code. **No human has reviewed the trusted base.** That is still the M5.4 gate ("sign-off by the independent reviewer and the maintainer"); an external audit stays open if resources allow.
+Every finding below was checked against the code by the main session (Claude Code) before it was filed. The main session wrote neither review, but it is the same family that wrote the code. **Sign-off (the M5.4 gate):** the maintainer signed off on this report and its verdicts on 2026-11-14; the independent review is gemini-3.8-flash's, the minimum M5.4 accepts. An external audit stays open if resources allow.
 
 ## Findings fixed
 
@@ -124,20 +124,20 @@ For the maintainer to accept or file:
   - Fixed 16-byte audit path buffer (Gemini SEC-M54-004): holds, since `log/` plus 10 digits is 14 bytes.
 - **Carried by D-046:** the knowledge service can still fill the non-audit share of the store and deny the runtime's task records (to M6.10). A warning as the audit trail fills, and export then rotation on the user's command, are planned for M5.5 (#217).
 
-### Proposed verdicts on the lows
+### Verdicts on the lows
 
-The maintainer decides; this is the main session's proposal.
+The main session proposed these, and the maintainer accepted them on 2026-11-14. Filed as #221–#236 (`bug`, no milestone), one per finding, except Gemini SEC-M54-003, which did not hold up when checked: `init` reads update files into that buffer, so the store needs `WRITE` on it.
 - **File as low issues:**
   - kernel F4 (skip `DEVICE` frames in `unmap_owned`), F7, F9, F11, and F6 before real hardware;
   - `trust` T3, T4, T6;
   - runtime R8, R11, R12, Gemini SEC-02, and R5 and R9 to confirm first;
-  - S-6, S-8, Gemini SEC-M54-003.
+  - S-6, S-8.
 - **Accept as documented limits:**
   - kernel F5 and F10 (invariants that hold today), F8 (covert channels are outside the threat model), `debug_write`'s 256 bytes;
   - `trust` Gemini F3 (the runtime enforces approvals), Gemini F4 and T5 (documented), T7;
   - runtime R10 (within the sender's budget), Gemini SEC-03 (fails closed);
   - S-7 (not reachable with today's tables).
-- **No action:** T2 (moot after #206), Gemini SEC-M54-004 (holds), the revocation sweep and D-046 (already scheduled), and the three `pharos-user` lows below (a comment fix for F2 at most).
+- **No action:** T2 (moot after #206), Gemini SEC-M54-004 (holds), Gemini SEC-M54-003 (not reproduced), the revocation sweep and D-046 (already scheduled), and the three `pharos-user` lows below (a comment fix for F2 at most).
 
 ### `pharos-user` low findings (Gemini)
 
@@ -199,4 +199,5 @@ Checked on 2026-11-14:
 | Dependencies audited (`ed25519-compact` 2.6.0, `libm` 0.2.16) | Done by the main session (above): no advisories, no transitive dependencies, MIT. Not read line by line. |
 | Security reporting process reviewed (SECURITY.md) | Done by the main session (see [the reporting process](#the-reporting-process)). Private vulnerability reporting is on; `SECURITY.md`'s status and scope were out of date and are corrected. Two repository settings are left to the maintainer. |
 | The report states the reviewer's independence | Above. |
+| Gate: sign-off by the independent reviewer and the maintainer | The independent review is gemini-3.8-flash's; the maintainer signed off on 2026-11-14. **Passed.** |
 | Threat model updated | Rows for #203 (the one-pass stall, to M6.10), #212 and D-046, and #215; the other fixes are within existing rows. |
