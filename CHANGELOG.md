@@ -25,6 +25,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- The runtime ends an inference session that gets no `NEXT` for 10 s, as the inference service does (#211, M5.4 review): before, an agent that opened the only session and went quiet kept every other agent's `INFER` at `BUSY` for its whole task time, long after the service had dropped the session. `IDLE_US` moved to `pharos_proto::infer`, shared by both. The `agents` kernel's `infer` case checks it.
 - A request an agent sends without a reply capability is held to its `rate` too (#209, M5.4 review): before, it was served at once and in full, so an agent could flood the runtime past its rate. `exhaustion`'s `glutton` sends 12 such `LOG`s; 1 is served with the fix, all 12 without.
 - An inference session ends when the `model <n>` grant it was opened under expires, as on revocation (#210, M5.4 review): an agent approved for `model 2 for 2000 ms` kept generating with `NEXT` after the deadline. `permissions`' `asker` now reads past it and must get nothing.
 - A supervisor can no longer delegate `update propose` (#208, M5.4 review): like `data read` and `data write`, it acts on the holder's own files, so a worker whose entry has no `update` could propose its own; refused with `NO_ACCESS`, and left out of a subtask stored before the fix. `capabilities.md` now lists `knowledge` as delegable, as `knowledge.md` already recorded.

@@ -8,8 +8,10 @@
 //! - `crash`: crashes (a page fault); `exit`: exits with 3; `hang`: spins;
 //!   `spin`: spins, asking `INFO` once a second;
 //! - `fail`: fails with `asked to fail`;
-//! - `infer`: model 1 (not in its manifest) must be refused, then generates
-//!   from model 2 and completes with the text;
+//! - `infer`: model 1 (not in its manifest) must be refused; a session
+//!   left idle past the service's idle time must not hold the next
+//!   `INFER` (#211); then generates from model 2 and completes with the
+//!   text;
 //! - `probe`: completes with `probe ok` if control requests are refused;
 //! - `wait`: keeps asking `INFO` every 200 ms until stopped;
 //! - `keys`: checks `BEGIN` answers `GO`, `UNKNOWN`, and `DONE` (#99);
@@ -161,7 +163,7 @@ use pharos_proto::agents::{
     self, Asked, Assigned, Begun, CHECKPOINT_AT, CONTROL, Datagram, Deps, KEY, MAX_BUFFER,
     MAX_DATAGRAM, NO_AUDIT, NO_SESSION, Request, encode,
 };
-use pharos_proto::infer::{Started, Tokens};
+use pharos_proto::infer::{IDLE_US, Started, Tokens};
 use pharos_proto::knowledge::{self, Author, Kind, List, Put, Source, Summary, flag};
 use pharos_proto::permission::Permission;
 use pharos_proto::{Reader, status};
@@ -351,6 +353,24 @@ impl Agent {
         }
         let prompt = b"hello hello";
         self.buffer.write_bytes(0, prompt);
+        // A session left idle (#211): one `NEXT`, then none for longer than
+        // the service's idle time; the runtime ends it too, so the next
+        // `INFER` starts instead of `BUSY`.
+        let idle = Request::Infer {
+            model: 2,
+            max_new: 40,
+            prompt_len: prompt.len() as u32,
+        };
+        let (_, n) = self.call(&idle, &mut out);
+        if Started::parse(&out[..n]).is_none() {
+            return self.fail(b"GENERATE through the runtime failed");
+        }
+        self.call(&Request::Next, &mut out);
+        let until = uptime() + IDLE_US + 500_000;
+        while uptime() < until {
+            self.call(&Request::Info, &mut out);
+            sleep(200_000);
+        }
         let generate = Request::Infer {
             model: 2,
             max_new: 20,
@@ -358,7 +378,7 @@ impl Agent {
         };
         let (_, n) = self.call(&generate, &mut out);
         if Started::parse(&out[..n]).is_none() {
-            return self.fail(b"GENERATE through the runtime failed");
+            return self.fail(b"GENERATE through the runtime failed, or an idle session held it");
         }
         let mut text = Vec::new();
         loop {

@@ -1273,6 +1273,8 @@ struct Slot {
     session_model: u8,
     /// The new tokens it asked for, charged until the session ends (#118).
     session_new: u16,
+    /// When it was opened or last answered a `NEXT` (#211).
+    session_seen: u64,
     ending: Option<Ending>,
     grants: Grants,
     /// Destinations it sent to, and datagrams from them kept for it.
@@ -1705,6 +1707,7 @@ impl Runtime {
             session: None,
             session_model: 0,
             session_new: 0,
+            session_seen: 0,
             ending: None,
             grants: Grants::default(),
             peers: Vec::new(),
@@ -1781,6 +1784,19 @@ impl Runtime {
                 continue;
             };
             let task = s.task;
+            // The only session, idle: ended, so it does not hold the
+            // service for everyone after the service dropped it (#211).
+            if s.session.is_some() {
+                let idle_at = s.session_seen.saturating_add(infer::IDLE_US);
+                if now >= idle_at {
+                    self.cancel_session(i);
+                } else {
+                    wait = wait.min(idle_at - now);
+                }
+            }
+            let Some(s) = self.slots[i].as_mut() else {
+                continue;
+            };
             let gone = s.grants.expire(now);
             if let Some(u) = s.grants.list().iter().filter_map(|g| g.until).min() {
                 wait = wait.min(u.saturating_sub(now));
@@ -2212,6 +2228,7 @@ impl Runtime {
                     s.session = Some(started.session);
                     s.session_model = model;
                     s.session_new = max_new;
+                    s.session_seen = uptime();
                 }
                 Ok(n)
             }
@@ -2228,6 +2245,8 @@ impl Runtime {
                         s.session = None;
                     }
                     self.session_ended(i, session);
+                } else if let Some(s) = &mut self.slots[i] {
+                    s.session_seen = uptime();
                 }
                 Ok(n)
             }

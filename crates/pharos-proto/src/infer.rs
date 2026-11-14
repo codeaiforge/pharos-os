@@ -26,6 +26,9 @@ pub mod op {
 /// a model and processes the whole prompt first. `init`'s health window
 /// for the agent runtime is set above twice this (M4.5 review F1).
 pub const GENERATE_US: u64 = 60_000_000;
+/// A session with no `NEXT` for this long is cancelled by the service,
+/// and ended by the agent runtime too (#211).
+pub const IDLE_US: u64 = 10_000_000;
 /// Most new tokens one `GENERATE` asks for.
 pub const MAX_NEW: u16 = 2048;
 /// Longest prompt (bytes of UTF-8 in the attached buffer).

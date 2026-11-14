@@ -25,8 +25,8 @@ use pharos_programs::budgets::Window;
 use pharos_programs::fp::Libm;
 use pharos_programs::models::{self, MANIFEST, Model as Entry, find};
 use pharos_proto::infer::{
-    MAX_BUFFER, MAX_NEW, MAX_PROMPT, MAX_TEXT, Model, ModelState, NAME, NEXT_TOKENS, Record,
-    Request, Started, Status, Step, Stop, Tokens, VERSION, parse,
+    IDLE_US, MAX_BUFFER, MAX_NEW, MAX_PROMPT, MAX_TEXT, Model, ModelState, NAME, NEXT_TOKENS,
+    Record, Request, Started, Status, Step, Stop, Tokens, VERSION, parse,
 };
 use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::{Info, Writer, refusal};
@@ -42,8 +42,6 @@ const CONSOLE: Handle = 1;
 const SERVICE: Handle = 2;
 const REPORT: Handle = 3;
 const STORE: Handle = 4;
-/// A session with no `NEXT` for this long is cancelled.
-const IDLE_US: u64 = 10_000_000;
 /// The window model files are read through (as #78).
 const WINDOW: u64 = 16 << 20;
 /// Most clients with an attached buffer.
