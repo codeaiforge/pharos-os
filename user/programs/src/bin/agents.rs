@@ -3747,7 +3747,9 @@ impl Runtime {
             }
             return false;
         }
-        if s.bucket.take(rate, now).is_ok() || cap == 0 {
+        // One without a reply capability counts too (#209): held like any
+        // other, and dropped while one is held.
+        if s.bucket.take(rate, now).is_ok() {
             return true;
         }
         // It counts as progress when it arrives.
@@ -3773,8 +3775,10 @@ impl Runtime {
                     };
                     let mut out = [0u8; 256];
                     let n = self.handle(&msg, i as u32 + 1, &mut out);
-                    let _ = try_send(cap, &out[..n]);
-                    let _ = delete(cap);
+                    if cap != 0 {
+                        let _ = try_send(cap, &out[..n]);
+                        let _ = delete(cap);
+                    }
                 }
                 Err(us) => wait = wait.min(us),
             }

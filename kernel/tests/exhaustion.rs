@@ -2,7 +2,8 @@
 //! resources.md). The kernel starts the services and the network service
 //! as the `budgets` kernel does, then the runtime with its `budgets` policy
 //! table and `agentclient` in mode 7: two `spinner`s spin, `glutton` takes
-//! pages and handles until refused, floods requests past its rate, and goes
+//! pages and handles until refused, floods requests past its rate (also without a reply capability, which must be held
+//! to it too, #209), and goes
 //! past its tokens, datagrams, bytes, and files, while `ticker` must be
 //! served within 400 ms throughout. The runner types `usage` on the
 //! trusted console under that load and `stop all` once a third spinner
@@ -150,6 +151,16 @@ fn run(t: &mut TestRun) {
         process::exits()
             .into_iter()
             .any(|e| e.task == client && e.code == 0),
+    );
+    // #209: of 12 `LOG`s without a reply capability past its rate, one is
+    // held and served, and one more if a request was due meanwhile.
+    let flood = process::debug_output()
+        .iter()
+        .filter(|(id, l)| *id == runtime && l == b"agents: glutton: flood")
+        .count();
+    t.check(
+        "requests without a reply capability are held to the rate too",
+        (1..=2).contains(&flood),
     );
     for (_, line) in process::debug_output()
         .into_iter()

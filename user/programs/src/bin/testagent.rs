@@ -68,8 +68,9 @@
 //!   approval prompt, a buffer revoked under the runtime, the approval
 //!   queue filled, and a flood of requests; completes with `hostile ok`.
 //! - `glut` (agent `glutton`, the `exhaustion` kernel, #120): takes pages
-//!   and handles until refused, floods requests past its rate, then does
-//!   what `spend` does; completes with `spend ok`.
+//!   and handles until refused, floods requests past its rate (with and,
+//!   #209, without a reply capability), then does what `spend` does;
+//!   completes with `spend ok`.
 //! - `tools` (agent `reader`, the `tools` kernel, #126, #127): `read_file`
 //!   reads its granted `report.txt`, and is refused another file
 //!   (`NO_ACCESS`), a path, text that is not a call, an unknown tool
@@ -1747,6 +1748,17 @@ impl Agent {
         if !served || uptime() - start < 1_500_000 {
             return self.fail(b"12 requests at 4 a second were not held and served");
         }
+        // Sent without a reply capability, past its rate too (#209): one is
+        // held and the rest dropped. The kernel counts the `flood` lines.
+        let mut msg = [0u8; 256];
+        let Some(n) = encode(&Request::Log { text: b"flood" }, &mut msg) else {
+            return self.fail(b"LOG not encoded");
+        };
+        for _ in 0..12 {
+            let _ = send(RUNTIME, &msg[..n], 0, 0, 0);
+        }
+        // The held one served, so `spend` starts with none held.
+        sleep(600_000);
         self.spend()
     }
 
