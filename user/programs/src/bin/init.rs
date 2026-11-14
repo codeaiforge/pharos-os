@@ -408,9 +408,19 @@ impl Init {
         say(service.name, "started", None);
         // `trust` gets the runtime's STOP before the runtime can start any
         // agent; a failed send leaves the runtime unstoppable, so stop it.
+        // Never a blocking send: a `trust` not receiving would hold `init`,
+        // and one blocked sending its `ready` here would wait for it too
+        // (#213). The runtime starts only once `trust` is ready
+        // ([`Self::check_ready`]), so it is receiving: 2 s at most.
         if service.is_runtime() {
-            let sent = send(self.trust, &TRUST_RUNTIME, process, STOP | WAIT, 0);
-            if sent.is_err() {
+            let sent = (0..200).any(|_| {
+                let ok = try_send_cap(self.trust, &TRUST_RUNTIME, process, STOP | WAIT, 0).is_ok();
+                if !ok {
+                    pharos_user::sleep(10_000);
+                }
+                ok
+            });
+            if !sent {
                 let _ = pharos_user::process_stop(process);
                 say(service.name, "not registered with trust", None);
             }
@@ -1164,6 +1174,14 @@ impl Init {
         self.event(j, &what, Event::Restarting, numbers, &users);
     }
 
+    /// True if `trust` sent `ready`, or the table has none.
+    fn trust_ready(&self) -> bool {
+        let count = self.table.len().min(MAX_SERVICES);
+        (0..count)
+            .find(|&k| self.table[k].name == "trust")
+            .is_none_or(|k| matches!(self.state[k], State::Ok(_)))
+    }
+
     /// Starts services whose restart delay has passed, and stops daemons
     /// that did not send `ready` in time. Returns how long until the next
     /// deadline.
@@ -1172,6 +1190,13 @@ impl Init {
         let mut wait = u64::MAX;
         for j in 0..self.table.len().min(MAX_SERVICES) {
             if let State::Restarting(at) = self.state[j] {
+                // The runtime waits for `trust` to be ready, to take its
+                // STOP (#213); `trust` restarts first when both crashed.
+                if now >= at && self.table[j].is_runtime() && !self.trust_ready() {
+                    self.state[j] = State::Restarting(now.saturating_add(100_000));
+                    wait = wait.min(100_000);
+                    continue;
+                }
                 if now >= at {
                     self.start(j);
                 } else {

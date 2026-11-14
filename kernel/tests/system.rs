@@ -8,7 +8,9 @@
 //! stop, never restarted), and kills the inference service four times
 //! (restarted three times, then given up). The runner types `services` on
 //! the trusted console once `trust` shows the give-up, then `system` and
-//! `safe` (#164); the kernel waits until `init` answered them. The runner then checks the trusted console
+//! `safe` (#164); the kernel waits until `init` answered them, then kills
+//! the runtime, and `trust` within the runtime's restart delay; both must
+//! come back with `trust` holding the new runtime's STOP (#213). The runner then checks the trusted console
 //! and the audit trail: ready, each event one line and one record, and
 //! each service's state. Runs under UEFI (D-009).
 
@@ -141,6 +143,11 @@ enum Step {
     Listed,
     /// `init` wrote safe mode for the next boot (#164).
     NextBoot,
+    /// The runtime killed, then `trust` while the runtime waits to be
+    /// restarted (#213).
+    KillTrust,
+    /// Both must come back, `trust` holding the new runtime's STOP.
+    TrustBack,
     Done,
 }
 
@@ -189,6 +196,7 @@ fn run(t: &mut TestRun) {
     // The processes before each fault, so the kernel waits for new ones.
     let (mut knowledge, mut infer) = (None, None);
     let (mut trust, mut agents) = (None, None);
+    let (mut kept, mut back) = (false, false);
     let start = time::uptime();
     while step != Step::Done && time::uptime() - start < Duration::from_secs(50) {
         w.poll();
@@ -256,6 +264,40 @@ fn run(t: &mut TestRun) {
             }
             Step::NextBoot => {
                 if w.has(NEXT_BOOT) {
+                    kept = trust.zip(agents).is_some_and(|(a, b)| {
+                        process::by_id(a).is_some() && process::by_id(b).is_some()
+                    });
+                    if agents.is_some_and(|id| process::kill(id, KILLED)) {
+                        step = Step::KillTrust;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            Step::KillTrust => {
+                // Within the runtime's 100 ms delay: it is due while
+                // `trust` is down.
+                if w.has("init: agents restarting 1 of 3 in 100 ms") {
+                    if trust.is_some_and(|id| process::kill(id, KILLED)) {
+                        step = Step::TrustBack;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            Step::TrustBack => {
+                let new_trust = children(init, |caps| {
+                    caps.iter().any(
+                        |(o, _)| matches!(o, Object::Device(d) if d.pci.device == VIRTIO_CONSOLE),
+                    ) && caps.iter().any(|(o, _)| matches!(o, Object::Process(_)))
+                });
+                let new_agents = children(init, |caps| {
+                    caps.iter().any(|(o, _)| matches!(o, Object::Filesystem(_)))
+                });
+                if new_trust.is_some_and(|id| Some(id) != trust)
+                    && new_agents.is_some_and(|id| Some(id) != agents)
+                {
+                    back = true;
                     step = Step::Done;
                 }
             }
@@ -324,9 +366,11 @@ fn run(t: &mut TestRun) {
     );
     t.check(
         "its dependents kept running: trust and the agent runtime",
-        trust
-            .zip(agents)
-            .is_some_and(|(a, b)| process::by_id(a).is_some() && process::by_id(b).is_some()),
+        kept,
+    );
+    t.check(
+        "the runtime, then trust killed: both come back, trust holding the runtime's STOP (#213)",
+        back,
     );
     t.check("no network service runs", net_of(init).is_none());
     t.check("no inference service runs", infer_of(init).is_none());

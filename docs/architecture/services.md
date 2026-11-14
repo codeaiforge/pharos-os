@@ -194,7 +194,7 @@ For example, the inference service's entry reads `Give(DebugConsole, WRITE, None
 
 **Declared runtime gains.** Each entry's `gains` lists what the service may hold beyond `caps`:
 - `Own` (every service): objects it created itself, an endpoint no other process holds, or an interrupt object of one of its devices;
-- `Processes`: process capabilities with `STOP | WAIT`, for `trust` (the runtime and each agent) and for the runtime (its agents);
+- `Processes`: process capabilities with `STOP | WAIT`, for `trust` (the runtime and each agent) and for the runtime (its agents). `init` hands `trust` the runtime's without ever blocking (`try_send_cap`, at most 2 s, else it stops the runtime), and restarts the runtime only once `trust` is ready (#213);
 - `RuntimeChannel`: `trust`'s `SEND` on `Endpoint(Agents)` badged `agents::TRUST`.
 
 A call's one-shot reply capability is revoked when the call returns, so it needs no entry. The audit tells it apart by taking three snapshots 100 ms apart: a capability counts only if it is in all three. A client's attached buffer is mapped and its capability deleted, so it is no capability; mappings are bounded by each service's page limit.
