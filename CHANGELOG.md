@@ -28,6 +28,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- `revoke <agent> <permission>` reaches every task of the agent that has not ended (#230, M5.4 review): a task waiting to start or restart kept the permission for its next attempt, and its running subtasks kept a delegated one. The `permissions` kernel and a host unit test in `grants.rs` cover it.
 - The agent runtime drops a task's approvals, revocations, and refusals once the task has ended or is forgotten and no attempt of it runs (#233, M5.4 review): the lists only grew. `grants::Kept::prune`; a host unit test in `grants.rs` covers it.
 - An answered `send` confirmation ends when its destination is revoked or expires (#234, M5.4 review): a yes given under one grant held for the destination granted again (reachable through an approval's expiry). `tools::take_for` drops it; a host unit test in `tools.rs` covers it.
 - `apply` marks the slot it replaces bad in the slot record before writing it (#236, M5.4 review): a crash or failed save between writing the slot and saving the record left the record naming that slot good for an image it no longer held, so a later rollback refused it and the factory image ran. A failed apply now leaves no rollback target, which `system` shows. A host unit test in `pharos-image` covers it.

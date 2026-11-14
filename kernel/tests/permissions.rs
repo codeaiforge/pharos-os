@@ -10,7 +10,9 @@
 //! be refused after each without a restart and its session ended; then it
 //! crashes, and on attempt 2 both must still be refused; the kernel then
 //! restarts the runtime, and on attempt 3 both must still be refused
-//! (#207). Then an `asker`
+//! (#207). `keeper-e`, submitted to run after `keeper-b`, waits through
+//! the revocations and must be refused both when it runs (#230). Then an
+//! `asker`
 //! task asks for permissions (#106): the runner answers `yes` to model 2
 //! for 2 s, `no` to `data write`, and nothing to `data read` (refused after
 //! the test table's 5 s), then answers that one late (`no request #3`).
@@ -112,6 +114,7 @@ fn run(t: &mut TestRun) {
     for step in [
         "with its grants, an agent writes and reads its own file and generates from model 2",
         "revoked while it runs: refused at once, its session ended, and still after a restart",
+        "revoked while the task waited to start: refused when it runs",
         "asked: approved for 2 s then refused again, refused by the user, unanswered refused",
         "with the audit trail gone, consequential actions are refused with NO_AUDIT",
         "a task started then gets no grant, as none could be recorded",

@@ -144,6 +144,27 @@ impl Kept {
         self.approved.retain(|(t, ..)| live(*t));
         self.refused.retain(|(t, _)| live(*t));
     }
+
+    /// Gives `g`, an attempt of task `id`, what was approved for the task,
+    /// and takes what was revoked from it.
+    pub fn apply(&self, id: u32, g: &mut Grants) {
+        for (_, p, until) in self.approved.iter().filter(|(t, ..)| *t == id) {
+            g.add(*p, *until);
+        }
+        for (_, p) in self.revoked.iter().filter(|(t, _)| *t == id) {
+            g.revoke(p);
+        }
+    }
+}
+
+/// The tasks of agent `name` a revocation reaches (#230): each not ended,
+/// whether an attempt runs or it waits to start or restart, and each whose
+/// last attempt still runs (`running`).
+pub fn revocable(tasks: &Tasks, name: &[u8], running: impl Fn(u32) -> bool) -> Vec<u32> {
+    (tasks.list.iter())
+        .filter(|t| t.agent == name && (!t.ended() || running(t.id)))
+        .map(|t| t.id)
+        .collect()
 }
 
 #[cfg(test)]
@@ -341,6 +362,38 @@ mod tests {
         assert_eq!(kept.revoked, [a, b].map(|t| (t, Permission::Model(2))));
         assert_eq!(kept.approved.len(), 2);
         assert_eq!(kept.refused.len(), 2);
+    }
+
+    #[test]
+    fn a_revocation_reaches_every_task_that_may_run() {
+        let mut f = Mem::default();
+        let (mut tasks, _) = Tasks::load(&mut f, |_| Some(3)).unwrap();
+        let [a, b, c, d, other] =
+            [b"x", b"x", b"x", b"x", b"y"].map(|n| tasks.submit(&mut f, n, &[], b"").unwrap());
+        // `a` runs, `b` waits to restart (or to start), `c` ended while
+        // its attempt still runs, `d` ended.
+        let at = |tasks: &Tasks, id| tasks.find(id).unwrap();
+        tasks.start(&mut f, at(&tasks, a)).unwrap();
+        for t in [c, d] {
+            tasks
+                .finish(&mut f, at(&tasks, t), State::Done, b"")
+                .unwrap();
+        }
+        let running = |id| id == a || id == c || id == other;
+        assert_eq!(revocable(&tasks, b"x", running), [a, b, c]);
+        assert_eq!(revocable(&tasks, b"y", running), [other]);
+        assert_eq!(revocable(&tasks, b"z", running), []);
+        // Recorded for `b`, its next attempt has it no more, and keeps
+        // what was approved for it.
+        let mut kept = Kept::default();
+        kept.revoked.push((b, Permission::Model(2)));
+        kept.approved.push((b, NET, Some(5)));
+        kept.approved.push((a, Permission::Model(3), None));
+        let mut g = Grants::new(1 << 2, Data::None, &[], &[], &[], (0, 0));
+        kept.apply(b, &mut g);
+        assert!(!g.allows(&Permission::Model(2), 0));
+        assert_eq!(g.until(&NET, 0), Some(Some(5)));
+        assert!(!g.allows(&Permission::Model(3), 0), "another task's");
     }
 
     #[test]

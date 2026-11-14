@@ -2640,6 +2640,13 @@ fn main(_: u64) -> u64 {
             a.complete(b"napped")
         }
         b"keeper-d" if a.get(b"notes").0 == status::NO_ACCESS => a.complete(b"d ok"),
+        // Waited for `keeper-b` while the user revoked both (#230).
+        b"keeper-e"
+            if a.get(b"notes").0 == status::NO_ACCESS && a.generate(4).0 == status::NO_ACCESS =>
+        {
+            a.complete(b"e ok")
+        }
+        b"keeper-e" => a.fail(b"a revocation did not reach a task waiting to start"),
         b"keeper-d" => a.fail(b"a grant was given without its record"),
         b"wait" => loop {
             a.call(&Request::Info, &mut out);

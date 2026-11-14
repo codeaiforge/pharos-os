@@ -658,6 +658,10 @@ fn permissions(mut c: Client) -> u64 {
             c.step(step, false);
             continue;
         };
+        // #230: `keeper-e` (task 3) waits for `keeper-b` while the user
+        // revokes from `keeper`.
+        let waiting =
+            (input == b"keeper-b").then(|| c.submit_after(b"keeper", b"keeper-e", &[task]));
         let ended = c.wait(task, 60);
         if let Some((s, result)) = &ended {
             if result != want {
@@ -674,6 +678,16 @@ fn permissions(mut c: Client) -> u64 {
             );
         } else {
             c.step(step, false);
+        }
+        if let Some(waiting) = waiting {
+            let e_ok = waiting
+                .ok()
+                .and_then(|t| c.wait(t, 60))
+                .is_some_and(|(s, r)| s.state == State::Done && r == b"e ok" && s.attempts == 1);
+            c.step(
+                "revoked while the task waited to start: refused when it runs",
+                e_ok,
+            );
         }
     }
     // Audit (#108): `keeper-d` waits for `keeper-c`, during which the

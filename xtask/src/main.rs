@@ -2268,17 +2268,17 @@ const PERMISSIONS_SCRIPT: &[console::Step] = &[
     ("revoked model 2 from keeper", ""),
     // `asker` (#106): yes, no, then no answer (and a late one).
     (
-        "approve #1: asker task 3 wants model 2 for 2000 ms? (yes 1 / no 1)",
+        "approve #1: asker task 4 wants model 2 for 2000 ms? (yes 1 / no 1)",
         "yes 1\n",
     ),
     ("approve #1: granted", ""),
     (
-        "approve #2: asker task 3 wants data write for this task? (yes 2 / no 2)",
+        "approve #2: asker task 4 wants data write for this task? (yes 2 / no 2)",
         "no 2\n",
     ),
     ("approve #2: refused", ""),
     (
-        "approve #3: asker task 3 wants data read for this task? (yes 3 / no 3)",
+        "approve #3: asker task 4 wants data read for this task? (yes 3 / no 3)",
         "",
     ),
     ("approve #3: no answer; refused", "yes 3\n"),
@@ -2784,12 +2784,15 @@ fn permissions_audit(image: &Path) -> Result<()> {
         "client 2 Event revoke user task 0/0 data read trust outcome 1 keeper",
         "client 3 Event revoke keeper task 2/1 data read",
         "client 3 Event revoke keeper task 2/1 model 2",
+        // #230: from `keeper-e`, which had not started.
+        "client 3 Event revoke keeper task 3/0 data read",
+        "client 3 Event revoke keeper task 3/0 model 2",
         "client 2 Event approve user task 0/0  trust outcome 1 #1",
         "client 2 Event refuse user task 0/0  trust outcome 1 #2",
-        "client 3 Event approve asker task 3/1 model 2",
-        "client 3 Event expire asker task 3/1 model 2",
-        "client 3 Event refuse asker task 3/1 data write  outcome 2 user",
-        "client 3 Event refuse asker task 3/1 data read  outcome 2 no answer",
+        "client 3 Event approve asker task 4/1 model 2",
+        "client 3 Event expire asker task 4/1 model 2",
+        "client 3 Event refuse asker task 4/1 data write  outcome 2 user",
+        "client 3 Event refuse asker task 4/1 data read  outcome 2 no answer",
     ] {
         if !lines.iter().any(|l| l.contains(want)) {
             return Err(format!("the audit trail has no record like {want:?}"));
@@ -2807,7 +2810,7 @@ fn permissions_audit(image: &Path) -> Result<()> {
         })
         .collect();
     let last_is_the_cut_write =
-        |l: &String| Some(l) == lines.last() && l.contains("Intent data write keeper task 4/1");
+        |l: &String| Some(l) == lines.last() && l.contains("Intent data write keeper task 5/1");
     if unmatched.len() > 1 || !unmatched.iter().all(|l| last_is_the_cut_write(l)) {
         return Err(format!("intents without an outcome: {unmatched:?}"));
     }

@@ -99,7 +99,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use pharos_programs::budgets::{self, Bucket, GroupUse, Over, Usage};
-use pharos_programs::grants::{Grants, Kept};
+use pharos_programs::grants::{self, Grants, Kept};
 use pharos_programs::groups;
 use pharos_programs::mailbox::{self, Mailboxes};
 use pharos_programs::tasks::{self, Begin, Files, StoreFailed, Tasks};
@@ -1704,6 +1704,7 @@ impl Runtime {
         let registered = trust::encode(&register, &mut msg)
             .is_some_and(|n| send(TRUST, &msg[..n], process, STOP | WAIT, 0).is_ok());
         let now = uptime();
+        let mut g = self.grants_of(id, &limits);
         self.slots[slot] = Some(Slot {
             task: id,
             process,
@@ -1728,25 +1729,6 @@ impl Runtime {
         });
         // Every grant is recorded before it is given; none is given if a
         // record fails (#108).
-        let files = &limits.files[..limits.file_count];
-        let channels = &limits.channels[..limits.channel_count];
-        let mut g = Grants::new(
-            limits.models,
-            limits.data,
-            limits.net.as_slice(),
-            files,
-            channels,
-            limits.knowledge,
-        );
-        if limits.propose {
-            g.add(Permission::UpdatePropose, None);
-        }
-        for (_, p, until) in self.kept.approved.iter().filter(|(t, ..)| *t == id) {
-            g.add(*p, *until);
-        }
-        for (_, p) in self.kept.revoked.iter().filter(|(t, _)| *t == id) {
-            g.revoke(p);
-        }
         let delegated = self.delegated(id, now);
         let from = self.source(id);
         let recorded = g.list().iter().all(|grant| {
@@ -1776,6 +1758,27 @@ impl Runtime {
             return;
         }
         self.event(id, b"started", None);
+    }
+
+    /// What an attempt of task `id` starts with, before what its
+    /// supervisor delegates: its manifest within the policy entry, what
+    /// was approved for the task, less what was revoked from it.
+    fn grants_of(&self, id: u32, limits: &Limits) -> Grants {
+        let files = &limits.files[..limits.file_count];
+        let channels = &limits.channels[..limits.channel_count];
+        let mut g = Grants::new(
+            limits.models,
+            limits.data,
+            limits.net.as_slice(),
+            files,
+            channels,
+            limits.knowledge,
+        );
+        if limits.propose {
+            g.add(Permission::UpdatePropose, None);
+        }
+        self.kept.apply(id, &mut g);
+        g
     }
 
     /// Stops agents with no request for `progress_ms`, or over `task_ms`.
@@ -3268,26 +3271,24 @@ impl Runtime {
             .map_or_else(Vec::new, |t| self.tasks.list[t].agent.clone())
     }
 
-    /// `REVOKE` from `trust`: takes `permission` from every running task
-    /// of agent `name`, ends a session opened with it, and tells `trust`.
+    /// `REVOKE` from `trust`: takes `permission` from every task of agent
+    /// `name` that may still run, its running attempt or the next one
+    /// (#230), and from their running subtasks; ends a session opened with
+    /// it, and tells `trust`.
     fn revoke(&mut self, name: &[u8], permission: Permission) {
         let mut outcome = trust::Outcome::NoAgent;
-        for i in 0..SLOTS {
-            let Some(s) = self.slots[i].as_mut() else {
-                continue;
-            };
-            let named = self
-                .tasks
-                .find(s.task)
-                .is_some_and(|t| self.tasks.list[t].agent == name);
-            if !named {
-                continue;
-            }
+        let slots = &self.slots;
+        let running = |id: u32| slots.iter().flatten().any(|s| s.task == id);
+        for task in grants::revocable(&self.tasks, name, running) {
             if outcome == trust::Outcome::NoAgent {
                 outcome = trust::Outcome::NotHeld;
             }
-            let task = s.task;
-            if self.take(i, permission, b"user") {
+            let slot = (self.slots.iter()).position(|s| s.as_ref().is_some_and(|s| s.task == task));
+            let held = match slot {
+                Some(i) => self.take(i, permission, b"user"),
+                None => self.take_next(task, permission),
+            };
+            if held {
                 outcome = trust::Outcome::Revoked;
                 // With its source (#135): from every running subtask it
                 // was delegated to.
@@ -3314,6 +3315,39 @@ impl Runtime {
             name,
             permission,
         });
+    }
+
+    /// Takes `permission` from task `task`, which waits to start or
+    /// restart (#230), if its next attempt would hold it, and keeps it
+    /// taken; recorded as on a running attempt. Returns true if it would
+    /// have been held.
+    fn take_next(&mut self, task: u32, permission: Permission) -> bool {
+        let Some(limits) =
+            (self.tasks.find(task)).and_then(|t| self.limits(&self.tasks.list[t].agent))
+        else {
+            return false;
+        };
+        let now = uptime();
+        let mut g = self.grants_of(task, &limits);
+        for (p, until) in self.delegated(task, now) {
+            g.add(p, until);
+        }
+        g.expire(now);
+        if !g.revoke(&permission) {
+            return false;
+        }
+        self.close(task, permission, false);
+        // Always taken away; recorded when the trail can be.
+        let agent = self.agent_of(task);
+        self.permission_event(
+            &agent,
+            task,
+            action::REVOKE,
+            permission,
+            outcome::OK,
+            b"user",
+        );
+        true
     }
 
     /// Takes `permission` from the attempt in slot `i` and keeps it taken
