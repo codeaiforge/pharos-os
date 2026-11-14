@@ -259,6 +259,21 @@ impl Record {
         (self.slots.iter()).any(|s| s.state == State::Bad && s.sha256 == *sha256)
     }
 
+    /// Before an approved update is written over the slot [`Record::stage`]
+    /// will pick (#236): that slot is no longer a rollback target. If it
+    /// holds an image it becomes `Bad`, its version and SHA-256 kept, so
+    /// [`Record::min_version`] and [`Record::was_bad`] still count it.
+    /// Saved before the slot's file is written, so a crash or a failed
+    /// save after the write leaves no record naming the slot `Good` for an
+    /// image it no longer holds. Returns that slot.
+    pub fn replacing(&mut self) -> Slot {
+        let slot = self.active.map_or(Slot::A, Slot::other);
+        if self.slot(slot).state != State::Empty {
+            self.refuse(slot);
+        }
+        slot
+    }
+
     /// Stages an approved update (#165) in the slot that is not active
     /// (A if none) and makes it active, so it is tried first, on this boot
     /// and after a crash; the previous slot stays the rollback target.
@@ -526,5 +541,39 @@ mod tests {
             let mut r = record(Some(Slot::A), info(State::Good, 0, 7), info(other, 0, 8));
             assert_eq!(r.rollback(), None, "{other:?}");
         }
+    }
+
+    #[test]
+    fn the_slot_an_update_replaces_is_no_rollback_target() {
+        // #236: A runs version 8; B holds version 7, the rollback target.
+        let r = record(
+            Some(Slot::A),
+            info(State::Good, 0, 8),
+            info(State::Good, 0, 7),
+        );
+        let mut marked = r;
+        assert_eq!(marked.replacing(), Slot::B);
+        // Saved before B's file is written: a crash after the write
+        // leaves this record, and B is neither rolled back to nor booted.
+        assert_eq!(*marked.slot(Slot::B), info(State::Bad, 0, 7));
+        assert_eq!(marked.slot(Slot::A), r.slot(Slot::A));
+        let (mut back, mut boot) = (marked, marked);
+        assert_eq!(back.rollback(), None);
+        assert_eq!(boot.candidate([true, false]), None, "A failed: factory");
+        assert_eq!(marked.min_version(0), r.min_version(0), "still counted");
+        // Staging then fills B as before.
+        let (mut staged, mut direct) = (marked, r);
+        assert_eq!(staged.stage(9, [9; 32]), direct.stage(9, [9; 32]));
+        assert_eq!(staged, direct);
+        // An empty slot, or a bad one, is left as it is.
+        for state in [State::Empty, State::Bad] {
+            let other = info(state, 0, 10);
+            let mut r = record(Some(Slot::A), info(State::Good, 0, 8), other);
+            assert_eq!(r.replacing(), Slot::B);
+            assert_eq!(*r.slot(Slot::B), other, "{state:?}");
+        }
+        let mut none = Record::EMPTY;
+        assert_eq!(none.replacing(), Slot::A);
+        assert_eq!(none, Record::EMPTY);
     }
 }

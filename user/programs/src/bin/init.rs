@@ -1950,6 +1950,20 @@ impl Init {
             self.system(&[b"update discarded: incoming ", name, what].concat(), None);
             return;
         }
+        // The slot to be written is no rollback target from here on, and
+        // the record says so before its file changes (#236). Saved before
+        // the check, which leaves the image in the buffer that a save uses.
+        let mut marked = self.record;
+        let slot = marked.replacing();
+        let slot_name = shown::name(1 + slot as u32);
+        if marked != self.record && !slots.save(&marked) {
+            self.slots = Some(slots);
+            self.system(
+                &[b"update failed: ", slot_name, b" cannot be written"].concat(),
+                None,
+            );
+            return;
+        }
         let checked = slots.check(&path, self.key.as_ref(), self.table).and_then(
             |(version, sha256, len, config)| {
                 if sha256 != offer.sha256 {
@@ -1964,6 +1978,11 @@ impl Init {
         let (version, sha256, len) = match checked {
             Ok(found) => found,
             Err(why) => {
+                // The slot was not written: it is the rollback target
+                // again, unless that cannot be saved.
+                if marked != self.record && !slots.save(&self.record) {
+                    self.record = marked;
+                }
                 self.slots = Some(slots);
                 self.tell_offer(number, Some(why), name, (0, [0; 32]));
                 self.system(
@@ -1973,12 +1992,12 @@ impl Init {
                 return;
             }
         };
-        let mut record = self.record;
-        let slot = record.stage(version, sha256);
-        let slot_name = shown::name(1 + slot as u32);
+        let mut record = marked;
+        record.stage(version, sha256);
         // The file first, then the record that names it: a crash between
-        // leaves the record as it was.
+        // leaves the record that marked the slot bad.
         if !slots.write_slot(slot, len) || !slots.save(&record) {
+            self.record = marked;
             self.slots = Some(slots);
             self.system(
                 &[b"update failed: ", slot_name, b" cannot be written"].concat(),

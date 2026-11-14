@@ -28,6 +28,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- `apply` marks the slot it replaces bad in the slot record before writing it (#236, M5.4 review): a crash or failed save between writing the slot and saving the record left the record naming that slot good for an image it no longer held, so a later rollback refused it and the factory image ran. A failed apply now leaves no rollback target, which `system` shows. A host unit test in `pharos-image` covers it.
 - The store's `LIST` skips names longer than 80 bytes instead of stopping at them (#235, M5.4 review), so a long name in `incoming/` no longer hides later update files from `update`, and a client paging with `start` always moves. A host unit test in `pharos-proto` covers it.
 - `submit_child` writes a subtask once, with its parent and delegated permissions (#229, M5.4 review): it wrote the task first without them, so a failed second write left a parentless top-level task. A host unit test in `tasks.rs` cuts the store after every write.
 - `trust` limits the lines the agent runtime makes it print (#228, M5.4 review): a flooding runtime could keep every console transmit buffer busy, so `trust`'s and `init`'s lines were dropped silently. They are now limited to 32 at once and 20 a second, never in the last 4 free transmit buffers, and the number not shown is said once. A host unit test covers it.
