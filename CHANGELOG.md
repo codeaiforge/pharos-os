@@ -28,6 +28,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- Limine's responses can no longer be used after bootloader memory is reclaimed (#223, M5.4 review): they, their strings, the memory-map entries, and the module list are borrowed from a single `limine::BootMemory` token that `mm::reclaim_bootloader_memory` consumes, so a use after the reclaim does not compile. `'static` responses (test kernels) rule out the reclaim, and the frame allocator refuses to free a reclaimable frame before it. Host tests in `limine.rs` and `frame.rs`, and the `reclaim` test kernel, cover it.
 - `module_bytes` refuses ranges in the kernel image (#225, M5.4 review): the kernel image has the same memory-map kind as boot modules, so the check accepted a range over `.data` or `.bss`. `storage::module_range_ok` excludes the image's physical range, which `init_kernel_space` now records; a host unit test in `storage.rs` and the `ramdisk` test kernel cover it.
 - The hotplug driver refuses a PCI Express capability above offset `0xe4` (#224, M5.4 review): the slot registers sit at `+0x18`, so a device reporting a higher offset made the Slot Control write wrap into the port's Command register. `pci::express` checks it; a host unit test in `pci.rs` covers it.
 - `unmap_owned` keeps the frame of a page marked `DEVICE` (#221, M5.4 review): it freed disowned and device frames, which `destroy` skips, so a `mem_unmap` between two `mem_share` batches could free frames already handed to a `Memory` object. The `address_spaces` test kernel covers it.

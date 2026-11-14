@@ -13,7 +13,7 @@
 
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 /// Base revision this kernel is written against ("Base Revisions").
 pub const BASE_REVISION: u64 = 6;
@@ -105,38 +105,99 @@ impl<R: 'static> Request<R> {
         }
     }
 
-    /// The bootloader's response, if it answered this request.
-    /// The bootloader's response, if it gave one and responses have not
-    /// been retired (see [`retire_responses`]).
+    /// The bootloader's response, if it gave one, borrowed from `boot`.
+    /// The borrow ends before `boot` can be handed to the reclaim
+    /// (`mm::reclaim_bootloader_memory`), so the response cannot be used
+    /// after its memory is reused.
+    pub fn get<'a>(&self, _boot: &'a BootMemory) -> Option<&'a R> {
+        // SAFETY: the pointer is null or was set by the bootloader to a
+        // response in bootloader-reclaimable memory. That memory is reused
+        // only by the reclaim, which consumes the one `BootMemory`; `boot`
+        // is borrowed for `'a`, so it is not consumed during `'a`.
+        unsafe { self.response.read().as_ref() }
+    }
+
+    /// The bootloader's response for code that never reclaims bootloader
+    /// memory (test kernels). The first call keeps that memory for good:
+    /// [`BootMemory::take`] returns `None` from then on, so the reclaim can
+    /// never run. Returns `None` once the [`BootMemory`] has been taken.
     pub fn response(&self) -> Option<&'static R> {
-        if RESPONSES_RETIRED.load(Ordering::Acquire) {
+        if !BOOT_MEMORY.keep() {
             return None;
         }
-        // SAFETY: the pointer is null or was set by the bootloader to a
-        // response in bootloader-reclaimable memory, which stays untouched
-        // until `retire_responses` (checked above).
+        // SAFETY: as in `get`; `keep` succeeded, so the one `BootMemory`
+        // can no longer be taken, the reclaim cannot run, and the memory
+        // stays untouched for the rest of the kernel's life.
         unsafe { self.response.read().as_ref() }
     }
 }
 
-static RESPONSES_RETIRED: AtomicBool = AtomicBool::new(false);
+/// Who may read Limine's responses ([`BootMemoryState`]).
+const UNCLAIMED: u8 = 0;
+/// The [`BootMemory`] token was taken; only [`Request::get`] reads.
+const TAKEN: u8 = 1;
+/// [`Request::response`] was used; bootloader memory is never reclaimed.
+const KEPT: u8 = 2;
 
-/// Marks all responses invalid: from now on every `response()` returns
-/// `None`. Called before bootloader-reclaimable memory, where the responses
-/// live, is reused. References obtained earlier must not be used after this.
-// ponytail: earlier `&'static` references stay usable by safe code; the rule
-// above is documented, not enforced. Revisit if responses spread further.
-pub fn retire_responses() {
-    RESPONSES_RETIRED.store(true, Ordering::Release);
+/// Whether the [`BootMemory`] token is still available, taken, or given up
+/// for `'static` responses. Its own type so host tests can use fresh copies.
+struct BootMemoryState(AtomicU8);
+
+impl BootMemoryState {
+    const fn new() -> Self {
+        Self(AtomicU8::new(UNCLAIMED))
+    }
+
+    /// True if the token was free and is now taken.
+    fn take(&self) -> bool {
+        self.0
+            .compare_exchange(UNCLAIMED, TAKEN, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// True if responses may be `'static`: the token was never taken, and
+    /// now never will be.
+    fn keep(&self) -> bool {
+        match self
+            .0
+            .compare_exchange(UNCLAIMED, KEPT, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => true,
+            Err(state) => state == KEPT,
+        }
+    }
 }
 
-/// Reads a 0-terminated string provided by the bootloader.
-fn boot_str(ptr: *const c_char) -> Option<&'static str> {
+static BOOT_MEMORY: BootMemoryState = BootMemoryState::new();
+
+/// The right to read Limine's responses ([`Request::get`]) while
+/// bootloader-reclaimable memory, where they live, is untouched. There is
+/// at most one, and `mm::reclaim_bootloader_memory` consumes it, so no
+/// response borrowed from it survives the reclaim (issue #223). Not `Copy`
+/// or `Clone`.
+pub struct BootMemory {
+    _private: (),
+}
+
+impl BootMemory {
+    /// The one token: `None` if it was taken before, or if
+    /// [`Request::response`] already kept bootloader memory for good.
+    pub fn take() -> Option<BootMemory> {
+        BOOT_MEMORY.take().then_some(BootMemory { _private: () })
+    }
+}
+
+/// Reads a 0-terminated string provided by the bootloader, borrowed for as
+/// long as the response that points to it.
+fn boot_str<T: ?Sized>(_response: &T, ptr: *const c_char) -> Option<&str> {
     if ptr.is_null() {
         return None;
     }
-    // SAFETY: the protocol guarantees 0-terminated ASCII strings that stay
-    // valid while the kernel runs.
+    // SAFETY: the protocol guarantees a 0-terminated string. It lives in
+    // bootloader-reclaimable memory next to the response, so it is valid
+    // exactly as long as the response is: the returned lifetime is that of
+    // `_response`, which `Request::get` or `Request::response` bounds by the
+    // reclaim.
     unsafe { CStr::from_ptr(ptr) }.to_str().ok()
 }
 
@@ -149,12 +210,12 @@ pub struct BootloaderInfoResponse {
 }
 
 impl BootloaderInfoResponse {
-    pub fn name(&self) -> Option<&'static str> {
-        boot_str(self.name)
+    pub fn name(&self) -> Option<&str> {
+        boot_str(self, self.name)
     }
 
-    pub fn version(&self) -> Option<&'static str> {
-        boot_str(self.version)
+    pub fn version(&self) -> Option<&str> {
+        boot_str(self, self.version)
     }
 }
 
@@ -219,11 +280,13 @@ pub struct MemmapResponse {
 
 impl MemmapResponse {
     /// The memory map entries, in the order the bootloader reported them.
-    pub fn entries(&self) -> impl Iterator<Item = &'static MemmapEntry> + '_ {
+    pub fn entries(&self) -> impl Iterator<Item = &MemmapEntry> {
         (0..self.entry_count as usize).map(move |i| {
             // SAFETY: the protocol guarantees `entries` points to
-            // `entry_count` valid entry pointers, and the entries stay valid
-            // and unmodified while the kernel runs.
+            // `entry_count` valid entry pointers. Array and entries live in
+            // bootloader-reclaimable memory like the response, so they are
+            // valid and unmodified for as long as `self` is borrowed (see
+            // `Request::get`).
             unsafe { &**self.entries.add(i) }
         })
     }
@@ -256,8 +319,8 @@ pub struct ExecutableCmdlineResponse {
 
 impl ExecutableCmdlineResponse {
     /// The command line; empty when the entry sets none.
-    pub fn cmdline(&self) -> Option<&'static str> {
-        boot_str(self.cmdline)
+    pub fn cmdline(&self) -> Option<&str> {
+        boot_str(self, self.cmdline)
     }
 }
 
@@ -294,13 +357,13 @@ impl File {
     }
 
     /// The path within the boot volume, with a leading slash.
-    pub fn path(&self) -> Option<&'static str> {
-        boot_str(self.path)
+    pub fn path(&self) -> Option<&str> {
+        boot_str(self, self.path)
     }
 
     /// The string from the configuration (`module_string`).
-    pub fn string(&self) -> Option<&'static str> {
-        boot_str(self.string)
+    pub fn string(&self) -> Option<&str> {
+        boot_str(self, self.string)
     }
 }
 
@@ -314,12 +377,13 @@ pub struct ModuleResponse {
 
 impl ModuleResponse {
     /// The modules, in configuration order.
-    pub fn modules(&self) -> impl Iterator<Item = &'static File> + '_ {
+    pub fn modules(&self) -> impl Iterator<Item = &File> {
         (0..self.module_count as usize).map(move |i| {
             // SAFETY: the protocol guarantees `modules` points to
-            // `module_count` valid file pointers, valid and unmodified
-            // until bootloader-reclaimable memory is reused (responses are
-            // retired before that).
+            // `module_count` valid file pointers. List and files live in
+            // bootloader-reclaimable memory like the response, so they are
+            // valid and unmodified for as long as `self` is borrowed (see
+            // `Request::get`).
             unsafe { &**self.modules.add(i) }
         })
     }
@@ -374,6 +438,22 @@ mod tests {
         assert_eq!(&request.id[..2], &COMMON_MAGIC);
         assert_eq!(&request.id[2..], &[0x67cf3d9d378a806f, 0xe304acdfc50c3c62]);
         assert!(request.response().is_none(), "no bootloader on the host");
+    }
+
+    #[test]
+    fn one_boot_memory_token_and_no_static_responses_beside_it() {
+        let state = BootMemoryState::new();
+        assert!(state.take(), "the first take gets the token");
+        assert!(!state.take(), "there is only one token");
+        assert!(!state.keep(), "no 'static responses while it is out");
+    }
+
+    #[test]
+    fn static_responses_rule_out_the_token() {
+        let state = BootMemoryState::new();
+        assert!(state.keep(), "'static responses before any token");
+        assert!(state.keep(), "and again");
+        assert!(!state.take(), "then the reclaim can never be allowed");
     }
 
     #[test]

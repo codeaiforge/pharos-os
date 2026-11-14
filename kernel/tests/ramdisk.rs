@@ -8,6 +8,7 @@
 
 use pharos_fs::{BLOCK_SIZE, BlockDevice, BlockError};
 use pharos_kernel::arch::x86_64::{gdt, idt, paging};
+use pharos_kernel::limine::BootMemory;
 use pharos_kernel::storage;
 use pharos_kernel::testing::{self, TestRun};
 use pharos_kernel::{kprintln, mm};
@@ -38,20 +39,24 @@ fn block_matches(disk: &[u8], block: usize) -> bool {
 fn run(t: &mut TestRun) {
     gdt::init();
     idt::init();
+    let Some(boot) = BootMemory::take() else {
+        t.check("bootloader memory token available", false);
+        return;
+    };
     let memory = testing::init_memory(
-        requests::HHDM.response(),
-        requests::MEMMAP.response(),
-        requests::EXECUTABLE_ADDRESS.response(),
+        requests::HHDM.get(&boot),
+        requests::MEMMAP.get(&boot),
+        requests::EXECUTABLE_ADDRESS.get(&boot),
     );
     t.check("frame allocator and kernel page tables set up", memory);
-    let Some(hhdm) = requests::HHDM.response() else {
+    let Some(hhdm) = requests::HHDM.get(&boot) else {
         return;
     };
     if !memory {
         return;
     }
 
-    let (recorded, skipped) = storage::record_modules(requests::MODULES.response(), hhdm.offset);
+    let (recorded, skipped) = storage::record_modules(requests::MODULES.get(&boot), hhdm.offset);
     for m in storage::modules().iter().flatten() {
         kprintln!("  module {}: {} bytes at {:#x}", m.name(), m.size, m.phys);
     }
@@ -127,7 +132,7 @@ fn run(t: &mut TestRun) {
     );
 
     // Module memory must survive reclaim and never reach the frame allocator.
-    let reclaimed = mm::reclaim_bootloader_memory();
+    let reclaimed = mm::reclaim_bootloader_memory(boot);
     t.check("bootloader memory reclaimed", reclaimed.is_ok());
     let module_ranges = storage::modules();
     let mut handed_out = 0;

@@ -104,18 +104,19 @@ mod global {
         Ok(stats)
     }
 
-    /// Hands bootloader-reclaimable memory to the frame allocator and
-    /// retires Limine's responses, which live there (every `response()`
-    /// returns `None` afterwards). Call once nothing uses bootloader memory:
-    /// after the switch to the kernel's own stack, GDT, and page tables, and
-    /// after the last read of a Limine response. Returns the frames gained.
-    pub fn reclaim_bootloader_memory() -> Result<usize, MmError> {
+    /// Hands bootloader-reclaimable memory to the frame allocator. Consumes
+    /// the [`BootMemory`](crate::limine::BootMemory) token, so no Limine
+    /// response borrowed from it (they live in that memory) can be used
+    /// afterwards, and the reclaim runs at most once (#223). Call once
+    /// nothing uses bootloader memory: after the switch to the kernel's own
+    /// stack, GDT, and page tables. Returns the frames gained. On an error
+    /// the memory stays reserved, and responses stay unreadable.
+    pub fn reclaim_bootloader_memory(_boot: crate::limine::BootMemory) -> Result<usize, MmError> {
         let mut frames = FRAMES.lock();
         let frames = frames.as_mut().ok_or(MmError::FramesNotReady)?;
         if !paging::kernel_space_active() {
             return Err(MmError::PagingNotReady);
         }
-        crate::limine::retire_responses();
         Ok(frames.release_pending())
     }
 

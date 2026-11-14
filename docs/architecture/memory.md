@@ -33,10 +33,10 @@ After the GDT and IDT, `kmain` (and test kernels through `testing::init_memory`)
 Bootloader-reclaimable regions hold Limine's boot stack, GDT, page tables, and its responses (including the memory map). The kernel stops using each of them: it switches to its own stack (first thing in `kmain`), GDT (#20), and page tables (#27), and copies the memory map into a kernel static (`mm::memory_map()`, up to 128 entries; more are counted as truncated). The frame allocator is built over usable **and** reclaimable regions from the start (their bitmap storage is planned up front), with reclaimable frames marked used. Reclaim then:
 
 1. refuses to run unless the kernel's own page tables are active;
-2. retires Limine's responses: from then on every `Request::response()` returns `None`;
-3. frees the reclaimable frames (once; later calls gain nothing).
+2. consumes the one `limine::BootMemory` token;
+3. frees the reclaimable frames.
 
-References to responses obtained before reclaim must not be used afterwards; this is a documented rule, not enforced by the type system. In QEMU with 256 MiB, reclaim adds 41 MiB under UEFI and 144 frames under BIOS.
+Limine's responses, and the strings, memory-map entries, and module list they point to, are borrowed from that token (`Request::get(&boot)`), so a use after the reclaim does not compile (#223). `BootMemory::take()` hands out the token once. Test kernels that never reclaim may call `Request::response()` for `'static` references instead; the first such call rules out the token for good, and `response()` returns `None` while the token is out, so the two cannot be mixed. Until the reclaim, the frame allocator refuses to free a reclaimable frame. Safe code can still free other in-use frames it names by address (`Frame::from_addr`); the frame allocator trusts its callers there. In QEMU with 256 MiB, reclaim adds 41 MiB under UEFI and 144 frames under BIOS.
 
 ### Physical frames (`mm::frame`, `mm::bitmap`)
 
@@ -98,7 +98,7 @@ In QEMU with 256 MiB the kernel tables take 273 frames under UEFI and 264 under 
 ## 5. Testing
 
 - Host unit tests: heap allocation (rounding, alignment, coalescing, bad and double frees, exhaustion), bitmap and frame allocation (alignment, edges, double frees, exhaustion), page-table entry encoding, page splitting, and direct-map kinds.
-- Test kernels: `frames` (allocation, freeing, exhaustion), `reclaim` (reclaimed frame count, retired responses, every frame written afterwards with the copied memory map intact), `paging` (segment permissions, guard pages, direct map with 2 MiB pages, map/write/alias/unmap, page fault after unmap), `heap` (collections, 4 KiB alignment, a 20,000-operation fragmentation run with contents checked, usage back to zero, allocation with interrupts on), `heap_oom` (exhaustion reported by the panic handler), `write_protect` (writing rodata faults with a protection-violation write), `no_execute` (executing data faults with an instruction-fetch error), and `double_fault` (stack overflow on the kernel's own tables). Each was checked once to fail when the property it tests is broken.
+- Test kernels: `frames` (allocation, freeing, exhaustion), `reclaim` (one bootloader-memory token, reclaimed frame count, retired responses, every frame written afterwards with the copied memory map intact), `paging` (segment permissions, guard pages, direct map with 2 MiB pages, map/write/alias/unmap, page fault after unmap), `heap` (collections, 4 KiB alignment, a 20,000-operation fragmentation run with contents checked, usage back to zero, allocation with interrupts on), `heap_oom` (exhaustion reported by the panic handler), `write_protect` (writing rodata faults with a protection-violation write), `no_execute` (executing data faults with an instruction-fetch error), and `double_fault` (stack overflow on the kernel's own tables). Each was checked once to fail when the property it tests is broken.
 
 ## 6. Alternatives
 

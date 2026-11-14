@@ -6,7 +6,7 @@
 
 use pharos_kernel::arch::x86_64::{gdt, idt, paging};
 use pharos_kernel::boot_info::summarize;
-use pharos_kernel::limine::MEMMAP_BOOTLOADER_RECLAIMABLE;
+use pharos_kernel::limine::{BootMemory, MEMMAP_BOOTLOADER_RECLAIMABLE};
 use pharos_kernel::mm::{self, frame::Span};
 use pharos_kernel::testing::{self, TestRun};
 
@@ -15,13 +15,25 @@ pharos_kernel::test_kernel!(run);
 fn run(t: &mut TestRun) {
     gdt::init();
     idt::init();
+    let Some(boot) = BootMemory::take() else {
+        t.check("bootloader memory token available", false);
+        return;
+    };
+    t.check(
+        "only one bootloader memory token",
+        BootMemory::take().is_none(),
+    );
+    t.check(
+        "no 'static response while the token is out",
+        requests::MEMMAP.response().is_none() && requests::HHDM.response().is_none(),
+    );
     let memory = testing::init_memory(
-        requests::HHDM.response(),
-        requests::MEMMAP.response(),
-        requests::EXECUTABLE_ADDRESS.response(),
+        requests::HHDM.get(&boot),
+        requests::MEMMAP.get(&boot),
+        requests::EXECUTABLE_ADDRESS.get(&boot),
     );
     t.check("frame allocator and kernel page tables set up", memory);
-    let Some(map) = requests::MEMMAP.response() else {
+    let Some(map) = requests::MEMMAP.get(&boot) else {
         t.check("memory map present", false);
         return;
     };
@@ -61,8 +73,8 @@ fn run(t: &mut TestRun) {
         pending == expected,
     );
 
-    // Reclaim. Limine responses are invalid from here on.
-    let reclaimed = mm::reclaim_bootloader_memory();
+    // Reclaim. It consumes `boot`, so `map` cannot be used from here on.
+    let reclaimed = mm::reclaim_bootloader_memory(boot);
     t.check("reclaim succeeded", reclaimed.is_ok());
     t.check(
         "reclaimed exactly the reclaimable frames",
@@ -73,8 +85,8 @@ fn run(t: &mut TestRun) {
         requests::MEMMAP.response().is_none(),
     );
     t.check(
-        "second reclaim gains nothing",
-        mm::reclaim_bootloader_memory() == Ok(0),
+        "no token for a second reclaim",
+        BootMemory::take().is_none(),
     );
 
     let mut guard = mm::frames();

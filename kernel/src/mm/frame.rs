@@ -239,6 +239,12 @@ impl<'a> FrameAllocator<'a> {
             .regions_mut()
             .find(|r| r.span.contains(frame.0))
             .ok_or(FrameFreeError::Unknown)?;
+        // Bootloader memory still waiting for the reclaim was never handed
+        // out; freeing it early would let Limine's responses be reused while
+        // the kernel may still read them (#223).
+        if region.pending {
+            return Err(FrameFreeError::NotAllocated);
+        }
         let index = ((frame.0 - region.span.base) / FRAME_SIZE) as usize;
         region.bitmap.free(index, count).map_err(|e| match e {
             FreeError::OutOfRange => FrameFreeError::Unknown,
@@ -256,7 +262,9 @@ impl<'a> FrameAllocator<'a> {
 
     /// Frees every pending region (bootloader-reclaimable memory) and
     /// returns the number of frames released. Later calls release nothing.
-    pub fn release_pending(&mut self) -> usize {
+    /// Only `mm::reclaim_bootloader_memory` calls it, after it consumed the
+    /// `BootMemory` token (#223).
+    pub(crate) fn release_pending(&mut self) -> usize {
         let mut released = 0;
         for region in self.regions_mut().filter(|r| r.pending) {
             let frames = region.span.frames;
@@ -377,6 +385,11 @@ mod tests {
         assert!(
             before.iter().all(|&f| f < 0x80_0000),
             "no pending frame handed out"
+        );
+        assert_eq!(
+            a.free(Frame::from_addr(0x80_0000).unwrap()),
+            Err(FrameFreeError::NotAllocated),
+            "a pending frame cannot be freed before the release (#223)"
         );
         assert_eq!(a.release_pending(), 8);
         assert_eq!(a.release_pending(), 0, "second release frees nothing");

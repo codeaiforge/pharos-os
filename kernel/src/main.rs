@@ -17,7 +17,7 @@ use pharos_kernel::arch::x86_64::{
     _print_panic, QemuExit, apic, gdt, halt, idt, paging, qemu_exit, run_on_kernel_stack,
 };
 use pharos_kernel::boot_info::{BootMode, boot_mode, firmware_name, mib, summarize};
-use pharos_kernel::limine::BASE_REVISION;
+use pharos_kernel::limine::{BASE_REVISION, BootMemory};
 use pharos_kernel::mm;
 use pharos_kernel::storage;
 use pharos_kernel::time;
@@ -44,23 +44,28 @@ extern "C" fn kernel_main() -> ! {
         ));
     }
 
-    let Some(memmap) = requests::MEMMAP.response() else {
+    // Limine's responses are borrowed from `boot`, which the reclaim below
+    // consumes, so none can be used after it (#223).
+    let Some(boot) = BootMemory::take() else {
+        fail(format_args!("bootloader memory already claimed"));
+    };
+    let Some(memmap) = requests::MEMMAP.get(&boot) else {
         fail(format_args!("no memory map from the bootloader"));
     };
-    let Some(hhdm) = requests::HHDM.response() else {
+    let Some(hhdm) = requests::HHDM.get(&boot) else {
         fail(format_args!(
             "no higher-half direct map from the bootloader"
         ));
     };
 
-    if let Some(info) = requests::BOOTLOADER_INFO.response() {
+    if let Some(info) = requests::BOOTLOADER_INFO.get(&boot) {
         kprintln!(
             "  bootloader: {} {}",
             info.name().unwrap_or("?"),
             info.version().unwrap_or("?")
         );
     }
-    if let Some(firmware) = requests::FIRMWARE_TYPE.response() {
+    if let Some(firmware) = requests::FIRMWARE_TYPE.get(&boot) {
         kprintln!("  firmware:   {}", firmware_name(firmware.firmware_type));
     }
     let entry = kmain as *const () as usize;
@@ -89,7 +94,7 @@ extern "C" fn kernel_main() -> ! {
         Err(error) => fail(format_args!("frame allocator setup failed: {error}")),
     }
 
-    let Some(image) = requests::EXECUTABLE_ADDRESS.response() else {
+    let Some(image) = requests::EXECUTABLE_ADDRESS.get(&boot) else {
         fail(format_args!("no executable address from the bootloader"));
     };
     let image = paging::KernelImage {
@@ -137,7 +142,7 @@ extern "C" fn kernel_main() -> ! {
     }
 
     // The Limine entry's mode (#164): read now, while its string exists.
-    let mut mode = match boot_mode(requests::CMDLINE.response().and_then(|r| r.cmdline())) {
+    let mut mode = match boot_mode(requests::CMDLINE.get(&boot).and_then(|r| r.cmdline())) {
         Ok(mode) => mode,
         Err(other) => {
             kprintln!("  mode:       command line \"{other}\" not known; normal mode");
@@ -150,11 +155,11 @@ extern "C" fn kernel_main() -> ! {
 
     // Module records live in kernel memory; Limine's list does not survive
     // the reclaim below.
-    let (modules, skipped) = storage::record_modules(requests::MODULES.response(), hhdm.offset);
+    let (modules, skipped) = storage::record_modules(requests::MODULES.get(&boot), hhdm.offset);
 
-    // Last step that may touch bootloader memory is done: `memmap`, `hhdm`,
-    // and the other Limine responses must not be used after this.
-    match mm::reclaim_bootloader_memory() {
+    // Last step that may touch bootloader memory is done. Consuming `boot`
+    // ends every borrowed Limine response; using one below does not compile.
+    match mm::reclaim_bootloader_memory(boot) {
         Ok(frames) => {
             let free = mm::frames().as_ref().map_or(0, |f| f.stats().free);
             kprintln!(
