@@ -339,6 +339,20 @@ impl Tasks {
         deps: &[u32],
         input: &[u8],
     ) -> Result<u32, Error> {
+        self.create(f, agent, deps, input, 0, &[])
+    }
+
+    /// A new pending task, written once: a subtask is never stored without
+    /// its parent and delegated permissions (#229).
+    fn create(
+        &mut self,
+        f: &mut impl Files,
+        agent: &[u8],
+        deps: &[u32],
+        input: &[u8],
+        parent: u32,
+        delegated: &[Permission],
+    ) -> Result<u32, Error> {
         if self.list.len() >= MAX_TASKS || input.len() > MAX_INPUT as usize || deps.len() > MAX_DEPS
         {
             return Err(Error::TooLarge);
@@ -362,8 +376,8 @@ impl Tasks {
             checkpoint: Vec::new(),
             result: Vec::new(),
             keys: Vec::new(),
-            parent: 0,
-            delegated: Vec::new(),
+            parent,
+            delegated: delegated.to_vec(),
             revoked: Vec::new(),
             refused: Vec::new(),
         };
@@ -384,13 +398,7 @@ impl Tasks {
         if self.find(parent).is_none() || delegated.len() > MAX_DELEGATED {
             return Err(Error::NotFound);
         }
-        let id = self.submit(f, agent, &[], input)?;
-        let i = self.find(id).ok_or(Error::NotFound)?;
-        let mut t = self.list[i].clone();
-        t.parent = parent;
-        t.delegated = delegated.to_vec();
-        self.save(f, Some(i), t)?;
-        Ok(id)
+        self.create(f, agent, &[], input, parent, delegated)
     }
 
     /// Subtasks not ended whose goal has ended or is gone (#136): no work
@@ -790,6 +798,30 @@ mod tests {
         );
         assert_eq!(again.open_children(goal), 1);
         assert_eq!(again.orphans(), [], "its goal is open");
+    }
+
+    #[test]
+    fn a_subtask_is_never_stored_without_its_parent() {
+        // #229: the store fails after `cut` writes. Whatever was stored
+        // then, a subtask in it has its parent and delegated permissions.
+        let file = Permission::file(b"report.txt").unwrap();
+        for cut in 0..4 {
+            let mut f = Mem::default();
+            let (mut tasks, _) = load(&mut f);
+            let goal = tasks.submit(&mut f, b"worker", &[], b"goal").unwrap();
+            f.left = Some(cut);
+            let made = tasks.submit_child(&mut f, b"worker", goal, b"a", &[file.clone()]);
+            let (again, _) = load(&mut f.after_crash());
+            let stored: Vec<_> = again.list.iter().filter(|t| t.id != goal).collect();
+            for t in &stored {
+                assert_eq!(
+                    (t.parent, t.delegated.as_slice()),
+                    (goal, &[file.clone()][..]),
+                    "cut after {cut} writes"
+                );
+            }
+            assert_eq!(made.is_ok(), !stored.is_empty(), "cut after {cut} writes");
+        }
     }
 
     #[test]
