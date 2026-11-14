@@ -28,6 +28,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- The store's `LIST` skips names longer than 80 bytes instead of stopping at them (#235, M5.4 review), so a long name in `incoming/` no longer hides later update files from `update`, and a client paging with `start` always moves. A host unit test in `pharos-proto` covers it.
 - `submit_child` writes a subtask once, with its parent and delegated permissions (#229, M5.4 review): it wrote the task first without them, so a failed second write left a parentless top-level task. A host unit test in `tasks.rs` cuts the store after every write.
 - `trust` limits the lines the agent runtime makes it print (#228, M5.4 review): a flooding runtime could keep every console transmit buffer busy, so `trust`'s and `init`'s lines were dropped silently. They are now limited to 32 at once and 20 a second, never in the last 4 free transmit buffers, and the number not shown is said once. A host unit test covers it.
 - `stop all` says what it did not stop (#227, M5.4 review): it answered `stopped all` even without the runtime's capability, or after a `still running`. It now asks `init` for the runtime once more, and answers `stop all: <n> still running` or `stop all: no runtime capability held; …` when not everything was stopped. A host unit test covers it.

@@ -234,7 +234,7 @@ All integers are little-endian. Blocks are 4 KiB (8 virtio-blk sectors).
   | 2 `read` | path, file offset, length, buffer offset (u64 each) | status, bytes copied into the buffer (u64) |
   | 3 `write` | path, length, buffer offset | status (the file is replaced atomically) |
   | 4 `append` | stream path, record (1–200 bytes, inline; larger records later, when a client needs them) | status, record number (u64), chain head (32 bytes) |
-  | 5 `list` | path prefix (may be empty), start index (u32) | status, count (u8), more (u8), then each name as a length byte and bytes |
+  | 5 `list` | path prefix (may be empty), start index (u32) | status, count (u8), more (u8), then each name as a length byte and bytes; a name longer than 80 bytes relative to the namespace (`MAX_CLIENT_PATH`) is skipped and not counted in the start index, so `start += count` reaches every later name (#235; before, the listing stopped there for good) |
   | 6 `delete` | path | status |
   | 0xF1 `ATTACH` (common, a `send`; 7 before #92) | buffer size (u64, at most 32 MiB: `MAX_BUFFER`, so 16 clients fit in the service's limit; larger ones are dropped and the earlier buffer stays; M3.0 review), with the `Memory` capability (`READ` and `WRITE`) | none |
   | 8 `buffer` | — | status, attached buffer size (u64; 0 if none) |

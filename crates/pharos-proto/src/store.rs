@@ -295,6 +295,37 @@ pub fn full_path(prefix: &[u8], path: &[u8], out: &mut [u8; 104]) -> Option<usiz
     pharos_fs::valid_path(&out[..n]).then_some(n)
 }
 
+/// A `list` reply after its status byte: count, more, and the names
+/// from the `start`-th in `out[3..]`, as many as fit; returns the reply's
+/// length. `names` are relative to the client's namespace. A name longer
+/// than [`MAX_CLIENT_PATH`] cannot be sent, so it is skipped and not
+/// counted in `start`: the listing moves past it, and a client that
+/// continues from the names it has (`start += count`) sees every later
+/// one (#235). `out` holds at least 3 bytes.
+pub fn list_reply<'a>(
+    names: impl IntoIterator<Item = &'a [u8]>,
+    start: u32,
+    out: &mut [u8],
+) -> usize {
+    let (mut at, mut count, mut more) = (3, 0u8, 0u8);
+    let sendable = names
+        .into_iter()
+        .filter(|name| name.len() <= MAX_CLIENT_PATH);
+    for name in sendable.skip(start as usize) {
+        if at + 1 + name.len() > out.len() || count == u8::MAX {
+            more = 1;
+            break;
+        }
+        out[at] = name.len() as u8;
+        out[at + 1..at + 1 + name.len()].copy_from_slice(name);
+        at += 1 + name.len();
+        count += 1;
+    }
+    out[1] = count;
+    out[2] = more;
+    at
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,5 +450,38 @@ mod tests {
         }
         assert_eq!(Status::from_code(200), Status::BadRequest);
         assert_eq!(Status::NoSpace as u8, status::OWN, "own codes from 32");
+    }
+
+    #[test]
+    fn a_list_moves_past_names_it_cannot_send() {
+        // #235: a name over the limit sits between two that fit.
+        let long = [b'x'; MAX_CLIENT_PATH + 1];
+        let names: [&[u8]; 4] = [b"a", &long, b"b", b"c"];
+        let mut seen = std::vec::Vec::new();
+        let mut start = 0u32;
+        loop {
+            // Room for one short name a page.
+            let mut out = [0u8; 5];
+            let n = list_reply(names, start, &mut out);
+            let (count, more) = (out[1], out[2]);
+            let mut at = 3;
+            for _ in 0..count {
+                let len = usize::from(out[at]);
+                seen.push(out[at + 1..at + 1 + len].to_vec());
+                at += 1 + len;
+            }
+            assert_eq!(at, n);
+            start += u32::from(count);
+            if more == 0 {
+                break;
+            }
+            assert!(count > 0, "a page with more always moves");
+        }
+        assert_eq!(seen, [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        let mut out = [0u8; 256];
+        assert_eq!(list_reply(names, 0, &mut out), 9);
+        assert_eq!(&out[1..9], b"\x03\x00\x01a\x01b\x01c");
+        assert_eq!(list_reply(names, 3, &mut out), 3, "past the end");
+        assert_eq!(&out[1..3], [0, 0]);
     }
 }

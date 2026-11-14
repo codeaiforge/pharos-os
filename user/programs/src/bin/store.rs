@@ -19,7 +19,7 @@
 
 use pharos_programs::virtio::{Blk, SECTOR};
 use pharos_proto::store::{
-    MAX_BUFFER, MAX_CLIENT_PATH, NAME, Request, Status, VERSION, full_path, namespace, parse,
+    MAX_BUFFER, NAME, Request, Status, VERSION, full_path, list_reply, namespace, parse,
 };
 use pharos_proto::{Info, Refused, refusal};
 use pharos_store::{BLOCK, Block, Device, Error, IoError, Kind, Store};
@@ -293,20 +293,8 @@ impl Service {
                 path[..prefix.len()].copy_from_slice(prefix);
                 path[prefix.len()] = b'/';
                 path[prefix.len() + 1..n].copy_from_slice(p);
-                let (mut at, mut count, mut more) = (3, 0u8, 0u8);
-                for name in self.store.list(&path[..n]).skip(start as usize) {
-                    let name = &name[prefix.len() + 1..];
-                    if at + 1 + name.len() > out.len() || name.len() > MAX_CLIENT_PATH {
-                        more = 1;
-                        break;
-                    }
-                    out[at] = name.len() as u8;
-                    out[at + 1..at + 1 + name.len()].copy_from_slice(name);
-                    at += 1 + name.len();
-                    count += 1;
-                }
-                out[1] = count;
-                out[2] = more;
+                let names = self.store.list(&path[..n]);
+                let at = list_reply(names.map(|name| &name[prefix.len() + 1..]), start, out);
                 return Ok(at);
             }
             Request::Delete { path: p } => {
