@@ -699,6 +699,11 @@ impl AddressSpace {
     // ponytail: empty intermediate tables are never freed; free them when
     // address spaces come and go (M2.7).
     pub fn unmap(&mut self, virt: u64) -> Result<u64, MapError> {
+        self.unmap_entry(virt).map(|entry| entry & ADDRESS_MASK)
+    }
+
+    /// [`unmap`](Self::unmap), returning the whole leaf entry it cleared.
+    fn unmap_entry(&mut self, virt: u64) -> Result<u64, MapError> {
         if self.user && virt >= USER_END {
             return Err(MapError::WrongHalf);
         }
@@ -719,7 +724,7 @@ impl AddressSpace {
                     // SAFETY: `invlpg` only drops the TLB entry for `virt`.
                     unsafe { asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) };
                 }
-                return Ok(entry & ADDRESS_MASK);
+                return Ok(entry);
             }
             table = entry & ADDRESS_MASK;
         }
@@ -750,9 +755,12 @@ impl AddressSpace {
 
     /// Unmaps the page at `virt` and frees its frame, which must belong to
     /// this space (mapped with [`map_new_page`](Self::map_new_page)). Does
-    /// nothing for an unmapped page.
+    /// nothing for an unmapped page. A page marked `DEVICE` (device memory,
+    /// or [`disown`](Self::disown)ed to a `Memory` object) is unmapped but
+    /// its frame is kept, as [`destroy`](Self::destroy) does (#221).
     pub fn unmap_owned(&mut self, virt: u64, frames: &mut FrameAllocator<'_>) {
-        if let Some(frame) = self.unmap(virt).ok().and_then(Frame::from_addr) {
+        let owned = self.unmap_entry(virt).ok().filter(|e| e & DEVICE == 0);
+        if let Some(frame) = owned.and_then(|e| Frame::from_addr(e & ADDRESS_MASK)) {
             let _ = frames.free(frame);
         }
     }

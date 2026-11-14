@@ -231,6 +231,33 @@ fn run(t: &mut TestRun) {
         freed == Some((14, true)),
     );
 
+    // `unmap_owned` frees an owned page's frame but keeps a disowned one,
+    // which belongs to a `Memory` object now (#221).
+    let kept = {
+        let mut guard = mm::frames();
+        guard.as_mut().and_then(|frames| {
+            let mut c = AddressSpace::new_user(frames).ok()?;
+            c.map_new_page(USER_PAGE, Flags::USER_DATA, &[], frames)
+                .ok()?;
+            let shared = USER_PAGE + FRAME_SIZE;
+            c.map_new_page(shared, Flags::USER_DATA, &[], frames).ok()?;
+            let phys = c.disown(shared).ok()?;
+            let before = frames.stats().free;
+            c.unmap_owned(USER_PAGE, frames);
+            let owned_freed = frames.stats().free == before + 1;
+            c.unmap_owned(shared, frames);
+            let disowned_kept = frames.stats().free == before + 1
+                && c.translate(shared).is_none()
+                && frames.free(mm::frame::Frame::from_addr(phys)?).is_ok();
+            c.destroy(frames);
+            Some(owned_freed && disowned_kept)
+        })
+    };
+    t.check(
+        "unmap_owned frees an owned frame and keeps a disowned one",
+        kept == Some(true),
+    );
+
     // A kernel mapping made after a process space exists (in a part of the
     // kernel half nothing used before) is visible there too. Last, because
     // the kernel keeps the page tables it creates here.
