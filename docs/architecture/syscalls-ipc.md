@@ -136,8 +136,8 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 7 | `open` (M2.8) | filesystem handle, path buffer, path len (≤ 104) | new file handle | filesystem, `READ` |
 | 8 | `read` (M2.8) | file handle, buffer, len (≤ 4096), file offset | bytes read (0 at end of file) | file, `READ` |
 | 9 | `config_read` (M2.9) | device, offset (< 256, aligned), width (1, 2, 4) | the value | device, `CONFIG` |
-| 10 | `mmio_map` (M2.9) | device, BAR, offset, length, user address (pages) | 0 | device, `MAP` |
-| 11 | `dma_alloc` (M2.9) | device, pages (1–16), user address | physical address | device, `MAP` |
+| 10 | `mmio_map` (M2.9) | device, BAR, offset, length, user address (pages, outside the map region since #219) | 0 | device, `MAP` |
+| 11 | `dma_alloc` (M2.9) | device, pages (1–16), user address (outside the map region since #219) | physical address | device, `MAP` |
 | 12 | `irq_create` (M2.9) | device, MSI-X entry (< table size, and inside the table's BAR since #218) | new interrupt handle | device, `IRQ` |
 | 13 | `irq_wait` (M2.9) | interrupt handle, a timeout in microseconds (`u64::MAX` forever, 0 do not block; M3.0) | interrupts since the last wait (≥ 1) | interrupt, `WAIT` |
 | 14 | `endpoint_create` (M2.10) | — | new endpoint handle (`SEND`, `RECEIVE`, `GRANT`) | none |

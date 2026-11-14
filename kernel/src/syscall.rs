@@ -303,12 +303,19 @@ fn map_pages(len: u64) -> Option<u64> {
     (len != 0 && len <= region).then(|| len.div_ceil(4096))
 }
 
-/// A page-aligned user range of `len` bytes (at least one page).
-fn user_pages(addr: u64, len: u64) -> Result<u64, Error> {
+/// A page-aligned user range of `len` bytes (at least one page) for device
+/// pages, outside the map region: a page there could fill a hole the
+/// revocation sweep left in a `mem_map` reservation, which `mem_unmap` then
+/// frees as the process's own (#219).
+fn device_pages(addr: u64, len: u64) -> Result<u64, Error> {
     if addr % 4096 != 0 || len == 0 || len % 4096 != 0 {
         return Err(Error::BadAddress);
     }
     if !user_range_ok(addr, len) {
+        return Err(Error::BadAddress);
+    }
+    let region = crate::process::MAP_REGION;
+    if addr < region.end && region.start < addr + len {
         return Err(Error::BadAddress);
     }
     Ok(addr)
@@ -389,7 +396,7 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             bar: args[1],
             offset: args[2],
             len: args[3],
-            addr: user_pages(args[4], args[3])?,
+            addr: device_pages(args[4], args[3])?,
         }),
         number::DMA_ALLOC => {
             let pages = args[1];
@@ -399,7 +406,7 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             Ok(Call::DmaAlloc {
                 handle: args[0],
                 pages: pages as usize,
-                addr: user_pages(args[2], pages * 4096)?,
+                addr: device_pages(args[2], pages * 4096)?,
             })
         }
         number::IRQ_CREATE => Ok(Call::IrqCreate {
@@ -1799,6 +1806,22 @@ mod tests {
         assert_eq!(dma(17, 0x2000_0000), Err(Error::TooLarge));
         assert_eq!(dma(1, 0), Err(Error::BadAddress), "null page");
         let region = crate::process::MAP_REGION;
+        // Never in the map region (#219), nor across its start.
+        assert_eq!(dma(1, region.start), Err(Error::BadAddress));
+        assert_eq!(dma(2, region.start - 4096), Err(Error::BadAddress));
+        assert_eq!(dma(1, region.end - 4096), Err(Error::BadAddress));
+        assert_eq!(
+            dma(1, region.end),
+            Ok(Call::DmaAlloc {
+                handle: 1,
+                pages: 1,
+                addr: region.end
+            })
+        );
+        assert_eq!(
+            mmio(0x1000, region.start + 0x10_0000),
+            Err(Error::BadAddress)
+        );
         let map = |len| decode(19, [len, 9, 9, 9, 9, 9]);
         assert_eq!(map(1), Ok(Call::MemMap { pages: 1 }));
         assert_eq!(map(4097), Ok(Call::MemMap { pages: 2 }));
@@ -1936,6 +1959,7 @@ mod tests {
                 Ok(Call::DmaAlloc { addr, pages, .. }) => {
                     assert!((1..=16).contains(&pages) && addr % 4096 == 0);
                     assert!(user_range_ok(addr, pages as u64 * 4096));
+                    assert!(!crate::process::MAP_REGION.contains(&addr));
                 }
                 Ok(Call::IrqCreate { entry, .. }) => assert!(entry < 2048),
                 Ok(Call::Spawn {
