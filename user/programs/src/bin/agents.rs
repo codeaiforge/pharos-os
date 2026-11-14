@@ -552,7 +552,8 @@ const TEST: &[Entry] = &[
         program: b"bin/testagent",
         pages: 256,
         models: 1 << 2,
-        attempts: 2,
+        // `keeper-b`'s third runs after a restart of the runtime (#207).
+        attempts: 3,
         progress_ms: 5_000,
         task_ms: 60_000,
         data: Data::Write,
@@ -1347,6 +1348,23 @@ struct Confirm {
     permission: Permission,
     data: Vec<u8>,
     answer: Option<bool>,
+}
+
+/// Every task's revoked (or, if `refused`, refused) permissions, as the
+/// runtime keeps them (#207).
+fn closed(tasks: &Tasks, refused: bool) -> Vec<(u32, Permission)> {
+    let list = |t: &tasks::Task| {
+        if refused {
+            t.refused.clone()
+        } else {
+            t.revoked.clone()
+        }
+    };
+    tasks
+        .list
+        .iter()
+        .flat_map(|t| list(t).into_iter().map(move |p| (t.id, p)))
+        .collect()
 }
 
 /// True if `entry` lets its agent ask for `p`.
@@ -3315,7 +3333,7 @@ impl Runtime {
             return false;
         }
         let (task, model) = (s.task, s.session_model);
-        self.revoked.push((task, permission));
+        self.close(task, permission, false);
         if permission == Permission::Model(model) {
             self.cancel_session(i);
         }
@@ -3342,6 +3360,34 @@ impl Runtime {
             self.resolve(number, trust::Resolution::Refused);
         }
         true
+    }
+
+    /// Keeps `p` revoked from task `task` (or, if `refused`, refused to
+    /// it), in memory and in its record, so a restart of the runtime keeps
+    /// it too (#207).
+    fn close(&mut self, task: u32, p: Permission, refused: bool) {
+        let list = if refused {
+            &mut self.refused
+        } else {
+            &mut self.revoked
+        };
+        list.push((task, p));
+        // ponytail: a record the store does not take, or one already
+        // holding `MAX_CLOSED`, keeps it for this run only; a runtime
+        // restart before the task ends would lose it. Said, so the user
+        // knows to revoke again; ending the task instead if that matters.
+        let stored = self
+            .tasks
+            .find(task)
+            .is_some_and(|at| self.tasks.close(&mut self.store, at, p, refused).is_ok());
+        if !stored {
+            let mut d = [0u8; 20];
+            say(&[
+                b"agents: task ",
+                decimal(task.into(), &mut d),
+                b": not stored; kept until the runtime restarts",
+            ]);
+        }
     }
 
     /// `ASK` from the agent in slot `i`, running task `task` of `entry`.
@@ -3379,7 +3425,7 @@ impl Runtime {
         });
         // `trust` unreachable means no (D-018 item 4).
         if !asked {
-            self.refused.push((task, p));
+            self.close(task, p, true);
             return Asked::Refused;
         }
         self.pending.push(Pending {
@@ -3442,7 +3488,7 @@ impl Runtime {
                 s.grants.add(q.permission, until);
             }
         } else {
-            self.refused.push((q.task, q.permission));
+            self.close(q.task, q.permission, true);
         }
         tell_trust(&trust::Request::Resolved {
             number,
@@ -4027,6 +4073,8 @@ fn main(arg: u64) -> u64 {
         decimal(found.unreadable as u64, c),
         b" unreadable",
     ]);
+    // Kept in each task's record (#207).
+    let (revoked, refused) = (closed(&tasks, false), closed(&tasks, true));
     let mut r = Runtime {
         agents,
         tasks,
@@ -4039,12 +4087,12 @@ fn main(arg: u64) -> u64 {
         controls: Default::default(),
         infer_buffer,
         reply,
-        revoked: Vec::new(),
+        revoked,
         pending: Vec::new(),
         next_request: 0,
         approve_us: APPROVE_US[usize::from(arg == 1)],
         approved: Vec::new(),
-        refused: Vec::new(),
+        refused,
         groups,
         group_use: alloc::vec![GroupUse::default(); groups.len()],
         infer_health: Health {

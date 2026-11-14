@@ -31,7 +31,9 @@
 //!   and polls until `trust` revokes its permissions: reading `notes`
 //!   until `NO_ACCESS`, then `INFER` (`BUSY` while its session is open)
 //!   until `NO_ACCESS`; then its session must be gone and writing refused,
-//!   and it crashes. On attempt 2 both must still be refused (a revocation
+//!   and it crashes. On attempt 2 both must still be refused, and it logs
+//!   `restart the runtime` and waits; on attempt 3, after the kernel
+//!   restarted the runtime, both must be refused again (#207; a revocation
 //!   holds for the task); completes with `b ok`.
 //! - `ask` (agent `asker`, #106): `ASK` for a network destination (not
 //!   askable) is refused at once, and model 2 is refused before it asks;
@@ -2281,11 +2283,25 @@ impl Agent {
         if task.attempt > 1 {
             let data = self.get(b"notes").0 == status::NO_ACCESS;
             let model = self.generate(4).0 == status::NO_ACCESS;
-            return if data && model {
-                self.complete(b"b ok")
-            } else {
-                self.fail(b"a revoked permission came back with the restart")
-            };
+            if !(data && model) {
+                return self.fail(b"a revoked permission came back with the restart");
+            }
+            if task.attempt > 2 {
+                return self.complete(b"b ok");
+            }
+            // Then the kernel restarts the runtime, which stops this
+            // attempt (#207); each poll counts as progress, 30 s at most.
+            self.call(
+                &Request::Log {
+                    text: b"restart the runtime",
+                },
+                &mut out,
+            );
+            for _ in 0..150 {
+                self.call(&Request::Info, &mut out);
+                sleep(200_000);
+            }
+            return self.fail(b"the runtime was not restarted");
         }
         if !self.generate(20).1 {
             return self.fail(b"GENERATE through the runtime failed");

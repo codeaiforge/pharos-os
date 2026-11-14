@@ -37,11 +37,14 @@ pub trait Files {
 pub const NEXT_ID: &[u8] = b"next-id";
 pub const DIR: &[u8] = b"tasks/";
 const MAGIC: &[u8; 4] = b"PTSK";
-/// Format 2 (#134) adds the parent task and delegated permissions;
-/// format 1 records are still read, with neither.
-const FORMAT: u8 = 2;
+/// Format 2 (#134) adds the parent task and delegated permissions, format
+/// 3 (#207) what was revoked from or refused to the task; older records
+/// are still read, without them.
+const FORMAT: u8 = 3;
 /// Most permissions delegated to one subtask (#135).
 pub const MAX_DELEGATED: usize = 4;
+/// Most permissions revoked from, and refused to, one task (#207).
+pub const MAX_CLOSED: usize = 16;
 
 /// Why a change was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +81,11 @@ pub struct Task {
     pub parent: u32,
     /// What its supervisor delegated to it (#135).
     pub delegated: Vec<Permission>,
+    /// Revoked from it, kept across restarts of its agent and of the
+    /// runtime (#207).
+    pub revoked: Vec<Permission>,
+    /// Refused to it when asked, so not asked again (#207).
+    pub refused: Vec<Permission>,
 }
 
 /// What `BEGIN` answers.
@@ -144,13 +152,15 @@ impl Task {
             }
         }
         put_u32(&mut out, self.parent);
-        out.push(self.delegated.len() as u8);
-        for p in &self.delegated {
-            let mut b = [0u8; pharos_proto::permission::WIRE];
-            let mut w = Writer::new(&mut b);
-            if p.write(&mut w).is_some() {
-                let n = w.len();
-                out.extend_from_slice(&b[..n]);
+        for list in [&self.delegated, &self.revoked, &self.refused] {
+            out.push(list.len() as u8);
+            for p in list {
+                let mut b = [0u8; pharos_proto::permission::WIRE];
+                let mut w = Writer::new(&mut b);
+                if p.write(&mut w).is_some() {
+                    let n = w.len();
+                    out.extend_from_slice(&b[..n]);
+                }
             }
         }
         out
@@ -163,7 +173,7 @@ impl Task {
             return None;
         }
         let format = r.u8()?;
-        if format != 1 && format != FORMAT {
+        if !(1..=FORMAT).contains(&format) {
             return None;
         }
         let id = r.u32()?;
@@ -207,20 +217,28 @@ impl Task {
             }
             keys.push(Key { key, done });
         }
-        let (mut parent, mut delegated) = (0, Vec::new());
-        if format == FORMAT {
-            parent = r.u32()?;
+        let list = |r: &mut Reader<'_>, max: usize| {
             let n = usize::from(r.u8()?);
-            if n > MAX_DELEGATED {
-                return None;
-            }
-            for _ in 0..n {
-                delegated.push(Permission::read(&mut r)?);
-            }
+            (n <= max).then_some(())?;
+            (0..n)
+                .map(|_| Permission::read(r))
+                .collect::<Option<Vec<_>>>()
+        };
+        let (mut parent, mut delegated) = (0, Vec::new());
+        let (mut revoked, mut refused) = (Vec::new(), Vec::new());
+        if format >= 2 {
+            parent = r.u32()?;
+            delegated = list(&mut r, MAX_DELEGATED)?;
+        }
+        if format >= 3 {
+            revoked = list(&mut r, MAX_CLOSED)?;
+            refused = list(&mut r, MAX_CLOSED)?;
         }
         r.is_empty().then_some(Self {
             parent,
             delegated,
+            revoked,
+            refused,
             id,
             agent,
             state,
@@ -346,6 +364,8 @@ impl Tasks {
             keys: Vec::new(),
             parent: 0,
             delegated: Vec::new(),
+            revoked: Vec::new(),
+            refused: Vec::new(),
         };
         self.save(f, None, task)?;
         Ok(id)
@@ -423,6 +443,32 @@ impl Tasks {
             }
         }
         None
+    }
+
+    /// Records `p` as revoked from task `i` (or, if `refused`, refused to
+    /// it), so it holds after a restart of the runtime (#207). Already
+    /// recorded: nothing to write.
+    pub fn close(
+        &mut self,
+        f: &mut impl Files,
+        i: usize,
+        p: Permission,
+        refused: bool,
+    ) -> Result<(), Error> {
+        let mut t = self.list[i].clone();
+        let list = if refused {
+            &mut t.refused
+        } else {
+            &mut t.revoked
+        };
+        if list.contains(&p) {
+            return Ok(());
+        }
+        if list.len() >= MAX_CLOSED {
+            return Err(Error::TooLarge);
+        }
+        list.push(p);
+        self.save(f, Some(i), t)
     }
 
     /// Starts an attempt: counted and stored before the agent runs.
@@ -651,6 +697,8 @@ mod tests {
                 Permission::file(b"report.txt").unwrap(),
                 Permission::Model(2)
             ],
+            revoked: std::vec![Permission::DataRead],
+            refused: std::vec![Permission::Model(3), Permission::DataWrite],
         }
     }
 
@@ -659,13 +707,47 @@ mod tests {
         let mut t = task();
         t.parent = 0;
         t.delegated.clear();
+        t.revoked.clear();
+        t.refused.clear();
         let mut b = t.encode();
+        // Format 2: nothing revoked or refused (#207).
+        b[4] = 2;
+        b.truncate(b.len() - 2);
+        assert_eq!(Task::decode(&b), Some(t.clone()));
         // Format 1: no parent, no delegated permissions.
         b[4] = 1;
         b.truncate(b.len() - 5);
         assert_eq!(Task::decode(&b), Some(t));
-        b[4] = 3;
+        b[4] = 4;
         assert_eq!(Task::decode(&b), None, "an unknown format");
+    }
+
+    #[test]
+    fn revoked_and_refused_outlive_a_restart() {
+        let mut f = Mem::default();
+        let (mut tasks, _) = load(&mut f);
+        let id = tasks.submit(&mut f, b"worker", &[], b"in").unwrap();
+        let i = tasks.find(id).unwrap();
+        let net = Permission::Net {
+            addr: [10, 0, 2, 2],
+            port: 7,
+        };
+        tasks.close(&mut f, i, Permission::Model(2), false).unwrap();
+        tasks.close(&mut f, i, Permission::Model(2), false).unwrap();
+        tasks.close(&mut f, i, net, true).unwrap();
+        let (again, _) = load(&mut f);
+        let i = again.find(id).unwrap();
+        assert_eq!(again.list[i].revoked, [Permission::Model(2)], "once");
+        assert_eq!(again.list[i].refused, [net]);
+        let mut full = again;
+        for n in 1..MAX_CLOSED as u8 {
+            full.close(&mut f, i, Permission::Model(n + 2), false)
+                .unwrap();
+        }
+        assert_eq!(
+            full.close(&mut f, i, Permission::DataRead, false),
+            Err(Error::TooLarge)
+        );
     }
 
     #[test]

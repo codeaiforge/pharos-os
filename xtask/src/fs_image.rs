@@ -268,7 +268,7 @@ pub const TEST_MANIFESTS: [(&str, &str); 36] = [
     (
         "agents/keeper.manifest",
         "manifest = 1\nname = keeper\nprogram = bin/testagent\npages = 256\nmodels = 2\n\
-         attempts = 2\nprogress_ms = 5000\ntask_ms = 60000\ndata = write\nnet =\n",
+         attempts = 3\nprogress_ms = 5000\ntask_ms = 60000\ndata = write\nnet =\n",
     ),
     (
         "agents/asker.manifest",

@@ -665,8 +665,9 @@ fn permissions(mut c: Client) -> u64 {
                 line.extend_from_slice(&result[..result.len().min(200)]);
                 let _ = debug_write(CONSOLE, &line);
             }
-            // `keeper-b` crashes once after its checks, on purpose.
-            let attempts = if input == b"keeper-b" { 2 } else { 1 };
+            // `keeper-b` crashes once after its checks, on purpose, and its
+            // second attempt ends with the runtime's restart (#207).
+            let attempts = if input == b"keeper-b" { 3 } else { 1 };
             c.step(
                 step,
                 s.state == State::Done && result == want && s.attempts == attempts,

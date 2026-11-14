@@ -8,7 +8,9 @@
 //! a permission `keeper` does not hold, an agent that does not run, then
 //! `revoke keeper data read` and `revoke keeper model 2`. `keeper-b` must
 //! be refused after each without a restart and its session ended; then it
-//! crashes, and on attempt 2 both must still be refused. Then an `asker`
+//! crashes, and on attempt 2 both must still be refused; the kernel then
+//! restarts the runtime, and on attempt 3 both must still be refused
+//! (#207). Then an `asker`
 //! task asks for permissions (#106): the runner answers `yes` to model 2
 //! for 2 s, `no` to `data write`, and nothing to `data read` (refused after
 //! the test table's 5 s), then answers that one late (`no request #3`).
@@ -66,20 +68,36 @@ fn run(t: &mut TestRun) {
     let Some(services) = common::setup(t) else {
         return;
     };
-    let Some(runtime) = common::start_runtime(t, &services) else {
+    let Some(mut runtime) = common::start_runtime(t, &services) else {
         return;
     };
+    let mut runtimes = alloc::vec![runtime];
+    let mut replaced = false;
     let (client, steps) = common::client(t, &services, 2);
     let mut passed: Vec<Vec<u8>> = Vec::new();
     let mut killed = false;
     let start = time::uptime();
     while time::uptime() - start < Duration::from_secs(100) {
         // `keeper-c` asks for it (#108).
-        if !killed
-            && process::debug_output()
+        let said = |line: &[u8]| {
+            process::debug_output()
                 .iter()
-                .any(|(id, l)| *id == runtime && l == b"agents: keeper: audit me")
-        {
+                .any(|(id, l)| runtimes.contains(id) && l == line)
+        };
+        let (restart, audit) = (
+            !replaced && said(b"agents: keeper: restart the runtime"),
+            !killed && said(b"agents: keeper: audit me"),
+        );
+        // `keeper-b`'s second attempt checked its revocations: a new
+        // runtime must keep them (#207).
+        if restart {
+            replaced = true;
+            if let Some(new) = common::replace_runtime(t, &services, runtime) {
+                runtime = new;
+                runtimes.push(new);
+            }
+        }
+        if audit {
             killed = process::kill(services.audit_id, 13);
         }
         match ipc::poll(&steps, Duration::from_millis(100)) {
@@ -116,13 +134,17 @@ fn run(t: &mut TestRun) {
     );
     let said: Vec<Vec<u8>> = process::debug_output()
         .into_iter()
-        .filter(|(id, _)| *id == runtime)
+        .filter(|(id, _)| runtimes.contains(id))
         .map(|(_, l)| l)
         .collect();
     for line in &said {
         kprintln!("  runtime: {}", core::str::from_utf8(line).unwrap_or("?"));
     }
     t.check("the kernel killed the audit service", killed);
+    t.check(
+        "the kernel restarted the runtime (#207)",
+        runtimes.len() == 2,
+    );
     t.check(
         "the runtime accepted asker's manifest",
         said.iter().any(|l| l == b"agents: asker manifest accepted"),
