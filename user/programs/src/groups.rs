@@ -32,11 +32,21 @@ pub fn assigning<'g, 'e>(
     })
 }
 
+/// True for a permission over the holder's own files: `data read`,
+/// `data write` (M3.7 review F2), and `update propose`, which copies one
+/// of them (#208). Delegated, a worker would get its own, which no one
+/// granted it.
+fn own_files(p: &Permission) -> bool {
+    matches!(
+        p,
+        Permission::DataRead | Permission::DataWrite | Permission::UpdatePropose
+    )
+}
+
 /// Each of `wanted` with the deadline it gets: the latest of a grant in
 /// `held` (the supervisor's, at `now`) that allows it. The first one not
-/// held refuses them all, and so does `data read` or `data write`: they
-/// name the holder's own files, so a worker would get its own, which no
-/// one granted it (M3.7 review F2).
+/// held refuses them all, and so does one over the holder's own files
+/// ([`own_files`]).
 pub fn delegable(
     held: &Grants,
     wanted: impl IntoIterator<Item = Permission>,
@@ -45,7 +55,7 @@ pub fn delegable(
     wanted
         .into_iter()
         .map(|p| match p {
-            Permission::DataRead | Permission::DataWrite => Err(p),
+            p if own_files(&p) => Err(p),
             _ => held.until(&p, now).map(|u| (p, u)).ok_or(p),
         })
         .collect()
@@ -54,7 +64,8 @@ pub fn delegable(
 /// What a subtask's attempt gets when it starts: each of `delegated` its
 /// supervisor's running attempt (`held`, `None` if it does not run) still
 /// holds at `now`, with that grant's deadline. One no longer held is
-/// left out; the rest are given.
+/// left out, as is one over the worker's own files (a task stored
+/// before #208); the rest are given.
 pub fn given(
     held: Option<&Grants>,
     delegated: impl IntoIterator<Item = Permission>,
@@ -65,6 +76,7 @@ pub fn given(
     };
     delegated
         .into_iter()
+        .filter(|p| !own_files(p))
         .filter_map(|p| held.until(&p, now).map(|u| (p, u)))
         .collect()
 }
@@ -234,17 +246,27 @@ mod tests {
         let report = Permission::file(b"report.txt").unwrap();
         let mut held = Grants::new(1 << 2, Data::Write, &[], &[b"report.txt"], &[], (0, 0));
         held.add(Permission::Model(3), Some(500));
+        held.add(Permission::UpdatePropose, None);
         assert_eq!(delegable(&held, [], 0), Ok(Vec::new()), "nothing");
         assert_eq!(
             delegable(&held, [Permission::Model(2), report], 0),
             Ok(alloc::vec![(Permission::Model(2), None), (report, None)]),
             "a subset"
         );
-        for data in [Permission::DataRead, Permission::DataWrite] {
+        for data in [
+            Permission::DataRead,
+            Permission::DataWrite,
+            Permission::UpdatePropose,
+        ] {
             assert_eq!(
                 delegable(&held, [Permission::Model(2), data], 0),
                 Err(data),
-                "data names the worker's own files, held or not (F2)"
+                "data and update propose name the worker's own files, held or not (F2, #208)"
+            );
+            assert_eq!(
+                given(Some(&held), [data], 0),
+                Vec::new(),
+                "nor given (#208)"
             );
         }
         assert_eq!(
