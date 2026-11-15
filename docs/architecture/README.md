@@ -1,18 +1,41 @@
 # Architecture documents
 
-This directory will hold detailed design documents for individual subsystems. The high-level overview stays in [docs/project/architecture.md](../project/architecture.md); decisions are recorded in [docs/project/decision-log.md](../project/decision-log.md).
+This directory holds the detailed design documents, one per subsystem. **Start with [how Pharos works](overview.md)**: diagrams of the layers, what each process holds, the boot, an agent task end to end, and the trust zones, with links into the documents below. The short overview stays in [docs/project/architecture.md](../project/architecture.md); decisions are recorded in [docs/project/decision-log.md](../project/decision-log.md).
 
-Current documents:
+Each document's own Status section says what is **implemented**, **placeholder**, or **planned**.
 
-- [Boot design](boot.md) — accepted boot flow, kernel entry contract, image layout, and build tool (implemented in M2.2 and M2.3).
+**Overview**
+
+- [How Pharos works](overview.md) — how the components interact, in diagrams; the place to start.
+
+**Kernel**
+
+- [Boot design](boot.md) — boot flow, kernel entry contract, image layout, the build tool, and recovery and signed updates (M2.2, M2.3, M4.3; D-028).
 - [Memory management](memory.md) — frame allocator, the kernel's own page tables, and the kernel address space (M2.5, D-005).
-- [Exceptions and interrupts](interrupts.md) — IDT, exception handling, the double-fault stack, and the local APIC timer (M2.4, D-006).
-- [Scheduling](scheduling.md) — kernel tasks, their stacks, the context switch, and locking rules (M2.6, D-013).
+- [Exceptions and interrupts](interrupts.md) — IDT, exception handling, the interrupt stacks, and the local APIC timer (M2.4, D-006).
+- [Scheduling](scheduling.md) — kernel tasks, their stacks, the context switch, scheduling classes, and locking rules (M2.6, D-013).
 - [System calls and IPC](syscalls-ipc.md) — processes, the system-call interface, capabilities, and IPC (M2.7, D-004, D-012, D-014).
-- [Storage and the filesystem](storage.md) — block devices, the read-only image format, its validation, and file capabilities (M2.8, D-007).
-- [Drivers and device access](drivers.md) — Rust user programs and the ELF loader, PCI discovery, device interrupts, MMIO and DMA capabilities, and the virtio-blk driver (M2.9, D-008).
-- [Processes and system services](services.md) — process creation from user space, badges, endpoint notifications, and the `init` service manager (M2.10, D-015).
+- [The user execution environment](user-environment.md) — vector state, user memory, timeouts, and shared memory for user programs (M3.0, D-016).
+
+**System services**
+
+- [Storage and the filesystem](storage.md) — block devices, the read-only image format, the writable copy-on-write store, and file capabilities (M2.8, M3.0; D-007, D-017).
+- [Drivers and device access](drivers.md) — Rust user programs and the ELF loader, PCI discovery, device interrupts, MMIO and DMA capabilities, virtio drivers, and hotplug (M2.9, M4.4; D-008).
+- [Processes and system services](services.md) — process creation from user space, badges, notifications, `init`, supervision, manifests, configuration, and health (M2.10, M4.1–M4.6; D-015, D-026 to D-031).
 - [Networking](networking.md) — the virtio-net driver, the minimal network stack, network capabilities, and the host test endpoint (M2.10, D-015).
+
+**AI and agents**
+
+- [Local inference](inference.md) — the `no_std` engine, the inference service, its model manifest, and its interface (M3.2; D-010, D-011).
+- [Agents](agents.md) — the runtime, manifests, the agent lifecycle, durable tasks, and the emergency stop on the trusted console (M3.3, D-018).
+- [Capabilities](capabilities.md) — agent permissions, revocation, approval on the trusted path, agent networking, and the audit service (M3.4, D-012).
+- [Resources](resources.md) — CPU accounting, limits, budgets, and reservations (M3.5, D-022).
+- [Tools](tools.md) — validated tool calls, granted files, and per-call confirmation (M3.6).
+- [Coordination](coordination.md) — channels, groups, delegation, and verification (M3.7, D-024).
+- [Knowledge](knowledge.md) — shared entries with provenance (M3.8).
+
+**Evaluations**
+
 - [Boot evaluation](boot-evaluation.md) — options and prototype evidence behind D-001 to D-003.
 
 ## When to write one
@@ -53,4 +76,4 @@ Each document should contain:
 6. **Alternatives** — options considered and why they were not chosen.
 7. **Open questions.**
 
-Keep documents in sync with the code: update them in the same change that alters the design.
+Keep documents in sync with the code: update them in the same change that alters the design, and update the diagrams in [overview.md](overview.md) when a change alters what they show. Draw diagrams in Mermaid, using the colour classes defined there, so they diff as text and render on GitHub.

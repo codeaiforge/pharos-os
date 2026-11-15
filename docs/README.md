@@ -3,7 +3,7 @@
 ## Project
 
 - [Vision](project/vision.md) — purpose, principles, goals, and non-goals.
-- [Architecture](project/architecture.md) — proposed layers and boundaries, and what is actually implemented.
+- [Architecture](project/architecture.md) — what is implemented, and the layers, boundaries, and capability model.
 - [Implementation roadmap](project/implementation-roadmap.md) — the authoritative phased plan with milestone gates.
 - [Decision log](project/decision-log.md) — decision-record template and open decisions.
 - [Glossary](project/glossary.md) — project terminology.
@@ -17,7 +17,8 @@
 
 ## Architecture
 
-- [Architecture documents guide](architecture/README.md) — how detailed design documents are organized.
+- [How Pharos works](architecture/overview.md) — diagrams of how the components interact; start here.
+- [Architecture documents guide](architecture/README.md) — the index of detailed design documents and how they are organized.
 
 ## Security
 
