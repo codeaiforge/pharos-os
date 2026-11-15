@@ -86,14 +86,29 @@ net =
 
 ### Lifecycle (#98)
 
-```text
-            spawn + trust REGISTER
- starting ───────────────────────────▶ running ──── COMPLETE / FAIL / exit 0 ──▶ stopped
-    │                                     │
-    │ spawn or REGISTER fails             ├── crash, or no request for progress_ms ──▶ restarting ──▶ starting
-    ▼                                     │                                               │
-  failed ◀──────────── attempts used up ──┴───────────────────────────────────────────────┘
-                                          └── CANCEL, or trust's stop ──▶ stopped
+```mermaid
+stateDiagram-v2
+    direction LR
+    classDef live fill:#d8f0dc,stroke:#2e7d32,color:#10301a
+    classDef retry fill:#fff8e1,stroke:#8d6e63,color:#3e2723
+    classDef ended fill:#e3f2fd,stroke:#1565c0,color:#0d2a4a
+    classDef bad fill:#ffebee,stroke:#c62828,color:#4a0d0d
+
+    [*] --> starting: a task can run
+    starting --> running: spawned, and trust holds its STOP (REGISTER)
+    starting --> failed: spawn or REGISTER fails
+    running --> stopped: COMPLETE, FAIL, or exit 0
+    running --> stopped: CANCEL, or a stop on trust
+    running --> restarting: crash, or no request for progress_ms
+    restarting --> starting: attempts left
+    restarting --> failed: attempts used up
+    stopped --> [*]
+    failed --> [*]
+
+    class starting,running live
+    class restarting retry
+    class stopped ended
+    class failed bad
 ```
 
 - **One process per task attempt.** The runtime starts an agent when one of its tasks can run. The agent asks for its task, works, reports the result, and exits. A restart is a new process for the same task, with the attempt count increased and the last checkpoint handed back.
@@ -122,7 +137,7 @@ Clients are told apart by badge: agent slots, and control clients that `init`'s 
 | `RECEIVE_FROM` | agent | the oldest datagram kept for it (only from a destination it sent to and still holds), into its buffer, with its source; `NOT_FOUND` at once if none (#109) | 1 s |
 | `TOOL` | agent | a tool call: its text in the agent's buffer (at most 1 KiB) is copied out, parsed, and checked against the agent's tools, grants, and budgets, then audited and run; `read_file` puts a granted file in the buffer, `send` sends a datagram once the user confirms that call (`PENDING` until then, `REFUSED` if not); see [tools.md](tools.md) (#126–#128) | 10 s |
 | `MESSAGE_SEND`, `MESSAGE_RECEIVE` | agent | a message of up to 1 KiB and a kind byte to an agent it holds `channel` for, queued in the runtime (8 per receiver, `BUSY` when full) and audited without its content; the oldest message waiting for the caller, with its sender, or `NOT_FOUND`; see [coordination.md](coordination.md) (#133) | 1 s |
-| `KNOWLEDGE_PUT`, `KNOWLEDGE_GET`, `KNOWLEDGE_HISTORY`, `KNOWLEDGE_QUERY`, `PROMOTE` (planned, M3.8) | agent | shared knowledge through the `knowledge` service, within `knowledge read` and `knowledge write` grants per scope; each put and promotion audited without its content ([knowledge.md](knowledge.md)) | the service's bounded wait |
+| `KNOWLEDGE_PUT`, `KNOWLEDGE_GET`, `KNOWLEDGE_HISTORY`, `KNOWLEDGE_QUERY`, `PROMOTE` (M3.8, #144, #145) | agent | shared knowledge through the `knowledge` service, within `knowledge read` and `knowledge write` grants per scope; each put and promotion audited without its content ([knowledge.md](knowledge.md)) | the service's bounded wait |
 | `SUBTASK`, `SUBTASK_STATUS` | supervisor | a subtask for one of its group's workers, input from its buffer (at most 8 open per goal, `BUSY` beyond); one of its own subtasks' state and result, `NO_SESSION` for any other task; see [coordination.md](coordination.md) (#134) | 10 s |
 | `ANSWER` | `trust` | the user's `yes` or `no` to an approval request (#106) | none (a plain `send`) |
 | `REVOKE` | `trust` | takes a permission from every task of an agent that has not ended (running, or waiting to start or restart, #230), for the rest of the task; answered with `trust`'s `REVOKED` (#105) | none (a plain `send`) |

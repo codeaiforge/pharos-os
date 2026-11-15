@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Changed
 
+- Architecture docs' labels match the code: [capabilities](docs/architecture/capabilities.md), [tools](docs/architecture/tools.md), [resources](docs/architecture/resources.md), and [coordination](docs/architecture/coordination.md) now open with **Implemented** and their milestone's gate date instead of "Planned"; two stale "(planned, …)" labels removed (tools in capabilities.md, the knowledge operations in agents.md). The agent lifecycle in [agents.md](docs/architecture/agents.md) and the trust boundaries in the [threat model](docs/security/threat-model.md) are now Mermaid diagrams, with the same content as the ASCII they replace
 - Stale documents corrected: `architecture.md`'s implemented section (it said the kernel had no user processes or IPC), `knowledge.md`'s status, `phase3-requirements.md` (it said nothing was implemented), and the decision log, where D-011, D-012, and D-018 sat under open decisions though accepted
 - M5.4 (security review and threat-model update) passed its gate on 2026-11-14 with the maintainer's sign-off ([report](docs/security/review-m5.4-trusted-base.md)); M5.2 is current. The low findings were filed as #221–#236 or accepted
 - `SECURITY.md` updated (M5.4): it said Pharos is not bootable and scoped reports to the host tools; it now covers the kernel, user space, and image signing, with examples from the threat model of what to report and what is not a vulnerability

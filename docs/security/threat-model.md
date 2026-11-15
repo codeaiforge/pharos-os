@@ -219,15 +219,21 @@ Everything below is **planned**; none of it is implemented.
 
 ### Trust boundaries
 
-```text
- untrusted            │ partially trusted          │ trusted (TCB)
-──────────────────────┼────────────────────────────┼──────────────────
- agents               │ agent runtime & policy     │ kernel
- model output         │ system services            │ boot chain
- model files          │ inference service          │
- network peers        │ drivers (if user space)    │
- external input/files │                            │
+```mermaid
+flowchart LR
+    classDef kernel fill:#1e3a5f,stroke:#0f1f33,color:#ffffff
+    classDef partial fill:#eceff1,stroke:#607d8b,color:#1c262b
+    classDef untrusted fill:#ffe5cc,stroke:#e65100,color:#4a1d00
+
+    U["<b>Untrusted</b><br/><br/>agents<br/>model output<br/>model files<br/>network peers<br/>external input and files"]:::untrusted
+    P["<b>Partially trusted</b><br/><br/>agent runtime and policy<br/>system services<br/>inference service<br/>drivers, in user space"]:::partial
+    T["<b>Trusted: the TCB</b><br/><br/>kernel<br/>boot chain"]:::kernel
+
+    U -->|"checked, never obeyed"| P
+    P -->|"system calls and<br/>capabilities only"| T
 ```
+
+The zones as implemented, with the trusted base reviewed in M5.4 (`init`, the store, `audit`, `trust`, and the agent runtime besides the kernel and boot chain), are in [how Pharos works](../architecture/overview.md#7-trust-zones).
 
 ### Threat actors
 

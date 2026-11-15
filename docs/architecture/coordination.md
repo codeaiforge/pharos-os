@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#132),** with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. **Implemented:** channels (#133), groups and subtasks (#134), delegation (#135), failure and stop handling (#136), the verifier (#137), and the isolation and confused-deputy tests (#138).
+**Implemented** (M3.7, gate passed 2026-11-05). Design approved by the maintainer on 2026-11-05 (#132), with messages kept in memory (8 per receiver, `BUSY` when full), one verifier check (`text <max bytes>`, with every subtask done and verified), `stop group` done by `trust` alone, and no delegation by workers. Built by: channels (#133), groups and subtasks (#134), delegation (#135), failure and stop handling (#136), the verifier (#137), and the isolation and confused-deputy tests (#138).
 
 ## 2. Context
 

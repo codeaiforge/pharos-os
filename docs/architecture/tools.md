@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**Planned. Design approved by the maintainer on 2026-11-05 (#124),** with each call of a sensitive tool confirmed (a refusal holds for that call only), the user shown a `send`'s destination and size but not its payload, and flat file names in one read-only namespace. **Implemented:** the tool-call parser and validator (#125), the tool interface in the agent runtime (#126), and `read_file` with the `file` permission (#127), confirmation for sensitive tools (#128), and the prompt-injection and malformed-call tests (#129).
+**Implemented** (M3.6, gate passed 2026-11-05). Design approved by the maintainer on 2026-11-05 (#124), with each call of a sensitive tool confirmed (a refusal holds for that call only), the user shown a `send`'s destination and size but not its payload, and flat file names in one read-only namespace. Built by: the tool-call parser and validator (#125), the tool interface in the agent runtime (#126), and `read_file` with the `file` permission (#127), confirmation for sensitive tools (#128), and the prompt-injection and malformed-call tests (#129).
 
 ## 2. Context
 
