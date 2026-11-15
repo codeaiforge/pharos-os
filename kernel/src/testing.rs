@@ -95,6 +95,24 @@ pub fn init_memory(
     result.is_ok()
 }
 
+/// Turns the IOMMU on from the bootloader's RSDP, as `kmain` does, so
+/// devices can be granted: `DeviceHandle::grant` attaches each to its own
+/// domain and refuses them without one (#243). Call after
+/// [`init_memory`] and the heap, before granting a device. Panics (the
+/// test fails) with the reason if the IOMMU cannot start.
+#[cfg(target_os = "none")]
+pub fn init_iommu(rsdp: Option<&crate::limine::RsdpResponse>) {
+    use crate::acpi::{self, DirectMap};
+    let dmar = rsdp
+        .and_then(|r| r.address.checked_sub(crate::arch::x86_64::paging::hhdm()))
+        .and_then(|rsdp| acpi::find(&DirectMap, rsdp, b"DMAR").ok().flatten())
+        .and_then(|table| acpi::parse_dmar(&table).ok())
+        .expect("init_iommu: no DMAR table");
+    if let Err(error) = crate::iommu::init(&dmar) {
+        panic!("init_iommu: {error}");
+    }
+}
+
 /// A test kernel passes only if it ran at least one check and none failed,
 /// so an empty test kernel cannot pass by accident.
 pub fn passed(passed: usize, failed: usize) -> bool {

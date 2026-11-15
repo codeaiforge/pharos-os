@@ -1335,7 +1335,10 @@ mod kernel {
                     })
                 })
                 .ok_or(Error::BadAddress)??;
-                device.add_dma(phys, pages, process.record.id);
+                // In the device's IOMMU domain before the driver sees it.
+                if device.give_dma(phys, pages, process.record.id).is_err() {
+                    return Err(Error::NoMemory);
+                }
                 // Off since a previous driver ended, or for a hot-added
                 // device until now (M4.4 review F1, F3).
                 device.master();

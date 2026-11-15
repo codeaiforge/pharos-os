@@ -1059,7 +1059,7 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
         "-netdev",
         "user,id=net0",
         "-device",
-        "virtio-net-pci,netdev=net0,disable-legacy=on",
+        "virtio-net-pci,netdev=net0,disable-legacy=on,iommu_platform=on",
         "-device",
         "isa-debug-exit,iobase=0xf4,iosize=0x04",
         // Two hotplug slots (M4.4, D-029, drivers.md): native PCIe hotplug,
@@ -1083,7 +1083,7 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
     args.extend(["-drive".into(), disk]);
     args.extend([
         "-device".into(),
-        "virtio-blk-pci,drive=disk0,disable-legacy=on".into(),
+        "virtio-blk-pci,drive=disk0,disable-legacy=on,iommu_platform=on".into(),
     ]);
     // The writable store disk, after the read-only one in PCI order (the
     // storage service takes the second virtio-blk device).
@@ -1092,7 +1092,7 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
     args.extend(["-drive".into(), store]);
     args.extend([
         "-device".into(),
-        "virtio-blk-pci,drive=disk1,disable-legacy=on".into(),
+        "virtio-blk-pci,drive=disk1,disable-legacy=on,iommu_platform=on".into(),
     ]);
     // The trusted path (D-018, agents.md): a virtio-console on the FIFOs
     // `trust.in` and `trust.out` next to the ISO ([`console::fifos`]).
@@ -1102,7 +1102,7 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
         "-chardev".into(),
         pipe,
         "-device".into(),
-        "virtio-serial-pci,disable-legacy=on".into(),
+        "virtio-serial-pci,disable-legacy=on,iommu_platform=on".into(),
         "-device".into(),
         "virtconsole,chardev=trust".into(),
     ]);
@@ -2055,7 +2055,7 @@ const HOTPLUG_SCRIPT: &[console::Step] = &[
     ("trust: ready", "qmp:{\"execute\": \"qmp_capabilities\"}\n"),
     (
         "system ready: 8 services",
-        "qmp:{\"execute\": \"device_add\", \"arguments\": {\"driver\": \"virtio-blk-pci\", \"drive\": \"spare1\", \"bus\": \"rp1\", \"id\": \"hot1\", \"disable-legacy\": \"on\"}}\n",
+        "qmp:{\"execute\": \"device_add\", \"arguments\": {\"driver\": \"virtio-blk-pci\", \"drive\": \"spare1\", \"bus\": \"rp1\", \"id\": \"hot1\", \"disable-legacy\": \"on\", \"iommu_platform\": \"on\"}}\n",
     ),
     ("device 1af4:1042 added to slot 1; driver disk", ""),
     (">service disk ready", ""),
@@ -2067,7 +2067,7 @@ const HOTPLUG_SCRIPT: &[console::Step] = &[
     ("device 1af4:1042 removed from slot 1; driver disk", ""),
     (
         "\"device\": \"hot1\"",
-        "qmp:{\"execute\": \"device_add\", \"arguments\": {\"driver\": \"virtio-blk-pci\", \"drive\": \"spare2\", \"bus\": \"rp1\", \"id\": \"hot2\", \"disable-legacy\": \"on\"}}\n",
+        "qmp:{\"execute\": \"device_add\", \"arguments\": {\"driver\": \"virtio-blk-pci\", \"drive\": \"spare2\", \"bus\": \"rp1\", \"id\": \"hot2\", \"disable-legacy\": \"on\", \"iommu_platform\": \"on\"}}\n",
     ),
     (">device 1af4:1042 added to slot 1; driver disk", ""),
     (">service disk ready", "stop service disk\n"),
@@ -4441,12 +4441,12 @@ mod tests {
         assert!(uefi.contains("isa-debug-exit,iobase=0xf4,iosize=0x04"));
         assert!(uefi.contains("-cdrom pharos.iso"));
         assert!(uefi.contains("readonly=on,file=disk.img"));
-        assert!(uefi.contains("virtio-blk-pci,drive=disk0,disable-legacy=on"));
+        assert!(uefi.contains("virtio-blk-pci,drive=disk0,disable-legacy=on,iommu_platform=on"));
         assert!(
             uefi.contains("-nic none -netdev user,id=net0"),
             "only the card below"
         );
-        assert!(uefi.contains("virtio-net-pci,netdev=net0,disable-legacy=on"));
+        assert!(uefi.contains("virtio-net-pci,netdev=net0,disable-legacy=on,iommu_platform=on"));
         assert!(uefi.contains("id=disk1,format=raw,file=store.img"));
         assert!(
             !uefi.contains("readonly=on,file=store.img"),
@@ -4656,11 +4656,29 @@ mod tests {
         let at = |a: &[OsString], s: &str| a.iter().position(|x| x == s);
         let iommu = at(&args, IOMMU[1]).expect("intel-iommu");
         assert_eq!(args[iommu - 1], "-device");
-        assert!(iommu < at(&args, "virtio-net-pci,netdev=net0,disable-legacy=on").unwrap());
+        assert!(
+            iommu
+                < at(
+                    &args,
+                    "virtio-net-pci,netdev=net0,disable-legacy=on,iommu_platform=on"
+                )
+                .unwrap()
+        );
         let without = without_iommu(args.clone());
         assert_eq!(without.len(), args.len() - 2);
         assert!(at(&without, IOMMU[1]).is_none());
         assert!(at(&without, "isa-debug-exit,iobase=0xf4,iosize=0x04").is_some());
+        // Every virtio device's DMA goes through it (#243).
+        let virtio: Vec<_> = args
+            .iter()
+            .map(|a| a.to_string_lossy())
+            .filter(|a| a.starts_with("virtio-") && a.contains("-pci"))
+            .collect();
+        assert_eq!(virtio.len(), 4);
+        assert!(
+            virtio.iter().all(|a| a.ends_with(",iommu_platform=on")),
+            "{virtio:?}"
+        );
     }
 
     #[test]

@@ -59,8 +59,6 @@ pub struct Capabilities {
     pub levels: u32,
     /// Domain IDs the unit supports.
     pub domains: u32,
-    /// The unit needs a write-buffer flush after table updates.
-    pub write_buffer_flush: bool,
     /// Offset of the first fault-recording register, and their count.
     pub fault_offset: u64,
     pub fault_registers: u32,
@@ -73,6 +71,10 @@ pub struct Capabilities {
 pub enum Unsupported {
     /// `CAP.SAGAW` offers neither 3- nor 4-level tables.
     TableLevels(u64),
+    /// `CAP.RWBF` (a write-buffer flush after each table update) or
+    /// `CAP.CM` (caching mode: an IOTLB invalidation after each new
+    /// mapping too). QEMU's unit needs neither, so neither is written.
+    Flushes,
 }
 
 impl Capabilities {
@@ -85,10 +87,12 @@ impl Capabilities {
         } else {
             return Err(Unsupported::TableLevels(sagaw));
         };
+        if cap & ((1 << 4) | (1 << 7)) != 0 {
+            return Err(Unsupported::Flushes);
+        }
         Ok(Self {
             levels,
             domains: 1 << (4 + 2 * (cap & 0x7)),
-            write_buffer_flush: cap & (1 << 4) != 0,
             fault_offset: ((cap >> 24) & 0x3ff) * 16,
             fault_registers: ((cap >> 40) & 0xff) as u32 + 1,
             iotlb_offset: ((ecap >> 8) & 0x3ff) * 16 + 8,
@@ -161,11 +165,14 @@ pub struct Tables {
 }
 
 impl Tables {
-    /// An empty root table: every device blocked.
+    /// An empty root table: every device blocked. Bus 0's context table,
+    /// which every boot device needs, is made now and kept, so granting
+    /// and releasing a device returns every frame it took.
     pub fn new(mem: &mut impl Memory) -> Result<Self, Error> {
-        Ok(Self {
-            root: mem.alloc().ok_or(Error::OutOfMemory)?,
-        })
+        let root = mem.alloc().ok_or(Error::OutOfMemory)?;
+        let context = mem.alloc().ok_or(Error::OutOfMemory)?;
+        mem.write(root, 0, context | PRESENT);
+        Ok(Self { root })
     }
 
     /// The root table's physical address, for `RTADDR`.
@@ -262,8 +269,8 @@ impl Domain {
     }
 
     /// Maps the page at `iova` to frame `phys`, readable by the device and
-    /// writable if `write`. The caller flushes the write buffer if the unit
-    /// needs it, before the device uses the page.
+    /// writable if `write`. Usable at once: units that cache absent
+    /// entries or buffer writes are refused (`Unsupported::Flushes`).
     pub fn map(
         &mut self,
         mem: &mut impl Memory,
@@ -293,17 +300,22 @@ impl Domain {
         Ok(())
     }
 
-    /// Unmaps the page at `iova` and returns the frame it mapped. The
-    /// caller then invalidates the IOTLB and waits for it before reusing
-    /// the frame.
-    pub fn unmap(&mut self, mem: &mut impl Memory, iova: u64) -> Option<u64> {
+    /// Unmaps the page at `iova` and returns the frame it mapped. Tables
+    /// left empty are unlinked and pushed to `empty`. The caller then
+    /// invalidates the IOTLB and waits for it before reusing the frame or
+    /// freeing those tables: until then the unit may still use them.
+    pub fn unmap(&mut self, mem: &mut impl Memory, iova: u64, empty: &mut Vec<u64>) -> Option<u64> {
         self.check(iova).ok()?;
+        // (table, index) from the root down to the leaf.
+        let mut path = Vec::new();
         let mut table = self.root;
         for level in (2..=self.levels).rev() {
-            let entry = mem.read(table, self.index(iova, level));
+            let index = self.index(iova, level);
+            let entry = mem.read(table, index);
             if entry & READ == 0 {
                 return None;
             }
+            path.push((table, index));
             table = entry & ADDRESS;
         }
         let index = self.index(iova, 1);
@@ -312,6 +324,15 @@ impl Domain {
             return None;
         }
         mem.write(table, index, 0);
+        // Unlink each table below the root that no longer maps anything.
+        while let Some((parent, index)) = path.pop() {
+            if (0..512).any(|i| mem.read(table, i) != 0) {
+                break;
+            }
+            mem.write(parent, index, 0);
+            empty.push(table);
+            table = parent;
+        }
         Some(entry & ADDRESS)
     }
 
@@ -351,6 +372,53 @@ impl Domain {
     }
 }
 
+/// A requester ID: bus in bits 15:8, device in 7:3, function in 2:0.
+pub fn requester(bus: u8, device: u8, function: u8) -> u16 {
+    u16::from(bus) << 8 | u16::from(device) << 3 | u16::from(function)
+}
+
+/// Whether a unit in `units` translates the function at `bus`, `device`,
+/// `function` (segment 0). `bridge` gives a bridge's secondary and
+/// subordinate bus numbers, to follow a scope's path and to cover what
+/// lies behind a bridge scope. A function no unit covers is not
+/// translated, so the kernel must not hand it to a driver (iommu.md).
+pub fn covers(
+    units: &[crate::acpi::Unit],
+    (bus, device, function): (u8, u8, u8),
+    bridge: impl Fn(u8, u8, u8) -> Option<(u8, u8)>,
+) -> bool {
+    const ENDPOINT: u8 = 1;
+    const BRIDGE: u8 = 2;
+    let named = |s: &crate::acpi::Scope| -> bool {
+        // The scope's target: each hop but the last is a bridge whose
+        // secondary bus the next hop is on.
+        let mut at = s.start_bus;
+        let Some((&last, hops)) = s.path.split_last() else {
+            return false;
+        };
+        for &(d, f) in hops {
+            match bridge(at, d, f) {
+                Some((secondary, _)) => at = secondary,
+                None => return false,
+            }
+        }
+        let target = (at, last.0, last.1);
+        match s.kind {
+            ENDPOINT => target == (bus, device, function),
+            BRIDGE => {
+                target == (bus, device, function)
+                    || bridge(target.0, target.1, target.2)
+                        .is_some_and(|(lo, hi)| lo <= bus && bus <= hi)
+            }
+            _ => false,
+        }
+    };
+    units
+        .iter()
+        .filter(|u| u.segment == 0)
+        .any(|u| u.flags & crate::acpi::INCLUDE_PCI_ALL != 0 || u.scopes.iter().any(named))
+}
+
 #[cfg(target_arch = "x86_64")]
 pub use global::*;
 
@@ -359,17 +427,35 @@ mod global {
     use alloc::vec::Vec;
     use core::fmt;
 
-    use super::{Capabilities, Fault, Tables, Unsupported};
-    use crate::acpi::Dmar;
+    use alloc::collections::BTreeMap;
+
+    use super::{
+        Capabilities, Domain, Error, Fault, Memory, PAGE, Tables, Unsupported, covers, requester,
+    };
+    use crate::acpi::{self, Dmar};
     use crate::arch::x86_64::iommu::{KernelMemory, Unit, UnitError};
+    use crate::arch::x86_64::pci as hw;
     use crate::mm::raw::IrqMutex;
+    use crate::pci::Address;
 
     struct State {
         units: Vec<Unit>,
         tables: Tables,
-        // Kept for #243's `attach` and `map`, which write through it.
-        #[allow(dead_code)]
         mem: KernelMemory,
+        caps: Capabilities,
+        /// The DMAR's units, for which devices they cover.
+        scopes: Vec<acpi::Unit>,
+        /// The attached devices' domains, by requester ID.
+        domains: BTreeMap<u16, Domain>,
+    }
+
+    impl State {
+        fn each_unit(&self, f: impl Fn(&Unit) -> Result<(), UnitError>) -> Result<(), DeviceError> {
+            for unit in &self.units {
+                f(unit).map_err(DeviceError::Unit)?;
+            }
+            Ok(())
+        }
     }
 
     static STATE: IrqMutex<Option<State>> = IrqMutex::new(None);
@@ -436,8 +522,146 @@ mod global {
             unit.enable(tables.root())
                 .map_err(|e| InitError::Unit(unit.base(), e))?;
         }
-        *state = Some(State { units, tables, mem });
+        *state = Some(State {
+            units,
+            tables,
+            mem,
+            caps,
+            scopes: dmar.units.clone(),
+            domains: BTreeMap::new(),
+        });
         Ok(caps)
+    }
+
+    /// Why a device could not be attached, mapped, or detached.
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum DeviceError {
+        /// [`init`] has not run: no device may be handed out.
+        NotStarted,
+        /// No unit's scope names the function, so its DMA is not translated.
+        NotCovered,
+        /// Every domain ID is in use.
+        NoDomainId,
+        /// The device has no domain.
+        NotAttached,
+        Table(Error),
+        Unit(UnitError),
+    }
+
+    fn rid(a: Address) -> u16 {
+        requester(a.bus, a.device, a.function)
+    }
+
+    /// The secondary and subordinate bus of the bridge at `bus`, `device`,
+    /// `function`, or `None` if it is not a bridge.
+    fn bridge(bus: u8, device: u8, function: u8) -> Option<(u8, u8)> {
+        let a = Address {
+            bus,
+            device,
+            function,
+        };
+        let header = hw::read32(a, 0x0c) >> 16 & 0x7f;
+        let buses = hw::read32(a, 0x18);
+        (header == 1).then_some(((buses >> 8) as u8, (buses >> 16) as u8))
+    }
+
+    /// Gives function `a` its own empty domain: from here its DMA reaches
+    /// only what [`map`] adds. Call before bus mastering goes on.
+    pub fn attach(a: Address) -> Result<(), DeviceError> {
+        let mut guard = STATE.lock();
+        let state = guard.as_mut().ok_or(DeviceError::NotStarted)?;
+        if !covers(&state.scopes, (a.bus, a.device, a.function), bridge) {
+            return Err(DeviceError::NotCovered);
+        }
+        // ponytail: linear scan for a free ID; few devices.
+        let id = (1..state.caps.domains.min(1 << 16))
+            .map(|i| i as u16)
+            .find(|i| state.domains.values().all(|d| d.id() != *i))
+            .ok_or(DeviceError::NoDomainId)?;
+        let domain =
+            Domain::new(&mut state.mem, id, state.caps.levels).map_err(DeviceError::Table)?;
+        if let Err(e) =
+            state
+                .tables
+                .attach(&mut state.mem, a.bus, a.device << 3 | a.function, &domain)
+        {
+            domain.destroy(&mut state.mem);
+            return Err(DeviceError::Table(e));
+        }
+        state.domains.insert(rid(a), domain);
+        state.each_unit(Unit::invalidate_context)
+    }
+
+    /// Maps `pages` pages at `phys` for function `a`'s DMA, at the same
+    /// addresses. Usable by the device when this returns.
+    pub fn map(a: Address, phys: u64, pages: usize) -> Result<(), DeviceError> {
+        let mut guard = STATE.lock();
+        let state = guard.as_mut().ok_or(DeviceError::NotStarted)?;
+        let domain = state
+            .domains
+            .get_mut(&rid(a))
+            .ok_or(DeviceError::NotAttached)?;
+        for page in 0..pages as u64 {
+            let addr = phys + page * PAGE;
+            domain
+                .map(&mut state.mem, addr, addr, true)
+                .map_err(DeviceError::Table)?;
+        }
+        Ok(())
+    }
+
+    /// Unmaps `pages` pages at `phys` from function `a`'s domain, then
+    /// invalidates the IOTLB and waits: when this returns, the device
+    /// cannot reach them, and the frames may be freed.
+    pub fn unmap(a: Address, phys: u64, pages: usize) -> Result<(), DeviceError> {
+        let mut guard = STATE.lock();
+        let state = guard.as_mut().ok_or(DeviceError::NotStarted)?;
+        let domain = state
+            .domains
+            .get_mut(&rid(a))
+            .ok_or(DeviceError::NotAttached)?;
+        let mut empty = Vec::new();
+        for page in 0..pages as u64 {
+            domain.unmap(&mut state.mem, phys + page * PAGE, &mut empty);
+        }
+        state.each_unit(Unit::invalidate_iotlb)?;
+        // Only now can no unit be walking them.
+        for table in empty {
+            state.mem.free(table);
+        }
+        Ok(())
+    }
+
+    /// Blocks function `a` again and frees its domain's tables, after the
+    /// context cache and IOTLB are invalidated: when this returns, the
+    /// device reaches no memory.
+    pub fn detach(a: Address) -> Result<(), DeviceError> {
+        let mut guard = STATE.lock();
+        let state = guard.as_mut().ok_or(DeviceError::NotStarted)?;
+        let domain = state
+            .domains
+            .remove(&rid(a))
+            .ok_or(DeviceError::NotAttached)?;
+        state
+            .tables
+            .detach(&mut state.mem, a.bus, a.device << 3 | a.function);
+        let flushed = state
+            .each_unit(Unit::invalidate_context)
+            .and_then(|()| state.each_unit(Unit::invalidate_iotlb));
+        // A unit that did not confirm the invalidation may still use the
+        // old tables: leak them rather than reuse their frames.
+        if flushed.is_ok() {
+            domain.destroy(&mut state.mem);
+        }
+        flushed
+    }
+
+    /// Where function `a`'s DMA to `iova` goes, and whether it may write
+    /// (`None`: blocked). For tests.
+    pub fn translate(a: Address, iova: u64) -> Option<(u64, bool)> {
+        let guard = STATE.lock();
+        let state = guard.as_ref()?;
+        state.domains.get(&rid(a))?.translate(&state.mem, iova)
     }
 
     /// Whether every unit translates, from root table `root` (`None`
@@ -504,7 +728,6 @@ mod tests {
         let c = Capabilities::decode(QEMU_CAP, QEMU_ECAP).unwrap();
         assert_eq!(c.levels, 3);
         assert_eq!(c.domains, 65536);
-        assert!(!c.write_buffer_flush);
         assert_eq!(c.fault_offset, 0x220);
         assert_eq!(c.fault_registers, 1);
         assert_eq!(c.iotlb_offset, 0xf8);
@@ -518,6 +741,78 @@ mod tests {
             Capabilities::decode(1 << 8, 1),
             Err(Unsupported::TableLevels(1))
         );
+    }
+
+    #[test]
+    fn units_that_need_flushes_are_refused() {
+        for bit in [4, 7] {
+            assert_eq!(
+                Capabilities::decode(QEMU_CAP | 1 << bit, QEMU_ECAP),
+                Err(Unsupported::Flushes),
+                "CAP bit {bit}"
+            );
+        }
+    }
+
+    /// QEMU's scopes: endpoints at 00:01.0 and 00:03.0, and the bridge
+    /// 00:10.0 (buses 1 to 1).
+    fn qemu_units(flags: u8) -> std::vec::Vec<crate::acpi::Unit> {
+        let scope = |kind, d| crate::acpi::Scope {
+            kind,
+            enumeration_id: 0,
+            start_bus: 0,
+            path: std::vec![(d, 0)],
+        };
+        std::vec![crate::acpi::Unit {
+            flags,
+            segment: 0,
+            base: 0xfed9_0000,
+            scopes: std::vec![scope(1, 1), scope(1, 3), scope(2, 0x10)],
+        }]
+    }
+
+    fn qemu_bridge(bus: u8, device: u8, function: u8) -> Option<(u8, u8)> {
+        ((bus, device, function) == (0, 0x10, 0)).then_some((1, 1))
+    }
+
+    #[test]
+    fn only_devices_a_scope_names_are_covered() {
+        let units = qemu_units(0);
+        assert!(covers(&units, (0, 3, 0), qemu_bridge));
+        assert!(covers(&units, (0, 1, 0), qemu_bridge));
+        assert!(!covers(&units, (0, 3, 1), qemu_bridge), "another function");
+        assert!(!covers(&units, (0, 4, 0), qemu_bridge), "unnamed");
+        assert!(covers(&units, (0, 0x10, 0), qemu_bridge), "the bridge");
+        assert!(covers(&units, (1, 0, 0), qemu_bridge), "behind the bridge");
+        assert!(!covers(&units, (2, 0, 0), qemu_bridge), "beyond its buses");
+        assert!(covers(
+            &qemu_units(crate::acpi::INCLUDE_PCI_ALL),
+            (0, 4, 0),
+            qemu_bridge
+        ));
+        let mut other = qemu_units(crate::acpi::INCLUDE_PCI_ALL);
+        other[0].segment = 1;
+        assert!(!covers(&other, (0, 3, 0), qemu_bridge), "another segment");
+        assert!(!covers(&[], (0, 3, 0), qemu_bridge));
+    }
+
+    #[test]
+    fn a_scope_path_follows_bridges() {
+        let units = std::vec![crate::acpi::Unit {
+            flags: 0,
+            segment: 0,
+            base: 0,
+            scopes: std::vec![crate::acpi::Scope {
+                kind: 1,
+                enumeration_id: 0,
+                start_bus: 0,
+                path: std::vec![(0x10, 0), (0, 0)],
+            }],
+        }];
+        assert!(covers(&units, (1, 0, 0), qemu_bridge));
+        assert!(!covers(&units, (0, 0, 0), qemu_bridge));
+        assert!(!covers(&units, (1, 0, 0), |_, _, _| None), "not a bridge");
+        assert_eq!(requester(1, 0x1f, 7), 0x01ff);
     }
 
     #[test]
@@ -540,7 +835,15 @@ mod tests {
     fn a_new_root_table_blocks_every_device() {
         let mut mem = Fake::default();
         let tables = Tables::new(&mut mem).unwrap();
-        assert!(mem.frames[&tables.root()].iter().all(|&e| e == 0));
+        let root = mem.frames[&tables.root()];
+        assert!(
+            root[1..].iter().all(|&e| e == 0),
+            "only bus 0 has a context table"
+        );
+        assert!(
+            mem.frames[&(root[0] & ADDRESS)].iter().all(|&e| e == 0),
+            "and it is empty"
+        );
         for bus in [0, 1, 255] {
             assert_eq!(tables.domain_of(&mem, bus, 0x18), None);
         }
@@ -582,6 +885,7 @@ mod tests {
         for levels in [3, 4] {
             let mut mem = Fake::default();
             let mut d = Domain::new(&mut mem, 1, levels).unwrap();
+            let mut empty = std::vec::Vec::new();
             d.map(&mut mem, 0x20_0000, 0x20_0000, true).unwrap();
             d.map(&mut mem, 0x3fff_f000, 0x3fff_f000, false).unwrap();
             assert_eq!(d.translate(&mem, 0x20_0000), Some((0x20_0000, true)));
@@ -592,9 +896,23 @@ mod tests {
                 d.map(&mut mem, 0x20_0000, 0x30_0000, true),
                 Err(Error::InUse)
             );
-            assert_eq!(d.unmap(&mut mem, 0x20_0000), Some(0x20_0000));
+            assert_eq!(d.unmap(&mut mem, 0x20_0000, &mut empty), Some(0x20_0000));
             assert_eq!(d.translate(&mem, 0x20_0000), None);
-            assert_eq!(d.unmap(&mut mem, 0x20_0000), None);
+            assert_eq!(d.unmap(&mut mem, 0x20_0000, &mut empty), None);
+            // Its last-level table is empty; the one above still maps
+            // 0x3fff_f000.
+            assert_eq!(empty.len(), 1);
+            assert_eq!(
+                d.unmap(&mut mem, 0x3fff_f000, &mut empty),
+                Some(0x3fff_f000)
+            );
+            // Then every table below the root.
+            assert_eq!(empty.len() as u32, levels, "{levels} levels");
+            assert_eq!(mem.frames.len() as u32, levels + 1, "still allocated");
+            assert!(mem.frames[&d.root].iter().all(|&e| e == 0), "unlinked");
+            for table in empty {
+                mem.free(table);
+            }
             d.destroy(&mut mem);
             assert!(mem.frames.is_empty(), "every table freed ({levels} levels)");
         }
@@ -637,7 +955,7 @@ mod tests {
             d.map(&mut mem, 0x1000, 1 << 52, true),
             Err(Error::BadAddress(1 << 52))
         );
-        assert_eq!(d.unmap(&mut mem, 1 << 39), None);
+        assert_eq!(d.unmap(&mut mem, 1 << 39, &mut std::vec::Vec::new()), None);
     }
 
     #[test]

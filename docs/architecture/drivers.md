@@ -235,7 +235,7 @@ The runner's QMP channel is a pair of FIFOs (`qmp.in`, `qmp.out`) made like the 
   - it cannot write PCI configuration space;
   - it cannot map RAM, other devices, or the MSI-X table;
   - its faults kill only the driver.
-- **DMA (limit, no IOMMU):** a driver can program its device to read or write **any physical memory**, so in M2.9 a driver is trusted with all memory through its device. Mitigations until an IOMMU:
+- **DMA (limit in M2.9; IOMMU since M5.2):** a driver can program its device to read or write **any physical memory**, so in M2.9 a driver is trusted with all memory through its device. Since #243 each granted device has its own VT-d domain mapping only its DMA buffers ([iommu.md](iommu.md)); the attack test is #244. Mitigations until an IOMMU:
   - only the kernel starts drivers;
   - drivers stay small;
   - bus mastering is turned off before a dead driver's buffers are freed.

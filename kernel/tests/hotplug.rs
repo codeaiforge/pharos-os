@@ -126,6 +126,7 @@ fn run(t: &mut TestRun) {
     }
     process::init();
     t.check("preemption enabled", sched::enable_preemption().is_ok());
+    pharos_kernel::testing::init_iommu(crate::requests::RSDP.response());
     pci::enumerate();
     t.check(
         "the kernel found the two root ports' slots, empty",

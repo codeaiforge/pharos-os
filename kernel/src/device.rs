@@ -13,7 +13,13 @@
 //! (M4.4 review F1); the next `dma_alloc` turns bus mastering on again.
 //! [`mmio_range`] decides which BAR ranges a driver
 //! may map: never outside a memory BAR, and never the MSI-X table or PBA.
-//! Safe Rust.
+//!
+//! In the kernel, each granted function has its own IOMMU domain
+//! ([iommu.md](../../docs/architecture/iommu.md), #243): attached before
+//! bus mastering goes on, each DMA buffer mapped before the driver gets it,
+//! unmapped (the IOTLB invalidated and waited for) before its frames are
+//! freed, and the domain detached when the handle goes. A function no
+//! IOMMU unit covers is never granted. Safe Rust.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -137,9 +143,11 @@ mod kernel {
     static GRANTED: IrqMutex<Vec<hw::Address>> = IrqMutex::new(Vec::new());
 
     impl DeviceHandle {
-        /// Hands `pci` to a driver: turns memory decoding and bus mastering
-        /// on. `None` if the function already has a live handle (until that
-        /// handle's last reference, including pins, is gone).
+        /// Hands `pci` to a driver: gives it an empty IOMMU domain, then
+        /// turns memory decoding and bus mastering on. `None` if the
+        /// function already has a live handle (until that handle's last
+        /// reference, including pins, is gone), or the IOMMU cannot
+        /// isolate it.
         pub fn grant(pci: Arc<pci::Device>) -> Option<Arc<Self>> {
             {
                 let mut granted = GRANTED.lock();
@@ -147,6 +155,17 @@ mod kernel {
                     return None;
                 }
                 granted.push(pci.address);
+            }
+            if let Err(error) = crate::iommu::attach(pci.address) {
+                let a = pci.address;
+                crate::kprintln!(
+                    "iommu: {:02x}:{:02x}.{} not granted: {error:?}",
+                    a.bus,
+                    a.device,
+                    a.function
+                );
+                GRANTED.lock().retain(|g| *g != pci.address);
+                return None;
             }
             hw::set_enabled(pci.address, true);
             Some(Arc::new(Self::new(pci)))
@@ -162,6 +181,12 @@ mod kernel {
                 hw::set_msix_control(self.pci.address, m.offset, false, true);
             }
         }
+    }
+
+    /// Leaves buffers allocated when the IOMMU did not confirm the device
+    /// can no longer reach them: a leak, never a reuse.
+    fn leak(device: &DeviceHandle, error: crate::iommu::DeviceError) {
+        crate::kprintln!("iommu: {device:?}: buffers kept, not freed: {error:?}");
     }
 
     fn free(buffers: impl IntoIterator<Item = (u64, usize)>) {
@@ -186,7 +211,25 @@ mod kernel {
                 return;
             }
             hw::set_bus_master(self.pci.address, false);
+            for &(phys, pages) in &mine {
+                if let Err(e) = crate::iommu::unmap(self.pci.address, phys, pages) {
+                    return leak(self, e);
+                }
+            }
             free(mine);
+        }
+
+        /// Records a DMA buffer process `owner` allocated and maps it in
+        /// the device's domain, so the device may use it once this returns.
+        /// On an error the buffer stays recorded (freed with the others).
+        pub fn give_dma(
+            &self,
+            phys: u64,
+            pages: usize,
+            owner: u64,
+        ) -> Result<(), crate::iommu::DeviceError> {
+            self.add_dma(phys, pages, owner);
+            crate::iommu::map(self.pci.address, phys, pages)
         }
 
         /// Turns bus mastering on (a `dma_alloc`: the driver now has
@@ -206,9 +249,13 @@ mod kernel {
         fn drop(&mut self) {
             // Stop the device first: no more DMA or MSI writes.
             self.stop();
-            // Only now may its buffers be reused.
+            // Only once the IOMMU confirms it reaches nothing may its
+            // buffers be reused.
             let buffers = core::mem::take(&mut *self.dma.lock());
-            free(buffers.into_iter().map(|(p, n, _)| (p, n)));
+            match crate::iommu::detach(self.pci.address) {
+                Ok(()) => free(buffers.into_iter().map(|(p, n, _)| (p, n))),
+                Err(e) => leak(self, e),
+            }
             // Stopped and its memory freed: it may be granted again.
             GRANTED.lock().retain(|a| *a != self.pci.address);
         }

@@ -109,6 +109,7 @@ fn run(t: &mut TestRun) {
     }
     process::init();
     t.check("preemption enabled", sched::enable_preemption().is_ok());
+    pharos_kernel::testing::init_iommu(crate::requests::RSDP.response());
     pci::enumerate();
     let console = pci::devices()
         .into_iter()

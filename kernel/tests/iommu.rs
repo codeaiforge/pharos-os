@@ -61,9 +61,12 @@ fn run(t: &mut TestRun) {
         on.is_some_and(|(on, _)| on),
     );
     t.check(
-        "the root table is empty: no device reaches memory",
+        "no context entry present: no device reaches memory",
         on.is_some_and(|(_, root)| {
-            (0..512).all(|i| paging::read_phys_u64(root + i * 8) == Some(0))
+            let bus0 = paging::read_phys_u64(root).unwrap_or(0);
+            (1..512).all(|i| paging::read_phys_u64(root + i * 8) == Some(0))
+                && bus0 & 1 == 1
+                && (0..512).all(|i| paging::read_phys_u64((bus0 & !0xfff) + i * 8) == Some(0))
         }),
     );
     t.check(

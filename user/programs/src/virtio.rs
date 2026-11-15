@@ -19,6 +19,8 @@ const DEVICE_FEATURE_SELECT: usize = 0x00;
 const DEVICE_FEATURE: usize = 0x04;
 const DRIVER_FEATURE_SELECT: usize = 0x08;
 const DRIVER_FEATURE: usize = 0x0c;
+/// `VIRTIO_F_ACCESS_PLATFORM` (feature bit 33), in the high feature word.
+const ACCESS_PLATFORM: u32 = 1 << 1;
 const CONFIG_MSIX_VECTOR: usize = 0x10;
 const DEVICE_STATUS: usize = 0x14;
 const QUEUE_SELECT: usize = 0x16;
@@ -160,7 +162,8 @@ impl Transport {
         self.status(ACKNOWLEDGE);
         self.status(ACKNOWLEDGE | DRIVER);
         common.write32(c + DEVICE_FEATURE_SELECT, 1);
-        if common.read32(c + DEVICE_FEATURE) & 1 == 0 {
+        let high = common.read32(c + DEVICE_FEATURE);
+        if high & 1 == 0 {
             return Err("no VERSION_1");
         }
         common.write32(c + DEVICE_FEATURE_SELECT, 0);
@@ -170,7 +173,10 @@ impl Transport {
         common.write32(c + DRIVER_FEATURE_SELECT, 0);
         common.write32(c + DRIVER_FEATURE, wanted);
         common.write32(c + DRIVER_FEATURE_SELECT, 1);
-        common.write32(c + DRIVER_FEATURE, 1);
+        // VERSION_1 (bit 32), and ACCESS_PLATFORM (bit 33) when offered:
+        // the device's DMA goes through the IOMMU (iommu.md, #243), which
+        // maps each buffer at its physical address, so nothing else changes.
+        common.write32(c + DRIVER_FEATURE, 1 | (high & ACCESS_PLATFORM));
         self.status(ACKNOWLEDGE | DRIVER | FEATURES_OK);
         if common.read8(c + DEVICE_STATUS) & FEATURES_OK == 0 {
             return Err("features refused");

@@ -316,6 +316,7 @@ fn run(t: &mut TestRun) {
     }
     process::init();
     t.check("preemption enabled", sched::enable_preemption().is_ok());
+    pharos_kernel::testing::init_iommu(crate::requests::RSDP.response());
     pci::enumerate();
     let Ok(root) = fs::mount("root") else {
         t.check("the boot image's root filesystem is found", false);

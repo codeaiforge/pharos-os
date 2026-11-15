@@ -147,6 +147,7 @@ fn start(
 /// Starts `store` (on the second virtio-blk disk), `infer`, `audit` (#108),
 /// `knowledge` (#144), and `trust` (on the virtio-console), as `init` does. The scheduler and processes must be set up.
 pub fn setup(t: &mut TestRun) -> Option<Services> {
+    pharos_kernel::testing::init_iommu(crate::requests::RSDP.response());
     pci::enumerate();
     let devices = pci::devices();
     let disk = devices
