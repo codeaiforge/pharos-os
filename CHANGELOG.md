@@ -38,6 +38,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- `cargo xtask s1` failed since the audit reserve (#212, `4be5074`): the store images xtask writes left only 256 blocks of room, all inside the eighth of the store kept for the audit trail, so with the 676 MB S1 model the knowledge service's first write was refused (`knowledge: the store refused the start`). Images are now sized with the reserve on top of their room; an xtask host test with a 64 MiB file fails without it. `cargo xtask test` skips `s1` without the model, which is how this was missed
 - A subtask whose goal ended is stopped, its grants dropped, before its cancellation is recorded (#231, M5.4 review): with the audit trail or the store refusing, it kept running with its delegated grants until `task_ms`. It is not started or retried until the cancellation is recorded. The `groups` kernel covers it.
 - `revoke <agent> <permission>` reaches every task of the agent that has not ended (#230, M5.4 review): a task waiting to start or restart kept the permission for its next attempt, and its running subtasks kept a delegated one. The `permissions` kernel and a host unit test in `grants.rs` cover it.
 - The agent runtime drops a task's approvals, revocations, and refusals once the task has ended or is forgotten and no attempt of it runs (#233, M5.4 review): the lists only grew. `grants::Kept::prune`; a host unit test in `grants.rs` covers it.

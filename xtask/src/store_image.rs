@@ -367,23 +367,29 @@ pub fn model(path: &Path, model: Option<&Path>) -> Result<()> {
 
 /// A fresh store at `path`, just big enough, holding `files`.
 fn write_files(path: &Path, files: &[(&[u8], &[u8])]) -> Result<()> {
-    let len: usize = files.iter().map(|(_, d)| d.len()).sum();
-    let blocks = (len as u64).div_ceil(BLOCK as u64) + 256;
-    let mut store = Store::format(FileDevice::create(path, blocks)?)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    for (name, bytes) in files {
-        store
-            .write(name, bytes)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-    }
-    Ok(())
+    format_with(path, files, 256)
 }
 
 /// Writes a store holding `files` and room for the boot services' own
 /// (the audit trail, the knowledge service): 16 MiB more (#163).
 pub fn with_room(path: &Path, files: &[(&[u8], &[u8])]) -> Result<()> {
+    format_with(path, files, 4096)
+}
+
+/// Blocks for a store holding `data` bytes with `room` blocks left for
+/// other namespaces' writes: the store keeps the last
+/// [`pharos_store::RESERVE_PART`]-th of its blocks for the audit trail
+/// (D-046), so that comes on top. Without it, a store holding the S1 model
+/// had all of its free space inside the reserve, and the knowledge
+/// service's first write was refused.
+fn blocks_for(data: u64, room: u64) -> u64 {
+    let need = data.div_ceil(BLOCK as u64) + room;
+    need + need.div_ceil(pharos_store::RESERVE_PART - 1) + 1
+}
+
+fn format_with(path: &Path, files: &[(&[u8], &[u8])], room: u64) -> Result<()> {
     let len: usize = files.iter().map(|(_, d)| d.len()).sum();
-    let blocks = (len as u64).div_ceil(BLOCK as u64) + 4096;
+    let blocks = blocks_for(len as u64, room);
     let mut store = Store::format(FileDevice::create(path, blocks)?)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     for (name, bytes) in files {
@@ -782,6 +788,25 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_large_file_leaves_room_outside_the_audit_reserve() {
+        let dir = std::env::temp_dir().join(format!("pharos-room-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.img");
+        // 64 MiB: its reserve (an eighth) is far more than the 256 blocks
+        // of room, as with the S1 model.
+        let big = vec![7u8; 64 << 20];
+        write_files(&path, &[(b"models/big.gguf", &big)]).unwrap();
+        let store = Store::mount(FileDevice::open(&path).unwrap()).unwrap();
+        // Half the 256 blocks of room (the store's own metadata uses some).
+        let room = 128 * BLOCK as u64;
+        assert!(
+            store.leaves_reserve(b"knowledge/starts", room),
+            "room past the reserve"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn s1_prompt_is_the_benchmarks() {
