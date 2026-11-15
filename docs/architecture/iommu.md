@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-15 (#239), with each open question decided as recommended (section 7). It follows [D-044](../project/decision-log.md#d-044-reference-platform-and-the-limits-required-on-a-real-host) item 3 (accepted 2026-11-15) and [D-008](../project/decision-log.md) (user-space drivers, the IOMMU left open).
-- **Implementation:** **implemented** for the KVM reference platform: the ACPI and DMAR parsers (#241); the VT-d registers and tables, with translation on at boot and nothing attached (#242); the device hooks, `VIRTIO_F_ACCESS_PLATFORM`, and `iommu_platform=on` on every virtio device, so each granted device's DMA reaches only its own buffers (#243); and the `iommu` test kernel's DMA attack on a kernel canary and the threat model's rows (#244). **Planned:** the mutation run on a throwaway branch in CI (run locally in #244; CI needs a push by the maintainer).
+- **Implementation:** **implemented** for the KVM reference platform: the ACPI and DMAR parsers (#241); the VT-d registers and tables, with translation on at boot and nothing attached (#242); the device hooks, `VIRTIO_F_ACCESS_PLATFORM`, and `iommu_platform=on` on every virtio device, so each granted device's DMA reaches only its own buffers (#243); and the `iommu` test kernel's DMA attack on a kernel canary and the threat model's rows (#244). Identity-mapping the first 16 MiB in every domain failed CI on the throwaway branch `mutation/iommu-identity-map` ([run 43745306163](https://github.com/codeaiforge/pharos-os/actions/runs/43745306163)): only the `iommu` kernel failed, at the canary and fault checks; the host tests, Rust 1.85, and the other kernels passed.
 
 ## 2. Context
 
