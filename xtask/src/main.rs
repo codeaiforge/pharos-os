@@ -1452,6 +1452,22 @@ fn shard(names: &[String], n: usize, of: usize) -> Vec<String> {
 /// `cargo xtask test`: boot check under UEFI and BIOS, then the kernel tests
 /// (D-009). Both parts always run; the command fails if either fails. With
 /// a shard, only its share of the kernels, and the boot check in share 1.
+/// `cargo test`'s selection: every test kernel, or a shard's `names`.
+/// `None` for a shard with none: `cargo test` without `--test` would build
+/// the `no_std` library as a test and fail.
+fn test_selection(names: Option<Vec<String>>) -> Option<Vec<String>> {
+    match names {
+        None => Some(vec!["--test".to_string(), "*".to_string()]),
+        Some(names) if names.is_empty() => None,
+        Some(names) => Some(
+            names
+                .into_iter()
+                .flat_map(|t| ["--test".to_string(), t])
+                .collect(),
+        ),
+    }
+}
+
 fn test(paths: &Paths, timeout: Duration, part: Option<(usize, usize)>, repeat: u32) -> Result<()> {
     let boot = match part {
         Some((n, _)) if n > 1 => Ok(()),
@@ -1460,19 +1476,22 @@ fn test(paths: &Paths, timeout: Duration, part: Option<(usize, usize)>, repeat: 
     if let Err(e) = &boot {
         println!("{e}");
     }
-    let mut selected = vec!["--test".to_string(), "*".to_string()];
-    if let Some((n, of)) = part {
-        let names = shard(&test_kernels(paths)?, n, of);
-        println!(
-            "Shard {n} of {of}: {} test kernels: {}",
-            names.len(),
-            names.join(", ")
-        );
-        selected = names
-            .into_iter()
-            .flat_map(|t| ["--test".to_string(), t])
-            .collect();
-    }
+    let names = match part {
+        Some((n, of)) => {
+            let names = shard(&test_kernels(paths)?, n, of);
+            println!(
+                "Shard {n} of {of}: {} test kernels: {}",
+                names.len(),
+                names.join(", ")
+            );
+            Some(names)
+        }
+        None => None,
+    };
+    let Some(selected) = test_selection(names) else {
+        println!("No test kernels in this shard.");
+        return boot;
+    };
     println!("Kernel tests (cargo test -p {KERNEL_PACKAGE} --target {KERNEL_TARGET}):");
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let tests = run(
@@ -4647,6 +4666,16 @@ mod tests {
         assert!(
             evaluate_refusal(&boot_run(Some(35), false, &no_iommu), CPU_REFUSED, t).is_err(),
             "a different refusal"
+        );
+    }
+
+    #[test]
+    fn an_empty_shard_runs_no_cargo_test() {
+        assert_eq!(test_selection(None).unwrap(), ["--test", "*"]);
+        assert_eq!(test_selection(Some(Vec::new())), None);
+        assert_eq!(
+            test_selection(Some(vec!["a".into(), "b".into()])).unwrap(),
+            ["--test", "a", "--test", "b"]
         );
     }
 
