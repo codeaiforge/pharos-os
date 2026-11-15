@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-15 (#239), with each open question decided as recommended (section 7). It follows [D-044](../project/decision-log.md#d-044-reference-platform-and-the-limits-required-on-a-real-host) item 3 (accepted 2026-11-15) and [D-008](../project/decision-log.md) (user-space drivers, the IOMMU left open).
-- **Implementation:** in progress. **Implemented:** the ACPI and DMAR parsers (#241); the VT-d registers and tables, with translation on at boot and nothing attached (#242). the device hooks, `VIRTIO_F_ACCESS_PLATFORM`, and `iommu_platform=on` on every virtio device, so each granted device's DMA reaches only its own buffers (#243). **Planned:** the test kernel's DMA attack on a kernel canary, its CI mutation, and closing the threat model's rows (#244).
+- **Implementation:** **implemented** for the KVM reference platform: the ACPI and DMAR parsers (#241); the VT-d registers and tables, with translation on at boot and nothing attached (#242); the device hooks, `VIRTIO_F_ACCESS_PLATFORM`, and `iommu_platform=on` on every virtio device, so each granted device's DMA reaches only its own buffers (#243); and the `iommu` test kernel's DMA attack on a kernel canary and the threat model's rows (#244). **Planned:** the mutation run on a throwaway branch in CI (run locally in #244; CI needs a push by the maintainer).
 
 ## 2. Context
 
@@ -111,4 +111,4 @@ flowchart LR
 1. #241: ACPI walk and DMAR parser, host-tested (`acpi.rs`, the Limine RSDP request).
 2. #242: VT-d registers and tables, translation on at boot with nothing attached (`arch/x86_64/iommu.rs`, `iommu.rs`).
 3. #243: device hooks and `VIRTIO_F_ACCESS_PLATFORM`, `iommu_platform=on` on every virtio device, and refusing to grant a device no unit's scope names. (`xtask` adds the IOMMU everywhere since #242.)
-4. #244: the `iommu` test kernel, its mutation, and the threat model's rows; the matrix and S1 measured.
+4. #244: the `iommu` test kernel's attack, its mutations, and the threat model's rows (S1 measured in #243). Found: QEMU's virtio-blk completes the blocked request (status OK, nothing written), so a driver cannot tell from the device that its DMA was blocked; the unit's fault record says so.

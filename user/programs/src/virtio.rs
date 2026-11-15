@@ -438,10 +438,22 @@ impl Blk {
         self.start(Op::Read, sector, len)
     }
 
+    /// Starts reading `len` bytes from `sector` into physical address
+    /// `data` instead of the data page: what a compromised driver can ask
+    /// of its device. For the DMA-isolation test (`dmaprobe`, #244); the
+    /// IOMMU must block it unless `data` is the driver's own buffer.
+    pub fn submit_into(&mut self, sector: u64, len: usize, data: u64) -> Result<(), &'static str> {
+        self.start_at(Op::Read, sector, len, data)
+    }
+
     /// Starts request `op`: for reads and writes, `len` bytes (whole
     /// sectors, at most [`MAX_READ`]) at `sector`, in the data page (a
     /// write's data must be there already); a flush has no data.
     fn start(&mut self, op: Op, sector: u64, len: usize) -> Result<(), &'static str> {
+        self.start_at(op, sector, len, self.phys + DATA as u64)
+    }
+
+    fn start_at(&mut self, op: Op, sector: u64, len: usize, data: u64) -> Result<(), &'static str> {
         if self.outstanding.is_some() {
             return Err("a request is already in flight");
         }
@@ -471,7 +483,7 @@ impl Blk {
             _ => {
                 // Reads: the device writes the data; writes: it reads it.
                 let flags = if op == Op::Read { NEXT | WRITE } else { NEXT };
-                self.q.set(1, self.phys + DATA as u64, len as u32, flags, 2);
+                self.q.set(1, data, len as u32, flags, 2);
                 self.q.set(2, status, 1, WRITE, 0);
             }
         }
@@ -532,6 +544,11 @@ impl Blk {
     /// Resets the device (stops all queue activity).
     pub fn reset(&self) {
         self.t.reset();
+    }
+
+    /// The physical address of the queue and data pages.
+    pub fn dma_phys(&self) -> u64 {
+        self.phys
     }
 }
 
