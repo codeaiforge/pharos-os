@@ -14,14 +14,15 @@ extern crate alloc;
 use core::panic::PanicInfo;
 
 use pharos_kernel::arch::x86_64::{
-    _print_panic, QemuExit, apic, gdt, halt, idt, paging, qemu_exit, run_on_kernel_stack,
+    _print_panic, QemuExit, apic, cpu_identity, gdt, halt, idt, paging, qemu_exit,
+    run_on_kernel_stack,
 };
 use pharos_kernel::boot_info::{BootMode, boot_mode, firmware_name, mib, summarize};
 use pharos_kernel::limine::{BASE_REVISION, BootMemory};
 use pharos_kernel::mm;
 use pharos_kernel::storage;
 use pharos_kernel::time;
-use pharos_kernel::{fs, ipc, kprintln, pci, process, sched};
+use pharos_kernel::{cpu, fs, ipc, kprintln, pci, process, sched};
 
 pharos_kernel::limine_requests!();
 
@@ -37,6 +38,16 @@ extern "C" fn kernel_main() -> ! {
     gdt::init();
     idt::init();
     kprintln!("Pharos OS {} kernel", env!("CARGO_PKG_VERSION"));
+
+    // Before anything else runs: on a CPU affected by Meltdown or MDS, any
+    // process could read all memory through the kernel half (D-044).
+    match cpu::check(&cpu_identity()) {
+        Ok(allowed) => kprintln!("  cpu:        not affected by Meltdown or MDS ({allowed:?})"),
+        Err(refused) => fail(format_args!(
+            "this CPU may leak kernel memory to processes (D-044): {}",
+            refused.reason()
+        )),
+    }
 
     if !requests::BASE_REVISION_TAG.is_supported() {
         fail(format_args!(

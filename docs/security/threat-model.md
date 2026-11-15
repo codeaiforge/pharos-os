@@ -59,7 +59,7 @@ User processes run in ring 3 since M2.7. Design: [syscalls-ipc.md](../architectu
 | User flags leak into the kernel (DF, AC) | Interrupt entry clears DF and AC (review F1); `syscall` clears them through `SFMASK`. Debug builds assert both are clear in every dispatcher (`hardening`) |
 | FPU state leaks between processes | Since M3.0 (D-016) processes use x87, SSE, and AVX, and every thread switch saves and restores them eagerly (`FXSAVE`, or `XSAVE` with AVX), with a clean state for new threads (`vector_state`, `vector_state_avx`). Until then `CR0.EM` made x87 fault (review F3) |
 | A stale TLB entry keeps a freed kernel page reachable | Kernel-space unmaps always flush, even while a process space is active (review F4, `address_spaces`) |
-| Speculative execution leaks kernel memory (Meltdown class) | **Limit:** not mitigated (no KPTI); revisit before real-hardware use |
+| Speculative execution leaks kernel memory (Meltdown class) | The kernel refuses to boot on an affected CPU (#237, D-044): it runs only under QEMU's TCG, on AMD or Hygon, or on Intel reporting `RDCL_NO` and `MDS_NO`, and otherwise stops, naming what is missing. No KPTI: carried to M8.1 for older bare metal. Tested by the boot check's refused-CPU boot and `cpu` host tests |
 | Timing side channels | `CR4.TSD` (D-044, #238): `rdtsc` and `rdtscp` fault in user mode, tested by `user_mode`; processes get `uptime` in microseconds through a system call, and on one CPU no counting thread runs beside the code it would time |
 
 ### Storage images (M2.8)
@@ -166,7 +166,7 @@ Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-in
 | Limit | Since | Carried to |
 | --- | --- | --- |
 | No IOMMU: a driver is trusted with all memory through its device's DMA; a hot-added device too, once its driver turns bus mastering on (M4.4 review) | M2.9 (D-008) | M5.2 for the KVM reference platform, where a driver can still program its virtio device to write anywhere in guest memory (D-044, accepted: QEMU's emulated `intel-iommu` with a VT-d driver, **planned**); VT-d and AMD-Vi on bare metal in M8.1 (required before real-hardware use) |
-| No KPTI: the kernel half is mapped in every address space (Meltdown class) | M2.7 | M5.2, required before real-hardware use (D-031: Phase 4 runs only in QEMU and the kernel holds no secret); a KVM host counts as real hardware, so it stays in the narrowed M5.2 (D-044, accepted: refuse to boot on an affected CPU, **planned**; KPTI carried to M8.1 for older bare metal) |
+| No KPTI: the kernel half is mapped in every address space (Meltdown class). **Resolved for M5.2 (#237):** the kernel refuses to boot on a CPU affected by Meltdown or MDS (D-044) | M2.7 | M5.2; KPTI itself carried to M8.1, for older bare metal |
 | One CPU: locking, TLB flushes, and MSI-X routing assume it | from the start | Phase 5 (Phase 4 ran on one CPU throughout); SMP needs a decision record and a re-review of those paths |
 | Revocation does not unmap device registers or DMA buffers; ending the process is the full revocation. **Resolved (#104):** revoking a device capability stops the device and turns the driver's register and DMA mappings into zeroed private pages | M2.9 | M3.4 (revocable agent permissions) |
 | No timeouts on pings or service start (`receive`, `call`, `irq_wait`, and `sleep` have them since #76). **Resolved (#100):** `init` stops a daemon that sends no `ready` within 10 s, restarts a crashed daemon at most 3 times, and never restarts a stopped one | M2.7 | M3.3 (supervision) |

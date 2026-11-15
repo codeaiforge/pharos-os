@@ -49,6 +49,14 @@ const QEMU_EXIT_FAILURE: i32 = 35;
 
 /// Serial marker the kernel prints after a successful boot (D-009).
 const BOOT_MARKER: &str = "PHAROS: boot ok";
+/// How the kernel refuses a CPU affected by Meltdown or MDS (D-044, #237).
+const CPU_REFUSED: &str =
+    "PHAROS: boot failed: this CPU may leak kernel memory to processes (D-044): ";
+/// An Intel model without `IA32_ARCH_CAPABILITIES`, with TCG's CPUID
+/// signature hidden, so the kernel cannot tell it is emulated: it must
+/// refuse to boot (#237). Last on the command line, so it wins over a
+/// matrix cell's `-cpu`.
+const REFUSED_CPU: [&str; 2] = ["-cpu", "Skylake-Client,tcg-cpuid=off"];
 /// Serial marker a passing test kernel prints last (D-009; must match
 /// `pharos_kernel::testing::TESTS_OK_MARKER`).
 const TESTS_MARKER: &str = "PHAROS: tests ok";
@@ -1524,8 +1532,46 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
         }
         Err(reason) => return Err(format!("boot audit trail ({}): {reason}", store.display())),
     }
+    // D-044 (#237): the same image on an affected CPU stops, saying why.
+    let log = logs.join("boot-refused-cpu.log");
+    let vars = logs.join("boot-refused-cpu-ovmf-vars.fd");
+    let extra: Vec<OsString> = REFUSED_CPU.iter().map(Into::into).collect();
+    let run = boot_headless(&iso, &vars, &log, false, timeout, &extra)?;
+    let label = "boot check (CPU affected by Meltdown or MDS)";
+    match evaluate_refusal(&run, timeout) {
+        Ok(()) => println!(
+            "{label}: PASS, refused in {:.1} s",
+            run.elapsed.as_secs_f32()
+        ),
+        Err(reason) => {
+            report_failure(label, &run, &log, &reason);
+            matrix::summary(&format!("`{label}`: FAIL: {reason}"));
+            return Err(format!("{label}: {reason}"));
+        }
+    }
     println!("All boot checks passed.");
     Ok(())
+}
+
+/// A boot on a CPU the kernel must refuse (D-044): the failure status, the
+/// refusal line, and no boot marker.
+fn evaluate_refusal(run: &BootRun, timeout: Duration) -> Result<()> {
+    let lines = || run.log.lines().map(|l| l.trim_end_matches('\r').trim());
+    if run.timed_out {
+        return Err(format!("no result within {} s", timeout.as_secs()));
+    }
+    if lines().any(|l| l == BOOT_MARKER) {
+        return Err("the kernel booted on a CPU it must refuse".into());
+    }
+    if !lines().any(|l| l.starts_with(CPU_REFUSED)) {
+        return Err(format!("the serial log lacks \"{CPU_REFUSED}...\""));
+    }
+    match run.status {
+        Some(QEMU_EXIT_FAILURE) => Ok(()),
+        other => Err(format!(
+            "QEMU exit status {other:?}, not the kernel's failure ({QEMU_EXIT_FAILURE})"
+        )),
+    }
 }
 
 /// The boot's services, as `init`'s boot table names them.
@@ -4521,6 +4567,28 @@ mod tests {
         let timeout = evaluate_boot(&boot_run(None, true, good), BOOT_MARKER, t);
         assert!(timeout.unwrap_err().contains("no result within 60 s"));
         assert!(evaluate_boot(&boot_run(None, false, good), BOOT_MARKER, t).is_err());
+    }
+
+    #[test]
+    fn a_refused_cpu_must_stop_with_its_reason() {
+        let t = Duration::from_secs(60);
+        let refused =
+            format!("Pharos OS 0.1.0 kernel\r\n{CPU_REFUSED}it has no IA32_ARCH_CAPABILITIES\r\n");
+        assert!(evaluate_refusal(&boot_run(Some(35), false, &refused), t).is_ok());
+        let booted = format!("{refused}PHAROS: boot ok\n");
+        assert!(
+            evaluate_refusal(&boot_run(Some(35), false, &booted), t)
+                .unwrap_err()
+                .contains("booted")
+        );
+        let other = "PHAROS: boot failed: no memory map from the bootloader\n";
+        assert!(
+            evaluate_refusal(&boot_run(Some(35), false, other), t)
+                .unwrap_err()
+                .contains("lacks")
+        );
+        assert!(evaluate_refusal(&boot_run(Some(33), false, &refused), t).is_err());
+        assert!(evaluate_refusal(&boot_run(None, true, &refused), t).is_err());
     }
 
     #[test]

@@ -165,6 +165,55 @@ pub fn enable_and_wait_for_interrupt() {
     unsafe { asm!("sti", "hlt", options(nomem, nostack)) };
 }
 
+/// What the CPU says about itself for the Meltdown-class check (D-044,
+/// [`crate::cpu`]).
+#[allow(unused_unsafe)] // `__cpuid_count` is safe in recent Rust, `unsafe` in 1.85
+pub fn cpu_identity() -> crate::cpu::Identity {
+    let words = |b: u32, c: u32, d: u32| {
+        let mut out = [0; 12];
+        out[..4].copy_from_slice(&b.to_le_bytes());
+        out[4..8].copy_from_slice(&c.to_le_bytes());
+        out[8..].copy_from_slice(&d.to_le_bytes());
+        out
+    };
+    // SAFETY: CPUID exists on every x86-64 CPU and has no side effects.
+    let leaf0 = unsafe { core::arch::x86_64::__cpuid_count(0, 0) };
+    // The vendor string is EBX, EDX, ECX.
+    let vendor = words(leaf0.ebx, leaf0.edx, leaf0.ecx);
+    // SAFETY: as above.
+    let leaf1 = unsafe { core::arch::x86_64::__cpuid_count(1, 0) };
+    // CPUID.1:ECX bit 31: running under a hypervisor, whose signature is
+    // leaf 0x4000_0000's EBX, ECX, EDX.
+    let hypervisor = (leaf1.ecx & (1 << 31) != 0).then(|| {
+        // SAFETY: as above; leaves from 0x4000_0000 are reserved for
+        // hypervisors and read as data on any CPU.
+        let leaf = unsafe { core::arch::x86_64::__cpuid_count(0x4000_0000, 0) };
+        words(leaf.ebx, leaf.ecx, leaf.edx)
+    });
+    let arch_capabilities = (leaf0.eax >= 7)
+        .then(|| {
+            // SAFETY: as above; leaf 7 exists (EAX of leaf 0 is the highest).
+            unsafe { core::arch::x86_64::__cpuid_count(7, 0) }
+        })
+        .filter(|leaf7| leaf7.edx & (1 << 29) != 0)
+        .map(|_| {
+            let (lo, hi): (u32, u32);
+            // SAFETY: CPUID.7.EDX bit 29 says IA32_ARCH_CAPABILITIES (MSR
+            // 0x10A) exists, so `rdmsr` of it does not fault; it only reads
+            // the MSR into EDX:EAX and touches no memory.
+            unsafe {
+                asm!("rdmsr", in("ecx") 0x10a_u32, out("eax") lo, out("edx") hi,
+                    options(nomem, nostack, preserves_flags))
+            };
+            u64::from(hi) << 32 | u64::from(lo)
+        });
+    crate::cpu::Identity {
+        vendor,
+        hypervisor,
+        arch_capabilities,
+    }
+}
+
 /// Reads the time-stamp counter.
 pub fn rdtsc() -> u64 {
     let (lo, hi): (u32, u32);
