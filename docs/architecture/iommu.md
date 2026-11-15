@@ -2,8 +2,8 @@
 
 ## 1. Status
 
-- **Design:** **Draft**, for the maintainer's approval (#239). It follows [D-044](../project/decision-log.md#d-044-reference-platform-and-the-limits-required-on-a-real-host) item 3 (accepted 2026-11-15) and [D-008](../project/decision-log.md) (user-space drivers, the IOMMU left open).
-- **Implementation:** **planned**; nothing here exists yet. Facts marked *(to verify)* are checked by the first prototype before the code is reviewed.
+- **Design:** **Accepted**: approved by the maintainer on 2026-11-15 (#239), with each open question decided as recommended (section 7). It follows [D-044](../project/decision-log.md#d-044-reference-platform-and-the-limits-required-on-a-real-host) item 3 (accepted 2026-11-15) and [D-008](../project/decision-log.md) (user-space drivers, the IOMMU left open).
+- **Implementation:** **planned** (#241 to #244); nothing here exists yet. Facts marked *(to verify)* are checked by the first prototype before the code is reviewed.
 
 ## 2. Context
 
@@ -69,7 +69,7 @@ flowchart LR
 
 - **Invalidation is register-based** (`CCMD`, `IOTLB`), not the invalidation queue: one unit, a few invalidations per `dma_alloc` or driver exit, so a queue's speed is not needed and its code is avoided. *(To verify: QEMU's register-based invalidation in legacy mode.)*
 - **Faults** are read from the fault-recording registers and printed (`iommu: device 00:03.0 blocked write to 0x…`), counted per device, and cleared. The fault interrupt is not used at first: the kernel polls the status on each device stop and in the test kernel.
-- **No IOMMU found:** the kernel refuses to hand a device to a driver, so the boot fails with `no IOMMU (DMAR) found; drivers cannot be isolated (D-044)`. Fail closed, as the CPU check (#237). `cargo xtask` adds the IOMMU everywhere, so every test still boots. (Open question 1.)
+- **No IOMMU found:** the boot fails with `no IOMMU (DMAR) found; drivers cannot be isolated (D-044)`. Fail closed, as the CPU check (#237). `cargo xtask` adds the IOMMU everywhere, so every test still boots (decided, open question 1).
 
 ## 4. Security
 
@@ -101,9 +101,11 @@ flowchart LR
 2. **Interrupt remapping:** carry MSI injection to M8.1 as stated (recommended for M5.2's size), or add it now?
 3. **S1's cost:** if translated DMA slows model loading beyond what S1 allows, is a larger mapping granularity (2 MiB pages for large buffers) acceptable, or a longer S1 limit?
 
-## Implementation issues (to file once approved)
+**Decided (2026-11-15, #239):** 1. refuse to boot without an IOMMU; 2. interrupt remapping carried to M8.1, MSI injection stated in the threat model; 3. 2 MiB mappings for large buffers if S1 needs them.
 
-1. ACPI walk and DMAR parser, host-tested (`acpi.rs`, the Limine RSDP request).
-2. VT-d registers and tables, translation on at boot with nothing attached (`arch/x86_64/iommu.rs`, `iommu.rs`).
-3. Device hooks and `VIRTIO_F_ACCESS_PLATFORM`, with `xtask` adding the IOMMU everywhere.
-4. The `iommu` test kernel, its mutation, and the threat model's rows; the matrix and S1 measured.
+## Implementation issues
+
+1. #241: ACPI walk and DMAR parser, host-tested (`acpi.rs`, the Limine RSDP request).
+2. #242: VT-d registers and tables, translation on at boot with nothing attached (`arch/x86_64/iommu.rs`, `iommu.rs`).
+3. #243: device hooks and `VIRTIO_F_ACCESS_PLATFORM`, with `xtask` adding the IOMMU everywhere.
+4. #244: the `iommu` test kernel, its mutation, and the threat model's rows; the matrix and S1 measured.

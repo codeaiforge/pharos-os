@@ -16,7 +16,7 @@ Each document's own Status section says what is **implemented**, **placeholder**
 - [Scheduling](scheduling.md) — kernel tasks, their stacks, the context switch, scheduling classes, and locking rules (M2.6, D-013).
 - [System calls and IPC](syscalls-ipc.md) — processes, the system-call interface, capabilities, and IPC (M2.7, D-004, D-012, D-014).
 - [The user execution environment](user-environment.md) — vector state, user memory, timeouts, and shared memory for user programs (M3.0, D-016).
-- [DMA isolation](iommu.md) — a VT-d driver for QEMU's `intel-iommu`: one domain per device, blocked by default (M5.2, D-044; **draft**, planned).
+- [DMA isolation](iommu.md) — a VT-d driver for QEMU's `intel-iommu`: one domain per device, blocked by default (M5.2, D-044; design accepted, implementation planned).
 
 **System services**
 
