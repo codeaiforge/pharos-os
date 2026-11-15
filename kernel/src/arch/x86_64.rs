@@ -13,6 +13,7 @@ pub mod context;
 pub mod fpu;
 pub mod gdt;
 pub mod idt;
+pub mod iommu;
 pub mod paging;
 pub mod pci;
 pub mod syscall;

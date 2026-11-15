@@ -22,7 +22,7 @@ use pharos_kernel::limine::{BASE_REVISION, BootMemory};
 use pharos_kernel::mm;
 use pharos_kernel::storage;
 use pharos_kernel::time;
-use pharos_kernel::{acpi, cpu, fs, ipc, kprintln, pci, process, sched};
+use pharos_kernel::{acpi, cpu, fs, iommu, ipc, kprintln, pci, process, sched};
 
 pharos_kernel::limine_requests!();
 
@@ -215,25 +215,29 @@ extern "C" fn kernel_main() -> ! {
         Err(error) => kprintln!("  filesystem: root not mounted: {error}"),
     }
 
-    // The IOMMU's units (#241, iommu.md); reported only, until #242 uses them.
-    match rsdp.map(|rsdp| acpi::find(&acpi::DirectMap, rsdp, b"DMAR")) {
-        None => kprintln!("  acpi:       no RSDP from the bootloader"),
-        Some(Err(error)) => kprintln!("  acpi:       tables unreadable: {error:?}"),
-        Some(Ok(None)) => kprintln!("  acpi:       no DMAR table (no IOMMU)"),
-        Some(Ok(Some(table))) => match acpi::parse_dmar(&table) {
-            Ok(dmar) => {
-                for unit in &dmar.units {
-                    kprintln!(
-                        "  acpi:       DMAR unit at {:#x}, segment {}, flags {:#x}, {} scopes",
-                        unit.base,
-                        unit.segment,
-                        unit.flags,
-                        unit.scopes.len()
-                    );
-                }
-            }
-            Err(error) => kprintln!("  acpi:       DMAR malformed: {error:?}"),
-        },
+    // DMA isolation (iommu.md): translation on, every device blocked,
+    // before any driver runs. Without an IOMMU no driver can be isolated,
+    // so the boot stops (D-044, #242).
+    let dmar = match rsdp.map(|rsdp| acpi::find(&acpi::DirectMap, rsdp, b"DMAR")) {
+        Some(Ok(Some(table))) => acpi::parse_dmar(&table)
+            .unwrap_or_else(|e| fail(format_args!("the DMAR table is malformed: {e:?}"))),
+        Some(Err(error)) => fail(format_args!("ACPI tables unreadable: {error:?}")),
+        None => fail(format_args!(
+            "no RSDP from the bootloader; the IOMMU cannot be found"
+        )),
+        Some(Ok(None)) => fail(format_args!(
+            "no IOMMU (DMAR) found; drivers cannot be isolated (D-044)"
+        )),
+    };
+    match iommu::init(&dmar) {
+        Ok(caps) => kprintln!(
+            "  iommu:      {} unit(s) translating, {}-level tables, nothing attached",
+            dmar.units.len(),
+            caps.levels
+        ),
+        Err(error) => fail(format_args!(
+            "the IOMMU cannot isolate drivers (D-044): {error}"
+        )),
     }
     let functions = pci::enumerate();
     kprintln!("  pci:        {functions} functions");

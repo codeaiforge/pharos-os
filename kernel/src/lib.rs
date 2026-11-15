@@ -34,6 +34,7 @@ pub mod cpu;
 pub mod device;
 pub mod fs;
 pub mod hotplug;
+pub mod iommu;
 #[cfg(target_arch = "x86_64")]
 pub mod ipc;
 #[cfg(target_arch = "x86_64")]

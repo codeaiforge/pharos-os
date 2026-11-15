@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-15 (#239), with each open question decided as recommended (section 7). It follows [D-044](../project/decision-log.md#d-044-reference-platform-and-the-limits-required-on-a-real-host) item 3 (accepted 2026-11-15) and [D-008](../project/decision-log.md) (user-space drivers, the IOMMU left open).
-- **Implementation:** **planned** (#241 to #244); nothing here exists yet. Facts marked *(to verify)* are checked by the first prototype before the code is reviewed.
+- **Implementation:** in progress. **Implemented:** the ACPI and DMAR parsers (#241); the VT-d registers and tables, with translation on at boot and nothing attached (#242). **Planned:** the device hooks and `iommu_platform=on` (#243), and the test kernel's DMA attack and the threat-model rows (#244). Until #243, virtio devices bypass the IOMMU (next section), so **no driver is isolated yet**.
 
 ## 2. Context
 
@@ -22,6 +22,7 @@ Facts about the platform (QEMU 8.2 on the development host):
 - `-device intel-iommu` needs `q35`, which every image already uses. Defaults: legacy (not scalable) mode, 39-bit guest addresses (3-level second-level tables), `caching-mode=off`, interrupt remapping `auto`.
 - A virtio-pci device bypasses the IOMMU unless it is created with `iommu_platform=on`, and then its driver must accept `VIRTIO_F_ACCESS_PLATFORM` (feature bit 33). Today's drivers negotiate only `VERSION_1` (bit 32). *(To verify: whether QEMU refuses `FEATURES_OK` when the driver does not accept bit 33.)*
 - **QEMU 8.2's DMAR does not set INCLUDE_PCI_ALL** (found by the `acpi` test kernel, #241): its one unit, at `0xfed9_0000`, names each function on bus 0 in a device scope (endpoints, the root-port bridges, the I/O APIC). A function no unit names is not translated, so the driver must refuse to grant a device that no unit covers (#242, #243).
+- **QEMU's unit is not coherent** (`ECAP` `0xf42`: `C` is 0; found by the `iommu` test kernel, #242): it reads the tables from memory without snooping the CPU's caches, so the kernel flushes each table write (`clflush`, then `mfence`) before telling the unit. Its `CAP` (`0x00d2008c22260206`): 39-bit tables only (3 levels), 65,536 domain IDs, one fault-recording register at `0x220`, no write-buffer flush; the IOTLB register is at `0xf8`. Register-based invalidation works in legacy mode.
 - VT-d does not translate writes to the interrupt range `0xfee0_0000`–`0xfeef_ffff`; they are MSIs.
 
 ## 3. Design
@@ -62,15 +63,15 @@ flowchart LR
 | --- | --- | --- | --- |
 | Limine RSDP request | `kernel/src/limine.rs` (already an `unsafe` module) | a new request static, as the others | gives the RSDP's physical address, read before bootloader memory is reclaimed (#223's `BootMemory`) |
 | ACPI walk and DMAR parser | `kernel/src/acpi.rs`, safe | none | RSDP → XSDT → `DMAR`; each table's length and checksum checked; returns the DRHD units (register base, `INCLUDE_PCI_ALL`, device scopes), and the count of reserved regions (RMRR), which the driver must not ignore. **Implemented (#241).** Reads physical memory through the existing safe direct-map reads. Host-tested and fuzzed |
-| VT-d registers | `kernel/src/arch/x86_64/iommu.rs` (hardware layer, already allowed) | volatile MMIO reads and writes of the unit's 4 KiB register page | `CAP`, `ECAP`, `GCMD`/`GSTS`, `RTADDR`, `CCMD`, `IOTLB` (at `ECAP.IRO`), fault status and recording registers |
-| Tables | `kernel/src/iommu.rs`, safe | none (frames written through `mm::raw`'s existing safe slices) | root table (256 buses), context tables, second-level tables (3 levels for 39-bit, 4 for 48-bit by `CAP.SAGAW`), domain IDs (`CAP.ND`) |
+| VT-d registers | `kernel/src/arch/x86_64/iommu.rs` (hardware layer, already allowed) | none new for registers (the existing `mmio_read32`/`mmio_write32`); the table frames' direct-map reads and writes, and `clflush` | `CAP`, `ECAP`, `GCMD`/`GSTS`, `RTADDR`, `CCMD`, `IOTLB` (at `ECAP.IRO`), fault status and recording registers; `KernelMemory` writes only frames it allocated. **Implemented (#242)** |
+| Tables | `kernel/src/iommu.rs`, safe | none | root table (256 buses), context tables, second-level tables (3 levels for 39-bit, 4 for 48-bit by `CAP.SAGAW`), domain IDs (`CAP.ND`); `iommu::init` turns translation on. **Implemented (#242)**, host-tested; attach and map are used from #243 |
 | Hooks | `kernel/src/device.rs` | none | attach on `grant`, map on `add_dma`, unmap and invalidate before `free`, detach on drop |
 | Driver feature | `user/programs/src/virtio.rs` | none | accept `VIRTIO_F_ACCESS_PLATFORM` when the device offers it |
 | QEMU settings | `xtask` | none | `-device intel-iommu,intremap=off` and `iommu_platform=on` on every virtio device, in every boot and test kernel |
 
-- **Invalidation is register-based** (`CCMD`, `IOTLB`), not the invalidation queue: one unit, a few invalidations per `dma_alloc` or driver exit, so a queue's speed is not needed and its code is avoided. *(To verify: QEMU's register-based invalidation in legacy mode.)*
+- **Invalidation is register-based** (`CCMD`, `IOTLB`), not the invalidation queue: one unit, a few invalidations per `dma_alloc` or driver exit, so a queue's speed is not needed and its code is avoided. Both are global for now. Verified on QEMU (#242).
 - **Faults** are read from the fault-recording registers and printed (`iommu: device 00:03.0 blocked write to 0x…`), counted per device, and cleared. The fault interrupt is not used at first: the kernel polls the status on each device stop and in the test kernel.
-- **No IOMMU found:** the boot fails with `no IOMMU (DMAR) found; drivers cannot be isolated (D-044)`. Fail closed, as the CPU check (#237). `cargo xtask` adds the IOMMU everywhere, so every test still boots (decided, open question 1).
+- **No IOMMU found:** the boot fails with `no IOMMU (DMAR) found; drivers cannot be isolated (D-044)`. Fail closed, as the CPU check (#237). `cargo xtask` adds the IOMMU everywhere, so every test still boots (decided, open question 1). **Implemented (#242)**, and so is refusing a DMAR that lists reserved regions (RMRR, which QEMU's has none of) or a unit outside PCI segment 0.
 
 ## 4. Security
 
@@ -108,5 +109,5 @@ flowchart LR
 
 1. #241: ACPI walk and DMAR parser, host-tested (`acpi.rs`, the Limine RSDP request).
 2. #242: VT-d registers and tables, translation on at boot with nothing attached (`arch/x86_64/iommu.rs`, `iommu.rs`).
-3. #243: device hooks and `VIRTIO_F_ACCESS_PLATFORM`, with `xtask` adding the IOMMU everywhere.
+3. #243: device hooks and `VIRTIO_F_ACCESS_PLATFORM`, `iommu_platform=on` on every virtio device, and refusing to grant a device no unit's scope names. (`xtask` adds the IOMMU everywhere since #242.)
 4. #244: the `iommu` test kernel, its mutation, and the threat model's rows; the matrix and S1 measured.

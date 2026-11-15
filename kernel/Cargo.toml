@@ -165,6 +165,10 @@ name = "acpi"
 harness = false
 
 [[test]]
+name = "iommu"
+harness = false
+
+[[test]]
 name = "address_spaces"
 harness = false
 

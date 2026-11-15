@@ -57,6 +57,12 @@ const CPU_REFUSED: &str =
 /// refuse to boot (#237). Last on the command line, so it wins over a
 /// matrix cell's `-cpu`.
 const REFUSED_CPU: [&str; 2] = ["-cpu", "Skylake-Client,tcg-cpuid=off"];
+/// QEMU's VT-d unit, on every machine (D-044, iommu.md). Interrupt
+/// remapping stays off (carried to M8.1).
+const IOMMU: [&str; 2] = ["-device", "intel-iommu,intremap=off"];
+/// How the kernel refuses a machine without an IOMMU (#242).
+const IOMMU_REFUSED: &str =
+    "PHAROS: boot failed: no IOMMU (DMAR) found; drivers cannot be isolated (D-044)";
 /// Serial marker a passing test kernel prints last (D-009; must match
 /// `pharos_kernel::testing::TESTS_OK_MARKER`).
 const TESTS_MARKER: &str = "PHAROS: tests ok";
@@ -1038,6 +1044,9 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
     let mut args: Vec<OsString> = [
         "-M",
         "q35",
+        // Before the devices it translates.
+        IOMMU[0],
+        IOMMU[1],
         "-m",
         "256M",
         "-display",
@@ -1245,6 +1254,11 @@ fn boot_headless(
     serial.push(log);
     let mut args = qemu_args(iso, vars, &serial, bios, false);
     args.extend_from_slice(extra);
+    run_headless(args, log, timeout)
+}
+
+/// Runs QEMU with `args`, which write the serial console to `log`.
+fn run_headless(args: Vec<OsString>, log: &Path, timeout: Duration) -> Result<BootRun> {
     let start = Instant::now();
     let mut child = qemu_command(args)
         .stdin(std::process::Stdio::null())
@@ -1267,8 +1281,6 @@ fn boot_headless(
 fn test_qemu_args(name: &str) -> Vec<OsString> {
     match name {
         "vector_state" => vec!["-cpu".into(), "qemu64".into()],
-        // QEMU's VT-d unit, so the firmware's tables hold a DMAR (#241).
-        "acpi" => vec!["-device".into(), "intel-iommu,intremap=off".into()],
         "vector_state_avx" => vec!["-cpu".into(), "max".into()],
         // After `qemu_args`' 256M: QEMU takes the last `-m`.
         LARGE_FILE_TEST => vec!["-m".into(), "2G".into()],
@@ -1539,34 +1551,72 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
     let vars = logs.join("boot-refused-cpu-ovmf-vars.fd");
     let extra: Vec<OsString> = REFUSED_CPU.iter().map(Into::into).collect();
     let run = boot_headless(&iso, &vars, &log, false, timeout, &extra)?;
-    let label = "boot check (CPU affected by Meltdown or MDS)";
-    match evaluate_refusal(&run, timeout) {
-        Ok(()) => println!(
-            "{label}: PASS, refused in {:.1} s",
-            run.elapsed.as_secs_f32()
-        ),
-        Err(reason) => {
-            report_failure(label, &run, &log, &reason);
-            matrix::summary(&format!("`{label}`: FAIL: {reason}"));
-            return Err(format!("{label}: {reason}"));
-        }
-    }
+    refused(
+        "boot check (CPU affected by Meltdown or MDS)",
+        &run,
+        &log,
+        CPU_REFUSED,
+        timeout,
+    )?;
+    // #242: the same image on a machine without an IOMMU stops, saying why.
+    let log = logs.join("boot-no-iommu.log");
+    let vars = logs.join("boot-no-iommu-ovmf-vars.fd");
+    prepare_firmware(&vars, false)?;
+    console::fifos(iso.parent().unwrap_or(Path::new(".")))?;
+    let mut serial = OsString::from("file:");
+    serial.push(&log);
+    let _ = fs::remove_file(&log);
+    let args = without_iommu(qemu_args(&iso, &vars, &serial, false, false));
+    let run = run_headless(args, &log, timeout)?;
+    refused("boot check (no IOMMU)", &run, &log, IOMMU_REFUSED, timeout)?;
     println!("All boot checks passed.");
     Ok(())
 }
 
-/// A boot on a CPU the kernel must refuse (D-044): the failure status, the
-/// refusal line, and no boot marker.
-fn evaluate_refusal(run: &BootRun, timeout: Duration) -> Result<()> {
+/// `args` without the IOMMU device.
+fn without_iommu(args: Vec<OsString>) -> Vec<OsString> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut args = args.into_iter().peekable();
+    while let Some(arg) = args.next() {
+        if arg == IOMMU[0] && args.peek().is_some_and(|next| next == IOMMU[1]) {
+            args.next();
+        } else {
+            out.push(arg);
+        }
+    }
+    out
+}
+
+/// Reports a boot the kernel must refuse ([`evaluate_refusal`]).
+fn refused(label: &str, run: &BootRun, log: &Path, refusal: &str, timeout: Duration) -> Result<()> {
+    match evaluate_refusal(run, refusal, timeout) {
+        Ok(()) => {
+            println!(
+                "{label}: PASS, refused in {:.1} s",
+                run.elapsed.as_secs_f32()
+            );
+            Ok(())
+        }
+        Err(reason) => {
+            report_failure(label, run, log, &reason);
+            matrix::summary(&format!("`{label}`: FAIL: {reason}"));
+            Err(format!("{label}: {reason}"))
+        }
+    }
+}
+
+/// A boot on a machine the kernel must refuse (D-044): the failure status,
+/// the line starting with `refusal`, and no boot marker.
+fn evaluate_refusal(run: &BootRun, refusal: &str, timeout: Duration) -> Result<()> {
     let lines = || run.log.lines().map(|l| l.trim_end_matches('\r').trim());
     if run.timed_out {
         return Err(format!("no result within {} s", timeout.as_secs()));
     }
     if lines().any(|l| l == BOOT_MARKER) {
-        return Err("the kernel booted on a CPU it must refuse".into());
+        return Err("the kernel booted on a machine it must refuse".into());
     }
-    if !lines().any(|l| l.starts_with(CPU_REFUSED)) {
-        return Err(format!("the serial log lacks \"{CPU_REFUSED}...\""));
+    if !lines().any(|l| l.starts_with(refusal)) {
+        return Err(format!("the serial log lacks \"{refusal}...\""));
     }
     match run.status {
         Some(QEMU_EXIT_FAILURE) => Ok(()),
@@ -4576,21 +4626,41 @@ mod tests {
         let t = Duration::from_secs(60);
         let refused =
             format!("Pharos OS 0.1.0 kernel\r\n{CPU_REFUSED}it has no IA32_ARCH_CAPABILITIES\r\n");
-        assert!(evaluate_refusal(&boot_run(Some(35), false, &refused), t).is_ok());
+        assert!(evaluate_refusal(&boot_run(Some(35), false, &refused), CPU_REFUSED, t).is_ok());
         let booted = format!("{refused}PHAROS: boot ok\n");
         assert!(
-            evaluate_refusal(&boot_run(Some(35), false, &booted), t)
+            evaluate_refusal(&boot_run(Some(35), false, &booted), CPU_REFUSED, t)
                 .unwrap_err()
                 .contains("booted")
         );
         let other = "PHAROS: boot failed: no memory map from the bootloader\n";
         assert!(
-            evaluate_refusal(&boot_run(Some(35), false, other), t)
+            evaluate_refusal(&boot_run(Some(35), false, other), CPU_REFUSED, t)
                 .unwrap_err()
                 .contains("lacks")
         );
-        assert!(evaluate_refusal(&boot_run(Some(33), false, &refused), t).is_err());
-        assert!(evaluate_refusal(&boot_run(None, true, &refused), t).is_err());
+        assert!(evaluate_refusal(&boot_run(Some(33), false, &refused), CPU_REFUSED, t).is_err());
+        assert!(evaluate_refusal(&boot_run(None, true, &refused), CPU_REFUSED, t).is_err());
+        let no_iommu = format!("Pharos OS 0.1.0 kernel\r\n{IOMMU_REFUSED}\r\n");
+        assert!(evaluate_refusal(&boot_run(Some(35), false, &no_iommu), IOMMU_REFUSED, t).is_ok());
+        assert!(
+            evaluate_refusal(&boot_run(Some(35), false, &no_iommu), CPU_REFUSED, t).is_err(),
+            "a different refusal"
+        );
+    }
+
+    #[test]
+    fn every_machine_has_the_iommu_but_the_refused_one() {
+        let (iso, vars) = (Path::new("pharos.iso"), Path::new("vars.fd"));
+        let args = qemu_args(iso, vars, OsStr::new("stdio"), false, false);
+        let at = |a: &[OsString], s: &str| a.iter().position(|x| x == s);
+        let iommu = at(&args, IOMMU[1]).expect("intel-iommu");
+        assert_eq!(args[iommu - 1], "-device");
+        assert!(iommu < at(&args, "virtio-net-pci,netdev=net0,disable-legacy=on").unwrap());
+        let without = without_iommu(args.clone());
+        assert_eq!(without.len(), args.len() - 2);
+        assert!(at(&without, IOMMU[1]).is_none());
+        assert!(at(&without, "isa-debug-exit,iobase=0xf4,iosize=0x04").is_some());
     }
 
     #[test]
