@@ -79,6 +79,13 @@ programs! {
         "mov dx, 0xf4
          mov al, 0x11
          out dx, al";
+    Rdtsc, pharos_up_rdtsc, pharos_up_rdtsc_end,
+        "Reads the time-stamp counter (`CR4.TSD` makes it privileged, D-044).",
+        "rdtsc";
+    Rdtscp, pharos_up_rdtscp, pharos_up_rdtscp_end,
+        "Reads the time-stamp counter with `rdtscp` (privileged under \
+         `CR4.TSD`, D-044); `#UD` on a CPU without the instruction.",
+        "rdtscp";
     X87, pharos_up_x87, pharos_up_x87_end,
         "Loads 1.0 onto the x87 stack. Since M3.0 the FPU works for processes \
          (D-016), so this runs and the `ud2` after it faults.",

@@ -942,6 +942,7 @@ pub fn init_kernel_space(
     Ok(())
 }
 
+const CR4_TSD: u64 = 1 << 2;
 const CR4_PGE: u64 = 1 << 7;
 const CR4_SMEP: u64 = 1 << 20;
 const CR4_SMAP: u64 = 1 << 21;
@@ -963,12 +964,15 @@ fn read_cr4() -> u64 {
 ///   then faults if it executes or touches a user page by accident. Defence
 ///   in depth: the kernel never accesses user pages directly, and QEMU's
 ///   default CPU (used by CI) has neither feature.
+/// - `CR4.TSD` (D-044): `rdtsc` and `rdtscp` fault in ring 3, so processes
+///   have no cycle-precise timer for side channels; `uptime` gives them
+///   microseconds. The kernel's own TSC reads run in ring 0.
 #[allow(unused_unsafe)] // `__cpuid_count` is safe in recent Rust, `unsafe` in 1.85
 fn enable_cpu_protections() {
     super::fpu::init();
     // SAFETY: CPUID exists on every x86-64 CPU and has no side effects.
     let leaf7 = unsafe { core::arch::x86_64::__cpuid_count(7, 0) };
-    let mut cr4 = read_cr4();
+    let mut cr4 = read_cr4() | CR4_TSD;
     if leaf7.ebx & (1 << 7) != 0 {
         cr4 |= CR4_SMEP;
     }
@@ -976,7 +980,9 @@ fn enable_cpu_protections() {
         cr4 |= CR4_SMAP;
     }
     // SAFETY: setting SMEP/SMAP only adds checks on user pages, which the
-    // kernel neither executes nor accesses (no user pages exist yet).
+    // kernel neither executes nor accesses (no user pages exist yet); TSD
+    // only makes `rdtsc` and `rdtscp` privileged, and only the kernel uses
+    // them.
     unsafe { asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags)) };
 }
 

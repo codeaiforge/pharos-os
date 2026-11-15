@@ -102,6 +102,7 @@ Implementing #78 also found that a device interrupt arriving while the CPU idled
 - **Memory exhaustion:** per-process page limits checked before allocation, at most 1,024 mappings per process, no demand paging. Since #115 limits are carved from the creator's, so a process and its descendants together stay within its limit; a process can still use its whole limit of frames.
 - **Shared memory:** rights only narrow; read-only mappings are not writable; frames live until the last user; revoked mappings become zeroed private pages (#104).
 - **Timeouts:** cannot lose or duplicate a message; a late reply cannot reach a later call.
+- **Timers:** user programs read time only through `uptime` (microseconds, a system call). Since #238 (D-044) `CR4.TSD` makes `rdtsc` and `rdtscp` fault in ring 3, so no process has a cycle-precise timer for side channels; the kernel keeps its own TSC reads. A program that uses either instruction is killed with a general-protection fault.
 - **New trusted code:** the vector-state instructions in the hardware layer, the memory functions and allocator in `pharos-user`'s `syscall` module, and the `Memory` object in the kernel. AGENTS.md's list of what `pharos-user`'s `syscall` module may contain gains the memory functions and the new allocator.
 
 ## 5. Testing

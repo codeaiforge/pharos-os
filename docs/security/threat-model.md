@@ -60,7 +60,7 @@ User processes run in ring 3 since M2.7. Design: [syscalls-ipc.md](../architectu
 | FPU state leaks between processes | Since M3.0 (D-016) processes use x87, SSE, and AVX, and every thread switch saves and restores them eagerly (`FXSAVE`, or `XSAVE` with AVX), with a clean state for new threads (`vector_state`, `vector_state_avx`). Until then `CR0.EM` made x87 fault (review F3) |
 | A stale TLB entry keeps a freed kernel page reachable | Kernel-space unmaps always flush, even while a process space is active (review F4, `address_spaces`) |
 | Speculative execution leaks kernel memory (Meltdown class) | **Limit:** not mitigated (no KPTI); revisit before real-hardware use |
-| Timing side channels | **Limit:** `rdtsc` is available in user mode |
+| Timing side channels | `CR4.TSD` (D-044, #238): `rdtsc` and `rdtscp` fault in user mode, tested by `user_mode`; processes get `uptime` in microseconds through a system call, and on one CPU no counting thread runs beside the code it would time |
 
 ### Storage images (M2.8)
 
@@ -172,7 +172,7 @@ Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-in
 | No timeouts on pings or service start (`receive`, `call`, `irq_wait`, and `sleep` have them since #76). **Resolved (#100):** `init` stops a daemon that sends no `ready` within 10 s, restarts a crashed daemon at most 3 times, and never restarts a stopped one | M2.7 | M3.3 (supervision) |
 | No per-process quotas on processes, handles, or network use. **Resolved for processes and handles (#115):** carved from the creator's; network use by agents is budgeted by the runtime (#116) | M2.10 | M3.5 (resource accounting and limits) |
 | No network destination policy. **Resolved (#109):** per-client destination lists from `init`, checked by the network service | M2.10 | M3.4 (D-012) |
-| `rdtsc` in user mode (timing side channels) | M2.7 | M5.2, required before real-hardware use, a KVM host included (D-031; D-044, accepted: `CR4.TSD`, **planned**) |
+| `rdtsc` in user mode (timing side channels). **Resolved (#238):** `CR4.TSD` makes `rdtsc` and `rdtscp` fault in ring 3 (D-044) | M2.7 | M5.2 |
 | Shared-memory bookkeeping (8 bytes per page) on the fixed 4 MiB kernel heap, which panics when full: up to 1/512 of a process's page limit. **Partly resolved (#115):** charged to the sharer's page limit, one page per 512 shared pages, until it ends (`shared_memory`), so the sharer pays for it; the heap use is still bounded only by memory, since shared pages are mapped frames: 1/512 of RAM, 512 KiB on the 256 MiB test machine but the whole 4 MiB heap at 2 GiB | M3.0 | Phase 5, before guests larger than 2 GiB: a heap that grows, or bookkeeping in the charged pages (M4.6 review) |
 | Page limits not carved from the creator's; a large `mem_map` zeroes pages with interrupts disabled. **Resolved (#115):** carved, and zeroed in batches; interrupts actually let in between them since #120 | M3.0 | M3.5 |
 | Revocation does not unmap shared memory already mapped. **Resolved (#104):** revoked mappings become zeroed private pages with the same access, in every process, before `revoke` returns | M3.0 | M3.4 |

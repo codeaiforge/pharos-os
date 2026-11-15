@@ -109,9 +109,11 @@ fn run(t: &mut TestRun) {
         (TestProgram::Cli, 0, "executes cli"),
         (TestProgram::Hlt, 0, "executes hlt"),
         (TestProgram::WriteCr3, 0, "writes CR3"),
+        (TestProgram::Rdtsc, 0, "reads the TSC"),
+        (TestProgram::Rdtscp, 0, "reads the TSC with rdtscp"),
     ];
     let before = free_frames();
-    let mut ids = [0; 7];
+    let mut ids = [0; 9];
     let mut started = true;
     for (slot, (program, arg, _)) in ids.iter_mut().zip(attempts) {
         match process::spawn(program.bytes(), 0, arg, Vec::new()) {
@@ -119,7 +121,7 @@ fn run(t: &mut TestRun) {
             Err(_) => started = false,
         }
     }
-    t.check("seven misbehaving processes started", started);
+    t.check("nine misbehaving processes started", started);
     sched::sleep(Duration::from_millis(100));
 
     let kills = process::kills();
@@ -149,8 +151,24 @@ fn run(t: &mut TestRun) {
         protection(killed(ids[4])) && protection(killed(ids[5])) && protection(killed(ids[6])),
     );
     t.check(
-        "all seven killed in ring 3, the spinner and task 0 alive",
-        kills.len() == 7 && kills.iter().all(|k| k.cs & 3 == 3) && sched::live_tasks() == 2,
+        "rdtsc: general-protection fault (CR4.TSD, D-044)",
+        protection(killed(ids[7])),
+    );
+    // Without RDTSCP (CPUID 0x8000_0001 EDX bit 27) the instruction is #UD
+    // whatever CR4.TSD says, so only a CPU that has it can show the check.
+    let rdtscp = core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 27) != 0;
+    kprintln!("RDTSCP {rdtscp}");
+    t.check(
+        "rdtscp: general-protection fault (CR4.TSD), or #UD without RDTSCP",
+        if rdtscp {
+            protection(killed(ids[8]))
+        } else {
+            killed(ids[8]).is_some_and(|k| k.vector == 6)
+        },
+    );
+    t.check(
+        "all nine killed in ring 3, the spinner and task 0 alive",
+        kills.len() == 9 && kills.iter().all(|k| k.cs & 3 == 3) && sched::live_tasks() == 2,
     );
     t.check("the spinner never faulted", killed(spinner_id).is_none());
     t.check(
