@@ -22,6 +22,7 @@
 
 extern crate alloc;
 
+pub mod acpi;
 // Compiled on any x86-64 build (not only bare metal) so editors and host
 // builds can analyse it; it is only executed by the kernel.
 #[cfg(target_arch = "x86_64")]
@@ -92,9 +93,9 @@ macro_rules! limine_requests {
             use $crate::limine::{
                 BaseRevisionTag, BootloaderInfoResponse, ExecutableAddressResponse,
                 ExecutableCmdlineResponse, FirmwareTypeResponse, HhdmResponse, MemmapResponse,
-                ModuleResponse, REQUESTS_END_MARKER, REQUESTS_START_MARKER, Request,
+                ModuleResponse, REQUESTS_END_MARKER, REQUESTS_START_MARKER, Request, RsdpResponse,
                 bootloader_info_request, executable_address_request, executable_cmdline_request,
-                firmware_type_request, hhdm_request, memmap_request, module_request,
+                firmware_type_request, hhdm_request, memmap_request, module_request, rsdp_request,
             };
 
             #[used]
@@ -133,6 +134,10 @@ macro_rules! limine_requests {
             #[used]
             #[unsafe(link_section = ".limine_requests")]
             pub static MODULES: Request<ModuleResponse> = module_request();
+
+            #[used]
+            #[unsafe(link_section = ".limine_requests")]
+            pub static RSDP: Request<RsdpResponse> = rsdp_request();
 
             #[used]
             #[unsafe(link_section = ".limine_requests_end")]

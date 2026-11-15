@@ -1267,6 +1267,8 @@ fn boot_headless(
 fn test_qemu_args(name: &str) -> Vec<OsString> {
     match name {
         "vector_state" => vec!["-cpu".into(), "qemu64".into()],
+        // QEMU's VT-d unit, so the firmware's tables hold a DMAR (#241).
+        "acpi" => vec!["-device".into(), "intel-iommu,intremap=off".into()],
         "vector_state_avx" => vec!["-cpu".into(), "max".into()],
         // After `qemu_args`' 256M: QEMU takes the last `-m`.
         LARGE_FILE_TEST => vec!["-m".into(), "2G".into()],

@@ -1095,6 +1095,25 @@ pub(super) fn mmio_read32(phys: u64) -> Result<u32, MapError> {
 /// so the kernel may read it even with SMAP on).
 pub const USER_TEST_PAGE: u64 = 0x0000_0000_1000_0000;
 
+/// Copies `buf.len()` bytes from physical address `phys` through the direct
+/// map, or `None` (and `buf` unspecified) if the direct map does not cover
+/// every byte. For firmware tables (ACPI, #241), which the direct map covers
+/// as reserved memory.
+pub fn read_phys(phys: u64, buf: &mut [u8]) -> Option<()> {
+    let base = HHDM.load(Ordering::Relaxed);
+    for (i, byte) in buf.iter_mut().enumerate() {
+        let virt = base.checked_add(phys.checked_add(i as u64)?)?;
+        // One translation per page.
+        if i == 0 || virt % 4096 == 0 {
+            translate_kernel(virt)?;
+        }
+        // SAFETY: the kernel maps `virt`'s page (checked above, for the
+        // first byte and at every page start), and a read changes nothing.
+        *byte = unsafe { (virt as *const u8).read_volatile() };
+    }
+    Some(())
+}
+
 /// Reads the 8 bytes at physical address `phys` through the direct map, or
 /// `None` if the direct map does not cover it. For tests that watch a
 /// process's page from the kernel.

@@ -236,6 +236,20 @@ pub const fn firmware_type_request() -> Request<FirmwareTypeResponse> {
     Request::new([0x8c2f75d90bef28a8, 0x7045a4688eac00c3])
 }
 
+/// "RSDP Feature": where the ACPI tables start (#241, iommu.md). Since base
+/// revision 4 `address` is a direct-map (HHDM) address, not a physical one.
+#[repr(C)]
+pub struct RsdpResponse {
+    revision: u64,
+    /// The RSDP's address in the direct map.
+    pub address: u64,
+}
+
+/// A request for [`RsdpResponse`].
+pub const fn rsdp_request() -> Request<RsdpResponse> {
+    Request::new([0xc5e77b6b397e7b43, 0x27637845accdcf3c])
+}
+
 /// "HHDM (Higher Half Direct Map) Feature".
 #[repr(C)]
 pub struct HhdmResponse {
@@ -409,6 +423,7 @@ mod tests {
         assert_eq!(size_of::<MemmapResponse>(), 24);
         assert_eq!(size_of::<HhdmResponse>(), 16);
         assert_eq!(size_of::<FirmwareTypeResponse>(), 16);
+        assert_eq!(size_of::<RsdpResponse>(), 16);
         assert_eq!(size_of::<BootloaderInfoResponse>(), 24);
         assert_eq!(size_of::<ExecutableAddressResponse>(), 24);
         assert_eq!(size_of::<ExecutableCmdlineResponse>(), 16);

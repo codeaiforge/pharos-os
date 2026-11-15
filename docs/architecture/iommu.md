@@ -21,6 +21,7 @@ Facts about the platform (QEMU 8.2 on the development host):
 
 - `-device intel-iommu` needs `q35`, which every image already uses. Defaults: legacy (not scalable) mode, 39-bit guest addresses (3-level second-level tables), `caching-mode=off`, interrupt remapping `auto`.
 - A virtio-pci device bypasses the IOMMU unless it is created with `iommu_platform=on`, and then its driver must accept `VIRTIO_F_ACCESS_PLATFORM` (feature bit 33). Today's drivers negotiate only `VERSION_1` (bit 32). *(To verify: whether QEMU refuses `FEATURES_OK` when the driver does not accept bit 33.)*
+- **QEMU 8.2's DMAR does not set INCLUDE_PCI_ALL** (found by the `acpi` test kernel, #241): its one unit, at `0xfed9_0000`, names each function on bus 0 in a device scope (endpoints, the root-port bridges, the I/O APIC). A function no unit names is not translated, so the driver must refuse to grant a device that no unit covers (#242, #243).
 - VT-d does not translate writes to the interrupt range `0xfee0_0000`–`0xfeef_ffff`; they are MSIs.
 
 ## 3. Design
@@ -60,7 +61,7 @@ flowchart LR
 | Piece | Where | `unsafe` | Does |
 | --- | --- | --- | --- |
 | Limine RSDP request | `kernel/src/limine.rs` (already an `unsafe` module) | a new request static, as the others | gives the RSDP's physical address, read before bootloader memory is reclaimed (#223's `BootMemory`) |
-| ACPI walk and DMAR parser | `kernel/src/acpi.rs`, safe | none | RSDP → XSDT → `DMAR`; each table's length and checksum checked; returns the DRHD units (register base, `INCLUDE_PCI_ALL`, device scopes). Reads physical memory through the existing safe direct-map reads. Host-tested and fuzzed |
+| ACPI walk and DMAR parser | `kernel/src/acpi.rs`, safe | none | RSDP → XSDT → `DMAR`; each table's length and checksum checked; returns the DRHD units (register base, `INCLUDE_PCI_ALL`, device scopes), and the count of reserved regions (RMRR), which the driver must not ignore. **Implemented (#241).** Reads physical memory through the existing safe direct-map reads. Host-tested and fuzzed |
 | VT-d registers | `kernel/src/arch/x86_64/iommu.rs` (hardware layer, already allowed) | volatile MMIO reads and writes of the unit's 4 KiB register page | `CAP`, `ECAP`, `GCMD`/`GSTS`, `RTADDR`, `CCMD`, `IOTLB` (at `ECAP.IRO`), fault status and recording registers |
 | Tables | `kernel/src/iommu.rs`, safe | none (frames written through `mm::raw`'s existing safe slices) | root table (256 buses), context tables, second-level tables (3 levels for 39-bit, 4 for 48-bit by `CAP.SAGAW`), domain IDs (`CAP.ND`) |
 | Hooks | `kernel/src/device.rs` | none | attach on `grant`, map on `add_dma`, unmap and invalidate before `free`, detach on drop |

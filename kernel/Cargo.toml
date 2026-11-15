@@ -161,6 +161,10 @@ name = "classes"
 harness = false
 
 [[test]]
+name = "acpi"
+harness = false
+
+[[test]]
 name = "address_spaces"
 harness = false
 

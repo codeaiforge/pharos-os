@@ -22,7 +22,7 @@ use pharos_kernel::limine::{BASE_REVISION, BootMemory};
 use pharos_kernel::mm;
 use pharos_kernel::storage;
 use pharos_kernel::time;
-use pharos_kernel::{cpu, fs, ipc, kprintln, pci, process, sched};
+use pharos_kernel::{acpi, cpu, fs, ipc, kprintln, pci, process, sched};
 
 pharos_kernel::limine_requests!();
 
@@ -170,6 +170,11 @@ extern "C" fn kernel_main() -> ! {
 
     // Last step that may touch bootloader memory is done. Consuming `boot`
     // ends every borrowed Limine response; using one below does not compile.
+    // The RSDP's physical address, kept as a number: the response lives in
+    // bootloader memory, the tables themselves in firmware memory.
+    let rsdp = requests::RSDP
+        .get(&boot)
+        .and_then(|r| r.address.checked_sub(hhdm.offset));
     match mm::reclaim_bootloader_memory(boot) {
         Ok(frames) => {
             let free = mm::frames().as_ref().map_or(0, |f| f.stats().free);
@@ -210,6 +215,26 @@ extern "C" fn kernel_main() -> ! {
         Err(error) => kprintln!("  filesystem: root not mounted: {error}"),
     }
 
+    // The IOMMU's units (#241, iommu.md); reported only, until #242 uses them.
+    match rsdp.map(|rsdp| acpi::find(&acpi::DirectMap, rsdp, b"DMAR")) {
+        None => kprintln!("  acpi:       no RSDP from the bootloader"),
+        Some(Err(error)) => kprintln!("  acpi:       tables unreadable: {error:?}"),
+        Some(Ok(None)) => kprintln!("  acpi:       no DMAR table (no IOMMU)"),
+        Some(Ok(Some(table))) => match acpi::parse_dmar(&table) {
+            Ok(dmar) => {
+                for unit in &dmar.units {
+                    kprintln!(
+                        "  acpi:       DMAR unit at {:#x}, segment {}, flags {:#x}, {} scopes",
+                        unit.base,
+                        unit.segment,
+                        unit.flags,
+                        unit.scopes.len()
+                    );
+                }
+            }
+            Err(error) => kprintln!("  acpi:       DMAR malformed: {error:?}"),
+        },
+    }
     let functions = pci::enumerate();
     kprintln!("  pci:        {functions} functions");
     for d in pci::devices() {
