@@ -1429,21 +1429,41 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-044: Reference platform and the limits required on a real host
 
-- **Status:** Open
+- **Status:** Accepted
 - **Needed by:** M5.2
-- **Date accepted:**
+- **Date accepted:** 2026-11-15 (the maintainer chose each recommendation)
 
 **Context.** D-031 carried no KPTI and `rdtsc` in user mode to M5.2, required before real-hardware use; D-008 left the IOMMU open. A customer's KVM host is real hardware: a guest kernel on a Meltdown-vulnerable CPU is exposed to its own user space, and a compromised user-space driver can program its virtio device to write anywhere in guest memory.
 
-**Options.** Meltdown class: KPTI; or refuse to boot on a CPU that reports the vulnerability. `rdtsc`: `CR4.TSD` (other timers remain), or accepted with reasons. Driver DMA: a virtual IOMMU (virtio-iommu, for example), or drivers kept in the trusted base with the limit stated; VT-d and AMD-Vi on bare metal in M8.1.
+**Evidence (2026-11-15):**
+- **The kernel's direct map makes Meltdown matter.** Every process's address space maps the whole kernel half, and with it every frame in the direct map: on a vulnerable CPU an agent could read other processes' memory (another agent's data, the runtime's grants) without any capability. "The kernel holds no secret" (D-031) no longer covers it once user data shares the machine.
+- **KPTI without PCID breaks D-004's budget.** A lower-bound prototype (a scratch clone, never committed): global pages off and a CR3 reload on every `syscall` entry and exit, as KPTI without PCID must do, interrupt entries left out. `cargo xtask bench-ipc --runs 15` under KVM on the development machine (i9-10900K): **median 3,288 ns** (min 3,246, max 3,769) against **1,890 ns** (min 1,839, max 2,143) without it, the same day. D-004's budget is 2,000 ns. Real KPTI also needs a second page-table root per process, an entry trampoline, and changes to the `syscall` stub, every IDT stub, and the context switch, all in `unsafe` modules. With PCID the flushes go away but the change grows (PCID allocation, `INVPCID`).
+- **Current CPUs are not affected.** AMD reports no Meltdown; Intel CPUs since about 2019 set `RDCL_NO` (and `MDS_NO`) in `IA32_ARCH_CAPABILITIES` (MSR `0x10A`, present when CPUID.7.EDX bit 29 is set). The development host reports Meltdown, L1TF, MDS, and TAA as "Not affected" (`/sys/devices/system/cpu/vulnerabilities`). KVM passes the MSR to a guest with `-cpu host` and sets `RDCL_NO` when the host is not affected. QEMU's TCG runs no guest code natively, so it cannot leak by speculation; it identifies itself in CPUID leaf `0x40000000` (`TCGTCGTCGTCG`). The matrix's TCG cell `-cpu Skylake-Client` reports an Intel model without the MSR, so a check must recognize TCG or that cell would refuse to boot.
+- **No user program uses `rdtsc`.** Only the kernel does (`time`, `sched`, APIC calibration). `CR4.TSD` makes `rdtsc` and `rdtscp` fault in ring 3; the kernel already kills a process on a general-protection fault. What remains for user code is `uptime` (microseconds, through a system call), and on one CPU a counting thread cannot run beside the code it times.
+- **An IOMMU needs new privileged code either way.** The kernel parses no ACPI table today. QEMU 8.2 here offers `virtio-iommu-pci`, `intel-iommu` (needs `q35`, which every image already uses), and `amd-iommu`. `virtio-iommu` needs a virtqueue in the kernel (today every virtio driver is in user space); `intel-iommu` needs the DMAR table and a VT-d driver, which is also what bare metal needs (M8.1). Firecracker offers neither; Cloud Hypervisor offers `virtio-iommu`. Pharos boots through Limine on UEFI or BIOS, which Firecracker's direct kernel boot does not provide; QEMU with KVM is what `cargo xtask` and CI's `kvm` cell already run.
+- **The exposed driver is the network service.** Agents never hold a device. The drivers that do (`virtio-blk`, `net`, the store, `trust`) are started only by `init`; of them, `net` parses input from untrusted peers, so a memory-safety bug there, though in safe Rust, would give DMA over all guest memory.
 
-**Evaluation criteria.** Closes or honestly carries each limit; kernel change size and `unsafe`; test kernels that fail when a mitigation is removed.
+**Options.**
+1. *Meltdown class:* (a) refuse to boot unless the CPU is not affected: AMD or Hygon, or Intel with `RDCL_NO` and `MDS_NO`, or QEMU's TCG; anything else stops with a message naming the missing bit; KPTI carried to M8.1 for older bare metal; (b) KPTI without PCID; (c) KPTI with PCID.
+2. *`rdtsc`:* (a) `CR4.TSD` at boot, with a test kernel whose probe must be killed by `rdtsc`; (b) accepted, with the reasons.
+3. *Driver DMA:* (a) `virtio-iommu` in M5.2: a kernel driver that attaches each device to its own domain before bus mastering is turned on and maps only that device's DMA pages; (b) the emulated `intel-iommu` in M5.2, the same VT-d driver bare metal needs in M8.1; (c) carried to M8.1: drivers stay in the trusted base, the limit stated in the threat model.
+4. *Reference platform:* (a) QEMU with KVM, `q35`, virtio-pci devices only, UEFI (OVMF) or BIOS through Limine, on a host whose CPU passes option 1; other VMMs untested; (b) also Cloud Hypervisor.
 
-**Decision.** (empty while Open)
+**Evaluation criteria.** Closes or honestly carries each limit; kernel change size and `unsafe`; D-004's IPC budget; test kernels that fail when a mitigation is removed.
+
+**Recommendation (as proposed):**
+1. **(a) Refuse to boot on an affected CPU.** It closes the hole on every CPU a customer is likely to run, costs nothing per entry, and is a few lines in the hardware layer. KPTI costs 74 % on the IPC round trip even before interrupts, and reaches every entry path.
+2. **(a) `CR4.TSD`.** One bit, nothing to break, and a test that fails when it is cleared.
+3. **(b) `intel-iommu` now.** A compromised `net` service is the realistic path to kernel memory, and the VT-d driver is the one bare metal needs anyway, so the work is not thrown away in M8.1. If M5.2's schedule cannot take a new privileged driver, (c), stated, is the honest fallback; (a) is code no bare-metal machine will use.
+4. **(a) QEMU with KVM only.** It is what the tests already run; another VMM is a later report, not a gate.
+
+**Decision (the maintainer chose each recommendation, 2026-11-15):**
+1. **(a) Refuse to boot on an affected CPU.** The kernel boots only on AMD or Hygon, on Intel with `RDCL_NO` and `MDS_NO`, or under QEMU's TCG, and otherwise stops with a message naming what is missing. KPTI is carried to M8.1, for older bare metal. Rejected: (b) and (c), for the IPC budget and the size of the change.
+2. **(a) `CR4.TSD`.** Rejected: (b), since nothing needs `rdtsc` in user mode.
+3. **(b) `intel-iommu` in M5.2,** designed and reviewed as its own change: a DMAR parser and a VT-d driver giving each device its own domain before bus mastering is on. Rejected: (a), code no bare-metal machine uses; (c), it leaves the network service one bug from kernel memory.
+4. **(a) QEMU with KVM** is the reference platform. Rejected: (b) for M5.2; another VMM can be reported later.
 
 **Consequences.** The threat model's rows close or move to M8.1 with reasons.
-
-**Evidence.** None yet.
 
 ### D-045: Information-flow labels
 

@@ -597,9 +597,9 @@ Ordering notes:
 - **Deliverables:** The reference platform written down (host kernel, VMM, required CPU features); the mitigations D-044 chooses; a report from at least one authorized host besides CI's `kvm` cell.
 - **Prerequisites:** M5.1; D-044 accepted.
 - **Acceptance criteria:** The release matrix and S1 pass on the reference platform; the threat model's KPTI, `rdtsc`, and driver-DMA rows are closed, or carried to M8.1 with the reason D-044 gives.
-- **Validation:** Automated: the `kvm` cell; a test kernel that checks the chosen mitigations (for KPTI, that no kernel page outside the entry trampoline is mapped while user code runs); a throwaway branch that maps them again must fail CI. Manual: the host report.
-- **Risks and mitigations:** KPTI touches every kernel entry and exit and the TLB → its own change, reviewed as M5.4 reviews the trusted base; a user's host with a vulnerable CPU → refuse to boot unless D-044 says otherwise.
-- **Out of scope:** Bare metal, VT-d or AMD-Vi, SMP, other architectures (Phase 8).
+- **Validation:** Automated: the `kvm` cell; test kernels that check the chosen mitigations (D-044: the CPU check refuses an affected CPU model, `rdtsc` in user mode kills the process, and a driver's device cannot DMA outside its own pages); a throwaway branch that removes each must fail CI. Manual: the host report.
+- **Risks and mitigations:** the VT-d driver is new privileged code that every DMA depends on → its own design and change, reviewed as M5.4 reviews the trusted base; a user's host with an affected CPU → Pharos refuses to boot and says why (D-044).
+- **Out of scope:** Bare metal, VT-d or AMD-Vi on real hardware (the emulated `intel-iommu` is in scope, D-044), KPTI (M8.1), SMP, other architectures (Phase 8).
 - **Definition of done:** Standard.
 - **Gate:** Reference platform documented; matrix green on it; the three limits closed or carried by decision.
 
@@ -970,7 +970,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-041 | Model broker | M6.9 | **Open:** provider allow-list, redaction, cost accounting, off-Pharos local inference, fallback, model output as untrusted input |
 | D-042 | Multi-tenant runtime and scale | M6.10 | **Open:** one runtime per tenant, limits, message durability, the SMP decision |
 | D-043 | WASM runtime and WASI-to-capability mapping | M7.5 | **Open:** candidates, determinism, fuel or CPU limits on D-022, trusted-base size |
-| D-044 | Reference platform and the limits required on a real host | M5.2 | **Open:** KPTI or refusing vulnerable CPUs, `rdtsc` in user mode, DMA isolation for user-space drivers under KVM |
+| D-044 | Reference platform and the limits required on a real host | M5.2 | **Accepted** (2026-11-15): refuse to boot on a Meltdown- or MDS-affected CPU (KPTI to M8.1), `CR4.TSD`, QEMU's emulated `intel-iommu` with a VT-d driver, QEMU with KVM as the reference platform |
 | D-045 | Information-flow labels | M7.8 | **Open:** label model, propagation through knowledge, channels, and tools, declassification only on the trusted path |
 
 ## Next milestone
