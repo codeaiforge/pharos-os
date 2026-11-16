@@ -170,19 +170,9 @@ fn failed_starts_free_their_space(t: &mut TestRun) {
 
     // No frame left for the kernel stack: the test holds every free one.
     let no_stack = process::load(program).is_ok_and(|space| {
-        let held: Vec<_> = {
-            let mut frames = mm::frames();
-            let Some(frames) = frames.as_mut() else {
-                return false;
-            };
-            core::iter::from_fn(|| frames.alloc().ok()).collect()
-        };
+        let held = pharos_kernel::testing::hold_frames(0);
         let refused = process::start(space, 0, 0, Vec::new()).is_err();
-        if let Some(frames) = mm::frames().as_mut() {
-            for frame in held {
-                let _ = frames.free(frame);
-            }
-        }
+        pharos_kernel::testing::release_frames(held);
         refused
     });
     t.check(

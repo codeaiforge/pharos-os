@@ -270,6 +270,10 @@ fn run(t: &mut TestRun) {
             && probe.is_some_and(|id| process::exits().iter().any(|e| e.task == id && e.code == 0)),
     );
 
+    // The capability holds the 64 MiB object alive: release it first, or
+    // the next probe cannot map its own in the smallest cell (mem-min).
+    drop(parent);
+
     sweep_keeps_the_trusted_reserve(t, &programs);
 }
 
@@ -306,29 +310,18 @@ fn sweep_keeps_the_trusted_reserve(t: &mut TestRun, programs: &Fs) {
     let mapped = p.as_ref().is_some_and(|p| p.shared.lock().len() == 2);
     // Leave only the reserve and a few pages free, then revoke.
     let reserve = process::TRUSTED_RESERVE as usize;
-    let held: Vec<_> = {
-        let mut frames = mm::frames();
-        match frames.as_mut() {
-            Some(frames) => {
-                let spare = frames.stats().free.saturating_sub(reserve + 64);
-                (0..spare).filter_map(|_| frames.alloc().ok()).collect()
-            }
-            None => Vec::new(),
-        }
-    };
+    let held = testing::hold_frames(reserve + 64);
     let revoked = parent.as_ref().is_some_and(|c| process::revoke(c) > 0);
     let after = free_frames();
-    if let Some(frames) = mm::frames().as_mut() {
-        for frame in held {
-            let _ = frames.free(frame);
-        }
-    }
+    testing::release_frames(held);
     drop(p);
     if let Some(id) = probe {
         wait_end(id);
     }
-    if after < reserve {
-        kprintln!("sweep left {after} frames free, reserve {reserve}");
+    if !(given && mapped && revoked && after >= reserve) {
+        kprintln!(
+            "sweep: given {given}, mapped {mapped}, revoked {revoked}, {after} frames free (reserve {reserve})"
+        );
     }
     t.check(
         "sweeping an agent's revoked 64 MiB mapping keeps the trusted reserve free",

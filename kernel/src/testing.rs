@@ -113,6 +113,44 @@ pub fn init_iommu(rsdp: Option<&crate::limine::RsdpResponse>) {
     }
 }
 
+/// Frames a test holds to leave the allocator nearly empty, from
+/// [`hold_frames`]; give them back with [`release_frames`].
+#[cfg(target_os = "none")]
+pub struct HeldFrames(alloc::vec::Vec<(crate::mm::frame::Frame, usize)>);
+
+/// Takes every free frame but `keep`, in contiguous runs (halved when none
+/// that long is left): one entry per run, so a 2 or 4 GiB machine (half a
+/// million frames or more) fits the 4 MiB kernel heap.
+#[cfg(target_os = "none")]
+pub fn hold_frames(keep: usize) -> HeldFrames {
+    let mut held = alloc::vec::Vec::new();
+    if let Some(frames) = crate::mm::frames().as_mut() {
+        let mut spare = frames.stats().free.saturating_sub(keep);
+        let mut run = 1 << 16;
+        while spare > 0 && run > 0 {
+            let n = run.min(spare);
+            match frames.alloc_contiguous(n, 1) {
+                Ok(frame) => {
+                    held.push((frame, n));
+                    spare -= n;
+                }
+                Err(_) => run /= 2,
+            }
+        }
+    }
+    HeldFrames(held)
+}
+
+/// Gives back what [`hold_frames`] took.
+#[cfg(target_os = "none")]
+pub fn release_frames(held: HeldFrames) {
+    if let Some(frames) = crate::mm::frames().as_mut() {
+        for (frame, n) in held.0 {
+            let _ = frames.free_contiguous(frame, n);
+        }
+    }
+}
+
 /// A test kernel passes only if it ran at least one check and none failed,
 /// so an empty test kernel cannot pass by accident.
 pub fn passed(passed: usize, failed: usize) -> bool {

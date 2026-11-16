@@ -71,17 +71,20 @@ impl<'a> Bitmap<'a> {
         }
     }
 
-    /// True if `count` units from `start` are all free.
-    fn run_is_free(&self, start: usize, count: usize) -> bool {
-        (start..start + count).all(|unit| !self.is_used(unit))
+    /// The last used unit among the `count` from `start`, or `None` if
+    /// all are free.
+    fn last_used(&self, start: usize, count: usize) -> Option<usize> {
+        (start..start + count)
+            .rev()
+            .find(|&unit| self.is_used(unit))
     }
 
     /// Allocates `count` consecutive units whose first index is a multiple
     /// of `align` (a power of two). Returns the first index, or `None` if no
     /// such run is free.
-    // ponytail: linear scan, O(len) per allocation in the worst case; fine at
-    // today's sizes (tens of thousands of frames). Add a free-run index if
-    // profiling shows it matters.
+    // ponytail: linear scan, O(len) per allocation in the worst case: a run
+    // that meets a used unit resumes past it, so each unit is checked about
+    // once. Add a free-run index if profiling shows it matters.
     pub fn alloc(&mut self, count: usize, align: usize) -> Option<usize> {
         assert!(align.is_power_of_two(), "alignment must be a power of two");
         if count == 0 || count > self.free {
@@ -109,10 +112,11 @@ impl<'a> Bitmap<'a> {
                 start += 64;
                 continue;
             }
-            if self.run_is_free(start, count) {
-                return Some(start);
+            // Every run starting at or before a used unit contains it.
+            match self.last_used(start, count) {
+                None => return Some(start),
+                Some(used) => start = (used + 1).next_multiple_of(align),
             }
-            start += align;
         }
         None
     }
@@ -150,6 +154,28 @@ impl<'a> Bitmap<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_run_that_does_not_fit_is_refused_quickly() {
+        // 2 GiB of frames with one used in every 512: no run of 1024. A
+        // search that restarted one unit later at each miss checked about
+        // 512 units per start (5e8 here; the mem-2g cell's test hung).
+        let len = 1 << 19;
+        let mut words = std::vec![0u64; len / 64];
+        let mut b = Bitmap::new(&mut words, len);
+        for unit in (0..len).step_by(512) {
+            b.set(unit, true);
+            b.free -= 1;
+        }
+        let start = std::time::Instant::now();
+        assert_eq!(b.alloc(1024, 1), None);
+        assert_eq!(b.alloc(511, 1), Some(1), "a run that fits is still found");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "{:?}",
+            start.elapsed()
+        );
+    }
 
     #[test]
     fn allocates_every_unit_once_then_runs_out() {
