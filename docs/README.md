@@ -13,6 +13,7 @@
 - [Setup](development/setup.md) — prerequisites and first build.
 - [Workflow](development/workflow.md) — day-to-day development loop.
 - [Testing](development/testing.md) — current tests and the planned test strategy.
+- [Reference platform](development/reference-platform.md) — QEMU with KVM: host and VMM requirements, how to check a host, and host reports.
 - [Debugging](development/debugging.md) — debugging the CLI now, the kernel later.
 
 ## Architecture
