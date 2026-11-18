@@ -621,7 +621,7 @@ Ordering notes:
 
 ### M5.5 — Reproducible builds, release artifacts, documentation, and release criteria
 
-- **Objective and scope:** Produce verifiable releases: **v0.5, the microVM release** (renamed on 2026-11-13, D-033). **Status: Current** (since 2026-11-18).
+- **Objective and scope:** Produce verifiable releases: **v0.5, the microVM release** (renamed on 2026-11-13, D-033). **Status: Current** (since 2026-11-18). D-047 accepted (#253, 2026-11-18). Issues: design #254; device secret #255; signed audit head #256; slot record #257; Secure Boot #258; signed artifacts and reproducible builds #259; release criteria and user guide #260; audit export and rotation #217; gate #261.
 - **Deliverables:** Reproducible build procedure; signed artifacts; user documentation for running Pharos as a microVM on the reference platform; written release criteria; Secure Boot enforcement and a secret-keyed audit anchor, moved here from M4.3 (D-028); an authenticated slot record; measured boot, and the audit chain's head signed and exportable, so a verifier outside Pharos can check a trail (anchoring it outside the system is M6.7). A virtual TPM on the reference platform is an option to evaluate; with one, the host is in the trusted base for the anchor, as it is for Tier 3 (D-036).
 - **Prerequisites:** M5.2, M5.4.
 - **Acceptance criteria:** Two independent builds produce bit-identical artifacts; release criteria documented and met; the 8-hour soak passes on the release commit (D-032 amended); a trail rewritten consistently from the disk is rejected by the verifier.
@@ -972,7 +972,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-043 | WASM runtime and WASI-to-capability mapping | M7.5 | **Open:** candidates, determinism, fuel or CPU limits on D-022, trusted-base size |
 | D-044 | Reference platform and the limits required on a real host | M5.2 | **Accepted** (2026-11-15): refuse to boot on a Meltdown- or MDS-affected CPU (KPTI to M8.1), `CR4.TSD`, QEMU's emulated `intel-iommu` with a VT-d driver, QEMU with KVM as the reference platform |
 | D-045 | Information-flow labels | M7.8 | **Open:** label model, propagation through knowledge, channels, and tools, declassification only on the trusted path |
-| D-047 | Release integrity: the device secret, the audit anchor, Secure Boot, and signed artifacts | M5.5 | **Open:** the device secret (a virtual TPM, a host key through `fw_cfg`, or a passphrase), measured boot, who holds the Secure Boot and release keys, the audit anchor's key, artifact signing |
+| D-047 | Release integrity: the device secret, the audit anchor, Secure Boot, and signed artifacts | M5.5 | **Accepted** (2026-11-18, #253): a per-VM host key through `fw_cfg` as the device secret (a virtual TPM to M8.1); module hashes in the signed head; Secure Boot enforced with Pharos's keys and the release signed, both keys held offline by the maintainer; the audit head Ed25519-signed with a key derived from the secret, the slot record HMAC-SHA256 |
 
 ## Next milestone
 
