@@ -17,7 +17,7 @@ Each document's own Status section says what is **implemented**, **placeholder**
 - [System calls and IPC](syscalls-ipc.md) — processes, the system-call interface, capabilities, and IPC (M2.7, D-004, D-012, D-014).
 - [The user execution environment](user-environment.md) — vector state, user memory, timeouts, and shared memory for user programs (M3.0, D-016).
 - [DMA isolation](iommu.md) — a VT-d driver for QEMU's `intel-iommu`: one domain per device, blocked by default (M5.2, D-044; implemented).
-- [Release integrity](release-integrity.md) — the per-VM device secret, the signed audit head, the slot record's MAC, Secure Boot, and signed release artifacts (M5.5, D-047; draft, planned).
+- [Release integrity](release-integrity.md) — the per-VM device secret, the signed audit head, the slot record's MAC, Secure Boot, and signed release artifacts (M5.5, D-047; design approved, implementation planned).
 
 **System services**
 

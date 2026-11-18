@@ -2,7 +2,7 @@
 
 ## Status
 
-**Draft, awaiting the maintainer's approval** (#254, M5.5). It implements [D-047](../project/decision-log.md#d-047-release-integrity-the-device-secret-the-audit-anchor-secure-boot-and-signed-artifacts) (accepted 2026-11-18). Nothing here is implemented yet; each part is **planned** until its issue lands:
+**Design approved** by the maintainer on 2026-11-18 (#254, M5.5), with the recommendation on each open question (section 8). It implements [D-047](../project/decision-log.md#d-047-release-integrity-the-device-secret-the-audit-anchor-secure-boot-and-signed-artifacts) (accepted 2026-11-18). Nothing here is implemented yet; each part is **planned** until its issue lands:
 
 | Part | Issue |
 | --- | --- |
@@ -153,11 +153,11 @@ The chain the M4.3 evaluation showed holds ([boot-evaluation.md](boot-evaluation
 | `pharos-crypto` host tests | SHA-256 against FIPS 180-4 vectors (moved), HMAC-SHA256 against RFC 4231, HKDF against RFC 5869 | — |
 | `xtask` host tests | release signing and verification round trip; a changed file fails | — |
 
-## 8. Open questions for the maintainer
+## 8. Decided with the design (2026-11-18)
 
-1. **Enrolling Secure Boot keys into OVMF's variable store:** (a) `virt-fw-vars` from the `virt-firmware` Python package, installed by the maintainer and in CI (a build-time host tool, not part of Pharos); or (b) a small variable-store writer in `xtask` (edk2's authenticated-variable format, written directly into the file as `virt-fw-vars` does; more code, no new tool). **Recommendation: (a)**, with its licence and maintenance status recorded before use (AGENTS.md section 6).
-2. **A missing device key:** fail closed (recommended, as above), or boot with signing off and say so on the trusted console.
-3. **Signing the head on every append,** if it proves too slow under TCG: every N records plus on request, with unsigned records past the last signed head reported by the verifier.
+1. **Enrolling Secure Boot keys:** `virt-fw-vars`, from the `virt-firmware` Python package (26.10, 2026-10-13; GPLv2; monthly releases; it depends on `cryptography`, `pefile`, `pyyaml`, and `requests`). It is a build-time host tool, run as a separate program and never linked into or shipped with Pharos, so its licence does not affect Pharos's Apache-2.0. The maintainer installs it (`pip install virt-firmware==26.10`), and CI installs the same pinned version. The rejected option was a variable-store writer in `xtask`: more code to maintain for no gain.
+2. **A missing device key:** the boot fails closed (section 2).
+3. **Signing cost:** measured first; if signing after every record is too slow under TCG, the head is signed every N records and on each `HEAD` request, and the verifier reports records past the last signed head as unsigned.
 
 ## 9. Virtual TPM (evaluated, kept for M8.1)
 
