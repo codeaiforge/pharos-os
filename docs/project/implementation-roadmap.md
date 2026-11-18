@@ -972,6 +972,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-043 | WASM runtime and WASI-to-capability mapping | M7.5 | **Open:** candidates, determinism, fuel or CPU limits on D-022, trusted-base size |
 | D-044 | Reference platform and the limits required on a real host | M5.2 | **Accepted** (2026-11-15): refuse to boot on a Meltdown- or MDS-affected CPU (KPTI to M8.1), `CR4.TSD`, QEMU's emulated `intel-iommu` with a VT-d driver, QEMU with KVM as the reference platform |
 | D-045 | Information-flow labels | M7.8 | **Open:** label model, propagation through knowledge, channels, and tools, declassification only on the trusted path |
+| D-047 | Release integrity: the device secret, the audit anchor, Secure Boot, and signed artifacts | M5.5 | **Open:** the device secret (a virtual TPM, a host key through `fw_cfg`, or a passphrase), measured boot, who holds the Secure Boot and release keys, the audit anchor's key, artifact signing |
 
 ## Next milestone
 

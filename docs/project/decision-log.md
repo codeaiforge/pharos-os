@@ -1506,3 +1506,66 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 **Consequences.** Once the audit trail has used the whole store, agent work stops until the user exports it (M5.5). The other namespaces have seven eighths of the store between them, with no split among themselves: the knowledge service can still fill its share and deny the runtime's task records, which stays a limit for M6.10.
 
 **Evidence.** The review findings (Claude reviewer S-4 and R4; gemini-3.8-flash SEC-M54-002), confirmed by reading the code (#212).
+
+### D-047: Release integrity: the device secret, the audit anchor, Secure Boot, and signed artifacts
+
+- **Status:** Open
+- **Needed by:** M5.5
+- **Date accepted:**
+
+**Context.** M5.5 produces v0.5, the microVM release. Three limits wait on a secret that someone holding the disk cannot read:
+- the secret-keyed audit anchor (threat model: "no secret-keyed anchor before M5.5");
+- the authenticated slot record (D-028);
+- the exportable, signed audit head (D-046 item 4, #217).
+
+Secure Boot was evaluated in M4.3 (#166) and its enforcement moved here. Today:
+- **Builds:** two image builds are byte-identical in CI.
+- **Update slots:** Ed25519-signed (`pharos-image`, `ed25519-compact`).
+- **Boot medium:** checked by CRC-32 only.
+- **Audit chain:** unkeyed SHA-256; its head is shown on the trusted console for the user to compare.
+
+On the reference platform (D-044) the host's VM configuration is already in the trusted base (D-036).
+
+**Options.**
+1. *Where the device secret comes from:*
+   - (a) a virtual TPM: QEMU's `tpm-crb` with `swtpm` on the host, a TPM 2.0 driver in the kernel, and the secret sealed to measured-boot PCRs;
+   - (b) a per-VM key the host passes through QEMU's `fw_cfg`, read once by the kernel at boot, outside the disk image;
+   - (c) a passphrase typed on the trusted console at each boot.
+2. *Measured boot:*
+   - (a) PCR measurements by the firmware, Limine, and the kernel into the vTPM, needing 1a;
+   - (b) the kernel hashes its modules and the signed head carries those hashes, so a verifier compares them with the release's published hashes; together with Secure Boot (item 3), only a signed boot chain can sign heads.
+3. *Secure Boot enforcement:* Pharos's own keys (PK, KEK, db) enrolled in an OVMF variable store shipped with the release, Limine signed with `sbsign`, the config hash enrolled, and path hashes. This is the chain #166 showed holds; it is not an alternative but a choice of who holds the db key.
+   - (a) the maintainer, offline;
+   - (b) a CI secret.
+4. *The audit anchor:*
+   - (a) an Ed25519 key derived from the device secret, held by `audit`, signing the chain head at each export and on `audit` in `trust`; its public key is printed once at enrollment, for the verifier;
+   - (b) an HMAC over the head, which only a holder of the secret can check.
+5. *Release artifacts:*
+   - (a) a `SHA256SUMS` manifest signed with an Ed25519 release key, reusing `pharos-image`'s signing (`cargo xtask release sign`), the key held by the maintainer;
+   - (b) Sigstore or minisign, an outside tool and service.
+
+**Evaluation criteria.**
+- Closes the anchor, slot-record, and boot-medium limits on the reference platform, or carries them with a reason.
+- Least new trusted code, with no new dependency where one already in the tree does the work (AGENTS.md section 6).
+- A verifier outside Pharos can check a trail.
+- Unattended boot still works.
+- Each mitigation has a test kernel and a throwaway branch that fails CI without it.
+
+**Recommendation (for the maintainer).**
+1. **(b) `fw_cfg`:** the host is already trusted on the reference platform, and the kernel needs only a few port reads, not a TPM 2.0 stack. Whoever holds only the disk image cannot read the key. (a) is evaluated in a design note and kept for M8.1, where bare metal has a real TPM. (c) breaks unattended boot.
+2. **(b):** hashes in the signed head. PCR sealing needs 1a.
+3. **(a):** the maintainer holds the db key and the release key offline, so CI's secrets cannot sign a boot chain.
+4. **(a):** a third party can verify an Ed25519-signed head, which an HMAC does not allow. The slot record gets an HMAC-SHA256 from a second key derived from the same secret, since only `init` checks it.
+5. **(a):** no new tool or service.
+
+**Consequences, if accepted.**
+- **The kernel gets one more secret.** The Meltdown and MDS check (D-044) already guards it. Its leaving the kernel is a design question for the M5.5 design: a derived key handed to `audit` and `init` only, by their manifests.
+- **What the host must keep:** each VM's key file, and its OVMF variable store with Pharos's db key.
+- **Two limits stay open:** a host that is not trusted, and PCR-sealed secrets (M8.1).
+- **#217's export** writes the signed head defined here.
+
+**Evidence.**
+- `ed25519-compact` 2.6.0 already signs and verifies in `pharos-image`.
+- `sbsign` and OVMF's Secure Boot firmware are on the development host.
+- `swtpm` is not installed there (a package install, the maintainer's action).
+- CI's reproducibility check compares two image builds.
