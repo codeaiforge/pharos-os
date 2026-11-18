@@ -1,0 +1,11 @@
+[package]
+name = "pharos-crypto"
+description = "Pharos OS hashing and key derivation: SHA-256 (FIPS 180-4), HMAC-SHA256 (RFC 2104), and HKDF-SHA256 (RFC 5869), shared by the kernel, the services, and the host tools (D-047, release-integrity.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

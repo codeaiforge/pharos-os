@@ -106,6 +106,7 @@ pub mod number {
     pub const SLOT_NOTIFY: u64 = 28;
     pub const SLOT_NEXT: u64 = 29;
     pub const SLOT_ANSWER: u64 = 30;
+    pub const KEY_READ: u64 = 31;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -708,6 +709,14 @@ pub fn slot_next(hotplug: Handle) -> Result<Option<SlotEvent>, Error> {
         number: (v >> 24) as u8,
         id: (v >> 32) as u32,
     }))
+}
+
+/// The 32-byte key of a `Key` capability (`READ`), derived from the device
+/// secret for one purpose (D-047). `NOT_FOUND` if the kernel has no secret.
+pub fn key_read(key: Handle) -> Result<[u8; 32], Error> {
+    let mut out = [0u8; 32];
+    call(number::KEY_READ, [key, out.as_mut_ptr() as u64, 0, 0, 0, 0])?;
+    Ok(out)
 }
 
 /// The answer to a removal: `release` once the driver is stopped, or keep

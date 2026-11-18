@@ -239,6 +239,12 @@ extern "C" fn kernel_main() -> ! {
             "the IOMMU cannot isolate drivers (D-044): {error}"
         )),
     }
+    // The device secret (D-047): without it the audit trail and the slot
+    // record cannot be authenticated, so the boot stops.
+    match pharos_kernel::key::init() {
+        Ok(()) => kprintln!("  key:        device key read"),
+        Err(error) => fail(format_args!("{error}")),
+    }
     let functions = pci::enumerate();
     kprintln!("  pci:        {functions} functions");
     for d in pci::devices() {

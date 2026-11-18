@@ -6,7 +6,7 @@
 
 | Part | Issue |
 | --- | --- |
-| The device secret and the `Key` capability | #255 |
+| The device secret and the `Key` capability | #255, **implemented** |
 | The signed audit head | #256 |
 | The slot record's MAC | #257 |
 | Secure Boot | #258 |
@@ -57,7 +57,7 @@ The secret itself never leaves the kernel. The kernel derives one 32-byte key pe
 - the capability audit (D-027) checks that `audit`'s holding matches its manifest, so no other service holds it;
 - it cannot be derived further.
 
-**One new system call, `key_read(handle) -> [u8; 32]`:** it returns the derived key, never the secret. A process that holds the key holds what it protects. A compromised `audit` could sign a false head; that is the same trust `audit` already has as the trail's only writer.
+**One new system call, `key_read(handle) -> [u8; 32]`** (number 31; the handle needs `READ`; `NOT_FOUND` if the kernel has no secret): it returns the derived key, never the secret. A process that holds the key holds what it protects. A compromised `audit` could sign a false head; that is the same trust `audit` already has as the trail's only writer.
 
 **New trusted code:**
 - a SHA-256 and HMAC module in a small new crate, `pharos-crypto`, which `pharos-store` re-exports and the kernel, `init`, `audit`, and `xtask` share. Its `sha256.rs` moves from `pharos-store`; HMAC is about 20 lines;

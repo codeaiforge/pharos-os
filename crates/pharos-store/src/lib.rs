@@ -18,7 +18,6 @@
 
 extern crate alloc;
 
-mod sha256;
 #[cfg(test)]
 mod tests;
 
@@ -26,8 +25,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub use pharos_crypto::{Sha256, sha256};
 pub use pharos_fs::{Crc32, MAX_PATH, crc32, valid_path};
-pub use sha256::{Sha256, sha256};
 
 /// Bytes per block (8 virtio-blk sectors).
 pub const BLOCK: usize = 4096;

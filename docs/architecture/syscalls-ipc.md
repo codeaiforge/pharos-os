@@ -154,6 +154,7 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 25 | `process_stop` (M3.3, D-018) | process handle | 0, at once (the process and every process it started end at their next return to user mode; `process_status` shows when; an ended process is not an error) | process, `STOP` (`1 << 9`) |
 | 26 | `process_usage` (M3.5, D-022) | process handle, what: 0 CPU time, 1 pages mapped, 2 live descendants | CPU time in microseconds (so far, or all of it once ended); pages mapped with `mem_map` and `mem_map_cap` (0 once ended); processes it started, they started, and so on, still running; other `what` is `TOO_LARGE` | process, `WAIT` |
 | 27 | `fs_mount` (M4.3, D-028, #163, [boot.md](boot.md#the-kernel-call-fsmount)) | filesystem handle, `Memory` handle, offset, length (1 byte to 16 MiB; past the memory's end is `TOO_LARGE`) | a new filesystem handle (`READ`, `GRANT`) over a kernel-owned copy; `BAD_IMAGE` if the copy fails a `pharos-fs` check; `NO_MEMORY` with two copies mounted | filesystem `MOUNT` (`1 << 10`, only on `init`'s root); memory `READ` |
+| 31 | `key_read` (M5.5, D-047, #255, [release-integrity.md](release-integrity.md)) | `Key` handle, address of a 32-byte buffer | 0; the buffer holds the key derived from the device secret for the capability's purpose, never the secret; `NOT_FOUND` if the kernel has no secret | key, `READ` |
 
 Error codes (`rax`):
 

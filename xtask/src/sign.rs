@@ -98,6 +98,45 @@ pub fn test_seed(paths: &Paths) -> Result<[u8; 32]> {
     Ok(seed)
 }
 
+/// This host's device secret (D-047, release-integrity.md): 32 random
+/// bytes made on first use in `target/xtask/keys/device.key`, readable by
+/// the user only. Every machine `xtask` starts gets it through `fw_cfg`,
+/// but test kernels, which get [`crate::TEST_DEVICE_KEY`].
+pub fn device_key(paths: &Paths) -> Result<[u8; 32]> {
+    let dir = paths.target.join("xtask").join("keys");
+    let path = dir.join("device.key");
+    if let Ok(bytes) = fs::read(&path) {
+        return bytes.try_into().map_err(|b: Vec<u8>| {
+            format!(
+                "{} is {} bytes, not 32; delete it to make a new device key",
+                path.display(),
+                b.len()
+            )
+        });
+    }
+    let mut key = [0; 32];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut key))
+        .map_err(|e| format!("cannot read /dev/urandom for a device key: {e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    write_private(&path, &key)?;
+    Ok(key)
+}
+
+/// Writes `bytes` to `path`, readable and writable by the user only.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let _ = fs::remove_file(path);
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .and_then(|mut f| f.write_all(bytes))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

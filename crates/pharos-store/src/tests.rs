@@ -97,34 +97,6 @@ fn sample() -> Store<Mem> {
 }
 
 #[test]
-fn sha256_matches_fips_180_4_vectors() {
-    let hex = |h: [u8; 32]| {
-        h.iter()
-            .map(|b| std::format!("{b:02x}"))
-            .collect::<std::string::String>()
-    };
-    assert_eq!(
-        hex(sha256(&[b"abc"])),
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    );
-    assert_eq!(
-        hex(sha256(&[])),
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    );
-    assert_eq!(
-        hex(sha256(&[
-            b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
-        ])),
-        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
-    );
-    let million = vec![b'a'; 1_000_000];
-    assert_eq!(
-        hex(sha256(&[&million[..400_001], &million[400_001..]])),
-        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
-    );
-}
-
-#[test]
 fn objects_round_trip_through_a_remount() {
     let s = sample();
     let generation = s.generation();

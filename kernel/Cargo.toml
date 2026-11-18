@@ -24,6 +24,8 @@ undocumented_unsafe_blocks = "deny"
 pharos-fs = { path = "../crates/pharos-fs" }
 # The user-program format (D-008): same rules, no dependencies of its own.
 pharos-elf = { path = "../crates/pharos-elf" }
+# SHA-256, HMAC, and key derivation (D-047): same rules, no dependencies.
+pharos-crypto = { path = "../crates/pharos-crypto" }
 
 # Test kernels only (D-027): the service manifests the `system` kernel
 # audits. Not part of the kernel itself.
@@ -58,6 +60,10 @@ harness = false
 
 [[test]]
 name = "device_caps"
+harness = false
+
+[[test]]
+name = "device_key"
 harness = false
 
 [[test]]

@@ -19,6 +19,10 @@ name = "pharos-cli"
 version = "0.4.0"
 
 [[package]]
+name = "pharos-crypto"
+version = "0.4.0"
+
+[[package]]
 name = "pharos-elf"
 version = "0.4.0"
 
@@ -43,6 +47,7 @@ version = "0.4.0"
 name = "pharos-kernel"
 version = "0.4.0"
 dependencies = [
+ "pharos-crypto",
  "pharos-elf",
  "pharos-fs",
  "pharos-services",
@@ -77,6 +82,7 @@ version = "0.4.0"
 name = "pharos-store"
 version = "0.4.0"
 dependencies = [
+ "pharos-crypto",
  "pharos-fs",
 ]
 

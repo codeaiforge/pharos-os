@@ -745,7 +745,10 @@ pub const INIT_DEVICES: [(u16, u16); 3] = [(0x1af4, 0x1042), (0x1af4, 0x1041), (
 /// The capabilities the kernel starts `init` with (services.md): 1 the
 /// debug console, 2 `fs`, 3 `report` (`SEND`), then each device in
 /// [`INIT_DEVICES`] found by PCI enumeration (granted, in PCI order) when
-/// `devices` is true, and then the hotplug object (`HOTPLUG`, M4.4).
+/// `devices` is true, then the hotplug object (`HOTPLUG`, M4.4) when
+/// `devices` is true, and last, once the device secret was read (D-047),
+/// the `AuditAnchor` key (`READ | GRANT`, for `audit`) and the
+/// `SlotRecord` key (`READ`, `init`'s own).
 #[cfg(target_os = "none")]
 pub fn init_capabilities(
     fs: Arc<crate::fs::Fs>,
@@ -771,6 +774,14 @@ pub fn init_capabilities(
     }
     if devices {
         caps.push(Capability::new(Object::Hotplug, HOTPLUG));
+    }
+    if crate::key::present() {
+        use crate::key::Purpose;
+        caps.push(Capability::new(
+            Object::Key(Purpose::AuditAnchor),
+            READ | GRANT,
+        ));
+        caps.push(Capability::new(Object::Key(Purpose::SlotRecord), READ));
     }
     caps
 }

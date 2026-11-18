@@ -82,6 +82,10 @@ pub enum Object {
     /// The system's hotplug slots (drivers.md, M4.4): with `HOTPLUG`,
     /// their events and removal answers.
     Hotplug,
+    /// A key derived from the device secret for one purpose (D-047): with
+    /// `READ`, `key_read` returns it. The secret itself never leaves the
+    /// kernel.
+    Key(crate::key::Purpose),
 }
 
 impl fmt::Debug for Object {
@@ -98,6 +102,7 @@ impl fmt::Debug for Object {
             Self::Interrupt(i) => write!(f, "{i:?}"),
             Self::Memory(m) => write!(f, "Memory({} pages)", m.frames().len()),
             Self::Hotplug => f.write_str("Hotplug"),
+            Self::Key(p) => write!(f, "Key({p:?})"),
         }
     }
 }

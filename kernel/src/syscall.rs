@@ -44,6 +44,7 @@ pub mod number {
     pub const SLOT_NOTIFY: u64 = 28;
     pub const SLOT_NEXT: u64 = 29;
     pub const SLOT_ANSWER: u64 = 30;
+    pub const KEY_READ: u64 = 31;
 }
 
 /// What `process_usage` reports (its second argument).
@@ -276,6 +277,11 @@ pub enum Call {
         handle: Handle,
         slot: usize,
         release: bool,
+    },
+    /// Writes the 32-byte key of a `Key` capability to `addr`.
+    KeyRead {
+        handle: Handle,
+        addr: u64,
     },
     /// Mounts a copy of `len` bytes at `offset` of a `Memory` object.
     FsMount {
@@ -526,6 +532,13 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
             _ => Err(Error::TooLarge),
         },
         number::SLOT_NEXT => Ok(Call::SlotNext { handle: args[0] }),
+        number::KEY_READ => {
+            buffer(args[1], crate::key::KEY_LEN as u64)?;
+            Ok(Call::KeyRead {
+                handle: args[0],
+                addr: args[1],
+            })
+        }
         number::SLOT_ANSWER => match (args[1], args[2]) {
             (slot @ 0..8, release @ 0..=1) => Ok(Call::SlotAnswer {
                 handle: args[0],
@@ -544,7 +557,7 @@ pub fn needed_rights(call: &Call) -> cap::Rights {
         Call::DebugWrite { .. } => cap::WRITE,
         Call::Send { .. } | Call::Call { .. } => cap::SEND,
         Call::Receive { .. } => cap::RECEIVE,
-        Call::Open { .. } | Call::Read { .. } => cap::READ,
+        Call::Open { .. } | Call::Read { .. } | Call::KeyRead { .. } => cap::READ,
         Call::ConfigRead { .. } => cap::CONFIG,
         Call::MmioMap { .. } | Call::DmaAlloc { .. } => cap::MAP,
         Call::IrqCreate { .. } => cap::IRQ,
@@ -1492,6 +1505,16 @@ mod kernel {
                 hotplug_cap(&process, handle)?;
                 Ok(crate::hotplug::next(&process))
             }
+            Call::KeyRead { handle, addr } => {
+                let cap = process.caps.lock().get(handle, cap::READ)?;
+                let Object::Key(purpose) = *cap.object() else {
+                    return Err(Error::MissingRight);
+                };
+                let key = crate::key::derived(purpose).ok_or(Error::NotFound)?;
+                sched::with_current_space(|space| space.write_user(addr, &key))
+                    .ok_or(Error::BadAddress)??;
+                Ok(0)
+            }
             Call::SlotAnswer {
                 handle,
                 slot,
@@ -1570,6 +1593,13 @@ mod tests {
             Ok(Call::SlotNext { handle: 7 })
         );
         assert_eq!(
+            decode(31, [2, 0x40_0000, 9, 9, 9, 9]),
+            Ok(Call::KeyRead {
+                handle: 2,
+                addr: 0x40_0000
+            })
+        );
+        assert_eq!(
             decode(30, [7, 7, 1, 0, 0, 0]),
             Ok(Call::SlotAnswer {
                 handle: 7,
@@ -1602,7 +1632,14 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(31, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(32, [0; 6]), Err(Error::UnknownCall));
+        // key_read: a 32-byte user buffer.
+        assert_eq!(decode(31, [2, 0, 0, 0, 0, 0]), Err(Error::BadAddress));
+        let last = crate::arch::x86_64::paging::LAST_USER_PAGE;
+        assert_eq!(
+            decode(31, [2, last + 4096 - 16, 0, 0, 0, 0]),
+            Err(Error::BadAddress)
+        );
         let region = crate::process::MAP_REGION;
         assert_eq!(
             decode(22, [region.start, 8192, 9, 9, 9, 9]),

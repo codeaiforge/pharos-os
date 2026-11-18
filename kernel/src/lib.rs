@@ -39,6 +39,7 @@ pub mod iommu;
 pub mod ipc;
 #[cfg(target_arch = "x86_64")]
 pub mod irq;
+pub mod key;
 pub mod limine;
 pub mod mm;
 pub mod pci;

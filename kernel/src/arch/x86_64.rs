@@ -54,6 +54,72 @@ unsafe fn inb(port: u16) -> u8 {
     value
 }
 
+/// Writes a 16-bit word to an I/O port.
+///
+/// # Safety
+///
+/// As [`outb`]. Callers in this module only use `fw_cfg`'s selector.
+unsafe fn outw(port: u16, value: u16) {
+    // SAFETY: the caller guarantees the write is harmless; `out` touches no
+    // memory and does not use the stack.
+    unsafe {
+        asm!("out dx, ax", in("dx") port, in("ax") value, options(nomem, nostack, preserves_flags))
+    };
+}
+
+/// QEMU's firmware configuration interface on x86 (`docs/specs/fw_cfg.rst`
+/// in QEMU): a 16-bit little-endian selector and a byte-wide data port.
+const FW_CFG_SELECTOR: u16 = 0x510;
+const FW_CFG_DATA: u16 = 0x511;
+/// Its item keys: the signature (`QEMU`) and the file directory.
+const FW_CFG_SIGNATURE: u16 = 0x0000;
+const FW_CFG_FILE_DIR: u16 = 0x0019;
+/// Directory entries read before giving up (QEMU has a few dozen).
+const FW_CFG_MAX_FILES: u32 = 4096;
+
+/// Reads the `fw_cfg` file `name` (for example `opt/org.pharos/device-key`)
+/// into the start of `buf`, and returns its full size: `None` if there is
+/// no `fw_cfg` or no such file (release-integrity.md, D-047). Port I/O
+/// only, never `fw_cfg`'s DMA interface. Call during boot, before other
+/// tasks run: the selector is shared state.
+pub fn fw_cfg_file(name: &[u8], buf: &mut [u8]) -> Option<usize> {
+    // SAFETY: writing fw_cfg's selector only chooses which item the data
+    // port returns; it changes no memory and starts no DMA.
+    let select = |key: u16| unsafe { outw(FW_CFG_SELECTOR, key) };
+    // SAFETY: reading fw_cfg's data port returns the next byte of the
+    // selected item; it has no side effect on memory. Without fw_cfg the
+    // port reads 0xff.
+    let byte = || unsafe { inb(FW_CFG_DATA) };
+    let take = |out: &mut [u8]| out.iter_mut().for_each(|b| *b = byte());
+    select(FW_CFG_SIGNATURE);
+    let mut signature = [0u8; 4];
+    take(&mut signature);
+    if &signature != b"QEMU" {
+        return None;
+    }
+    select(FW_CFG_FILE_DIR);
+    let mut word = [0u8; 4];
+    take(&mut word);
+    let count = u32::from_be_bytes(word).min(FW_CFG_MAX_FILES);
+    let mut found = None;
+    for _ in 0..count {
+        let mut entry = [0u8; 64];
+        take(&mut entry);
+        let size = u32::from_be_bytes([entry[0], entry[1], entry[2], entry[3]]) as usize;
+        let key = u16::from_be_bytes([entry[4], entry[5]]);
+        let entry_name = &entry[8..];
+        let len = entry_name.iter().position(|&b| b == 0).unwrap_or(56);
+        if found.is_none() && &entry_name[..len] == name {
+            found = Some((key, size));
+        }
+    }
+    let (key, size) = found?;
+    select(key);
+    let n = size.min(buf.len());
+    take(&mut buf[..n]);
+    Some(size)
+}
+
 /// I/O base of the first serial port (COM1), the kernel's early log channel.
 const COM1: u16 = 0x3f8;
 

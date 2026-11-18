@@ -63,6 +63,23 @@ const IOMMU: [&str; 2] = ["-device", "intel-iommu,intremap=off"];
 /// How the kernel refuses a machine without an IOMMU (#242).
 const IOMMU_REFUSED: &str =
     "PHAROS: boot failed: no IOMMU (DMAR) found; drivers cannot be isolated (D-044)";
+/// The `fw_cfg` file that carries the device secret (D-047; must match
+/// `pharos_kernel::key::FW_CFG_NAME`), and its file next to the ISO.
+const DEVICE_KEY_NAME: &str = "opt/org.pharos/device-key";
+const DEVICE_KEY: &str = "device.key";
+/// The device key test kernels get: known, so the `device_key` kernel can
+/// check what the kernel read and derived.
+pub const TEST_DEVICE_KEY: [u8; 32] = {
+    let mut key = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        key[i] = i as u8;
+        i += 1;
+    }
+    key
+};
+/// How the kernel refuses a machine without a device key (#255).
+const KEY_REFUSED: &str = "PHAROS: boot failed: no device key (opt/org.pharos/device-key, D-047)";
 /// Serial marker a passing test kernel prints last (D-009; must match
 /// `pharos_kernel::testing::TESTS_OK_MARKER`).
 const TESTS_MARKER: &str = "PHAROS: tests ok";
@@ -764,7 +781,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 32] = [
+const USER_PROGRAMS: [&str; 33] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -779,6 +796,7 @@ const USER_PROGRAMS: [&str; 32] = [
     "vecprobe",
     "memprobe",
     "timeprobe",
+    "keyprobe",
     "shmprobe",
     "store",
     "storeclient",
@@ -993,6 +1011,13 @@ fn image(
     // timestamps must be pinned too (prototype finding, boot-evaluation.md).
     pin_timestamps(&root, SystemTime::UNIX_EPOCH + Duration::from_secs(epoch))?;
 
+    // The device secret (D-047), passed by `qemu_args` through `fw_cfg`:
+    // the known test key for test kernels, this host's key otherwise.
+    let key = match cmdline {
+        Some(_) => TEST_DEVICE_KEY,
+        None => sign::device_key(paths)?,
+    };
+    sign::write_private(&out.join(DEVICE_KEY), &key)?;
     let iso = out.join("pharos.iso");
     let disk = out.join(DISK_IMAGE);
     fs::write(&disk, disk_image()).map_err(io_err("cannot write", &disk))?;
@@ -1077,6 +1102,11 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
     .map(OsString::from)
     .collect();
     args.push(iso.into());
+    // The device secret (D-047): `device.key` next to the ISO, as a
+    // `fw_cfg` file the kernel reads once at boot.
+    let mut key = OsString::from(format!("name={DEVICE_KEY_NAME},file="));
+    key.push(iso.with_file_name(DEVICE_KEY));
+    args.extend(["-fw_cfg".into(), key]);
     // A read-only virtio-blk disk (modern device only, MSI-X) for the
     // driver work in M2.9: `disk.img` next to the ISO (drivers.md).
     let mut disk = OsString::from("if=none,id=disk0,format=raw,readonly=on,file=");
@@ -1589,8 +1619,43 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
     let args = without_iommu(qemu_args(&iso, &vars, &serial, false, false));
     let run = run_headless(args, &log, timeout)?;
     refused("boot check (no IOMMU)", &run, &log, IOMMU_REFUSED, timeout)?;
+    // #255: without the device key the boot stops, saying why.
+    let log = logs.join("boot-no-key.log");
+    let vars = logs.join("boot-no-key-ovmf-vars.fd");
+    prepare_firmware(&vars, false)?;
+    console::fifos(iso.parent().unwrap_or(Path::new(".")))?;
+    let mut serial = OsString::from("file:");
+    serial.push(&log);
+    let _ = fs::remove_file(&log);
+    let args = without_key(qemu_args(&iso, &vars, &serial, false, false));
+    let run = run_headless(args, &log, timeout)?;
+    refused(
+        "boot check (no device key)",
+        &run,
+        &log,
+        KEY_REFUSED,
+        timeout,
+    )?;
     println!("All boot checks passed.");
     Ok(())
+}
+
+/// `args` without the device key's `fw_cfg` file.
+fn without_key(args: Vec<OsString>) -> Vec<OsString> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut args = args.into_iter().peekable();
+    while let Some(arg) = args.next() {
+        let key = args.peek().is_some_and(|next| {
+            next.to_string_lossy()
+                .starts_with(&format!("name={DEVICE_KEY_NAME},"))
+        });
+        if arg == "-fw_cfg" && key {
+            args.next();
+        } else {
+            out.push(arg);
+        }
+    }
+    out
 }
 
 /// `args` without the IOMMU device.
@@ -4677,6 +4742,24 @@ mod tests {
             test_selection(Some(vec!["a".into(), "b".into()])).unwrap(),
             ["--test", "a", "--test", "b"]
         );
+    }
+
+    #[test]
+    fn every_machine_gets_the_device_key_but_the_refused_one() {
+        let (iso, vars) = (Path::new("img/pharos.iso"), Path::new("vars.fd"));
+        let args = qemu_args(iso, vars, OsStr::new("stdio"), false, false);
+        let key = args
+            .iter()
+            .position(|a| a == "-fw_cfg")
+            .expect("a -fw_cfg argument");
+        assert_eq!(
+            args[key + 1],
+            "name=opt/org.pharos/device-key,file=img/device.key"
+        );
+        let without = without_key(args.clone());
+        assert_eq!(without.len(), args.len() - 2);
+        assert!(!without.iter().any(|a| a == "-fw_cfg"));
+        assert_eq!(&TEST_DEVICE_KEY[..3], &[0, 1, 2]);
     }
 
     #[test]
