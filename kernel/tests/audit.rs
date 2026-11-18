@@ -170,6 +170,9 @@ fn run(t: &mut TestRun) {
     // The service signs a head after each record (D-047, #256); the host
     // checks them after the run (`audit_checks` in xtask).
     pharos_kernel::testing::init_key();
+    // A known measurement in place of a boot's (#262): the host checks
+    // that the heads carry it and `trust` shows it.
+    pharos_kernel::key::measure(core::iter::once((&b"kernel"[..], &b"audit test"[..])));
     let audit_caps = vec![
         Capability::new(Object::DebugConsole, WRITE),
         ep(&audit, RECEIVE),
@@ -217,6 +220,7 @@ fn run(t: &mut TestRun) {
         "an intent, then its outcome referring to it",
         "malformed entries are refused and not stored",
         "HEAD: 6 records and a chain head",
+        "HEAD: all 6 under a signed head, with its key and the measurement",
     ] {
         let want = alloc::format!("ok {step}");
         t.check(step, passed.iter().any(|l| l == want.as_bytes()));
@@ -251,6 +255,7 @@ fn run(t: &mut TestRun) {
         "the store fills: APPEND answers UNWRITABLE",
         "and keeps answering it",
         "HEAD still answers, counting only stored records",
+        "HEAD: signed up to the record that filled the store",
     ] {
         let want = alloc::format!("ok {step}");
         t.check(step, passed.iter().any(|l| l == want.as_bytes()));

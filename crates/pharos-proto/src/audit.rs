@@ -314,6 +314,13 @@ pub struct Head {
     pub boot: u32,
     pub records: u64,
     pub head: [u8; 32],
+    /// Records under the last signed head the store took (D-047, #262).
+    pub signed: u64,
+    /// The public key the heads verify with; zeros when they are not
+    /// signed (no `AuditAnchor` key).
+    pub key: [u8; 32],
+    /// The boot measurement the heads carry.
+    pub measurement: [u8; 32],
 }
 
 impl Head {
@@ -323,6 +330,9 @@ impl Head {
         w.u32(self.boot)?;
         w.u64(self.records)?;
         w.bytes(&self.head)?;
+        w.u64(self.signed)?;
+        w.bytes(&self.key)?;
+        w.bytes(&self.measurement)?;
         Some(w.len())
     }
     pub fn parse(reply: &[u8]) -> Option<Self> {
@@ -334,6 +344,9 @@ impl Head {
             boot: r.u32()?,
             records: r.u64()?,
             head: r.take(32)?.try_into().ok()?,
+            signed: r.u64()?,
+            key: r.take(32)?.try_into().ok()?,
+            measurement: r.take(32)?.try_into().ok()?,
         };
         r.is_empty().then_some(h)
     }
@@ -428,10 +441,15 @@ mod tests {
             boot: 3,
             records: 9,
             head: [7; 32],
+            signed: 8,
+            key: [6; 32],
+            measurement: [5; 32],
         };
-        let mut out = [0u8; 64];
+        let mut out = [0u8; 128];
         let n = h.encode(&mut out).unwrap();
+        assert_eq!(n, 117);
         assert_eq!(Head::parse(&out[..n]), Some(h));
+        assert_eq!(Head::parse(&out[..n - 1]), None);
     }
 
     #[test]

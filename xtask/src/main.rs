@@ -2915,7 +2915,29 @@ fn audit_checks(image: &Path, console: &str) -> Result<()> {
     // derives (D-047, #256), but in log/2 the last: the test fills the
     // store, and the record that fills it leaves no room for its head.
     let public = sign::anchor_public(&TEST_DEVICE_KEY);
-    for s in store_image::signed_heads(image, &public)? {
+    let heads = store_image::signed_heads(image, &public)?;
+    // #262: what `trust` showed at start is what the image verifies with,
+    // and the measurement the test kernel took.
+    let measured =
+        pharos_crypto::measurement([(&b"kernel"[..], pharos_store::sha256(&[b"audit test"]))]);
+    if let Some(s) = heads.iter().find(|s| s.measurement != measured) {
+        return Err(format!(
+            "{}: signed measurement {}, but the test kernel measured {}",
+            s.stream,
+            sign::hex(&s.measurement),
+            sign::hex(&measured)
+        ));
+    }
+    let want = format!(
+        "audit: 1 of 1 records signed, key {}, measured {}",
+        sign::hex(&public),
+        sign::hex(&measured)
+    );
+    if !console.lines().any(|l| l.trim() == want) {
+        return Err(format!("trust did not show `{want}` at start"));
+    }
+    println!("  the key and measurement trust showed match the image");
+    for s in heads {
         let unsigned_ok = u64::from(s.stream == "audit/log/2");
         if s.records - s.signed > unsigned_ok {
             return Err(format!(

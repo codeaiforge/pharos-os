@@ -55,6 +55,10 @@ struct Audit {
     seed: Option<[u8; 32]>,
     /// The boot measurement the kernel took (zeros if it took none).
     measurement: [u8; 32],
+    /// The seed's public key, for `HEAD` (zeros without a seed, #262).
+    public: [u8; 32],
+    /// Records under the last signed head the store took.
+    signed: u64,
 }
 
 fn decimal(mut v: u64, out: &mut [u8; 20]) -> &[u8] {
@@ -228,7 +232,7 @@ impl Audit {
     /// (D-047). A head the store does not take leaves the records after the
     /// last one unsigned, which the verifier reports; the record itself is
     /// stored, so its caller is not refused.
-    fn sign(&self) {
+    fn sign(&mut self) {
         let Some(seed) = self.seed else { return };
         let signed = pharos_image::head::Head {
             boot: self.boot,
@@ -247,7 +251,9 @@ impl Audit {
             record: &signed,
         };
         let mut out = [0u8; 256];
-        if !matches!(self.store(&req, &mut out), Some((StoreStatus::Ok, _))) {
+        if matches!(self.store(&req, &mut out), Some((StoreStatus::Ok, _))) {
+            self.signed = self.sequence.records();
+        } else {
             say(&[b"audit: signed head not stored"]);
         }
     }
@@ -287,6 +293,9 @@ impl Audit {
                 boot: 0,
                 records: 0,
                 head: [0; 32],
+                signed: 0,
+                key: self.public,
+                measurement: self.measurement,
             }
             .encode(out)
             .unwrap_or(0),
@@ -294,6 +303,9 @@ impl Audit {
                 boot: self.boot,
                 records: self.sequence.records(),
                 head: self.head,
+                signed: self.signed,
+                key: self.public,
+                measurement: self.measurement,
             }
             .encode(out)
             .unwrap_or(0),
@@ -314,7 +326,12 @@ fn main(_: u64) -> u64 {
         head: [0; 32],
         seed: key_read(ANCHOR).ok(),
         measurement: key_measurement(ANCHOR).unwrap_or([0; 32]),
+        public: [0; 32],
+        signed: 0,
     };
+    if let Some(seed) = &a.seed {
+        a.public = pharos_image::public_key(seed);
+    }
     if a.seed.is_none() {
         say(&[b"audit: no signing key; heads are not signed"]);
     }

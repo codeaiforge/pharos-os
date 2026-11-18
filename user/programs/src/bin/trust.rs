@@ -250,18 +250,28 @@ impl Trust {
             return;
         };
         let (mut a, mut b) = ([0u8; 20], [0u8; 20]);
-        let mut hex = [0u8; 64];
-        for (i, byte) in h.head.iter().enumerate() {
-            hex[2 * i] = b"0123456789abcdef"[usize::from(byte >> 4)];
-            hex[2 * i + 1] = b"0123456789abcdef"[usize::from(byte & 15)];
-        }
         self.say(&[
             b"audit: boot ",
             decimal(u64::from(h.boot), &mut a),
             b", ",
             decimal(h.records, &mut b),
             b" records, head ",
-            &hex,
+            &hex(&h.head),
+        ]);
+        // D-047 (#262): to compare with `cargo xtask store audit --key`.
+        if h.key == [0; 32] {
+            self.say(&[b"audit: heads not signed (no key)"]);
+            return;
+        }
+        self.say(&[
+            b"audit: ",
+            decimal(h.signed, &mut a),
+            b" of ",
+            decimal(h.records, &mut b),
+            b" records signed, key ",
+            &hex(&h.key),
+            b", measured ",
+            &hex(&h.measurement),
         ]);
     }
 
@@ -1328,4 +1338,14 @@ fn main(_: u64) -> u64 {
             _ => {}
         }
     }
+}
+
+/// `bytes` in lowercase hex.
+fn hex(bytes: &[u8; 32]) -> [u8; 64] {
+    let mut out = [0u8; 64];
+    for (i, byte) in bytes.iter().enumerate() {
+        out[2 * i] = b"0123456789abcdef"[usize::from(byte >> 4)];
+        out[2 * i + 1] = b"0123456789abcdef"[usize::from(byte & 15)];
+    }
+    out
 }

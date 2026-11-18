@@ -7,7 +7,7 @@
 | Part | Issue |
 | --- | --- |
 | The device secret and the `Key` capability | #255, **implemented** |
-| The signed audit head | #256, **implemented** (`trust`'s display of it **planned**, #262) |
+| The signed audit head | #256, **implemented**; `trust`'s display of it #262, **implemented** |
 | The slot record's MAC | #257, **implemented** |
 | Secure Boot | #258 |
 | Signed release artifacts | #259, **implemented** (signing Limine and the variable store **planned** with #258) |
@@ -98,7 +98,7 @@ After each record it stores, `audit` appends the signed head to the stream `audi
 - **Cost:** one signature and one extra append per record. Measured (#256): the `audit` test kernel, 88 records under TCG, took 14.9 s with and without signing, so every record is signed and the "every N records" fallback (section 8) is not used. The head stream takes about twice the space of the records it covers, from the audit reserve.
 - **A full store:** the record that fills the store can leave no room for its head. It stays stored and the verifier reports it as unsigned. The `audit` test kernel shows this.
 - **Without the key:** `audit` signs nothing and says so on the console; the verifier rejects such a trail.
-- **`trust`:** showing the signature status and the public key is **planned** (#262). `HEAD` answers as before.
+- **`trust` (#262, implemented):** `HEAD`'s answer also carries the records under the last signed head the store took, the public key, and the measurement (`pharos_proto::audit::Head`, 117 bytes). At start and on `audit`, `trust` prints a second line, `audit: <signed> of <records> records signed, key <hex>, measured <hex>`, or `audit: heads not signed (no key)`, for the user to compare with `cargo xtask store audit --key` and the release's `boot-measurement`. The `audit` test kernel requires the line to name the key the image's heads verify under and the measurement they carry.
 
 ### Public key
 

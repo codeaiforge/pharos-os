@@ -150,6 +150,10 @@ fn first(c: &mut Client) {
         "HEAD: 6 records and a chain head",
         h.is_some_and(|h| h.records == 6 && h.head != [0; 32]),
     );
+    c.step(
+        "HEAD: all 6 under a signed head, with its key and the measurement",
+        h.is_some_and(|h| h.signed == 6 && h.key != [0; 32] && h.measurement != [0; 32]),
+    );
 }
 
 fn second(c: &mut Client) {
@@ -181,6 +185,12 @@ fn second(c: &mut Client) {
         "HEAD still answers, counting only stored records",
         c.head()
             .is_some_and(|h| h.boot == 2 && h.records == stored + 1),
+    );
+    // The record that fills the store leaves no room for its head.
+    c.step(
+        "HEAD: signed up to the record that filled the store",
+        c.head()
+            .is_some_and(|h| h.signed <= h.records && h.signed + 1 >= h.records),
     );
     let mut d = [0u8; 20];
     let mut at = d.len();
