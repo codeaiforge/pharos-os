@@ -37,8 +37,10 @@ pub fn build(paths: &Paths) -> Result<PathBuf> {
         (STORE_IMAGE.to_owned(), iso.with_file_name(STORE_IMAGE)),
     ];
     let mut entries = Vec::new();
+    let host = [crate::cargo_home(), paths.root.clone()];
     for (name, from) in &files {
         crate::copy(from, &dir.join(name))?;
+        host_free(&dir.join(name), &host)?;
         entries.push((name.clone(), hash(&dir.join(name))?));
     }
     let info = dir.join(BUILDINFO);
@@ -150,6 +152,23 @@ fn read(path: &Path) -> Result<String> {
 fn hash(path: &Path) -> Result<[u8; 32]> {
     let bytes = fs::read(path).map_err(io_err("cannot read", path))?;
     Ok(pharos_store::sha256(&[&bytes]))
+}
+
+/// Refuses a file that names a host path from `host` (Cargo's home, the
+/// source tree): another host would build different bytes (#259).
+fn host_free(path: &Path, host: &[PathBuf]) -> Result<()> {
+    let bytes = fs::read(path).map_err(io_err("cannot read", path))?;
+    for dir in host {
+        let needle = dir.to_string_lossy();
+        if !needle.is_empty() && bytes.windows(needle.len()).any(|w| w == needle.as_bytes()) {
+            return Err(format!(
+                "{} contains the host path {needle}, so another host would build it differently; \
+                 remap it (--remap-path-prefix, see user_rustflags)",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `SHA256SUMS` for `entries`, sorted by name, and the measurement.
@@ -324,6 +343,23 @@ mod tests {
         let err = sign(&paths, &dir, &dir.join("release.key")).unwrap_err();
         assert!(err.contains("is the test key"), "{err}");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_naming_a_host_path_is_refused() {
+        let dir = std::env::temp_dir().join(format!("pharos-release-host-{}", std::process::id()));
+        crate::recreate_dir(&dir).unwrap();
+        let file = dir.join("init");
+        fs::write(&file, b"panic at /home/me/.cargo/registry/src/x.rs").unwrap();
+        let host = [PathBuf::from("/home/me/.cargo")];
+        assert!(
+            host_free(&file, &host)
+                .unwrap_err()
+                .contains("/home/me/.cargo")
+        );
+        fs::write(&file, b"panic at /cargo/registry/src/x.rs").unwrap();
+        host_free(&file, &host).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

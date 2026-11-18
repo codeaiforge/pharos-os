@@ -894,13 +894,25 @@ const USER_PROGRAM_RANGE: std::ops::Range<u64> = 0x40_0000..0x40_0000 + 16 * 102
 
 /// Compiler flags for user programs, given only to their build: the host
 /// builds for the same target triple and must not get them.
-fn user_rustflags(root: &Path) -> String {
+/// Dependencies' panic locations name their source under Cargo's home, so
+/// it is remapped to `/cargo`: a release must not depend on the host that
+/// built it (#259).
+fn user_rustflags(root: &Path, cargo_home: &Path) -> String {
     let script = root.join("user").join("programs").join("user.ld");
     format!(
         "-C relocation-model=static -C panic=abort -C link-arg=-nostartfiles -C link-arg=-nostdlib \
-         -C link-arg=-static -C link-arg=-T{} --cfg pharos_user",
-        script.display()
+         -C link-arg=-static -C link-arg=-T{} --cfg pharos_user --remap-path-prefix={}=/cargo",
+        script.display(),
+        cargo_home.display()
     )
+}
+
+/// Cargo's home (`CARGO_HOME`, else `~/.cargo`), where dependency sources
+/// are unpacked.
+fn cargo_home() -> PathBuf {
+    env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".cargo"))
 }
 
 /// Builds the user programs (release) in their own target directory, checks
@@ -924,7 +936,7 @@ fn build_user_programs_with(paths: &Paths, key: Option<&str>) -> Result<Vec<Imag
         command
             .current_dir(&paths.root)
             .env("CARGO_TARGET_DIR", &target_dir)
-            .env("RUSTFLAGS", user_rustflags(&paths.root))
+            .env("RUSTFLAGS", user_rustflags(&paths.root, &cargo_home()))
             .args([
                 "build",
                 "--release",
