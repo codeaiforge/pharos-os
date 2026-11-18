@@ -29,7 +29,7 @@ jobs:
           persist-credentials: false
 
       # rustup is preinstalled on GitHub-hosted runners. rust-toolchain.toml
-      # selects stable with rustfmt and clippy; the kernel target is added
+      # pins the stable release with rustfmt and clippy (#259); the kernel target is added
       # explicitly because an already-installed toolchain may lack it.
       - name: Toolchain
         run: |

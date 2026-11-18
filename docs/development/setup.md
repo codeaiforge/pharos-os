@@ -23,7 +23,7 @@ Read the rustup script before running it if you prefer; see <https://rustup.rs/>
 
 ## Toolchain choice
 
-- `rust-toolchain.toml` selects the **stable** channel with `rustfmt` and `clippy`. It does not pin a patch release, so it will not silently become obsolete; run `rustup update stable` to get new releases.
+- `rust-toolchain.toml` pins a **stable release** (1.100.0) with `rustfmt` and `clippy`, so CI and every local build use the same compiler and a release builds bit-identically on both (#259). Until 2026-11-18 it tracked the `stable` channel; CI then built with 1.100.0 and the development host with 1.99.1, and their ISOs differed. Bump the pin in its own change, after CI and the full local suite pass with the new release. Install it with `rustup toolchain install 1.100.0 --profile minimal -c rustfmt,clippy -t x86_64-unknown-none`.
 - The workspace uses **edition 2024**, so the minimum supported Rust is **1.85** (`rust-version` in `Cargo.toml`). The `msrv` CI job builds and tests on 1.85; locally the scaffold was tested with Rust 1.99.1.
 - Reproducibility of dependencies comes from the committed `Cargo.lock` and `--locked` in CI.
 

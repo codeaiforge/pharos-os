@@ -43,7 +43,7 @@ The only exception is an explicit authorization from the maintainer for a specif
   - explain it in the PR and require review of that code specifically.
 - Code must pass `scripts/check.sh`, which runs the same checks as CI (listed in [testing.md](docs/development/testing.md#quality-gates)). The kernel is checked for `x86_64-unknown-none` and excluded from host checks; never "fix" a failure by dropping a check.
 - Prefer clear error messages that say what failed and what to do next. Do not `unwrap()` on fallible input outside tests.
-- Keep builds reproducible: commit `Cargo.lock`, use `--locked` in CI, track the stable toolchain via `rust-toolchain.toml`, and avoid nightly features unless a decision record justifies them.
+- Keep builds reproducible: commit `Cargo.lock`, use `--locked` in CI, pin a stable toolchain release in `rust-toolchain.toml` (bumped in its own change), and avoid nightly features unless a decision record justifies them.
 
 ## 6. Dependencies
 
