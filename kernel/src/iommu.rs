@@ -592,9 +592,22 @@ mod global {
         state.each_unit(Unit::invalidate_context)
     }
 
+    static FAIL_NEXT_MAP: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+
+    /// Fault injection for test kernels, as `process::kill`: the next
+    /// [`map`] fails as if a table frame could not be allocated. Nothing in
+    /// user space can reach it.
+    pub fn fail_next_map() {
+        FAIL_NEXT_MAP.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Maps `pages` pages at `phys` for function `a`'s DMA, at the same
     /// addresses. Usable by the device when this returns.
     pub fn map(a: Address, phys: u64, pages: usize) -> Result<(), DeviceError> {
+        if FAIL_NEXT_MAP.swap(false, core::sync::atomic::Ordering::Relaxed) {
+            return Err(DeviceError::Table(Error::OutOfMemory));
+        }
         let mut guard = STATE.lock();
         let state = guard.as_mut().ok_or(DeviceError::NotStarted)?;
         let domain = state

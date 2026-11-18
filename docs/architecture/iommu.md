@@ -71,7 +71,7 @@ flowchart LR
 
 - **Frames:** bus 0's context table is made with the root table and kept; a domain's tables that an unmap leaves empty are freed only after the IOTLB invalidation completes (until then the unit may still walk them). So a driver's exit returns every frame it took, as the existing `virtio_blk` and `device_caps` tests require.
 - **Invalidation is register-based** (`CCMD`, `IOTLB`), not the invalidation queue: one unit, a few invalidations per `dma_alloc` or driver exit, so a queue's speed is not needed and its code is avoided. Both are global for now. Verified on QEMU (#242).
-- **Faults** are read from the fault-recording registers and printed (`iommu: device 00:03.0 blocked write to 0x…`), counted per device, and cleared. The fault interrupt is not used at first: the kernel polls the status on each device stop and in the test kernel.
+- **Faults** are read from the fault-recording registers and cleared by `iommu::take_faults`, which only the `iommu` test kernel calls today (**implemented**). Reading them on each device stop, printing and counting them per device, is **planned** (#246, M5.2 review). The fault interrupt is not used.
 - **No IOMMU found:** the boot fails with `no IOMMU (DMAR) found; drivers cannot be isolated (D-044)`. Fail closed, as the CPU check (#237). `cargo xtask` adds the IOMMU everywhere, so every test still boots (decided, open question 1). **Implemented (#242)**, and so is refusing a DMAR that lists reserved regions (RMRR, which QEMU's has none of) or a unit outside PCI segment 0.
 
 ## 4. Security

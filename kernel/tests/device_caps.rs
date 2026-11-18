@@ -22,7 +22,7 @@ use pharos_kernel::ipc::{self, Endpoint, Message};
 use pharos_kernel::pci::{self, CAP_VENDOR};
 use pharos_kernel::syscall::MAX_MESSAGE;
 use pharos_kernel::testing::{self, TestRun};
-use pharos_kernel::{fs, kprintln, mm, process, sched, storage, time};
+use pharos_kernel::{fs, iommu, kprintln, mm, process, sched, storage, time};
 
 pharos_kernel::test_kernel!(run);
 
@@ -326,6 +326,61 @@ fn run(t: &mut TestRun) {
     drop(root);
     t.check(
         "after it ends: every frame returned, and the device can be granted again",
+        free_frames() == before && DeviceHandle::grant(blk.clone()).is_some(),
+    );
+
+    // A failed IOMMU mapping (M5.2 review V-1): the buffer stays the
+    // driver's until it ends, even when every handle to the device, its own
+    // and the kernel's, goes first.
+    let Some(device) = DeviceHandle::grant(blk.clone()) else {
+        t.check("granted for the failed-mapping run", false);
+        return;
+    };
+    let root = Capability::new(Object::Device(device), MAP | CONFIG | GRANT);
+    let wait = Endpoint::new();
+    let caps = vec![
+        Capability::new(Object::DebugConsole, WRITE),
+        root.derive(MAP | CONFIG),
+        Capability::new(Object::Endpoint(wait.clone()), RECEIVE),
+    ];
+    iommu::fail_next_map();
+    let id = process::spawn_elf(&programs, b"bin/devprobe", 1 << 61, caps).unwrap_or(u64::MAX);
+    let mut failed = false;
+    for _ in 0..40 {
+        failed = output_of(id).iter().any(|l| l == b"failed");
+        if failed {
+            break;
+        }
+        sched::sleep(Duration::from_millis(25));
+    }
+    t.check("failed-mapping run: dma_alloc returned", failed);
+    let held = free_frames();
+    drop(root);
+    t.check(
+        "failed mapping: no frame freed while the driver lives",
+        free_frames() == held,
+    );
+    ipc::send(
+        &wait,
+        Message {
+            data: [0; MAX_MESSAGE],
+            len: 1,
+            cap: None,
+            badge: 0,
+        },
+    );
+    sched::sleep(Duration::from_millis(100));
+    let lines = output_of(id);
+    for step in [
+        "a failed IOMMU mapping: NO_MEMORY",
+        "delete the device handle",
+        "released",
+    ] {
+        let want = alloc::format!("ok {step}");
+        t.check(step, lines.iter().any(|l| l == want.as_bytes()));
+    }
+    t.check(
+        "failed mapping: every frame returned once it ends",
         free_frames() == before && DeviceHandle::grant(blk.clone()).is_some(),
     );
 }

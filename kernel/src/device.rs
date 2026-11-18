@@ -221,7 +221,9 @@ mod kernel {
 
         /// Records a DMA buffer process `owner` allocated and maps it in
         /// the device's domain, so the device may use it once this returns.
-        /// On an error the buffer stays recorded (freed with the others).
+        /// On an error the buffer stays recorded, and is freed with the
+        /// others once the device cannot reach it; the caller has already
+        /// pinned the handle for the process that maps it.
         pub fn give_dma(
             &self,
             phys: u64,

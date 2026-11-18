@@ -17,6 +17,12 @@
 //! kernel revokes its device capability and releases it. Then the
 //! registers and the buffer must read zeros, its own writes must stay in
 //! its now private pages, and the capability must be refused.
+//!
+//! With bit 61 set (M5.2 review V-1), the kernel has made the IOMMU
+//! mapping fail: `dma_alloc` must return `NO_MEMORY`. It deletes its
+//! device handle, prints `failed`, and waits; the kernel drops its own
+//! handle while the driver lives, and must not free the buffer before it
+//! exits.
 
 #![no_std]
 #![no_main]
@@ -61,6 +67,24 @@ fn hex(value: u64) -> [u8; 20] {
 const MMIO_ONLY: u64 = 1 << 63;
 /// Argument bit: map, then outlive the revocation of the device.
 const REVOKED: u64 = 1 << 62;
+
+/// Argument bit: the IOMMU mapping of the DMA buffer fails.
+const MAP_FAILS: u64 = 1 << 61;
+
+/// Bit 61's run: see the module comment.
+fn map_fails() -> u64 {
+    let mut f = 0;
+    report(
+        &mut f,
+        "a failed IOMMU mapping: NO_MEMORY",
+        dma_alloc(DEVICE, 1, DMA).err() == Some(Error::NoMemory),
+    );
+    report(&mut f, "delete the device handle", delete(DEVICE).is_ok());
+    let _ = debug_write(CONSOLE, b"failed");
+    let mut msg = [0u8; 8];
+    report(&mut f, "released", receive(WAIT, &mut msg).is_ok());
+    f
+}
 
 /// Bit 62's run: see the module comment.
 fn revoked(bar: u8, page: u64, in_page: usize) -> u64 {
@@ -114,6 +138,9 @@ fn main(arg: u64) -> u64 {
     let mut f = 0;
     let mmio_only = arg & MMIO_ONLY != 0;
     let revoke = arg & REVOKED != 0;
+    if arg & MAP_FAILS != 0 {
+        return map_fails();
+    }
     let arg = arg & !(MMIO_ONLY | REVOKED);
     let (bar, offset) = ((arg & 0xff) as u8, arg >> 8);
     if revoke {

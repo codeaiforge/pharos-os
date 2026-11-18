@@ -1335,6 +1335,12 @@ mod kernel {
                     })
                 })
                 .ok_or(Error::BadAddress)??;
+                // Recorded and pinned before the IOMMU mapping, so a failed
+                // one still follows the buffer's normal end: revocation or
+                // the driver's exit unmaps, invalidates, then frees it. The
+                // handle never frees frames the driver still maps (M5.2
+                // review V-1).
+                record_device(&process, via, device.clone(), addr, pages as u64);
                 // In the device's IOMMU domain before the driver sees it.
                 if device.give_dma(phys, pages, process.record.id).is_err() {
                     return Err(Error::NoMemory);
@@ -1342,7 +1348,6 @@ mod kernel {
                 // Off since a previous driver ended, or for a hot-added
                 // device until now (M4.4 review F1, F3).
                 device.master();
-                record_device(&process, via, device, addr, pages as u64);
                 Ok(phys)
             }
             Call::IrqCreate { handle, entry } => {
