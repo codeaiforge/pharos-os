@@ -8,7 +8,7 @@
 - **Design under review:** iommu.md, the threat model's DMA rows, D-044, and AGENTS.md sections 5 and 7. The roadmap's M5.2 risks ask for this review, held as M5.4 reviewed the trusted base.
 - **Threat model:** a compromised user-space driver controls its virtio device fully, and makes any system call its capabilities allow, in any order. It wins if any DMA reaches memory outside its buffers, or the kernel hangs, crashes, or runs out of memory.
 - **Dates:** 2026-11-18, milestone M5.2. Code under review: `main` at `39141ca`.
-- **Status:** **awaiting the maintainer's verdict.** The severities below are the reviewers' proposals.
+- **Status:** **signed off** by the maintainer on 2026-11-18 (the M5.2 gate), with the severities as proposed and #246–#251 filed rather than fixed before the gate.
 
 ## Reviewers and their independence
 
@@ -64,4 +64,4 @@ The main session (Claude Code, which wrote the driver) checked every finding aga
 
 ## Sign-off
 
-Pending: the maintainer's verdicts on the severities and on filing rather than fixing #246–#251 before the M5.2 gate.
+The maintainer signed off on 2026-11-18, closing the M5.2 gate.
