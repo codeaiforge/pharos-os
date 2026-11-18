@@ -2889,7 +2889,7 @@ fn supervision_checks(image: &Path, console: &str) -> Result<()> {
 fn system_checks(image: &Path, console: &str) -> Result<()> {
     // `safe` wrote the next boot's mode (#164).
     let record = store_image::read(image, b"system/state")?
-        .and_then(|b| pharos_image::slots::Record::decode(&b))
+        .and_then(|b| pharos_image::slots::Record::decode(&b, &recovery::slot_key()))
         .ok_or("system: `safe` left no slot record")?;
     if record.next != pharos_image::slots::Mode::Safe {
         return Err(format!(

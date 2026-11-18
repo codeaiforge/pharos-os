@@ -40,6 +40,9 @@ pub struct Slots {
     memory: Handle,
     /// The store's access is revoked: attach again before using it.
     private: Cell<bool>,
+    /// The `SlotRecord` key (D-047, #257): without it the record can be
+    /// neither trusted nor written, so it is unreadable.
+    key: Option<[u8; 32]>,
 }
 
 /// What `system/state` held.
@@ -58,7 +61,7 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
 
 impl Slots {
     /// Maps and shares the buffer and attaches it at the store.
-    pub fn open(store: Handle, reply: Handle) -> Option<Self> {
+    pub fn open(store: Handle, reply: Handle, key: Option<[u8; 32]>) -> Option<Self> {
         let buffer = mem_map(BUFFER).ok()?;
         let memory = mem_share(&buffer).ok()?;
         let slots = Self {
@@ -67,6 +70,7 @@ impl Slots {
             buffer,
             memory,
             private: Cell::new(false),
+            key,
         };
         slots.attach().then_some(slots)
     }
@@ -128,13 +132,16 @@ impl Slots {
     }
 
     pub fn load(&self) -> Loaded {
+        let Some(key) = self.key else {
+            return Loaded::Unreadable;
+        };
         match self.read(RECORD) {
             Err(()) => Loaded::Unreadable,
             Ok(None) => Loaded::Missing,
             Ok(Some(len)) if len == RECORD_LEN as u64 => {
                 let mut bytes = [0u8; RECORD_LEN];
                 self.buffer.read_bytes(0, &mut bytes);
-                Record::decode(&bytes).map_or(Loaded::Corrupt, Loaded::Record)
+                Record::decode(&bytes, &key).map_or(Loaded::Corrupt, Loaded::Record)
             }
             Ok(Some(_)) => Loaded::Corrupt,
         }
@@ -142,7 +149,10 @@ impl Slots {
 
     /// Writes `record` (one store commit: the old record or the new).
     pub fn save(&self, record: &Record) -> bool {
-        self.buffer.write_bytes(0, &record.encode());
+        let Some(key) = self.key else {
+            return false;
+        };
+        self.buffer.write_bytes(0, &record.encode(&key));
         let req = Request::Write {
             path: RECORD,
             len: RECORD_LEN as u64,

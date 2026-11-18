@@ -5,20 +5,33 @@
 //! | Offset | Size | Field |
 //! | --- | --- | --- |
 //! | 0 | 8 | magic `PHAROSSR` |
-//! | 8 | 4 | format version, 1 |
+//! | 8 | 4 | format version, 2 |
 //! | 12 | 1 | active: 0 none, 1 A, 2 B |
 //! | 13 | 1 | next mode: 0 normal, 1 safe, 2 recovery |
 //! | 14 | 2 | reserved, zero |
 //! | 16 | 48 | slot A: state, attempts, 6 reserved, version (u64), SHA-256 |
 //! | 64 | 48 | slot B, the same |
-//! | 112 | 4 | CRC-32 of bytes 0–111 |
+//! | 112 | 32 | HMAC-SHA256 of bytes 0–111 under the `SlotRecord` key |
 //!
 //! Each write is one store commit, so the record is always the old one or
-//! the new one (D-017). A missing or corrupt record means no slots.
+//! the new one (D-017). A missing or corrupt record means no slots. The
+//! MAC's key is derived from the device secret ([`record_key`], D-047), so
+//! whoever holds only the disk cannot write a record `init` accepts.
+//! Version 1 (a CRC-32 in place of the MAC) is refused as corrupt: taking
+//! it would let a rewritten record skip the MAC.
 
 pub const RECORD_MAGIC: [u8; 8] = *b"PHAROSSR";
-pub const RECORD_VERSION: u32 = 1;
-pub const RECORD_LEN: usize = 116;
+pub const RECORD_VERSION: u32 = 2;
+pub const RECORD_LEN: usize = 144;
+/// The HKDF label of the `SlotRecord` key (must match the kernel's
+/// `key::Purpose::SlotRecord`).
+pub const RECORD_LABEL: &[u8] = b"pharos slot record v1";
+
+/// The `SlotRecord` key for the device secret `secret` (host side: the
+/// kernel derives it the same way).
+pub fn record_key(secret: &[u8; 32]) -> [u8; 32] {
+    pharos_store::derive(secret, RECORD_LABEL)
+}
 /// Attempts without ready before a slot is `Bad`.
 pub const MAX_ATTEMPTS: u8 = 3;
 
@@ -122,7 +135,8 @@ impl Record {
         &mut self.slots[slot.index()]
     }
 
-    pub fn encode(&self) -> [u8; RECORD_LEN] {
+    /// The record, authenticated with `key` (the `SlotRecord` key).
+    pub fn encode(&self, key: &[u8; 32]) -> [u8; RECORD_LEN] {
         let mut r = [0; RECORD_LEN];
         r[..8].copy_from_slice(&RECORD_MAGIC);
         r[8..12].copy_from_slice(&RECORD_VERSION.to_le_bytes());
@@ -139,18 +153,20 @@ impl Record {
             r[at + 8..at + 16].copy_from_slice(&s.version.to_le_bytes());
             r[at + 16..at + 48].copy_from_slice(&s.sha256);
         }
-        let crc = pharos_fs::crc32(&r[..112]);
-        r[112..].copy_from_slice(&crc.to_le_bytes());
+        let mac = pharos_store::hmac(key, &[&r[..112]]);
+        r[112..].copy_from_slice(&mac);
         r
     }
 
-    /// The record in `bytes`, or `None` if any field is wrong.
-    pub fn decode(bytes: &[u8]) -> Option<Self> {
+    /// The record in `bytes`, or `None` if its MAC under `key` or any
+    /// field is wrong.
+    pub fn decode(bytes: &[u8], key: &[u8; 32]) -> Option<Self> {
         let r: &[u8; RECORD_LEN] = bytes.try_into().ok()?;
         let u32_at = |at: usize| u32::from_le_bytes([r[at], r[at + 1], r[at + 2], r[at + 3]]);
+        let mac: &[u8; 32] = r[112..].try_into().ok()?;
         if r[..8] != RECORD_MAGIC
             || u32_at(8) != RECORD_VERSION
-            || u32_at(112) != pharos_fs::crc32(&r[..112])
+            || !pharos_store::equal(mac, &pharos_store::hmac(key, &[&r[..112]]))
             || r[14..16] != [0, 0]
         {
             return None;
@@ -326,6 +342,8 @@ mod tests {
         }
     }
 
+    const KEY: [u8; 32] = [0x5a; 32];
+
     #[test]
     fn a_record_round_trips_and_any_changed_byte_is_refused() {
         let r = Record {
@@ -333,32 +351,53 @@ mod tests {
             next: Mode::Recovery,
             slots: [info(State::Bad, 3, 7), info(State::Good, 0, 8)],
         };
-        let bytes = r.encode();
-        assert_eq!(Record::decode(&bytes), Some(r));
-        assert_eq!(Record::decode(&Record::EMPTY.encode()), Some(Record::EMPTY));
+        let bytes = r.encode(&KEY);
+        assert_eq!(Record::decode(&bytes, &KEY), Some(r));
+        assert_eq!(
+            Record::decode(&Record::EMPTY.encode(&KEY), &KEY),
+            Some(Record::EMPTY)
+        );
         for at in 0..RECORD_LEN {
             for bit in 0..8 {
                 let mut changed = bytes;
                 changed[at] ^= 1 << bit;
-                assert_eq!(Record::decode(&changed), None, "byte {at} bit {bit}");
+                assert_eq!(Record::decode(&changed, &KEY), None, "byte {at} bit {bit}");
             }
         }
-        assert_eq!(Record::decode(&bytes[..RECORD_LEN - 1]), None);
-        assert_eq!(Record::decode(&[]), None);
+        assert_eq!(Record::decode(&bytes[..RECORD_LEN - 1], &KEY), None);
+        assert_eq!(Record::decode(&[], &KEY), None);
     }
 
     #[test]
-    fn fields_out_of_range_are_refused_even_with_a_good_crc() {
+    fn a_record_rewritten_without_the_key_is_refused() {
+        let r = record(Some(Slot::A), info(State::Good, 0, 9), SlotInfo::EMPTY);
+        // Another key: what whoever holds only the disk can compute.
+        assert_eq!(Record::decode(&r.encode(&[1; 32]), &KEY), None);
+        // Version 1: the same fields with a CRC-32 and no MAC.
+        let mut v1 = [0u8; 116];
+        v1[..112].copy_from_slice(&r.encode(&KEY)[..112]);
+        v1[8..12].copy_from_slice(&1u32.to_le_bytes());
+        let crc = pharos_fs::crc32(&v1[..112]);
+        v1[112..].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(Record::decode(&v1, &KEY), None);
+        assert_eq!(
+            record_key(&[3; 32]),
+            pharos_store::derive(&[3; 32], b"pharos slot record v1")
+        );
+    }
+
+    #[test]
+    fn fields_out_of_range_are_refused_even_with_a_good_mac() {
         let fix = |mut b: [u8; RECORD_LEN]| {
-            let crc = pharos_fs::crc32(&b[..112]);
-            b[112..].copy_from_slice(&crc.to_le_bytes());
+            let mac = pharos_store::hmac(&KEY, &[&b[..112]]);
+            b[112..].copy_from_slice(&mac);
             b
         };
-        let good = Record::EMPTY.encode();
-        for (at, value) in [(8, 2), (12, 3), (13, 3), (14, 1), (16, 5), (18, 1), (64, 9)] {
+        let good = Record::EMPTY.encode(&KEY);
+        for (at, value) in [(8, 1), (12, 3), (13, 3), (14, 1), (16, 5), (18, 1), (64, 9)] {
             let mut b = good;
             b[at] = value;
-            assert_eq!(Record::decode(&fix(b)), None, "byte {at} = {value}");
+            assert_eq!(Record::decode(&fix(b), &KEY), None, "byte {at} = {value}");
         }
     }
 
@@ -366,16 +405,16 @@ mod tests {
     fn random_bytes_never_panic() {
         let mut x = 0x9e37_79b9_7f4a_7c15u64;
         for _ in 0..100_000 {
-            let mut b = Record::EMPTY.encode();
+            let mut b = Record::EMPTY.encode(&KEY);
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
             b[(x % RECORD_LEN as u64) as usize] = (x >> 32) as u8;
             if x & 1 == 0 {
-                let crc = pharos_fs::crc32(&b[..112]);
-                b[112..].copy_from_slice(&crc.to_le_bytes());
+                let mac = pharos_store::hmac(&KEY, &[&b[..112]]);
+                b[112..].copy_from_slice(&mac);
             }
-            let _ = Record::decode(&b);
+            let _ = Record::decode(&b, &KEY);
         }
     }
 
@@ -426,7 +465,7 @@ mod tests {
             r.attempt(Slot::A);
             assert_eq!(*r.slot(Slot::A), info(State::Trying, n, 1));
             // As read back on the next boot.
-            r = Record::decode(&r.encode()).unwrap();
+            r = Record::decode(&r.encode(&KEY), &KEY).unwrap();
         }
         assert_eq!(r.candidate([false; 2]), None);
         assert_eq!(r.slot(Slot::A).state, State::Bad);

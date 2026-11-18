@@ -262,6 +262,8 @@ struct Init {
     /// The `AuditAnchor` key, for `audit` (D-047, #256), if the kernel
     /// gave one.
     anchor: Option<Handle>,
+    /// The `SlotRecord` key, the slot record's MAC key (#257).
+    slot_key: Option<[u8; 32]>,
     /// The configuration of the image that runs (M4.5); compiled values
     /// in safe mode and recovery. `config_from`: that image, as `SYSTEM`
     /// numbers it, or `COMPILED`.
@@ -1497,7 +1499,7 @@ impl Init {
     fn boot_image(&mut self, key: Option<[u8; 32]>, kernel: Mode, copy: bool) {
         self.start_all(|s| s.path == b"bin/store", u64::MAX);
         let mut slots = if self.up(b"bin/store") {
-            system::Slots::open(self.store, self.reply)
+            system::Slots::open(self.store, self.reply, self.slot_key)
         } else {
             None
         };
@@ -2223,6 +2225,7 @@ fn main(arg: u64) -> u64 {
         by_user: [false; MAX_SERVICES],
         hotplug: None,
         anchor: None,
+        slot_key: None,
         config: Config::COMPILED,
         config_from: listing::COMPILED,
         started: [0; MAX_SERVICES],
@@ -2236,9 +2239,11 @@ fn main(arg: u64) -> u64 {
     if slot_notify(hotplug, events, SLOT_BIT).is_ok() {
         init.hotplug = Some(hotplug);
     }
-    // The kernel's keys come last, `AuditAnchor` first (D-047): the first
-    // handle after the devices that `key_read` accepts.
-    init.anchor = (hotplug..hotplug + 2).find(|&h| pharos_user::key_read(h).is_ok());
+    // The kernel's keys come last, `AuditAnchor` then `SlotRecord` (D-047):
+    // the handles after the devices that `key_read` accepts.
+    let mut keys = (hotplug..hotplug + 3).filter_map(|h| Some((h, pharos_user::key_read(h).ok()?)));
+    init.anchor = keys.next().map(|(h, _)| h);
+    init.slot_key = keys.next().map(|(_, k)| k);
     // Only the boot table boots from an image; the test tables run from
     // the root filesystem.
     if table_number == 0 {

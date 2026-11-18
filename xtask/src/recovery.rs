@@ -7,6 +7,10 @@
 //! 1. slot A corrupt, slot B good: A refused, B runs;
 //! 2. slot A signed with another key, slot B empty: A refused, the factory
 //!    image runs;
+//!
+//!    Then `forged-record` (#257): a record whose MAC is from another key,
+//!    as whoever holds only the disk can write: taken as corrupt and
+//!    rewritten empty, so the factory image runs and slot A is not tried;
 //! 3. slot A never ready (its agent runtime exits at once): three boots on
 //!    one store, the second killed right after the attempt was written;
 //!    each counts an attempt and ends on the factory image, and after the
@@ -92,7 +96,7 @@ fn store_next(path: &Path, a: &[u8], b: Option<&[u8]>, next: Mode) -> Result<()>
         next,
         slots: [good(a), b.map_or(SlotInfo::EMPTY, good)],
     }
-    .encode();
+    .encode(&slot_key());
     let mut files: Vec<(&[u8], &[u8])> = vec![(b"system/a", a), (b"system/state", &record)];
     if let Some(b) = b {
         files.push((b"system/b", b));
@@ -103,7 +107,12 @@ fn store_next(path: &Path, a: &[u8], b: Option<&[u8]>, next: Mode) -> Result<()>
 fn record(iso: &Path) -> Result<Record> {
     let bytes = store_image::read(&iso.with_file_name(STORE_IMAGE), b"system/state")?
         .ok_or("the store has no system/state")?;
-    Record::decode(&bytes).ok_or_else(|| "system/state does not decode".into())
+    Record::decode(&bytes, &slot_key()).ok_or_else(|| "system/state does not decode".into())
+}
+
+/// The `SlotRecord` key of the device key test kernels get (D-047, #257).
+pub fn slot_key() -> [u8; 32] {
+    pharos_image::slots::record_key(&crate::TEST_DEVICE_KEY)
 }
 
 /// Boots once and returns the serial log; with `kill_at`, QEMU is killed
@@ -290,6 +299,39 @@ pub fn rounds(
         ],
     )?;
     expect_slot("unsigned", &record(iso)?, Slot::A, State::Bad, 1)?;
+
+    // 2b. A record rewritten without the key (#257, D-047): slot A good and
+    //     genuinely signed, but the record's MAC from another key. `init`
+    //     takes it as corrupt, rewrites it empty, and runs the factory image.
+    let forged = Record {
+        active: Some(Slot::A),
+        next: Mode::Normal,
+        slots: [good(&signed(&root, 4, &seed)), SlotInfo::EMPTY],
+    }
+    .encode(&[7; 32]);
+    store_image::with_room(
+        &store_path,
+        &[
+            (b"system/a", &signed(&root, 4, &seed)),
+            (b"system/state", &forged),
+        ],
+    )?;
+    let log = boot(iso, vars, logs, extra, "forged-record", None)?;
+    expect(
+        "forged-record",
+        &log,
+        &[
+            "init: system: slot record corrupt; rewritten empty",
+            "init: system: running factory image",
+            tests_ok,
+        ],
+    )?;
+    absent("forged-record", &log, &["init: system: slot A: attempt 1"])?;
+    if record(iso)? != Record::EMPTY {
+        return Err(format!(
+            "{TEST} forged-record: the record was not rewritten empty"
+        ));
+    }
 
     // 4. Safe mode from the record's `next`: slot A without the runtime,
     //    and without its configuration, which turns `net` off (M4.5).
@@ -522,7 +564,7 @@ pub const UPDATE_TEST: &str = "update";
 
 /// A store with `record` and `files` (store paths, contents).
 fn store_with(path: &Path, record: &Record, files: &[(&[u8], &[u8])]) -> Result<()> {
-    let record = record.encode();
+    let record = record.encode(&slot_key());
     let mut all: Vec<(&[u8], &[u8])> = vec![(b"system/state", &record)];
     all.extend_from_slice(files);
     store_image::with_room(path, &all)

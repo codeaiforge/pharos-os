@@ -204,7 +204,7 @@ Phase 2, M3.0 ([review](review-m3.0-platform.md)), M3.2 ([review](review-m3.2-in
 | `GET` returns at most 4 heads, so a writer can bury a key's newest one (each marked conflicting; `HISTORY` lists all) | M3.8 | accepted |
 | Control clients can read, cancel, and forget every task; only `init` grants the badge, and only test tables do | M3.3 | accepted at the Phase 4 gate: no boot table grants it |
 | The inference service: a long prompt holds it (callers time out). **Resolved (#100):** a failed model read is not kept (the next `GENERATE` tries again with a new window), and client slots are freed when `init` reports the client ended | M3.2 | M3.5 (budgets) |
-| The slot record is not authenticated: whoever holds the disk can erase the slots or rewrite the record, and a corrupt record rewritten empty loses the slots' versions (so the version floor falls to the factory image's) | M4.3 | M5.5 (D-047: an HMAC-SHA256 with a key derived from the per-VM host secret) |
+| The slot record is not authenticated: whoever holds the disk can erase the slots or rewrite the record, and a corrupt record rewritten empty loses the slots' versions (so the version floor falls to the factory image's) | M4.3 | **Narrowed (#257, D-047):** the record carries an HMAC-SHA256 under a key derived from the per-VM device secret, so a rewritten record is refused as corrupt and rewritten empty (`recovery`'s `forged-record` round, mutation-checked). Still open: erasing the record, or putting back an older genuine one (a rollback of slot versions), needs a monotonic counter (a TPM, M8.1) |
 
 ## Part 2 — Planned system (Phases 2–5)
 

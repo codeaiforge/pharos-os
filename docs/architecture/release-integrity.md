@@ -8,7 +8,7 @@
 | --- | --- |
 | The device secret and the `Key` capability | #255, **implemented** |
 | The signed audit head | #256, **implemented** (`trust`'s display of it **planned**, #262) |
-| The slot record's MAC | #257 |
+| The slot record's MAC | #257, **implemented** |
 | Secure Boot | #258 |
 | Signed release artifacts | #259 |
 | Export and rotation of the audit trail | #217 |
@@ -118,7 +118,7 @@ Without `--key`, it checks the chain alone and says it did not check signatures.
 
 ### Slot record
 
-Version 2 of `system/state` appends a 32-byte HMAC-SHA256 over bytes 0..112, keyed with `key_read(SlotRecord)`, replacing the CRC-32 (148 bytes in all).
+Version 2 of `system/state` puts a 32-byte HMAC-SHA256 over bytes 0..112, keyed with `key_read(SlotRecord)`, in place of the CRC-32 (144 bytes in all; **implemented**, #257). `init` reads the key once at start; without it the record is unreadable, never written.
 - **A version 1 record:** treated as corrupt (rewritten empty). Accepting it would let an attacker downgrade to an unauthenticated record. The version floor then falls to the factory image's, as for any corrupt record today. This happens once, on the first boot of v0.5.
 - **What stays open:** someone holding the disk can still erase the record, or put back an older genuine one: a rollback to an older slot version. Fixing that needs a monotonic counter (a TPM, M8.1). The threat model's row is narrowed to this.
 
