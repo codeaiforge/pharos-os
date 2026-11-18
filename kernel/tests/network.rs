@@ -76,6 +76,7 @@ fn run(t: &mut TestRun) {
         return;
     };
     let report = ipc::Endpoint::new();
+    pharos_kernel::testing::init_key();
     let caps = process::init_capabilities(programs.clone(), report.clone(), true);
     let id = process::spawn_elf(&programs, b"bin/init", 2, caps);
     t.check("init started with the network table", id.is_ok());

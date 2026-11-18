@@ -167,11 +167,18 @@ fn run(t: &mut TestRun) {
     ) else {
         return;
     };
+    // The service signs a head after each record (D-047, #256); the host
+    // checks them after the run (`audit_checks` in xtask).
+    pharos_kernel::testing::init_key();
     let audit_caps = vec![
         Capability::new(Object::DebugConsole, WRITE),
         ep(&audit, RECEIVE),
         ep(&report, SEND),
         ep(&store, SEND).derive_badged(SEND, AUDIT_TRAIL),
+        Capability::new(
+            Object::Key(pharos_kernel::key::Purpose::AuditAnchor),
+            pharos_kernel::cap::READ,
+        ),
     ];
     let Some(first) = start(t, &programs, b"bin/audit", audit_caps.clone(), &report, 0) else {
         return;

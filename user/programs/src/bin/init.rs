@@ -259,6 +259,9 @@ struct Init {
     by_user: [bool; MAX_SERVICES],
     /// The hotplug object, if the kernel gave one (#171).
     hotplug: Option<Handle>,
+    /// The `AuditAnchor` key, for `audit` (D-047, #256), if the kernel
+    /// gave one.
+    anchor: Option<Handle>,
     /// The configuration of the image that runs (M4.5); compiled values
     /// in safe mode and recovery. `config_from`: that image, as `SYSTEM`
     /// numbers it, or `COMPILED`.
@@ -299,6 +302,7 @@ impl Init {
             },
             // Per entry, in `grant`.
             Object::Arrived(_) => return None,
+            Object::AuditAnchor => self.anchor?,
             Object::Device(id, nth) => {
                 (self.devices[..self.device_count].iter())
                     .filter(|d| d.1 == id)
@@ -2218,6 +2222,7 @@ fn main(arg: u64) -> u64 {
         busy: true,
         by_user: [false; MAX_SERVICES],
         hotplug: None,
+        anchor: None,
         config: Config::COMPILED,
         config_from: listing::COMPILED,
         started: [0; MAX_SERVICES],
@@ -2231,6 +2236,9 @@ fn main(arg: u64) -> u64 {
     if slot_notify(hotplug, events, SLOT_BIT).is_ok() {
         init.hotplug = Some(hotplug);
     }
+    // The kernel's keys come last, `AuditAnchor` first (D-047): the first
+    // handle after the devices that `key_read` accepts.
+    init.anchor = (hotplug..hotplug + 2).find(|&h| pharos_user::key_read(h).is_ok());
     // Only the boot table boots from an image; the test tables run from
     // the root filesystem.
     if table_number == 0 {

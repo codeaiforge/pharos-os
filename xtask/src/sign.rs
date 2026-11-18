@@ -123,6 +123,24 @@ pub fn device_key(paths: &Paths) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+/// A device key file: exactly 32 bytes.
+pub fn read_device_key(path: &Path) -> Result<[u8; 32]> {
+    let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    bytes.try_into().map_err(|b: Vec<u8>| {
+        format!(
+            "{} is {} bytes, not a 32-byte device key",
+            path.display(),
+            b.len()
+        )
+    })
+}
+
+/// The audit public key of a device key: Ed25519's public key for the
+/// `AuditAnchor` seed the kernel derives (D-047).
+pub fn anchor_public(device_key: &[u8; 32]) -> [u8; 32] {
+    pharos_image::public_key(&pharos_image::head::anchor_seed(device_key))
+}
+
 /// Writes `bytes` to `path`, readable and writable by the user only.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;

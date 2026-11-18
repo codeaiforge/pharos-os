@@ -144,6 +144,7 @@ fn run(t: &mut TestRun) {
         return;
     };
     let report = Endpoint::new();
+    pharos_kernel::testing::init_key();
     let caps = process::init_capabilities(programs.clone(), report.clone(), true);
     let init =
         process::spawn_elf_limited(&programs, b"bin/init", 3, caps, process::INIT_MEMORY_LIMIT);

@@ -113,6 +113,16 @@ pub fn init_iommu(rsdp: Option<&crate::limine::RsdpResponse>) {
     }
 }
 
+/// Reads the device key `xtask` passes test kernels (D-047), so `init`
+/// gets its `Key` capabilities and `audit` signs its heads, as at boot.
+#[cfg(target_os = "none")]
+pub fn init_key() {
+    match crate::key::init() {
+        Ok(()) | Err(crate::key::Error::AlreadySet) => {}
+        Err(error) => panic!("init_key: {error}"),
+    }
+}
+
 /// Frames a test holds to leave the allocator nearly empty, from
 /// [`hold_frames`]; give them back with [`release_frames`].
 #[cfg(target_os = "none")]

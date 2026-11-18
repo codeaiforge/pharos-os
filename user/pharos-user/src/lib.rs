@@ -107,6 +107,7 @@ pub mod number {
     pub const SLOT_NEXT: u64 = 29;
     pub const SLOT_ANSWER: u64 = 30;
     pub const KEY_READ: u64 = 31;
+    pub const KEY_MEASUREMENT: u64 = 32;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -716,6 +717,18 @@ pub fn slot_next(hotplug: Handle) -> Result<Option<SlotEvent>, Error> {
 pub fn key_read(key: Handle) -> Result<[u8; 32], Error> {
     let mut out = [0u8; 32];
     call(number::KEY_READ, [key, out.as_mut_ptr() as u64, 0, 0, 0, 0])?;
+    Ok(out)
+}
+
+/// The boot measurement (D-047): SHA-256 over the kernel's file and each
+/// module, as the kernel measured them at boot. Needs any `Key` capability
+/// (`READ`); `NOT_FOUND` if the boot was not measured.
+pub fn key_measurement(key: Handle) -> Result<[u8; 32], Error> {
+    let mut out = [0u8; 32];
+    call(
+        number::KEY_MEASUREMENT,
+        [key, out.as_mut_ptr() as u64, 0, 0, 0, 0],
+    )?;
     Ok(out)
 }
 

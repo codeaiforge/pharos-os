@@ -119,6 +119,9 @@ pub enum Object {
     /// drivers.md): an entry holding it is a driver, started when one
     /// arrives and never at boot.
     Arrived(u32),
+    /// The `AuditAnchor` key, derived from the device secret (D-047,
+    /// release-integrity.md): `READ` only, and only for the `audit` entry.
+    AuditAnchor,
 }
 
 impl Service {
@@ -261,6 +264,8 @@ pub enum Broken {
     /// Rights that do not fit the object: device rights only on devices,
     /// `READ` only on the root, `WRITE` only on the console.
     Rights,
+    /// The `AuditAnchor` key given to an entry other than `audit`.
+    Key,
     /// A device given twice.
     SameDevice,
     /// A daemon without exactly one [`REPORT`], or a one-shot with one, or
@@ -310,7 +315,11 @@ pub fn check(table: &[Service]) -> Result<(), (usize, Broken)> {
                 Object::Root => g.rights == READ,
                 Object::Device(..) | Object::Arrived(_) => g.rights == DEVICE,
                 Object::Endpoint(_) => g.rights & !(SEND | RECEIVE | GRANT) == 0 && g.rights != 0,
+                Object::AuditAnchor => g.rights == READ,
             };
+            if g.object == Object::AuditAnchor && s.name != "audit" {
+                return fail(Broken::Key);
+            }
             if !fits {
                 return fail(Broken::Rights);
             }
@@ -342,6 +351,7 @@ pub fn check(table: &[Service]) -> Result<(), (usize, Broken)> {
             let fail = |r| Err((j, r));
             match a.object {
                 Object::Device(..) | Object::Arrived(_) => return fail(Broken::SameDevice),
+                Object::AuditAnchor => return fail(Broken::Key),
                 Object::Endpoint(_) if a.rights & b.rights & RECEIVE != 0 => {
                     return fail(Broken::Receiver);
                 }
@@ -452,7 +462,7 @@ mod tests {
         const BLK: Give = device(VIRTIO_BLK, 0);
         // BOOT: 0 virtio-blk, 1 net, 2 store, 3 infer, 4 audit, 5
         // knowledge, 6 trust, 7 agents.
-        const CASES: [(usize, &[Give], Broken); 12] = [
+        const CASES: [(usize, &[Give], Broken); 13] = [
             // `init`'s own badge on the store.
             (
                 3,
@@ -533,6 +543,17 @@ mod tests {
             ),
             // A one-shot with one.
             (0, &[CONSOLE, BLK, REPORT], Broken::Report),
+            // The audit trail's signing key to another service (D-047).
+            (
+                3,
+                &[
+                    CONSOLE,
+                    receive(Ep::Infer),
+                    REPORT,
+                    give(Object::AuditAnchor, READ, Badge::None),
+                ],
+                Broken::Key,
+            ),
             // Thirteen capabilities.
             (3, &[CONSOLE; 13], Broken::TooMany),
         ];

@@ -379,6 +379,40 @@ impl File {
     pub fn string(&self) -> Option<&str> {
         boot_str(self, self.string)
     }
+
+    /// The file's contents, for measuring it (D-047).
+    pub fn bytes(&self) -> &[u8] {
+        // SAFETY: the protocol guarantees `address` points to `size` bytes
+        // of the loaded file, in memory the bootloader reserved for it
+        // (executable and modules, or bootloader-reclaimable). It is not
+        // reused while `self`, a borrow of a response, lives (see
+        // `Request::get`), and nothing writes it.
+        unsafe { core::slice::from_raw_parts(self.address, self.size as usize) }
+    }
+}
+
+/// "Executable File Feature": the kernel's own file (D-047, measured at
+/// boot).
+#[repr(C)]
+pub struct ExecutableFileResponse {
+    revision: u64,
+    executable_file: *const File,
+}
+
+impl ExecutableFileResponse {
+    /// The kernel's file.
+    pub fn file(&self) -> &File {
+        // SAFETY: the protocol guarantees a valid file pointer, in
+        // bootloader-reclaimable memory like the response, valid for as
+        // long as `self` is borrowed (see `Request::get`).
+        unsafe { &*self.executable_file }
+    }
+}
+
+/// A request for [`ExecutableFileResponse`] (`limine.h`,
+/// `LIMINE_EXECUTABLE_FILE_REQUEST_ID`).
+pub const fn executable_file_request() -> Request<ExecutableFileResponse> {
+    Request::new([0xad97e90e83f1ed67, 0x31eb5d1c5ff23b69])
 }
 
 /// "Module Feature" response. Absent when no modules were loaded.

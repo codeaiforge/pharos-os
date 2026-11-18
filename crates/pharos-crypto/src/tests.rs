@@ -68,3 +68,21 @@ fn equal_compares_every_byte() {
     b[31] ^= 1;
     assert!(!equal(&a, &b));
 }
+
+#[test]
+fn measurement_covers_names_order_and_contents() {
+    let k = sha256(&[b"kernel bytes"]);
+    let r = sha256(&[b"root bytes"]);
+    let m = measurement([(&b"kernel"[..], k), (&b"root"[..], r)]);
+    // Length-prefixed: one byte, the name, the hash.
+    let mut flat = std::vec::Vec::new();
+    for (n, h) in [(&b"kernel"[..], k), (&b"root"[..], r)] {
+        flat.push(n.len() as u8);
+        flat.extend_from_slice(n);
+        flat.extend_from_slice(&h);
+    }
+    assert_eq!(m, sha256(&[&flat]));
+    assert_ne!(m, measurement([(&b"root"[..], r), (&b"kernel"[..], k)]));
+    assert_ne!(m, measurement([(&b"kernel"[..], r), (&b"root"[..], k)]));
+    assert_ne!(m, measurement([(&b"kerne"[..], k), (&b"lroot"[..], r)]));
+}

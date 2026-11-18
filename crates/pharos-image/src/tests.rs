@@ -117,3 +117,50 @@ fn mutations_never_panic() {
         }
     }
 }
+
+mod head {
+    use crate::head::{Error, Head, LEN, anchor_seed};
+
+    fn sample() -> Head {
+        Head {
+            boot: 3,
+            records: 42,
+            chain: [7; 32],
+            measurement: [9; 32],
+            uptime_us: 123_456,
+        }
+    }
+
+    #[test]
+    fn a_signed_head_verifies_and_round_trips() {
+        let seed = anchor_seed(&[1; 32]);
+        let public = crate::public_key(&seed);
+        let bytes = sample().sign(&seed);
+        assert_eq!(&bytes[..8], b"PHAROSAH");
+        assert_eq!(Head::verify(&bytes, &public), Ok(sample()));
+    }
+
+    #[test]
+    fn any_change_or_another_key_is_refused() {
+        let seed = anchor_seed(&[1; 32]);
+        let public = crate::public_key(&seed);
+        let bytes = sample().sign(&seed);
+        for i in 0..LEN {
+            let mut changed = bytes;
+            changed[i] ^= 1;
+            assert!(Head::verify(&changed, &public).is_err(), "byte {i}");
+        }
+        let other = crate::public_key(&anchor_seed(&[2; 32]));
+        assert_eq!(Head::verify(&bytes, &other), Err(Error::Signature));
+        assert_eq!(Head::verify(&bytes[..LEN - 1], &public), Err(Error::Length));
+    }
+
+    #[test]
+    fn the_anchor_seed_is_the_kernels_derivation() {
+        assert_eq!(
+            anchor_seed(&[5; 32]),
+            pharos_store::derive(&[5; 32], b"pharos audit anchor v1")
+        );
+        assert_ne!(anchor_seed(&[5; 32]), [5; 32]);
+    }
+}

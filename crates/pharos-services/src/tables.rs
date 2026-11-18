@@ -3,7 +3,7 @@
 //! `health` test kernel, 5 `aifail`, 6 `compromised`, 7 `soak`
 //! ([`table`]).
 
-use crate::rights::{GRANT, RECEIVE, SEND};
+use crate::rights::{GRANT, READ, RECEIVE, SEND};
 use crate::{
     Badge, CONSOLE, Dest, Ep, Gain, Give, Kind, Object, REPORT, ROOT, Restart, Service, arrived,
     device, give, receive, send,
@@ -120,6 +120,8 @@ const AUDIT_CAPS: &[Give] = &[
     receive(Ep::Audit),
     REPORT,
     send(Ep::Store, AUDIT_TRAIL),
+    // Handle 5: signs the chain head (D-047, #256).
+    give(Object::AuditAnchor, READ, Badge::None),
 ];
 
 /// The audit service, after the store at `store`.

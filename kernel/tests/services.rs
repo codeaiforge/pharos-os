@@ -66,6 +66,7 @@ fn run(t: &mut TestRun) {
     };
     // No devices: the virtio-blk entry must report a missing device.
     let report = ipc::Endpoint::new();
+    pharos_kernel::testing::init_key();
     let caps = process::init_capabilities(programs.clone(), report.clone(), false);
     let id = process::spawn_elf(&programs, b"bin/init", 1, caps);
     t.check("init started with the test table", id.is_ok());

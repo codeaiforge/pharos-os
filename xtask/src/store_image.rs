@@ -232,6 +232,80 @@ pub fn audit(image: &Path) -> Result<Vec<(String, Vec<String>)>> {
     Ok(out)
 }
 
+/// A stream checked against its signed head (D-047, #256): `log/<n>`, its
+/// record count, and how many of those the last signed head covers.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Signed {
+    pub stream: String,
+    pub records: u64,
+    pub signed: u64,
+    pub measurement: [u8; 32],
+}
+
+/// Checks every audit stream in `image` against the last head in
+/// `audit/head/<n>`, signed with the key whose public half is `public`:
+/// the signature, the boot number, and the chain value after the records
+/// the head covers. A trail rewritten on the disk, even with its chain
+/// recomputed, does not match a head it cannot sign. Records after the
+/// last head are counted as unsigned, not refused.
+pub fn signed_heads(image: &Path, public: &[u8; 32]) -> Result<Vec<Signed>> {
+    use pharos_image::head::Head;
+    let mut store =
+        Store::mount(FileDevice::open(image)?).map_err(|e| format!("{}: {e}", image.display()))?;
+    let paths: Vec<Vec<u8>> = store.list(b"audit/log/").map(<[u8]>::to_vec).collect();
+    let mut out = Vec::new();
+    for path in paths {
+        let name = String::from_utf8_lossy(&path).into_owned();
+        let boot = name
+            .strip_prefix("audit/log/")
+            .and_then(|n| n.parse::<u32>().ok())
+            .ok_or_else(|| format!("{name}: not a boot stream"))?;
+        let head_path = format!("audit/head/{boot}");
+        let mut last = None;
+        store
+            .records(head_path.as_bytes(), |bytes| last = Some(bytes.to_vec()))
+            .map_err(|e| format!("{name}: no signed head ({head_path}: {e})"))?;
+        let last = last.ok_or_else(|| format!("{name}: no signed head ({head_path} is empty)"))?;
+        let head = Head::verify(&last, public)
+            .map_err(|e| format!("{name}: its signed head does not verify ({e:?})"))?;
+        if head.boot != boot {
+            return Err(format!("{name}: its signed head is for boot {}", head.boot));
+        }
+        // The chain value after each record, as the store computes it.
+        let mut chain = [0u8; 32];
+        let mut count = 0u64;
+        let mut at_head = (head.records == 0).then_some(chain);
+        store
+            .records(&path, |payload| {
+                chain = pharos_store::sha256(&[&chain, payload]);
+                count += 1;
+                if count == head.records {
+                    at_head = Some(chain);
+                }
+            })
+            .map_err(|e| format!("{name}: {e}"))?;
+        if head.records > count {
+            return Err(format!(
+                "{name}: {count} records, but its signed head covers {}",
+                head.records
+            ));
+        }
+        if at_head != Some(head.chain) {
+            return Err(format!(
+                "{name}: the chain after record {} is not the one its head signed",
+                head.records
+            ));
+        }
+        out.push(Signed {
+            stream: name,
+            records: count,
+            signed: head.records,
+            measurement: head.measurement,
+        });
+    }
+    Ok(out)
+}
+
 /// `cargo xtask store knowledge <image>` (#144, knowledge.md): every
 /// version in namespace `knowledge`, read with the store's checks and
 /// parsed as `pharos_proto::knowledge` defines it, one line each: `scope/
@@ -925,6 +999,86 @@ mod tests {
         let mut buf = [0u8; 256];
         let n = rec.encode(&mut buf).unwrap();
         buf[..n].to_vec()
+    }
+
+    #[test]
+    fn signed_heads_reject_a_trail_rewritten_from_the_disk() {
+        use pharos_image::head::{Head, anchor_seed};
+        use pharos_proto::audit::{action, client};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/xtask")
+            .join(format!("signed-test-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let image = root.join("store.img");
+        let seed = anchor_seed(&[3; 32]);
+        let public = pharos_image::public_key(&seed);
+        let boot = record(0, client::AUDIT, action::BOOT, b"");
+        // As `audit` writes it: each record, then the signed head after it.
+        let write = |records: &[std::vec::Vec<u8>], heads: &[(u64, [u8; 32])]| {
+            let mut store = Store::format(FileDevice::create(&image, 32).unwrap()).unwrap();
+            for r in records {
+                store.append(b"audit/log/1", r).unwrap();
+            }
+            for &(records, chain) in heads {
+                let h = Head {
+                    boot: 1,
+                    records,
+                    chain,
+                    measurement: [4; 32],
+                    uptime_us: 5,
+                };
+                store.append(b"audit/head/1", &h.sign(&seed)).unwrap();
+            }
+        };
+        let chain_of = |records: &[std::vec::Vec<u8>]| {
+            records
+                .iter()
+                .fold([0u8; 32], |c, r| pharos_store::sha256(&[&c, r]))
+        };
+        let genuine = std::vec![boot.clone(), record(1, 4, action::SUBMIT, b"MARK")];
+        let heads = [(1, chain_of(&genuine[..1])), (2, chain_of(&genuine))];
+        write(&genuine, &heads);
+        let ok = signed_heads(&image, &public).unwrap();
+        assert_eq!(ok.len(), 1);
+        assert_eq!((ok[0].records, ok[0].signed), (2, 2));
+        assert_eq!(ok[0].measurement, [4; 32]);
+        // The same records under another key.
+        let other = pharos_image::public_key(&anchor_seed(&[9; 32]));
+        assert!(
+            signed_heads(&image, &other)
+                .unwrap_err()
+                .contains("does not verify")
+        );
+        // Rewritten consistently: a record changed, the chain recomputed by
+        // the store, the genuine heads kept (no key to sign new ones).
+        let forged = std::vec![boot.clone(), record(1, 4, action::SUBMIT, b"EDIT")];
+        write(&forged, &heads);
+        assert!(audit(&image).is_ok(), "the chain alone cannot tell");
+        let err = signed_heads(&image, &public).unwrap_err();
+        assert!(err.contains("not the one its head signed"), "{err}");
+        // A record removed from the end, or a head removed.
+        write(&genuine[..1], &heads);
+        assert!(
+            signed_heads(&image, &public)
+                .unwrap_err()
+                .contains("covers 2")
+        );
+        write(&genuine, &[]);
+        assert!(
+            signed_heads(&image, &public)
+                .unwrap_err()
+                .contains("no signed head")
+        );
+        // A record added after the last head is reported as unsigned.
+        let longer = std::vec![
+            boot.clone(),
+            record(1, 4, action::SUBMIT, b"MARK"),
+            record(2, 4, action::SUBMIT, b"MORE")
+        ];
+        write(&longer, &heads);
+        let tail = signed_heads(&image, &public).unwrap();
+        assert_eq!((tail[0].records, tail[0].signed), (3, 2));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

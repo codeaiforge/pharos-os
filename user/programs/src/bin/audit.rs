@@ -8,7 +8,12 @@
 //!
 //! Handles: 1 the console, 2 its endpoint (`RECEIVE`), 3 `init`'s report
 //! endpoint, 4 the storage service, badged for namespace `audit`
-//! (read-write). A boot is the next number after the highest `log/<n>`;
+//! (read-write), 5 the `AuditAnchor` key (D-047, #256). After each record
+//! it stores, the service appends a signed head (`pharos_image::head`:
+//! the stream's count and chain head, and the boot measurement, signed
+//! with Ed25519 under the key) to `head/<boot>`; `cargo xtask store audit
+//! --key` checks a trail against the last one. Without the key it signs
+//! nothing, and the verifier rejects the trail. A boot is the next number after the highest `log/<n>`;
 //! its first record is a `boot` event. An entry the store does not take
 //! (full, failing, or not answering within 10 s) answers `UNWRITABLE`, and
 //! the caller refuses the action. A restarted service starts a new stream;
@@ -24,7 +29,8 @@ use pharos_proto::audit::{
 use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::{refusal, status};
 use pharos_user::{
-    Handle, Received, call_timeout, debug_write, endpoint_create, receive, send, try_send, uptime,
+    Handle, Received, call_timeout, debug_write, endpoint_create, key_measurement, key_read,
+    receive, send, try_send, uptime,
 };
 
 pharos_user::entry!(main);
@@ -33,6 +39,7 @@ const CONSOLE: Handle = 1;
 const SERVICE: Handle = 2;
 const REPORT: Handle = 3;
 const STORE: Handle = 4;
+const ANCHOR: Handle = 5;
 const STORE_US: u64 = 10_000_000;
 
 struct Audit {
@@ -44,6 +51,10 @@ struct Audit {
     /// The next sequence number (#216).
     sequence: Sequence,
     head: [u8; 32],
+    /// The `AuditAnchor` key, the Ed25519 seed; `None` without one.
+    seed: Option<[u8; 32]>,
+    /// The boot measurement the kernel took (zeros if it took none).
+    measurement: [u8; 32],
 }
 
 fn decimal(mut v: u64, out: &mut [u8; 20]) -> &[u8] {
@@ -202,6 +213,7 @@ impl Audit {
                 number.copy_from_slice(&out[1..9]);
                 self.sequence.stored(u64::from_le_bytes(number));
                 self.head.copy_from_slice(&out[9..41]);
+                self.sign();
                 Some(rec.sequence)
             }
             // Perhaps taken, its answer lost: counted before the next.
@@ -209,6 +221,34 @@ impl Audit {
                 self.sequence.failed();
                 None
             }
+        }
+    }
+
+    /// Appends the signed head of the stream as it is now to `head/<boot>`
+    /// (D-047). A head the store does not take leaves the records after the
+    /// last one unsigned, which the verifier reports; the record itself is
+    /// stored, so its caller is not refused.
+    fn sign(&self) {
+        let Some(seed) = self.seed else { return };
+        let signed = pharos_image::head::Head {
+            boot: self.boot,
+            records: self.sequence.records(),
+            chain: self.head,
+            measurement: self.measurement,
+            uptime_us: uptime(),
+        }
+        .sign(&seed);
+        let mut path = [0u8; 16];
+        path[..5].copy_from_slice(b"head/");
+        let digits = &self.path[4..self.path_len];
+        path[5..5 + digits.len()].copy_from_slice(digits);
+        let req = StoreRequest::Append {
+            path: &path[..5 + digits.len()],
+            record: &signed,
+        };
+        let mut out = [0u8; 256];
+        if !matches!(self.store(&req, &mut out), Some((StoreStatus::Ok, _))) {
+            say(&[b"audit: signed head not stored"]);
         }
     }
 
@@ -272,7 +312,12 @@ fn main(_: u64) -> u64 {
         boot: 0,
         sequence: Sequence::default(),
         head: [0; 32],
+        seed: key_read(ANCHOR).ok(),
+        measurement: key_measurement(ANCHOR).unwrap_or([0; 32]),
     };
+    if a.seed.is_none() {
+        say(&[b"audit: no signing key; heads are not signed"]);
+    }
     // With no store, the service still runs and answers `UNWRITABLE`
     // until it can open its stream (#214).
     if !a.open() {

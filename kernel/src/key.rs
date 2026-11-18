@@ -96,6 +96,24 @@ mod global {
     pub fn derived(purpose: Purpose) -> Option<[u8; KEY_LEN]> {
         SECRET.lock().as_ref().map(|s| derive(s, purpose))
     }
+
+    static MEASUREMENT: IrqMutex<Option<[u8; 32]>> = IrqMutex::new(None);
+
+    /// Measures the boot (D-047 item 2): SHA-256 of each `(name, contents)`
+    /// in boot order, then [`pharos_crypto::measurement`] over them. Call
+    /// once, before bootloader memory is reclaimed. Returns the digest.
+    pub fn measure<'a>(files: impl Iterator<Item = (&'a [u8], &'a [u8])>) -> [u8; 32] {
+        let digest = pharos_crypto::measurement(
+            files.map(|(name, bytes)| (name, pharos_crypto::sha256(&[bytes]))),
+        );
+        *MEASUREMENT.lock() = Some(digest);
+        digest
+    }
+
+    /// The boot measurement, once [`measure`] ran.
+    pub fn measurement() -> Option<[u8; 32]> {
+        *MEASUREMENT.lock()
+    }
 }
 
 #[cfg(target_os = "none")]

@@ -88,6 +88,7 @@ fn run(t: &mut TestRun) {
         return;
     };
     let report = Endpoint::new();
+    pharos_kernel::testing::init_key();
     let caps = process::init_capabilities(root.clone(), report.clone(), true);
     let init = process::spawn_elf_limited(&root, b"bin/init", 6, caps, process::INIT_MEMORY_LIMIT);
     t.check("init started with the compromised table", init.is_ok());

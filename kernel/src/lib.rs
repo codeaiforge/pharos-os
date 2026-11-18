@@ -94,9 +94,10 @@ macro_rules! limine_requests {
         mod requests {
             use $crate::limine::{
                 BaseRevisionTag, BootloaderInfoResponse, ExecutableAddressResponse,
-                ExecutableCmdlineResponse, FirmwareTypeResponse, HhdmResponse, MemmapResponse,
-                ModuleResponse, REQUESTS_END_MARKER, REQUESTS_START_MARKER, Request, RsdpResponse,
-                bootloader_info_request, executable_address_request, executable_cmdline_request,
+                ExecutableCmdlineResponse, ExecutableFileResponse, FirmwareTypeResponse,
+                HhdmResponse, MemmapResponse, ModuleResponse, REQUESTS_END_MARKER,
+                REQUESTS_START_MARKER, Request, RsdpResponse, bootloader_info_request,
+                executable_address_request, executable_cmdline_request, executable_file_request,
                 firmware_type_request, hhdm_request, memmap_request, module_request, rsdp_request,
             };
 
@@ -132,6 +133,10 @@ macro_rules! limine_requests {
             #[used]
             #[unsafe(link_section = ".limine_requests")]
             pub static CMDLINE: Request<ExecutableCmdlineResponse> = executable_cmdline_request();
+
+            #[used]
+            #[unsafe(link_section = ".limine_requests")]
+            pub static EXECUTABLE_FILE: Request<ExecutableFileResponse> = executable_file_request();
 
             #[used]
             #[unsafe(link_section = ".limine_requests")]

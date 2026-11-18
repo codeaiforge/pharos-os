@@ -236,6 +236,7 @@ impl<'a> Audit<'a> {
                         nth.map(|n| Is::Device(id, n as u8))
                     }
                     Object::Endpoint(e) => self.ep(e).map(Is::Endpoint),
+                    Object::Key(pharos_kernel::key::Purpose::AuditAnchor) => Some(Is::AuditAnchor),
                     _ => None,
                 };
                 let give = is.and_then(|is| {

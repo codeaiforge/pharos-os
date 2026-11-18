@@ -26,6 +26,7 @@ extern crate std;
 #[cfg(test)]
 mod tests;
 
+pub mod head;
 pub mod slots;
 
 use ed25519_compact::{KeyPair, PublicKey, Seed, Signature};

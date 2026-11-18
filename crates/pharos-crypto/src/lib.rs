@@ -44,6 +44,21 @@ pub fn derive(ikm: &[u8], info: &[u8]) -> [u8; 32] {
     hmac(&prk, &[info, &[1]])
 }
 
+/// The boot measurement (D-047, release-integrity.md section 3): SHA-256
+/// over each measured file's name (its length as one byte, then the name)
+/// and SHA-256, in boot order. The kernel computes it at boot; the release
+/// publishes the one its files give.
+pub fn measurement<'a>(files: impl IntoIterator<Item = (&'a [u8], [u8; 32])>) -> [u8; 32] {
+    let mut h = Sha256::new();
+    for (name, hash) in files {
+        let name = &name[..name.len().min(255)];
+        h.update(&[name.len() as u8]);
+        h.update(name);
+        h.update(&hash);
+    }
+    h.finish()
+}
+
 /// Whether `a` and `b` are equal, without stopping at the first difference.
 pub fn equal(a: &[u8; 32], b: &[u8; 32]) -> bool {
     a.iter().zip(b).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0

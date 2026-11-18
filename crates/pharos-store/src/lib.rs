@@ -25,7 +25,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-pub use pharos_crypto::{Sha256, sha256};
+pub use pharos_crypto::{Sha256, derive, hmac, sha256};
 pub use pharos_fs::{Crc32, MAX_PATH, crc32, valid_path};
 
 /// Bytes per block (8 virtio-blk sectors).

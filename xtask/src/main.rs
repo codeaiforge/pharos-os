@@ -159,10 +159,14 @@ COMMANDS:
                             regular files under DIR (storage.md part 8).
     store ls <IMAGE>        Mount a store with the storage service's code, check
                             every object, and list them.
-    store audit <IMAGE>     Check every audit stream (log/<boot>) in a store: each
+    store audit <IMAGE> [--key <FILE>]
+                            Check every audit stream (log/<boot>) in a store: each
                             record's CRC-32 and SHA-256 chain, its format, and
                             consecutive sequence numbers from a boot record; then
-                            print the records (capabilities.md).
+                            print the records (capabilities.md). With --key (the
+                            VM's device key, such as target/xtask/keys/device.key),
+                            also check each stream against its last signed head
+                            and print the audit public key (D-047).
     store knowledge <IMAGE> List every knowledge version in a store: author, the
                             hash prefix `verify` takes, and content (knowledge.md).
     bench-ipc [--runs <N>]  Measure the IPC round trip against D-004's 2 us budget:
@@ -242,6 +246,8 @@ enum Task {
     },
     StoreAudit {
         image: PathBuf,
+        /// A device key file: also check the signed heads (D-047, #256).
+        key: Option<PathBuf>,
     },
     StoreKnowledge {
         image: PathBuf,
@@ -450,8 +456,16 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
             }
             Some("audit") => {
                 let image = args.next().ok_or("store audit needs an image path")?;
+                let key = match args.next().as_deref() {
+                    None => None,
+                    Some("--key") => Some(PathBuf::from(
+                        args.next().ok_or("--key needs a device key file")?,
+                    )),
+                    Some(other) => return Err(format!("unknown store audit option {other}")),
+                };
                 Task::StoreAudit {
                     image: PathBuf::from(image),
+                    key,
                 }
             }
             Some("knowledge") => {
@@ -1747,6 +1761,21 @@ fn boot_audit(store: &Path, boots: usize) -> Result<usize> {
             return Err(format!("{name} has no record that the system was ready"));
         }
     }
+    // Every record is under a signed head, from this host's device key
+    // (D-047, #256), and each boot was measured.
+    let key = store.with_file_name(DEVICE_KEY);
+    let public = sign::anchor_public(&sign::read_device_key(&key)?);
+    for s in store_image::signed_heads(store, &public)? {
+        if s.signed != s.records {
+            return Err(format!(
+                "{}: only {} of {} records signed",
+                s.stream, s.signed, s.records
+            ));
+        }
+        if s.measurement == [0; 32] {
+            return Err(format!("{}: signed with no boot measurement", s.stream));
+        }
+    }
     Ok(streams.len())
 }
 
@@ -2806,6 +2835,23 @@ fn audit_checks(image: &Path, console: &str) -> Result<()> {
         return Err("the typed `audit` command showed nothing".into());
     }
     println!("  the anchor trust showed matches the image");
+    // Every record is under a head signed with the key the test key
+    // derives (D-047, #256), but in log/2 the last: the test fills the
+    // store, and the record that fills it leaves no room for its head.
+    let public = sign::anchor_public(&TEST_DEVICE_KEY);
+    for s in store_image::signed_heads(image, &public)? {
+        let unsigned_ok = u64::from(s.stream == "audit/log/2");
+        if s.records - s.signed > unsigned_ok {
+            return Err(format!(
+                "{}: only {} of {} records signed",
+                s.stream, s.signed, s.records
+            ));
+        }
+        println!(
+            "  {}: {} of {} records under a verified signed head",
+            s.stream, s.signed, s.records
+        );
+    }
     Ok(())
 }
 
@@ -4217,13 +4263,29 @@ fn main() -> ExitCode {
                 Task::FsLs { image } => fs_image::ls(&image),
                 Task::StoreBuild { dir, image, blocks } => store_image::build(&dir, &image, blocks),
                 Task::StoreLs { image } => store_image::ls(&image),
-                Task::StoreAudit { image } => store_image::audit(&image).map(|streams| {
+                Task::StoreAudit { image, key } => store_image::audit(&image).and_then(|streams| {
                     for (name, lines) in streams {
                         println!("{name}: {} records", lines.len());
                         for line in lines {
                             println!("  {line}");
                         }
                     }
+                    let Some(key) = key else {
+                        println!("signatures not checked (no --key)");
+                        return Ok(());
+                    };
+                    let public = sign::anchor_public(&sign::read_device_key(&key)?);
+                    println!("audit key {}", sign::hex(&public));
+                    for s in store_image::signed_heads(&image, &public)? {
+                        println!(
+                            "{}: {} of {} records signed, boot measurement {}",
+                            s.stream,
+                            s.signed,
+                            s.records,
+                            sign::hex(&s.measurement)
+                        );
+                    }
+                    Ok(())
                 }),
                 Task::StoreKnowledge { image } => store_image::knowledge(&image).map(|lines| {
                     for line in lines {
@@ -4428,7 +4490,15 @@ mod tests {
         assert_eq!(
             parse(args(&["store", "audit", "s.img"])),
             Ok(Task::StoreAudit {
-                image: PathBuf::from("s.img")
+                image: PathBuf::from("s.img"),
+                key: None
+            })
+        );
+        assert_eq!(
+            parse(args(&["store", "audit", "s.img", "--key", "d.key"])),
+            Ok(Task::StoreAudit {
+                image: PathBuf::from("s.img"),
+                key: Some(PathBuf::from("d.key"))
             })
         );
         assert_eq!(

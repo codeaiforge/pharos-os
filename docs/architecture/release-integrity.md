@@ -7,7 +7,7 @@
 | Part | Issue |
 | --- | --- |
 | The device secret and the `Key` capability | #255, **implemented** |
-| The signed audit head | #256 |
+| The signed audit head | #256, **implemented** (`trust`'s display of it **planned**, #262) |
 | The slot record's MAC | #257 |
 | Secure Boot | #258 |
 | Signed release artifacts | #259 |
@@ -71,7 +71,7 @@ The secret itself never leaves the kernel. The kernel derives one 32-byte key pe
 
 **What it records:** the list `[(name, sha256)]` in recording order, and a single digest `boot_measurement = SHA-256(name_0 ‖ hash_0 ‖ name_1 ‖ hash_1 ‖ …)`, each name length-prefixed.
 
-**How it is read:** a second operation on any `Key` capability, `key_measurement(handle) -> [u8; 32]`, returns the digest; `trust` shows the digest at start (a new line; `trust` has no `boot` command today).
+**How it is read:** a second operation on any `Key` capability, `key_measurement(handle) -> [u8; 32]` (number 32), returns the digest. The kernel prints its first 8 bytes at boot (`measured: boot …`); `trust` showing it is **planned**. Test kernels are not measured, so their heads carry zeros. **Implemented (#256):** the kernel's file is named `kernel` and each module by its `module_string`, in configuration order.
 
 **Cost:** hashing the 676 MB model is estimated at a few seconds of S1's boot under KVM (to measure in #256). The model is the large module; if this matters, the model's hash is taken from the store's own CRC, or the model is measured lazily on first use. That is a choice to make once it is measured (#256).
 
@@ -81,7 +81,7 @@ The secret itself never leaves the kernel. The kernel derives one 32-byte key pe
 
 ### Head
 
-After each append it commits, `audit` writes `audit/head/<boot>` (one store `Write`, in the audit namespace and its reserve), 160 bytes:
+After each record it stores, `audit` appends the signed head to the stream `audit/head/<boot>`, in the audit namespace and its reserve; the verifier takes the stream's last record. (Implemented as an append, not the `Write` first planned: `Write` needs a shared buffer `audit` does not have, and a 160-byte head fits an inline append, at most 200 bytes.) The head is 160 bytes (`pharos_image::head`):
 
 | Bytes | Field |
 | --- | --- |
@@ -95,20 +95,24 @@ After each append it commits, `audit` writes `audit/head/<boot>` (one store `Wri
 | 96..160 | Ed25519 signature over bytes 0..96, with the seed `key_read(AuditAnchor)` |
 
 - **Signing:** `ed25519-compact` is already linked into user programs through `pharos-image` and signs without `std`.
-- **Cost:** one signature and one extra store write per record. To measure (#256); if a write per record is too slow, the head is written every N records and on each `HEAD` request, and the records past the last signed head are reported as unsigned by the verifier.
-- **`HEAD` answer and `trust`:** `HEAD` returns the signed head, and `trust`'s `audit` prints its signature status (`signed`).
+- **Cost:** one signature and one extra append per record. Measured (#256): the `audit` test kernel, 88 records under TCG, took 14.9 s with and without signing, so every record is signed and the "every N records" fallback (section 8) is not used. The head stream takes about twice the space of the records it covers, from the audit reserve.
+- **A full store:** the record that fills the store can leave no room for its head. It stays stored and the verifier reports it as unsigned. The `audit` test kernel shows this.
+- **Without the key:** `audit` signs nothing and says so on the console; the verifier rejects such a trail.
+- **`trust`:** showing the signature status and the public key is **planned** (#262). `HEAD` answers as before.
 
 ### Public key
 
-No enrollment boot is needed: the host holds the secret, so it can compute the public key. `cargo xtask key public <device.key>` prints it: derive `AuditAnchor`, take Ed25519's public key from that seed. `trust` prints the same key at start, for the user to compare.
+No enrollment boot is needed: the host holds the secret, so it can compute the public key. `cargo xtask store audit <IMAGE> --key <device.key>` prints it (`audit key <hex>`): derive `AuditAnchor`, take Ed25519's public key from that seed. (A separate `key public` command, first planned, is not needed.)
 
 ### Verifier
 
-`cargo xtask store audit <IMAGE> --key <public key or device.key>` additionally checks, for each `log/<n>`:
-- `head/<n>` exists;
-- its signature verifies;
-- its `records` and chain head equal the stream's (a stream longer than its signed head is reported as unsigned past it);
-- optionally, its `boot_measurement` equals the release's (`--release <SHA256SUMS>`).
+`cargo xtask store audit <IMAGE> --key <device.key>` additionally checks, for each `log/<n>` (**implemented**, `store_image::signed_heads`):
+- `head/<n>` exists and its last head's signature verifies;
+- the head names boot `<n>`;
+- the chain value after the records the head covers is the one it signed, so a trail rewritten with its chain recomputed is refused. Records after the last head are reported as unsigned, not refused;
+- it prints the boot measurement. Comparing it with the release's (`--release <SHA256SUMS>`) is **planned** with #259.
+
+The boot check requires every record of both boots to be signed and measured; the `audit` test kernel's host check requires the same, but for the record that fills the store.
 
 Without `--key`, it checks the chain alone and says it did not check signatures.
 

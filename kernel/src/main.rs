@@ -167,6 +167,32 @@ extern "C" fn kernel_main() -> ! {
     // Module records live in kernel memory; Limine's list does not survive
     // the reclaim below.
     let (modules, skipped) = storage::record_modules(requests::MODULES.get(&boot), hhdm.offset);
+    // Measured boot (D-047 item 2): the kernel's file, then each module in
+    // configuration order, before their bootloader copies can go.
+    let Some(kernel_file) = requests::EXECUTABLE_FILE.get(&boot) else {
+        fail(format_args!(
+            "no executable file from the bootloader; the boot cannot be measured"
+        ));
+    };
+    let files = core::iter::once((&b"kernel"[..], kernel_file.file().bytes())).chain(
+        requests::MODULES
+            .get(&boot)
+            .into_iter()
+            .flat_map(|r| r.modules())
+            .map(|f| (f.string().unwrap_or("").as_bytes(), f.bytes())),
+    );
+    let digest = pharos_kernel::key::measure(files);
+    kprintln!(
+        "  measured:   boot {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}…",
+        digest[0],
+        digest[1],
+        digest[2],
+        digest[3],
+        digest[4],
+        digest[5],
+        digest[6],
+        digest[7]
+    );
 
     // Last step that may touch bootloader memory is done. Consuming `boot`
     // ends every borrowed Limine response; using one below does not compile.
