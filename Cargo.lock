@@ -95,6 +95,7 @@ name = "xtask"
 version = "0.4.0"
 dependencies = [
  "libm",
+ "pharos-crypto",
  "pharos-elf",
  "pharos-fs",
  "pharos-image",

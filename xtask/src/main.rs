@@ -22,6 +22,7 @@ mod echo;
 mod fs_image;
 mod matrix;
 mod recovery;
+mod release;
 mod sign;
 mod store_image;
 
@@ -113,6 +114,19 @@ COMMANDS:
                             as 64 hex digits; without --key, the test key in
                             target/xtask/keys/ (made on first use). Prints the
                             public key, for PHAROS_IMAGE_KEY.
+    release                 Build the release (release-integrity.md part 6) in
+                            target/xtask/release/<version>/: the ISO, disk.img,
+                            store.img, and SHA256SUMS with their hashes and the
+                            boot measurement. Two builds give the same SHA256SUMS.
+    release sign <DIR> --release-key <FILE>
+                            Check DIR's files against its SHA256SUMS and sign it
+                            into SHA256SUMS.sig. FILE holds the maintainer's
+                            Ed25519 seed as 64 hex digits; the test key is
+                            refused. Prints the public key, for RELEASE-KEY.
+    release verify <DIR> --key <FILE>
+                            Check SHA256SUMS.sig under the public key in FILE
+                            (such as RELEASE-KEY), then every file; print the
+                            boot measurement.
     run [--bios] [--gdb] [--kernel <ELF>]
                             Build, make the image, and boot it in QEMU with serial
                             output on this terminal. UEFI (OVMF) by default; --bios
@@ -197,6 +211,15 @@ enum Task {
     Build,
     Image {
         kernel: Option<PathBuf>,
+    },
+    Release,
+    ReleaseSign {
+        dir: PathBuf,
+        key: PathBuf,
+    },
+    ReleaseVerify {
+        dir: PathBuf,
+        key: PathBuf,
     },
     ImageSign {
         image: PathBuf,
@@ -302,6 +325,34 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                 }
             }
             return Ok(Task::Image { kernel });
+        }
+        Some("release") => {
+            let task = match args.next().as_deref() {
+                None => return Ok(Task::Release),
+                Some(sub @ ("sign" | "verify")) => {
+                    let flag = if sub == "sign" {
+                        "--release-key"
+                    } else {
+                        "--key"
+                    };
+                    let usage = format!("release {sub} needs <DIR> {flag} <FILE>");
+                    let dir = PathBuf::from(args.next().ok_or(&usage)?);
+                    if args.next().as_deref() != Some(flag) {
+                        return Err(usage);
+                    }
+                    let key = PathBuf::from(args.next().ok_or(&usage)?);
+                    if sub == "sign" {
+                        Task::ReleaseSign { dir, key }
+                    } else {
+                        Task::ReleaseVerify { dir, key }
+                    }
+                }
+                Some(other) => return Err(format!("unknown release command '{other}'")),
+            };
+            if let Some(extra) = args.next() {
+                return Err(format!("unexpected argument '{extra}'"));
+            }
+            return Ok(task);
         }
         Some("run") => {
             let (mut bios, mut gdb, mut kernel) = (false, false, None);
@@ -1064,13 +1115,31 @@ fn image(
     Ok(iso)
 }
 
-/// Builds the main image and prints its path and hash.
-fn main_image(paths: &Paths, kernel: Option<PathBuf>) -> Result<PathBuf> {
+/// Builds the main image and prints its path, hash, and boot measurement,
+/// and returns the path and the measurement.
+fn main_image(paths: &Paths, kernel: Option<PathBuf>) -> Result<(PathBuf, [u8; 32])> {
     let modules = modules_for(paths, &kernel)?;
+    let elf = kernel.clone().unwrap_or_else(|| paths.kernel_elf());
     let iso = image(paths, kernel, &modules, &paths.image_dir(), None)?;
+    let measurement = measure(
+        &fs::read(&elf).map_err(io_err("cannot read", &elf))?,
+        &modules,
+    );
     println!("Image: {}", iso.display());
     println!("SHA-256: {}", sha256(&iso)?);
-    Ok(iso)
+    println!("Boot measurement: {}", sign::hex(&measurement));
+    Ok((iso, measurement))
+}
+
+/// The boot measurement the kernel computes (`key::measure`, D-047 item
+/// 2): the kernel file as `kernel`, then each module by its name, in
+/// configuration order.
+fn measure(kernel: &[u8], modules: &[Module]) -> [u8; 32] {
+    let hashes: Vec<(&[u8], [u8; 32])> = std::iter::once((&b"kernel"[..], kernel))
+        .chain(modules.iter().map(|(n, b)| (n.as_bytes(), &b[..])))
+        .map(|(n, b)| (n, pharos_store::sha256(&[b])))
+        .collect();
+    pharos_crypto::measurement(hashes)
 }
 
 /// QEMU arguments for booting `iso`. `serial` is a QEMU character device
@@ -1568,7 +1637,7 @@ fn test(paths: &Paths, timeout: Duration, part: Option<(usize, usize)>, repeat: 
 
 fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
     build(paths)?;
-    let iso = main_image(paths, None)?;
+    let (iso, measurement) = main_image(paths, None)?;
     let logs = paths.logs_dir();
     fs::create_dir_all(&logs).map_err(io_err("cannot create", &logs))?;
 
@@ -1602,7 +1671,7 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
     }
     // Both boots wrote the same store: one audit stream each (#108).
     let store = iso.with_file_name(STORE_IMAGE);
-    match boot_audit(&store, firmwares.len()) {
+    match boot_audit(&store, firmwares.len(), &measurement) {
         Ok(n) => {
             println!(
                 "boot audit trail: {n} streams, each with a start record for every service and the ready state"
@@ -1741,7 +1810,7 @@ const BOOT_SERVICES: [&str; 8] = [
 /// recorded a start for each boot service in each, including those started
 /// before the audit service was ready (#108), and that the system was
 /// ready with every one of them (#151). Returns the stream count.
-fn boot_audit(store: &Path, boots: usize) -> Result<usize> {
+fn boot_audit(store: &Path, boots: usize, measurement: &[u8; 32]) -> Result<usize> {
     let streams = store_image::audit(store)?;
     if streams.len() != boots {
         return Err(format!("expected {boots} streams, got {}", streams.len()));
@@ -1772,8 +1841,15 @@ fn boot_audit(store: &Path, boots: usize) -> Result<usize> {
                 s.stream, s.signed, s.records
             ));
         }
-        if s.measurement == [0; 32] {
-            return Err(format!("{}: signed with no boot measurement", s.stream));
+        // The kernel measured what the host built: what a release's
+        // `SHA256SUMS` publishes (#259).
+        if s.measurement != *measurement {
+            return Err(format!(
+                "{}: signed boot measurement {}, but the image's is {}",
+                s.stream,
+                sign::hex(&s.measurement),
+                sign::hex(measurement)
+            ));
         }
     }
     Ok(streams.len())
@@ -4236,6 +4312,9 @@ fn main() -> ExitCode {
                 }
                 Task::Build => build(&paths),
                 Task::Image { kernel } => main_image(&paths, kernel).map(|_| ()),
+                Task::Release => release::build(&paths).map(|_| ()),
+                Task::ReleaseSign { dir, key } => release::sign(&paths, &dir, &key),
+                Task::ReleaseVerify { dir, key } => release::verify(&dir, &key).map(|_| ()),
                 Task::ImageSign {
                     image,
                     out,
@@ -4332,6 +4411,43 @@ mod tests {
         assert!(sign(&["image", "sign", "a", "b"]).is_err());
         assert!(sign(&["image", "sign", "a", "b", "--version", "-1"]).is_err());
         assert_eq!(sign(&["image"]), Ok(Task::Image { kernel: None }));
+    }
+
+    #[test]
+    fn release_parses() {
+        let p = |list: &[&str]| parse(args(list));
+        assert_eq!(p(&["release"]), Ok(Task::Release));
+        assert_eq!(
+            p(&["release", "sign", "d", "--release-key", "k"]),
+            Ok(Task::ReleaseSign {
+                dir: "d".into(),
+                key: "k".into()
+            })
+        );
+        assert_eq!(
+            p(&["release", "verify", "d", "--key", "k"]),
+            Ok(Task::ReleaseVerify {
+                dir: "d".into(),
+                key: "k".into()
+            })
+        );
+        assert!(p(&["release", "sign", "d", "--key", "k"]).is_err());
+        assert!(p(&["release", "verify", "d"]).is_err());
+        assert!(p(&["release", "1.0"]).is_err());
+        assert!(p(&["release", "verify", "d", "--key", "k", "x"]).is_err());
+    }
+
+    #[test]
+    fn the_measurement_names_the_kernel_then_each_module_in_order() {
+        let modules = [("root", vec![1]), ("odd", vec![])];
+        let want = pharos_crypto::measurement([
+            (&b"kernel"[..], pharos_store::sha256(&[b"k"])),
+            (&b"root"[..], pharos_store::sha256(&[&[1]])),
+            (&b"odd"[..], pharos_store::sha256(&[b""])),
+        ]);
+        assert_eq!(measure(b"k", &modules), want);
+        let swapped = [modules[1].clone(), modules[0].clone()];
+        assert_ne!(measure(b"k", &swapped), want);
     }
 
     #[test]

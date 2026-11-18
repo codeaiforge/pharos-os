@@ -267,7 +267,7 @@ The zones as implemented, with the trusted base reviewed in M5.4 (`init`, the st
 | Kernel memory-safety bug | Safe Rust by default; reviewed `unsafe`; fuzzing of syscall interfaces | M2.2 onward |
 | Malicious DMA from devices | IOMMU use where available; limited device set (M2.9 limits the device set; M4.4 turns bus mastering off for a device no driver holds; since M5.2, #242–#244, every granted device has its own VT-d domain on the KVM reference platform, and a device no DMAR scope covers is not granted) | M5.2 (D-044, implemented for QEMU's `intel-iommu`), M8.1 (bare metal) |
 | Tampered boot chain | Reproducible builds; signed root images (D-028); Secure Boot evaluated in M4.3 (#166, [boot-evaluation.md](../architecture/boot-evaluation.md#secure-boot-evaluation-166-d-028): the chain holds only with path hashes, an enrolled config hash, and a signed Limine), enforced in M5.5 | M4.3, M5.5 |
-| Compromised dependency or artifact | Minimal dependencies; license and audit review; reproducible builds | ongoing, M5.5 |
+| Compromised dependency or artifact | Minimal dependencies; license and audit review; reproducible builds. **Implemented (#259):** a release's `SHA256SUMS` (its files, `BUILDINFO`, and the boot measurement) is signed with the maintainer's offline Ed25519 key and checked by `cargo xtask release verify`; CI builds the release twice and compares `SHA256SUMS`. **Limit:** an identical build shows only that the tools named in `BUILDINFO` gave these bytes, not that those tools are sound | ongoing, M5.5 |
 
 ### Known limitations of the plan
 

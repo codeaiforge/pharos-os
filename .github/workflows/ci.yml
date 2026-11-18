@@ -189,13 +189,15 @@ jobs:
       - name: Boot check and test kernels
         run: cargo xtask test --shard ${{ matrix.shard }}/4
 
-      # D-009: two image builds must be byte-identical.
-      - name: Reproducible ISO
+      # D-009, D-047 item 5 (#259): two release builds give the same
+      # SHA256SUMS (the ISO, disk.img, store.img, and the boot measurement).
+      # The log keeps it, to compare with the maintainer's local build.
+      - name: Reproducible release
         if: matrix.shard == 1
         run: |
-          first=$(cargo xtask image | sed -n 's/^SHA-256: //p')
-          rm -rf target/xtask/image
-          second=$(cargo xtask image | sed -n 's/^SHA-256: //p')
-          echo "first:  $first"
-          echo "second: $second"
-          test -n "$first" && test "$first" = "$second"
+          cargo xtask release
+          cp target/xtask/release/*/SHA256SUMS "$RUNNER_TEMP/first"
+          rm -rf target/xtask/image target/xtask/release
+          cargo xtask release
+          cat target/xtask/release/*/SHA256SUMS
+          diff "$RUNNER_TEMP/first" target/xtask/release/*/SHA256SUMS

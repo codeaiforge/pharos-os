@@ -144,3 +144,17 @@ pub fn sign(image: &[u8], version: u64, seed: &[u8; 32]) -> [u8; HEADER_LEN] {
 pub fn public_key(seed: &[u8; 32]) -> [u8; 32] {
     *KeyPair::from_seed(Seed::new(*seed)).pk
 }
+
+/// An Ed25519 signature of `message` with the key from `seed` (host side:
+/// a release's `SHA256SUMS`, D-047 item 5).
+pub fn sign_message(message: &[u8], seed: &[u8; 32]) -> [u8; 64] {
+    *KeyPair::from_seed(Seed::new(*seed)).sk.sign(message, None)
+}
+
+/// Whether `signature` signs `message` under `public`.
+pub fn verify_message(message: &[u8], signature: &[u8; 64], public: &[u8; 32]) -> bool {
+    let Ok(key) = PublicKey::from_slice(public) else {
+        return false;
+    };
+    key.verify(message, &Signature::new(*signature)).is_ok()
+}

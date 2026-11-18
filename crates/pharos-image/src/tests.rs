@@ -118,6 +118,19 @@ fn mutations_never_panic() {
     }
 }
 
+#[test]
+fn a_message_signature_holds_only_for_its_message_and_key() {
+    let seed = [7; 32];
+    let public = public_key(&seed);
+    let sig = sign_message(b"sums", &seed);
+    assert!(verify_message(b"sums", &sig, &public));
+    assert!(!verify_message(b"sumz", &sig, &public));
+    assert!(!verify_message(b"sums", &sig, &public_key(&[8; 32])));
+    let mut bad = sig;
+    bad[0] ^= 1;
+    assert!(!verify_message(b"sums", &bad, &public));
+}
+
 mod head {
     use crate::head::{Error, Head, LEN, anchor_seed};
 

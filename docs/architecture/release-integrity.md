@@ -2,7 +2,7 @@
 
 ## Status
 
-**Design approved** by the maintainer on 2026-11-18 (#254, M5.5), with the recommendation on each open question (section 8). It implements [D-047](../project/decision-log.md#d-047-release-integrity-the-device-secret-the-audit-anchor-secure-boot-and-signed-artifacts) (accepted 2026-11-18). Nothing here is implemented yet; each part is **planned** until its issue lands:
+**Design approved** by the maintainer on 2026-11-18 (#254, M5.5), with the recommendation on each open question (section 8). It implements [D-047](../project/decision-log.md#d-047-release-integrity-the-device-secret-the-audit-anchor-secure-boot-and-signed-artifacts) (accepted 2026-11-18). Each part is **planned** until its issue lands:
 
 | Part | Issue |
 | --- | --- |
@@ -10,7 +10,7 @@
 | The signed audit head | #256, **implemented** (`trust`'s display of it **planned**, #262) |
 | The slot record's MAC | #257, **implemented** |
 | Secure Boot | #258 |
-| Signed release artifacts | #259 |
+| Signed release artifacts | #259, **implemented** (signing Limine and the variable store **planned** with #258) |
 | Export and rotation of the audit trail | #217 |
 
 ## 1. What it protects, and from whom
@@ -110,7 +110,7 @@ No enrollment boot is needed: the host holds the secret, so it can compute the p
 - `head/<n>` exists and its last head's signature verifies;
 - the head names boot `<n>`;
 - the chain value after the records the head covers is the one it signed, so a trail rewritten with its chain recomputed is refused. Records after the last head are reported as unsigned, not refused;
-- it prints the boot measurement. Comparing it with the release's (`--release <SHA256SUMS>`) is **planned** with #259.
+- it prints the boot measurement, to compare with the `boot-measurement` line of the release's `SHA256SUMS` (section 6). Comparing them inside the verifier (`--release <SHA256SUMS>`) is **planned**.
 
 The boot check requires every record of both boots to be signed and measured; the `audit` test kernel's host check requires the same, but for the record that fills the store.
 
@@ -137,14 +137,19 @@ The chain the M4.3 evaluation showed holds ([boot-evaluation.md](boot-evaluation
 
 ## 6. Signed release artifacts (#259)
 
-- **`cargo xtask release <version>`** builds `pharos-<version>.iso` (Secure Boot hashes in, Limine not yet signed), `OVMF_VARS_4M.pharos.fd`, and `SHA256SUMS`. `SHA256SUMS` lists each file and adds a `boot-measurement <hex>` line (section 3).
-- **`cargo xtask release sign --db-key <file> --release-key <file>`**, on the maintainer's machine:
-  1. signs Limine;
-  2. rebuilds the ISO;
-  3. rewrites `SHA256SUMS`;
-  4. signs it with the release key (Ed25519, through `pharos-image`'s signing), giving `SHA256SUMS.sig`.
-- **Verifying:** `cargo xtask release verify <dir> --key <release public key>`. The release public key is published in the repository (`RELEASE-KEY`) and in the user guide.
-- **Two independent builds:** CI builds the unsigned release; the maintainer builds it locally; both `SHA256SUMS` (before signing) must be equal, and both are recorded at the gate. CI's reproducibility check today compares the ISO only; it is extended to `disk.img`, `store.img`, and the variable store.
+**Implemented** (`xtask/src/release.rs`), but the Secure Boot parts, which come with #258.
+
+- **`cargo xtask release`** builds the main image and puts the release in `target/xtask/release/<version>/`, the version being the workspace's (`Cargo.toml`), not an argument as first planned, so the two cannot disagree:
+  - `pharos-<version>.iso`, `disk.img`, `store.img`;
+  - `BUILDINFO`: the source commit (with ` (modified)` when tracked files differ from it), `rustc -V`, `cargo -V`, the `xorriso` version, the Limine version, and `SOURCE_DATE_EPOCH`;
+  - `SHA256SUMS`: each file's hash in `sha256sum` format, sorted by name, and a `boot-measurement <hex>` line (section 3), the digest the kernel signs into every audit head. The boot check requires the heads of both boots to carry exactly the measurement the host computed for the image.
+  - The device key next to the image is never copied: it is the build host's secret.
+  - **Planned with #258:** the Secure Boot hashes in the ISO and `OVMF_VARS_4M.pharos.fd`.
+- **`cargo xtask release sign <DIR> --release-key <FILE>`**, on the maintainer's machine: checks every file against `SHA256SUMS`, then signs `SHA256SUMS` with the release key (Ed25519, `pharos_image::sign_message`), giving `SHA256SUMS.sig` (128 hex digits). It refuses the test key (`target/xtask/keys/test.key`) and a build from a modified tree. It prints the public key. Signing Limine with the db key and rebuilding the ISO first (`--db-key`) are **planned** with #258.
+- **The release key:** an Ed25519 seed as 64 hex digits, made and kept offline by the maintainer, for example `(umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > release.key)`. Its public key goes into `RELEASE-KEY` at the repository root when the first release is signed (#260).
+- **Verifying:** `cargo xtask release verify <DIR> --key RELEASE-KEY` checks the signature, then every file, and prints the boot measurement. Without `xtask`, `sha256sum -c SHA256SUMS` checks the files (it warns that the measurement line is not a file); it does not check the signature.
+- **Two independent builds:** CI's `qemu` job (share 1) builds the release twice and compares `SHA256SUMS`, which covers the ISO, `disk.img`, `store.img`, `BUILDINFO`, and the measurement; the log keeps it. The maintainer builds it locally from the same commit with the same compiler, `cargo +<version> xtask release` with the version from CI's `BUILDINFO`. The two `SHA256SUMS` must be equal, and both are recorded at the gate (#261). `rust-toolchain.toml` keeps tracking `stable` for development; `BUILDINFO` names the compiler a release was built with, so a second build can use the same one.
+- **Tested:** two local builds on 2026-11-18 (rustc 1.99.1, xorriso 1.5.6, Limine 12.9.4) gave the same `SHA256SUMS`. The host tests cover a signing and verifying round trip; a changed file, `SHA256SUMS`, or key refused; the test key and a modified tree refused; the line rules; and the measurement's order.
 
 ## 7. Tests
 

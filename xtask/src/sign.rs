@@ -54,7 +54,7 @@ pub fn hex(bytes: &[u8]) -> String {
     })
 }
 
-fn parse_seed(text: &str) -> Option<[u8; 32]> {
+pub fn parse_seed(text: &str) -> Option<[u8; 32]> {
     let text = text.trim();
     if text.len() != 64 || !text.is_ascii() {
         return None;
@@ -66,7 +66,7 @@ fn parse_seed(text: &str) -> Option<[u8; 32]> {
     Some(seed)
 }
 
-fn read_seed(path: &Path) -> Result<[u8; 32]> {
+pub fn read_seed(path: &Path) -> Result<[u8; 32]> {
     let text =
         fs::read_to_string(path).map_err(|e| format!("cannot read key {}: {e}", path.display()))?;
     parse_seed(&text).ok_or(format!(
