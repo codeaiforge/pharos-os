@@ -2923,6 +2923,16 @@ fn audit_checks(image: &Path, console: &str) -> Result<()> {
         return Err("the typed `audit` command showed nothing".into());
     }
     println!("  the anchor trust showed matches the image");
+    // D-048 (#217): both warnings reached the trusted console.
+    for level in pharos_proto::audit::WARN_AT {
+        let want = format!(
+            "audit: the trail is {level}% full; export it on the host (cargo xtask store export), then audit rotate <code>"
+        );
+        if !console.lines().any(|l| l.trim() == want) {
+            return Err(format!("trust did not show `{want}`"));
+        }
+    }
+    println!("  trust showed the 80% and 95% warnings");
     // Every record is under a head signed with the key the test key
     // derives (D-047, #256), but in log/2 the last: the test fills the
     // store, and the record that fills it leaves no room for its head.

@@ -132,6 +132,9 @@ pub enum Event {
     /// It answered no health check for `numbers[0]` seconds (M4.5):
     /// stopped, and then handled by its restart policy.
     Unresponsive = 15,
+    /// The audit trail crossed a warning level (D-048, #217, no name):
+    /// `numbers[0]` the level in percent, from the audit service's report.
+    AuditFull = 16,
 }
 
 /// What [`Event::ByUser`] reports.
@@ -224,6 +227,7 @@ impl Event {
             DeviceAdded,
             DeviceRemoved,
             Unresponsive,
+            AuditFull,
         ]
         .get(usize::from(c))
         .copied()
@@ -233,7 +237,12 @@ impl Event {
     pub fn system(self) -> bool {
         matches!(
             self,
-            Self::Ready | Self::NotReady | Self::Image | Self::DeviceAdded | Self::DeviceRemoved
+            Self::Ready
+                | Self::NotReady
+                | Self::Image
+                | Self::DeviceAdded
+                | Self::DeviceRemoved
+                | Self::AuditFull
         )
     }
 }
@@ -1071,6 +1080,7 @@ mod tests {
             ev(Event::ByUser, b"knowledge", two),
             ev(Event::DeviceAdded, b"", two),
             ev(Event::DeviceRemoved, b"", Names::default()),
+            ev(Event::AuditFull, b"", Names::default()),
         ] {
             let mut buf = [0u8; 256];
             let n = encode(&req, &mut buf).unwrap();

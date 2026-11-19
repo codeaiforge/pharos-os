@@ -1339,6 +1339,14 @@ impl Init {
                             self.manage(action, &name, cap)
                         }
                     }
+                } else if let Some(level) = self
+                    .table
+                    .get(i)
+                    .filter(|s| s.path == b"bin/audit")
+                    .and_then(|_| audit::parse_full(&buf[..len.min(buf.len())]))
+                {
+                    // The trail crossed a warning level (D-048, #217).
+                    self.tell_trust(Event::AuditFull, b"", [level.into(), 0, 0], &[]);
                 } else if let (Some(service), Some(State::Running(p))) =
                     (self.table.get(i), self.state.get(i).copied())
                 {

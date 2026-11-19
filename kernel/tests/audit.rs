@@ -8,7 +8,9 @@
 //! down (it must open no stream, #214), then the store, and runs
 //! `auditclient` in mode 1: a new stream, opened once the store answers,
 //! then the store fills and `APPEND` answers `UNWRITABLE` while `HEAD`
-//! still answers. The runner types `audit` on the trusted console, and
+//! still answers; as it fills, the service reports 80% and 95% (D-048,
+//! #217), which the client takes as `init` would and passes to `trust`.
+//! The runner types `audit` on the trusted console, and
 //! afterwards checks the image with `cargo xtask store audit`'s code and
 //! that the chain head `trust` showed at start is the image's. Runs under
 //! UEFI (D-009).
@@ -57,16 +59,23 @@ fn start(
     id.filter(|_| ready)
 }
 
-/// Runs `auditclient` in `mode` until it says `done`; its passed steps.
-fn client(programs: &fs::Fs, audit: &Arc<Endpoint>, mode: u64) -> (Option<TaskId>, Vec<Vec<u8>>) {
+/// Runs `auditclient` in `mode`, with `more` after its usual handles,
+/// until it says `done`; its passed steps.
+fn client(
+    programs: &fs::Fs,
+    audit: &Arc<Endpoint>,
+    mode: u64,
+    more: Vec<Arc<Capability>>,
+) -> (Option<TaskId>, Vec<Vec<u8>>) {
     let steps = Endpoint::new();
     let send = Capability::new(Object::Endpoint(audit.clone()), SEND);
-    let caps = vec![
+    let mut caps = vec![
         Capability::new(Object::DebugConsole, WRITE),
         send.derive_badged(SEND, 4),
         send.derive_badged(SEND, 5),
         Capability::new(Object::Endpoint(steps.clone()), SEND),
     ];
+    caps.extend(more);
     let id = process::spawn_elf_limited(programs, b"bin/auditclient", mode, caps, 64).ok();
     let mut passed = Vec::new();
     let start = time::uptime();
@@ -213,7 +222,7 @@ fn run(t: &mut TestRun) {
         let _ = ipc::try_send(&reply, answer);
     }
 
-    let (id, passed) = client(&programs, &audit, 0);
+    let (id, passed) = client(&programs, &audit, 0, Vec::new());
     for step in [
         "HEAD: boot 1, its boot record only",
         "entries from two clients get consecutive sequence numbers",
@@ -239,7 +248,12 @@ fn run(t: &mut TestRun) {
         process::kill(store_id, KILLED),
     );
     sched::sleep(Duration::from_millis(200));
-    if start(t, &programs, b"bin/audit", audit_caps, &report, 0).is_none() {
+    // D-048 (#217): the restarted service reports to `warn`, where the
+    // client takes its warnings as `init` does and tells `trust`.
+    let warn = Endpoint::new();
+    let mut audit_caps = audit_caps;
+    audit_caps[2] = ep(&warn, SEND);
+    if start(t, &programs, b"bin/audit", audit_caps, &warn, 0).is_none() {
         return;
     }
     t.check(
@@ -249,13 +263,15 @@ fn run(t: &mut TestRun) {
     if start(t, &programs, b"bin/store", store_caps, &report, 10_240).is_none() {
         return;
     }
-    let (id, passed) = client(&programs, &audit, 1);
+    let as_init = vec![ep(&warn, RECEIVE), ep(&trust, SEND)];
+    let (id, passed) = client(&programs, &audit, 1, as_init);
     for step in [
         "after the restart: boot 2, a new stream",
         "the store fills: APPEND answers UNWRITABLE",
         "and keeps answering it",
         "HEAD still answers, counting only stored records",
         "HEAD: signed up to the record that filled the store",
+        "the service reported 80%, then 95%, to init",
     ] {
         let want = alloc::format!("ok {step}");
         t.check(step, passed.iter().any(|l| l == want.as_bytes()));
@@ -267,6 +283,10 @@ fn run(t: &mut TestRun) {
     t.check(
         "each start said its boot and stream",
         said("audit: boot 1, log/1") && said("audit: boot 2, log/2"),
+    );
+    t.check(
+        "the service logged each level it crossed",
+        said("audit: the trail is 80% full") && said("audit: the trail is 95% full"),
     );
     // Let the runner read the last answer before QEMU exits.
     sched::sleep(Duration::from_millis(500));

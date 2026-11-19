@@ -1569,3 +1569,40 @@ On the reference platform (D-044) the host's VM configuration is already in the 
 - `sbsign` and OVMF's Secure Boot firmware are on the development host.
 - `swtpm` is not installed there (a package install, the maintainer's action).
 - CI's reproducibility check compares two image builds.
+
+### D-048: Audit-trail warnings, export, and rotation
+
+- **Status:** Accepted
+- **Needed by:** M5.5
+- **Date accepted:** 2026-11-19 (issue #217)
+
+**Context.** D-046 item 4 plans two things for M5.5: a warning on the trusted console as the audit trail fills, and, on the user's command, export of the trail with its signed head, then a new stream. Two facts shape the design:
+- There is no channel from the VM to the host other than the disks and the network. The host already reads the trail from `store.img` with `cargo xtask store audit`.
+- The audit service starts before `trust`, so it cannot hold `trust`'s endpoint. It can report to `init`, which already tells `trust` about service events.
+
+**Options.**
+1. *How an export reaches the host, and how the service knows it happened:*
+   - (a) the host reads the store image with the VM stopped. `cargo xtask store export` checks every stream against its signed head, writes them into a directory, and prints a code (SHA-256 over each archived stream's boot, record count, and chain head). The user types `audit rotate <code>` on the trusted console. The service computes the same code from the store and frees those streams only if it matches;
+   - (b) `audit export` copies the trail into a new namespace for the host to collect. That doubles the trail's disk use at the moment the store is full;
+   - (c) the trail is streamed over the network to a collector on the host. That needs a collector, a destination policy, and network trust.
+2. *How the warning reaches the trusted console:*
+   - (a) a store request, `SPACE`, answered only for the audit namespace. The service reports each level it crosses to `init`, which passes it to `trust` as a `SERVICE` event built from fixed words;
+   - (b) only in `HEAD`, shown at start and on `audit`.
+
+**Evaluation criteria.** No record is dropped without the user's decision. No new device or namespace, and least new trusted code. The user is warned while the system runs. A verifier outside Pharos checks the archive and its link to the new stream.
+
+**Decision (the maintainer chose the recommendation, 2026-11-19).**
+1. **The host exports, and the user confirms with its code (1a).**
+   - Only finished boots are archived: every stream before the current one. The current stream is never freed.
+   - A rotation with no code, or one that does not match, is refused. The service never shows the code it expects, so the only way to get it is to export.
+   - Before freeing anything, the service stores a `rotate` record that carries the code. `cargo xtask store audit --archive <export>` checks that this record matches the export.
+2. **The warning goes through `init` (2a)** at 80% and 95% of the space the trail may use. That space is its own blocks and objects plus what is still free, less the blocks the next commit's index needs, so 100% means the next append does not fit. Each level is reported once per boot.
+   - The service offers the report with `try_send`, never a blocking `send`, because `init` calls the audit service too. It offers it again every 100 ms until `init` takes it.
+   - `trust` prints `audit: the trail is <n>% full; export it on the host (cargo xtask store export), then audit rotate <code>`.
+
+**Consequences.**
+- Exporting needs the VM stopped, since the host reads `store.img`, and a reboot before rotating, since the current stream is never archived.
+- Other namespaces learn nothing about the store's use from `SPACE`; it is refused to them.
+- The archive's integrity rests on the signed heads (D-047), which the export checks before it writes anything.
+
+**Evidence.** The issue's options (#217). The store already keeps each stream's chain head (`Info::head`); `STAT` gains it on the wire. The kernel's endpoints are synchronous (`ipc::send` blocks until a receiver takes the message), which rules out a blocking report from the audit service to `init`.

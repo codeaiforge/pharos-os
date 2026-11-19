@@ -301,6 +301,13 @@ impl Service {
                 let n = full(p, &mut path)?;
                 self.store.delete(&path[..n])
             }
+            // How full the trail is (D-048, #217); other namespaces learn
+            // nothing about the store's use.
+            Request::Space if audit => {
+                out[1] = self.store.fill(b"audit/");
+                return Ok(2);
+            }
+            Request::Space => return Err(Status::NoAccess),
             Request::Buffer => {
                 let size = buffer.map_or(0, |b| b.len() as u64);
                 out[1..9].copy_from_slice(&size.to_le_bytes());

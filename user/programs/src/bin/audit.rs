@@ -18,19 +18,26 @@
 //! (full, failing, or not answering within 10 s) answers `UNWRITABLE`, and
 //! the caller refuses the action. A restarted service starts a new stream;
 //! until the store says which (#214), every entry is `UNWRITABLE`.
+//!
+//! After each record it asks the store how full the trail is (`SPACE`,
+//! D-048, #217) and, once per boot for each level of `WARN_AT` it crosses,
+//! reports `full <level>` to `init`, which tells `trust`. The report is
+//! offered with `try_send`, never a blocking send, since `init` calls this
+//! service too; it is offered again every 100 ms until `init` takes it.
 
 #![no_std]
 #![no_main]
 
 use pharos_programs::sequence::Sequence;
 use pharos_proto::audit::{
-    self, Entry, Head, Kind, MAX_RECORD, Record, Request, UNWRITABLE, action, client, outcome,
+    self, Entry, Head, Kind, MAX_RECORD, Record, Request, UNWRITABLE, WARN_AT, action, client,
+    full_report, outcome,
 };
 use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::{refusal, status};
 use pharos_user::{
     Handle, Received, call_timeout, debug_write, endpoint_create, key_measurement, key_read,
-    receive, send, try_send, uptime,
+    receive, receive_timeout, send, try_send, uptime,
 };
 
 pharos_user::entry!(main);
@@ -59,6 +66,10 @@ struct Audit {
     public: [u8; 32],
     /// Records under the last signed head the store took.
     signed: u64,
+    /// The highest `WARN_AT` level the trail has crossed, and the highest
+    /// `init` has taken (D-048).
+    warn_due: u8,
+    warn_sent: u8,
 }
 
 fn decimal(mut v: u64, out: &mut [u8; 20]) -> &[u8] {
@@ -218,6 +229,7 @@ impl Audit {
                 self.sequence.stored(u64::from_le_bytes(number));
                 self.head.copy_from_slice(&out[9..41]);
                 self.sign();
+                self.check_space();
                 Some(rec.sequence)
             }
             // Perhaps taken, its answer lost: counted before the next.
@@ -256,6 +268,39 @@ impl Audit {
         } else {
             say(&[b"audit: signed head not stored"]);
         }
+    }
+
+    /// Asks the store how full the trail is, and notes each `WARN_AT`
+    /// level crossed (D-048, #217).
+    fn check_space(&mut self) {
+        let mut out = [0u8; 256];
+        if let Some((StoreStatus::Ok, 2)) = self.store(&StoreRequest::Space, &mut out) {
+            for level in WARN_AT {
+                if out[1] >= level && self.warn_due < level {
+                    self.warn_due = level;
+                    let mut d = [0u8; 20];
+                    say(&[
+                        b"audit: the trail is ",
+                        decimal(level.into(), &mut d),
+                        b"% full",
+                    ]);
+                }
+            }
+        }
+    }
+
+    /// Offers `init` each crossed level it has not taken, lowest first;
+    /// true while one is still waiting.
+    fn report_space(&mut self) -> bool {
+        for level in WARN_AT {
+            if level <= self.warn_due && level > self.warn_sent {
+                if try_send(REPORT, &full_report(level)).is_err() {
+                    return true;
+                }
+                self.warn_sent = level;
+            }
+        }
+        false
     }
 
     /// One `call` from `badge`; writes the reply into `out`.
@@ -328,6 +373,8 @@ fn main(_: u64) -> u64 {
         measurement: key_measurement(ANCHOR).unwrap_or([0; 32]),
         public: [0; 32],
         signed: 0,
+        warn_due: 0,
+        warn_sent: 0,
     };
     if let Some(seed) = &a.seed {
         a.public = pharos_image::public_key(seed);
@@ -345,7 +392,12 @@ fn main(_: u64) -> u64 {
     }
     let mut msg = [0u8; 256];
     loop {
-        if let Ok(Received::Message { len, cap, badge }) = receive(SERVICE, &mut msg) {
+        let got = if a.report_space() {
+            receive_timeout(SERVICE, &mut msg, 100_000)
+        } else {
+            receive(SERVICE, &mut msg)
+        };
+        if let Ok(Received::Message { len, cap, badge }) = got {
             let mut out = [0u8; 256];
             let n = a.handle(&msg[..len.min(256)], badge, &mut out);
             if cap != 0 {

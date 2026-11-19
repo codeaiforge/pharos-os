@@ -169,7 +169,14 @@ fn run(t: &mut TestRun) {
         ],
     );
     let other = client(&programs, &root, 3, 64, &[2]);
-    passed(t, &other, &["another namespace sees nothing of the first"]);
+    passed(
+        t,
+        &other,
+        &[
+            "another namespace sees nothing of the first",
+            "SPACE is refused outside the audit namespace",
+        ],
+    );
     let strangers = client(&programs, &root, 4, 64, &[0, 99]);
     passed(
         t,

@@ -6,7 +6,8 @@
 //! - 1: namespace 1, read-write: files through a shared buffer, streams,
 //!   listing, deletion, bad paths and ranges, and `NO_SPACE`.
 //! - 2: namespace 1, read-only: reads what 1 left, every write refused.
-//! - 3: namespace 2: sees nothing of namespace 1.
+//! - 3: namespace 2: sees nothing of namespace 1, and is refused `SPACE`
+//!   (the audit namespace's only, #217).
 //! - 4: badge 0 (handle 2), `init`'s own, sees only namespace `system`
 //!   (#163); an unknown namespace (handle 3) is refused.
 //! - 5: namespace 3, read-only, for the `large_file` test kernel (#78):
@@ -320,6 +321,11 @@ fn other(f: &mut u64) {
         c.status(Request::Stat { path: b"keep.txt" }) == Status::NotFound
             && s == Status::Ok
             && r[1] == 0,
+    );
+    report(
+        f,
+        "SPACE is refused outside the audit namespace",
+        c.status(Request::Space) == Status::NoAccess,
     );
 }
 

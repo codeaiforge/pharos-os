@@ -8,15 +8,21 @@
 //! and its outcome, malformed entries are refused. Argument 1, after the
 //! kernel killed and restarted the service: a new stream; then the tiny
 //! store fills and `APPEND` answers `UNWRITABLE`, while `HEAD` still works.
+//! In that mode the client also stands in for `init` (D-048, #217): handle
+//! 5 receives the service's reports, and it passes each `full` report to
+//! `trust` on handle 6 as the `SERVICE` event `init` sends.
 
 #![no_std]
 #![no_main]
 
 use pharos_proto::audit::{
-    self, Entry, Head, Kind, Request, UNWRITABLE, VERSION, action, op, outcome,
+    self, Entry, Head, Kind, Request, UNWRITABLE, VERSION, WARN_AT, action, op, outcome,
 };
 use pharos_proto::status;
-use pharos_user::{Handle, Received, call_timeout, debug_write, endpoint_create, send};
+use pharos_proto::trust::{self, Event, Names};
+use pharos_user::{
+    Handle, Received, call_timeout, debug_write, endpoint_create, receive_timeout, send, uptime,
+};
 
 pharos_user::entry!(main);
 
@@ -24,6 +30,9 @@ const CONSOLE: Handle = 1;
 const A: Handle = 2;
 const B: Handle = 3;
 const STEPS: Handle = 4;
+/// Mode 1: the audit service's report endpoint, and `trust` unbadged.
+const WARN: Handle = 5;
+const TRUST: Handle = 6;
 
 struct Client {
     reply: Handle,
@@ -191,6 +200,33 @@ fn second(c: &mut Client) {
         "HEAD: signed up to the record that filled the store",
         c.head()
             .is_some_and(|h| h.signed <= h.records && h.signed + 1 >= h.records),
+    );
+    let mut levels = [0u8; 2];
+    let mut n = 0;
+    let start = uptime();
+    while n < levels.len() && uptime() - start < 5_000_000 {
+        let mut buf = [0u8; 16];
+        let Ok(Received::Message { len, .. }) = receive_timeout(WARN, &mut buf, 200_000) else {
+            continue;
+        };
+        if let Some(level) = audit::parse_full(&buf[..len.min(buf.len())]) {
+            levels[n] = level;
+            n += 1;
+            let req = trust::Request::Service {
+                event: Event::AuditFull,
+                name: b"",
+                numbers: [level.into(), 0, 0],
+                names: Names::default(),
+            };
+            let mut msg = [0u8; 256];
+            if let Some(k) = trust::encode(&req, &mut msg) {
+                let _ = send(TRUST, &msg[..k], 0, 0, 0);
+            }
+        }
+    }
+    c.step(
+        "the service reported 80%, then 95%, to init",
+        levels == WARN_AT,
     );
     let mut d = [0u8; 20];
     let mut at = d.len();

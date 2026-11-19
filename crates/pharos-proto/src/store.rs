@@ -25,6 +25,9 @@ pub mod op {
     /// From `init` only (no badge): forget client `badge`'s buffer, as its
     /// process ended (#100).
     pub const RELEASE: u8 = 9;
+    /// From the `audit` namespace only: `[OK, percent]`, how full the
+    /// trail is of the space it may use (D-048, #217).
+    pub const SPACE: u8 = 10;
 }
 
 /// Reply status codes: the common ones this interface uses, then its own.
@@ -154,6 +157,7 @@ pub enum Request<'a> {
         client: u32,
     },
     Info,
+    Space,
 }
 
 fn path<'a>(r: &mut Reader<'a>) -> Option<&'a [u8]> {
@@ -204,6 +208,7 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             },
             op::BUFFER => Request::Buffer,
             op::RELEASE => Request::Release { client: r.u32()? },
+            op::SPACE => Request::Space,
             common::ATTACH => Request::Attach { len: r.u64()? },
             common::INFO => Request::Info,
             _ => return None,
@@ -273,6 +278,7 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.u64(len)?;
         }
         Request::Buffer => head(&mut w, op::BUFFER)?,
+        Request::Space => head(&mut w, op::SPACE)?,
         Request::Release { client } => {
             head(&mut w, op::RELEASE)?;
             w.u32(client)?;
@@ -356,6 +362,7 @@ mod tests {
             Request::Delete { path: b"old" },
             Request::Attach { len: 65536 },
             Request::Buffer,
+            Request::Space,
             Request::Release {
                 client: 3 | READ_ONLY,
             },

@@ -31,6 +31,26 @@ pub mod op {
 /// failing, or unreachable). Callers refuse the action (D-012 item 11).
 pub const UNWRITABLE: u8 = crate::status::OWN;
 
+/// Levels, in percent of the space the trail may use, at which the
+/// service warns as the trail fills (D-048, #217).
+pub const WARN_AT: [u8; 2] = [80, 95];
+
+/// The report the service sends `init` on its report capability when the
+/// trail crosses a [`WARN_AT`] level: `full` and the level. `init` turns it
+/// into a `SERVICE` event for `trust`.
+pub fn full_report(level: u8) -> [u8; 5] {
+    [b'f', b'u', b'l', b'l', level]
+}
+
+/// The level in a [`full_report`]; `None` for anything else, including a
+/// level that is not one of [`WARN_AT`].
+pub fn parse_full(msg: &[u8]) -> Option<u8> {
+    match msg {
+        [b'f', b'u', b'l', b'l', level] if WARN_AT.contains(level) => Some(*level),
+        _ => None,
+    }
+}
+
 /// Longest detail text.
 pub const MAX_DETAIL: usize = 64;
 
@@ -355,6 +375,16 @@ impl Head {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_warning_level_is_a_full_report() {
+        for level in WARN_AT {
+            assert_eq!(parse_full(&full_report(level)), Some(level));
+        }
+        assert_eq!(parse_full(&full_report(50)), None);
+        assert_eq!(parse_full(b"ready"), None);
+        assert_eq!(parse_full(b"full"), None);
+    }
 
     fn entry() -> Entry<'static> {
         Entry {

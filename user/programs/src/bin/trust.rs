@@ -1163,6 +1163,12 @@ impl Trust {
         let mut parts: [&[u8]; 9 + 2 * MAX_NAMES] = [b""; 9 + 2 * MAX_NAMES];
         let fixed: &[&[u8]] = match event {
             Event::Ready => &[b"system ready: ", decimal(n0, a), b" services"],
+            // D-048, #217: what to do comes from fixed words only.
+            Event::AuditFull => &[
+                b"audit: the trail is ",
+                decimal(n0, a),
+                b"% full; export it on the host (cargo xtask store export), then audit rotate <code>",
+            ],
             Event::NotReady => &[b"system not ready: ", decimal(n0, a), b" failed"],
             Event::Exited => &[b"service ", name, b" exited ", decimal(n0, a)],
             Event::Killed => &[b"service ", name, b" killed ", decimal(n0, a)],

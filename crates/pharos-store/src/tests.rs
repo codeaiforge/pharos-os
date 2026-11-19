@@ -556,3 +556,29 @@ fn writes_leave_the_audit_reserve() {
     // Rewriting an existing file adds no object; a smaller one still fits.
     assert!(!s.leaves_reserve(b"data/0", BLOCK as u64 * 8));
 }
+
+#[test]
+fn fill_counts_a_prefix_against_what_is_free() {
+    let mut s = Store::format(Mem::new(64)).unwrap();
+    assert_eq!(s.fill(b"audit/"), 0, "nothing under it yet");
+    s.write(b"data/big", &[1u8; BLOCK * 30]).unwrap();
+    s.append(b"audit/log/1", b"record").unwrap();
+    let low = s.fill(b"audit/");
+    // Other namespaces' blocks count as neither used nor free.
+    while s.append(b"audit/log/1", &[2u8; 200]).is_ok() {}
+    let full = s.fill(b"audit/");
+    assert!(low < 10 && full >= 95, "fill {low} then {full}");
+    assert!(s.fill(b"data/") >= 95, "little is free for data/ either");
+}
+
+#[test]
+fn the_trail_is_100_percent_full_when_an_append_no_longer_fits() {
+    for blocks in [16u64, 64, 1024] {
+        let mut s = Store::format(Mem::new(blocks)).unwrap();
+        s.append(b"audit/log/1", b"boot").unwrap();
+        while s.append(b"audit/log/1", &[3u8; 150]).is_ok() {
+            assert!(s.fill(b"audit/") <= 100);
+        }
+        assert_eq!(s.fill(b"audit/"), 100, "{blocks} blocks");
+    }
+}

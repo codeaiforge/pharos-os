@@ -584,6 +584,35 @@ impl<D: Device> Store<D> {
             && self.free_blocks() >= bytes.div_ceil(BLOCK as u64) + 1 + total / RESERVE_PART
     }
 
+    /// How full the objects under `prefix` (such as `audit/`) are, in
+    /// percent of the space they may use: their blocks and object-table
+    /// entries, plus what is still free (D-048, #217). Blocks or objects,
+    /// whichever is fuller. Index blocks belong to no object and are left
+    /// out, and so are the free blocks the next commit's index needs: at
+    /// 100% an append no longer fits.
+    pub fn fill(&self, prefix: &[u8]) -> u8 {
+        let mine = self
+            .current
+            .objects
+            .iter()
+            .filter(|o| o.path.starts_with(prefix));
+        let (objects, blocks) = mine.fold((0u64, 0u64), |(n, b), o| {
+            (
+                n + 1,
+                b + o.extents.iter().map(|e| u64::from(e.count)).sum::<u64>(),
+            )
+        });
+        let free_objects = (MAX_OBJECTS - self.current.objects.len().min(MAX_OBJECTS)) as u64;
+        let percent = |used: u64, free: u64| match used + free {
+            0 => 100,
+            all => used * 100 / all,
+        };
+        let free = self
+            .free_blocks()
+            .saturating_sub(u64::from(self.current.index.count));
+        percent(blocks, free).max(percent(objects, free_objects)) as u8
+    }
+
     fn find(&self, path: &[u8]) -> Result<usize, usize> {
         self.current
             .objects
