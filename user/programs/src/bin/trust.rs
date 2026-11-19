@@ -88,7 +88,8 @@ const BASE: u64 = 0x1000_0000;
 const RESERVED: usize = 4;
 /// Two lines: one console line holds at most 256 bytes.
 const HELP: &[u8] = b"commands: list, stop <agent>, stop group <group>, stop all, \
-revoke <agent> <permission>, yes <n>, no <n>, audit, usage, verify <scope> <key> <version> <hash>";
+revoke <agent> <permission>, yes <n>, no <n>, audit, audit rotate <code>, usage, \
+verify <scope> <key> <version> <hash>";
 const HELP_SYSTEM: &[u8] = b"commands: services, health, config, start <service>, \
 restart <service>, stop service <service>, system, safe, recovery, update, apply <n>, discard <n>, rollback";
 
@@ -275,6 +276,43 @@ impl Trust {
         ]);
     }
 
+    /// `audit rotate <code>` (D-048, #217): the audit service frees the
+    /// earlier streams only if the code is the one `cargo xtask store
+    /// export` printed for them. Deleting many streams can take a while.
+    fn rotate(&mut self, code: [u8; 8]) {
+        let mut msg = [audit::VERSION, audit::op::ROTATE, 0, 0, 0, 0, 0, 0, 0, 0];
+        msg[2..].copy_from_slice(&code);
+        let mut out = [0u8; 256];
+        let answer = self.reply.and_then(|reply| {
+            match call_timeout(AUDIT, &msg, reply, &mut out, 30_000_000) {
+                Ok(Received::Message { len, .. }) if len >= 1 => Some(len),
+                _ => None,
+            }
+        });
+        let mut d = [0u8; 20];
+        match (answer, out[0]) {
+            (Some(5), status::OK) => {
+                let freed = u32::from_le_bytes([out[1], out[2], out[3], out[4]]);
+                self.say(&[
+                    b"audit: rotated; ",
+                    decimal(freed.into(), &mut d),
+                    b" earlier streams freed, and the new stream names the export",
+                ]);
+            }
+            (Some(_), audit::NO_EXPORT) => self.say(&[
+                b"audit rotate: the code matches no export of the earlier streams; \
+export them first (cargo xtask store export)",
+            ]),
+            (Some(_), status::NOT_FOUND) => {
+                self.say(&[b"audit rotate: no earlier streams to free"])
+            }
+            (Some(_), audit::UNWRITABLE) => {
+                self.say(&[b"audit rotate: the store failed; export the trail again"])
+            }
+            _ => self.say(&[b"audit: not answering"]),
+        }
+    }
+
     fn command(&mut self, line: &[u8]) {
         match trust::command(line) {
             Command::List => {
@@ -376,6 +414,7 @@ impl Trust {
                 }
             }
             Command::Audit => self.audit(),
+            Command::AuditRotate(code) => self.rotate(code),
             Command::Services => self.services(false),
             Command::Health => self.services(true),
             Command::Config => self.config(),

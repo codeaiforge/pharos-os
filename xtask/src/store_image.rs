@@ -306,6 +306,137 @@ pub fn signed_heads(image: &Path, public: &[u8; 32]) -> Result<Vec<Signed>> {
     Ok(out)
 }
 
+/// Every audit stream's boot, record count, and chain head, in boot order:
+/// what the export code covers (D-048, #217).
+pub fn streams_of(image: &Path) -> Result<Vec<(u32, u64, [u8; 32])>> {
+    let store =
+        Store::mount(FileDevice::open(image)?).map_err(|e| format!("{}: {e}", image.display()))?;
+    let mut streams = Vec::new();
+    for path in store.list(b"audit/log/") {
+        let name = String::from_utf8_lossy(path);
+        let boot = name
+            .strip_prefix("audit/log/")
+            .and_then(|n| n.parse::<u32>().ok())
+            .ok_or_else(|| format!("{name}: not a boot stream"))?;
+        let info = store.stat(path).map_err(|e| format!("{name}: {e}"))?;
+        streams.push((boot, info.records, info.head));
+    }
+    streams.sort_by_key(|s| s.0);
+    Ok(streams)
+}
+
+/// The file in an export directory that holds the archived streams: a
+/// store of its own, so `store audit` checks it as it checks any other.
+pub const ARCHIVE: &str = "audit.img";
+
+/// `cargo xtask store export <image> <dir> --key <file>` (D-048, #217):
+/// checks every audit stream and its signed head, copies the streams and
+/// heads record by record into `<dir>/audit.img` (the same chain), writes
+/// `<dir>/EXPORT`, and returns the code `audit rotate` takes, with each
+/// stream's check. Refuses a `dir` that exists, so no export is replaced.
+pub fn export(image: &Path, dir: &Path, public: &[u8; 32]) -> Result<([u8; 8], Vec<Signed>)> {
+    audit(image)?;
+    let signed = signed_heads(image, public)?;
+    if signed.is_empty() {
+        return Err(format!("{}: no audit streams to export", image.display()));
+    }
+    if dir.exists() {
+        return Err(format!(
+            "{} exists; export into a new directory",
+            dir.display()
+        ));
+    }
+    let mut from =
+        Store::mount(FileDevice::open(image)?).map_err(|e| format!("{}: {e}", image.display()))?;
+    let paths: Vec<Vec<u8>> = from.list(b"audit/").map(<[u8]>::to_vec).collect();
+    let mut bytes = 0;
+    for p in &paths {
+        bytes += from
+            .stat(p)
+            .map_err(|e| format!("{}: {e}", String::from_utf8_lossy(p)))?
+            .len;
+    }
+    fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let archive = dir.join(ARCHIVE);
+    // ponytail: twice the bytes, for the generations a commit keeps.
+    let blocks = bytes.div_ceil(BLOCK as u64) * 2 + paths.len() as u64 * 2 + 64;
+    let mut to = Store::format(FileDevice::create(&archive, blocks)?)
+        .map_err(|e| format!("{}: {e}", archive.display()))?;
+    for p in &paths {
+        let mut records = Vec::new();
+        from.records(p, |r| records.push(r.to_vec()))
+            .map_err(|e| format!("{}: {e}", String::from_utf8_lossy(p)))?;
+        for r in records {
+            to.append(p, &r)
+                .map_err(|e| format!("{}: {e}", archive.display()))?;
+        }
+    }
+    drop(to);
+    let code = pharos_image::head::export_code(streams_of(image)?);
+    if pharos_image::head::export_code(streams_of(&archive)?) != code {
+        return Err(format!(
+            "{}: the copy differs from {}",
+            archive.display(),
+            image.display()
+        ));
+    }
+    let mut text = format!("code {}\n", hex8(&code));
+    for s in &signed {
+        text += &format!(
+            "{} {} records, {} under a signed head\n",
+            s.stream, s.records, s.signed
+        );
+    }
+    let summary = dir.join("EXPORT");
+    fs::write(&summary, text).map_err(|e| format!("cannot write {}: {e}", summary.display()))?;
+    Ok((code, signed))
+}
+
+/// 8 bytes as 16 lowercase hexadecimal digits.
+pub fn hex8(code: &[u8; 8]) -> String {
+    code.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `cargo xtask store audit <image> --archive <dir>` (D-048): the export
+/// in `dir` checks (against its signed heads with `public`, when given),
+/// and a `rotate` record in `image`, in a stream after every archived boot,
+/// names its code and boots. Returns that record's stream and line.
+pub fn check_archive(image: &Path, dir: &Path, public: Option<&[u8; 32]>) -> Result<String> {
+    let archive = dir.join(ARCHIVE);
+    audit(&archive)?;
+    if let Some(public) = public {
+        signed_heads(&archive, public)?;
+    }
+    let archived = streams_of(&archive)?;
+    let (Some(first), Some(last)) = (archived.first(), archived.last()) else {
+        return Err(format!("{}: no audit streams", archive.display()));
+    };
+    let code = pharos_image::head::export_code(archived.iter().copied());
+    let want = format!("export {} boots {}-{}", hex8(&code), first.0, last.0);
+    for (name, lines) in audit(image)? {
+        let Some(line) = lines
+            .iter()
+            .find(|l| l.contains(" rotate ") && l.ends_with(&want))
+        else {
+            continue;
+        };
+        let boot = name
+            .strip_prefix("audit/log/")
+            .and_then(|n| n.parse::<u32>().ok());
+        if boot.is_none_or(|b| b <= last.0) {
+            return Err(format!(
+                "{name}: names the export, but is not after boot {}",
+                last.0
+            ));
+        }
+        return Ok(format!("{name}: {line}"));
+    }
+    Err(format!(
+        "{}: no rotate record names `{want}`",
+        image.display()
+    ))
+}
+
 /// `cargo xtask store knowledge <image>` (#144, knowledge.md): every
 /// version in namespace `knowledge`, read with the store's checks and
 /// parsed as `pharos_proto::knowledge` defines it, one line each: `scope/
@@ -977,7 +1108,7 @@ mod tests {
         }
     }
 
-    fn record(sequence: u64, client: u8, action: u8, detail: &'static [u8]) -> std::vec::Vec<u8> {
+    fn record(sequence: u64, client: u8, action: u8, detail: &[u8]) -> std::vec::Vec<u8> {
         use pharos_proto::audit::{Entry, Kind, Record, outcome};
         let rec = Record {
             sequence,
@@ -1078,6 +1209,92 @@ mod tests {
         write(&longer, &heads);
         let tail = signed_heads(&image, &public).unwrap();
         assert_eq!((tail[0].records, tail[0].signed), (3, 2));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_export_is_checked_copied_and_named_by_the_rotation() {
+        use pharos_image::head::{Head, anchor_seed, export_code};
+        use pharos_proto::audit::{action, client};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/xtask")
+            .join(format!("export-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let image = root.join("store.img");
+        let seed = anchor_seed(&[3; 32]);
+        let public = pharos_image::public_key(&seed);
+        let boot = record(0, client::AUDIT, action::BOOT, b"");
+        let mut store = Store::format(FileDevice::create(&image, 64).unwrap()).unwrap();
+        // Boots 1 and 2, as `audit` writes them: each record, then its head.
+        for b in [1u32, 2] {
+            let log = format!("audit/log/{b}");
+            for r in [boot.clone(), record(1, 4, action::SUBMIT, b"MARK")] {
+                let (n, chain) = store.append(log.as_bytes(), &r).unwrap();
+                let head = Head {
+                    boot: b,
+                    records: n + 1,
+                    chain,
+                    measurement: [4; 32],
+                    uptime_us: 5,
+                };
+                store
+                    .append(format!("audit/head/{b}").as_bytes(), &head.sign(&seed))
+                    .unwrap();
+            }
+        }
+        drop(store);
+        let out = root.join("export");
+        let other = pharos_image::public_key(&anchor_seed(&[9; 32]));
+        assert!(
+            export(&image, &out, &other).is_err(),
+            "heads under another key"
+        );
+        assert!(!out.exists(), "nothing written when the check fails");
+        let (code, signed) = export(&image, &out, &public).unwrap();
+        assert_eq!(code, export_code(streams_of(&image).unwrap()));
+        assert_eq!(signed.len(), 2);
+        assert!(
+            export(&image, &out, &public)
+                .unwrap_err()
+                .contains("exists")
+        );
+        let archive = out.join(ARCHIVE);
+        assert_eq!(streams_of(&archive).unwrap(), streams_of(&image).unwrap());
+        assert_eq!(signed_heads(&archive, &public).unwrap().len(), 2);
+        assert!(
+            fs::read_to_string(out.join("EXPORT"))
+                .unwrap()
+                .starts_with(&format!("code {}", hex8(&code)))
+        );
+        // Boot 3 rotates, as the service does: it frees boots 1 and 2,
+        // then records the code.
+        let rotated = |detail: &str| {
+            let mut store = Store::mount(FileDevice::open(&image).unwrap()).unwrap();
+            for p in [
+                "audit/log/1",
+                "audit/head/1",
+                "audit/log/2",
+                "audit/head/2",
+                "audit/log/3",
+            ] {
+                let _ = store.delete(p.as_bytes());
+            }
+            store.append(b"audit/log/3", &boot).unwrap();
+            let rec = record(1, client::AUDIT, action::ROTATE, detail.as_bytes());
+            store.append(b"audit/log/3", &rec).unwrap();
+        };
+        rotated(&format!("export {} boots 1-2", hex8(&code)));
+        let line = check_archive(&image, &out, Some(&public)).unwrap();
+        assert!(
+            line.starts_with("audit/log/3: ") && line.contains(" rotate "),
+            "{line}"
+        );
+        // Another code, or the boots of another export, are not this one.
+        rotated("export 0123456789abcdef boots 1-2");
+        assert!(check_archive(&image, &out, None).is_err(), "another code");
+        rotated(&format!("export {} boots 1-1", hex8(&code)));
+        assert!(check_archive(&image, &out, None).is_err(), "other boots");
         fs::remove_dir_all(&root).unwrap();
     }
 

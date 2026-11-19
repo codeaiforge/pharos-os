@@ -237,7 +237,10 @@ impl Service {
                 out[1] = info.kind as u8;
                 out[2..10].copy_from_slice(&info.len.to_le_bytes());
                 out[10..18].copy_from_slice(&info.records.to_le_bytes());
-                return Ok(18);
+                // A stream's chain head (zeros for a file), for the audit
+                // service's export code (D-048, #217).
+                out[18..50].copy_from_slice(&info.head);
+                return Ok(50);
             }
             Request::Read {
                 path: p,

@@ -24,14 +24,24 @@
 //! reports `full <level>` to `init`, which tells `trust`. The report is
 //! offered with `try_send`, never a blocking send, since `init` calls this
 //! service too; it is offered again every 100 ms until `init` takes it.
+//!
+//! `ROTATE`, from `trust` only, frees every stream before this boot's
+//! (`log/<n>` and `head/<n>`) if they give the code `cargo xtask store
+//! export` printed for them (`pharos_image::head::export_code`, D-048). It
+//! frees them first and then stores a `rotate` record naming the code:
+//! the trail is usually full by then, and the record needs the room.
 
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 use pharos_programs::sequence::Sequence;
 use pharos_proto::audit::{
-    self, Entry, Head, Kind, MAX_RECORD, Record, Request, UNWRITABLE, WARN_AT, action, client,
-    full_report, outcome,
+    self, Entry, Head, Kind, MAX_RECORD, NO_EXPORT, Record, Request, UNWRITABLE, WARN_AT, action,
+    client, full_report, outcome,
 };
 use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::{refusal, status};
@@ -95,6 +105,25 @@ fn say(parts: &[&[u8]]) {
     let _ = debug_write(CONSOLE, &line[..n]);
 }
 
+/// `<prefix><boot>` in `out`; its length.
+fn named(prefix: &[u8], boot: u32, out: &mut [u8; 16]) -> usize {
+    let mut d = [0u8; 20];
+    let digits = decimal(u64::from(boot), &mut d);
+    out[..prefix.len()].copy_from_slice(prefix);
+    out[prefix.len()..prefix.len() + digits.len()].copy_from_slice(digits);
+    prefix.len() + digits.len()
+}
+
+/// 8 bytes as 16 lowercase hexadecimal digits.
+fn hex8(bytes: &[u8; 8]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for (i, b) in bytes.iter().enumerate() {
+        out[2 * i] = b"0123456789abcdef"[usize::from(b >> 4)];
+        out[2 * i + 1] = b"0123456789abcdef"[usize::from(b & 15)];
+    }
+    out
+}
+
 /// A `log/<n>` name's number.
 fn boot_of(name: &[u8]) -> Option<u32> {
     let digits = name.strip_prefix(b"log/")?;
@@ -118,8 +147,13 @@ impl Audit {
 
     /// The highest boot number already in the store (0: none).
     fn last_boot(&self) -> Option<u32> {
+        Some(self.boots()?.into_iter().max().unwrap_or(0))
+    }
+
+    /// The boot number of every `log/<n>` in the store.
+    fn boots(&self) -> Option<Vec<u32>> {
         let mut out = [0u8; 256];
-        let mut last = 0;
+        let mut boots = Vec::new();
         let mut start = 0u32;
         loop {
             let req = StoreRequest::List {
@@ -135,12 +169,12 @@ impl Audit {
             for _ in 0..count {
                 let len = usize::from(*out.get(at)?);
                 let name = out.get(at + 1..at + 1 + len)?;
-                last = last.max(boot_of(name).unwrap_or(0));
+                boots.extend(boot_of(name));
                 at += 1 + len;
             }
             start += u32::from(count);
             if more == 0 || count == 0 {
-                return Some(last);
+                return Some(boots);
             }
         }
     }
@@ -193,14 +227,93 @@ impl Audit {
 
     /// The stream's record count, from the store.
     fn count(&self) -> Option<u64> {
+        Some(self.stat(&self.path[..self.path_len])?.0)
+    }
+
+    /// A stream's record count and chain head, from the store.
+    fn stat(&self, path: &[u8]) -> Option<(u64, [u8; 32])> {
         let mut out = [0u8; 256];
-        let req = StoreRequest::Stat {
-            path: &self.path[..self.path_len],
-        };
-        match self.store(&req, &mut out)? {
-            (StoreStatus::Ok, 18) => Some(u64::from_le_bytes(out[10..18].try_into().ok()?)),
+        match self.store(&StoreRequest::Stat { path }, &mut out)? {
+            (StoreStatus::Ok, 50) => Some((
+                u64::from_le_bytes(out[10..18].try_into().ok()?),
+                out[18..50].try_into().ok()?,
+            )),
             _ => None,
         }
+    }
+
+    /// `ROTATE` (D-048): the status, and how many streams were freed.
+    fn rotate(&mut self, code: [u8; 8]) -> (u8, u32) {
+        if self.boot == 0 && !self.open() {
+            return (UNWRITABLE, 0);
+        }
+        let Some(mut boots) = self.boots() else {
+            return (UNWRITABLE, 0);
+        };
+        boots.retain(|b| *b < self.boot);
+        boots.sort_unstable();
+        let (Some(&first), Some(&last)) = (boots.first(), boots.last()) else {
+            return (status::NOT_FOUND, 0);
+        };
+        let mut streams = Vec::new();
+        for &boot in &boots {
+            let mut path = [0u8; 16];
+            let n = named(b"log/", boot, &mut path);
+            let Some((records, head)) = self.stat(&path[..n]) else {
+                return (UNWRITABLE, 0);
+            };
+            streams.push((boot, records, head));
+        }
+        if pharos_image::head::export_code(streams) != code {
+            return (NO_EXPORT, 0);
+        }
+        // ponytail: a store failure part-way leaves the rest, whose code
+        // then differs; the user exports again.
+        for &boot in &boots {
+            for prefix in [&b"log/"[..], b"head/"] {
+                let mut path = [0u8; 16];
+                let n = named(prefix, boot, &mut path);
+                let mut out = [0u8; 256];
+                match self.store(&StoreRequest::Delete { path: &path[..n] }, &mut out) {
+                    Some((StoreStatus::Ok | StoreStatus::NotFound, _)) => {}
+                    _ => return (UNWRITABLE, 0),
+                }
+            }
+        }
+        let mut detail = [0u8; 64];
+        let mut n = 0;
+        let (mut a, mut b) = ([0u8; 20], [0u8; 20]);
+        let parts: [&[u8]; 6] = [
+            b"export ",
+            &hex8(&code),
+            b" boots ",
+            decimal(first.into(), &mut a),
+            b"-",
+            decimal(last.into(), &mut b),
+        ];
+        for p in parts {
+            detail[n..n + p.len()].copy_from_slice(p);
+            n += p.len();
+        }
+        // Warned again as the new trail fills.
+        (self.warn_due, self.warn_sent) = (0, 0);
+        let entry = Entry {
+            kind: Kind::Event,
+            refers: 0,
+            actor: b"user",
+            task: 0,
+            attempt: 0,
+            action: action::ROTATE,
+            permission: None,
+            service: b"audit",
+            outcome: outcome::OK,
+            detail: &detail[..n],
+        };
+        say(&[b"audit: rotated: ", &detail[..n]]);
+        if self.write(client::AUDIT, entry).is_none() {
+            return (UNWRITABLE, boots.len() as u32);
+        }
+        (status::OK, boots.len() as u32)
     }
 
     /// Stores `entry` from `client`; its sequence number, or `None` if the
@@ -322,6 +435,16 @@ impl Audit {
             },
         };
         match req {
+            Request::Rotate(code) if client == client::TRUST => {
+                let (code, freed) = self.rotate(code);
+                out[0] = code;
+                out[1..5].copy_from_slice(&freed.to_le_bytes());
+                5
+            }
+            Request::Rotate(_) => {
+                out[0] = status::NO_ACCESS;
+                1
+            }
             Request::Append(entry) => match self.append(client, entry) {
                 Some(seq) => {
                     out[0] = status::OK;

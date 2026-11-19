@@ -147,6 +147,7 @@ fn run(t: &mut TestRun) {
             "a read past the end stops there",
             "replace it",
             "append records; numbers and chain head match",
+            "STAT names a stream's records and chain head (#217)",
             "list the namespace",
             "delete; then NOT_FOUND",
             "a path escaping the namespace: BAD_REQUEST",

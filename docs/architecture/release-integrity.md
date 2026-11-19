@@ -11,7 +11,7 @@
 | The slot record's MAC | #257, **implemented** |
 | Secure Boot | #258 |
 | Signed release artifacts | #259, **implemented** (signing Limine and the variable store **planned** with #258) |
-| Export and rotation of the audit trail | #217 (the fill warnings **implemented**, [D-048](../project/decision-log.md#d-048-audit-trail-warnings-export-and-rotation)) |
+| Export and rotation of the audit trail | #217, **implemented** ([D-048](../project/decision-log.md#d-048-audit-trail-warnings-export-and-rotation)) |
 
 ## 1. What it protects, and from whom
 

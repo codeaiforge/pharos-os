@@ -11,6 +11,13 @@
 //! In that mode the client also stands in for `init` (D-048, #217): handle
 //! 5 receives the service's reports, and it passes each `full` report to
 //! `trust` on handle 6 as the `SERVICE` event `init` sends.
+//!
+//! Argument 2, for the `rotate` test kernel (#217, D-048): handle 5 is the
+//! service badged as `trust`. Boot 1's records, then `restart` to the
+//! kernel, which starts the service again (boot 2); then `ROTATE` from
+//! client 4 (refused), with a wrong code (refused), with the code boot 1
+//! gives (`export_code` over its count and head: freed), and again
+//! (nothing left to free).
 
 #![no_std]
 #![no_main]
@@ -21,7 +28,8 @@ use pharos_proto::audit::{
 use pharos_proto::status;
 use pharos_proto::trust::{self, Event, Names};
 use pharos_user::{
-    Handle, Received, call_timeout, debug_write, endpoint_create, receive_timeout, send, uptime,
+    Handle, Received, call_timeout, debug_write, endpoint_create, receive_timeout, send, sleep,
+    uptime,
 };
 
 pharos_user::entry!(main);
@@ -33,6 +41,8 @@ const STEPS: Handle = 4;
 /// Mode 1: the audit service's report endpoint, and `trust` unbadged.
 const WARN: Handle = 5;
 const TRUST: Handle = 6;
+/// Mode 2: the audit service badged as `trust`.
+const AS_TRUST: Handle = 5;
 
 struct Client {
     reply: Handle,
@@ -246,15 +256,69 @@ fn second(c: &mut Client) {
     let _ = debug_write(CONSOLE, &line[..prefix.len() + d.len() - at]);
 }
 
+/// `ROTATE` with `code` on `to`: the status and the streams freed.
+fn rotate(c: &Client, to: Handle, code: [u8; 8]) -> (u8, u32) {
+    let mut msg = [VERSION, op::ROTATE, 0, 0, 0, 0, 0, 0, 0, 0];
+    msg[2..].copy_from_slice(&code);
+    let (status, out, len) = c.raw(to, &msg);
+    let freed = (len == 5).then(|| u32::from_le_bytes([out[1], out[2], out[3], out[4]]));
+    (status, freed.unwrap_or(0))
+}
+
+fn rotation(c: &mut Client) {
+    for detail in [&b"one"[..], b"two"] {
+        c.append(A, entry(detail));
+    }
+    let before = c.head().filter(|h| h.boot == 1 && h.records == 3);
+    c.step("boot 1: three records", before.is_some());
+    let Some(before) = before else { return };
+    // The kernel kills the service once it takes this; a `HEAD` sent
+    // before that would wait out its 20 s for the old one.
+    let _ = send(STEPS, b"restart", 0, 0, 0);
+    sleep(300_000);
+    let start = uptime();
+    let mut again = false;
+    while !again && uptime() - start < 30_000_000 {
+        again = c.head().is_some_and(|h| h.boot == 2);
+        if !again {
+            sleep(100_000);
+        }
+    }
+    c.step("after the restart: boot 2", again);
+    let code = pharos_image::head::export_code([(1, before.records, before.head)]);
+    c.step(
+        "ROTATE from a client that is not trust: NO_ACCESS",
+        rotate(c, A, code).0 == status::NO_ACCESS,
+    );
+    let mut wrong = code;
+    wrong[0] ^= 1;
+    c.step(
+        "ROTATE with a code no export gave: NO_EXPORT, nothing freed",
+        rotate(c, AS_TRUST, wrong) == (audit::NO_EXPORT, 0),
+    );
+    c.step(
+        "ROTATE with boot 1's code: boot 1 freed",
+        rotate(c, AS_TRUST, code) == (status::OK, 1),
+    );
+    c.step(
+        "a second ROTATE: nothing to free",
+        rotate(c, AS_TRUST, code).0 == status::NOT_FOUND,
+    );
+    c.step(
+        "HEAD: boot 2 holds its boot record and the rotate record",
+        c.head().is_some_and(|h| h.boot == 2 && h.records == 2),
+    );
+}
+
 fn main(arg: u64) -> u64 {
     let Ok(reply) = endpoint_create() else {
         return 100;
     };
     let mut c = Client { reply, failed: 0 };
-    if arg == 0 {
-        first(&mut c);
-    } else {
-        second(&mut c);
+    match arg {
+        0 => first(&mut c),
+        2 => rotation(&mut c),
+        _ => second(&mut c),
     }
     let _ = send(STEPS, b"done", 0, 0, 0);
     c.failed

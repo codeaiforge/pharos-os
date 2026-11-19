@@ -25,6 +25,21 @@ pub const VERSION: u32 = 1;
 pub const LEN: usize = 160;
 const SIGNED: usize = 96;
 
+/// The export code (D-048, #217): the first 8 bytes of a SHA-256 chain
+/// over each archived stream's boot, record count, and chain head, in boot
+/// order. `cargo xtask store export` prints it for the streams it wrote,
+/// and `audit rotate <code>` frees the earlier streams only if they give
+/// the same one.
+pub fn export_code(streams: impl IntoIterator<Item = (u32, u64, [u8; 32])>) -> [u8; 8] {
+    let mut state = pharos_store::sha256(&[b"pharos audit export v1"]);
+    for (boot, records, head) in streams {
+        state = pharos_store::sha256(&[&state, &boot.to_le_bytes(), &records.to_le_bytes(), &head]);
+    }
+    let mut code = [0u8; 8];
+    code.copy_from_slice(&state[..8]);
+    code
+}
+
 /// The HKDF label of the `AuditAnchor` key (must match the kernel's
 /// `key::Purpose::AuditAnchor`).
 pub const ANCHOR_LABEL: &[u8] = b"pharos audit anchor v1";

@@ -5,7 +5,12 @@
 //! - `APPEND` `[version, op, entry]`: one [`Entry`]; the reply is
 //!   `[OK, sequence (8)]`, or [`UNWRITABLE`] if the store did not take it;
 //! - `HEAD` `[version, op]`: `[OK, boot (4), records (8), head (32)]`, the
-//!   current boot's stream, record count, and chain head.
+//!   current boot's stream, record count, and chain head;
+//! - `ROTATE` `[version, op, code (8)]`, from `trust` only (D-048, #217):
+//!   frees every stream before the current boot's if they give `code`
+//!   (`pharos_image::head::export_code`), then stores a `rotate` record
+//!   naming it; the reply is `[OK, streams freed (4)]`, [`NO_EXPORT`] if
+//!   the code does not match, or `NOT_FOUND` if there is nothing to free.
 //!
 //! The badge says which client sends: none is `init` (the only holder of
 //! an unbadged capability), and `trust` and the runtime have the badges
@@ -25,11 +30,16 @@ pub const VERSION: u8 = 1;
 pub mod op {
     pub const APPEND: u8 = 1;
     pub const HEAD: u8 = 2;
+    pub const ROTATE: u8 = 3;
 }
 
 /// The service's own status: the entry was not stored (store full,
 /// failing, or unreachable). Callers refuse the action (D-012 item 11).
 pub const UNWRITABLE: u8 = crate::status::OWN;
+
+/// `ROTATE`'s code does not match the earlier streams: they were not
+/// exported as they are (D-048). The service never says which code would.
+pub const NO_EXPORT: u8 = crate::status::OWN + 1;
 
 /// Levels, in percent of the space the trail may use, at which the
 /// service warns as the trail fills (D-048, #217).
@@ -116,7 +126,10 @@ pub mod action {
     /// A device added to or removed from a hotplug slot (#171, D-029),
     /// from `init`: the slot, the PCI ID, and the driver as detail.
     pub const DEVICE: u8 = 22;
-    pub const LAST: u8 = DEVICE;
+    /// The earlier streams freed on the user's `audit rotate` (D-048,
+    /// #217), from the service itself: `export <code> boots <a>-<b>`.
+    pub const ROTATE: u8 = 23;
+    pub const LAST: u8 = ROTATE;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -143,6 +156,7 @@ pub mod action {
             "system",
             "manage",
             "device",
+            "rotate",
         ]
         .get(usize::from(code))
         .copied()
@@ -300,6 +314,7 @@ pub const MAX_RECORD: usize =
 pub enum Request<'a> {
     Append(Entry<'a>),
     Head,
+    Rotate([u8; 8]),
 }
 
 pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
@@ -308,6 +323,11 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
     let req = match code {
         op::APPEND => Entry::read(&mut r).map(Request::Append),
         op::HEAD => Some(Request::Head),
+        op::ROTATE => r.take(8).map(|c| {
+            let mut code = [0u8; 8];
+            code.copy_from_slice(c);
+            Request::Rotate(code)
+        }),
         _ => None,
     };
     match req {
@@ -324,6 +344,10 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             e.write(&mut w)?;
         }
         Request::Head => w.bytes(&[VERSION, op::HEAD])?,
+        Request::Rotate(code) => {
+            w.bytes(&[VERSION, op::ROTATE])?;
+            w.bytes(code)?;
+        }
     }
     Some(w.len())
 }
@@ -467,6 +491,14 @@ mod tests {
         let mut buf = [0u8; 8];
         let n = encode(&Request::Head, &mut buf).unwrap();
         assert_eq!(parse(&buf[..n]), Ok(Request::Head));
+        let mut buf = [0u8; 10];
+        let n = encode(&Request::Rotate([7; 8]), &mut buf).unwrap();
+        assert_eq!(parse(&buf[..n]), Ok(Request::Rotate([7; 8])));
+        assert_eq!(parse(&buf[..n - 1]), Err(Refused::Bad), "a short code");
+        assert_eq!(
+            parse(&[VERSION, op::ROTATE, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            Err(Refused::Bad)
+        );
         let h = Head {
             boot: 3,
             records: 9,

@@ -177,3 +177,23 @@ mod head {
         assert_ne!(anchor_seed(&[5; 32]), [5; 32]);
     }
 }
+
+#[test]
+fn the_export_code_names_every_stream_its_count_and_head() {
+    use crate::head::export_code;
+    let streams = [(1, 6, [1u8; 32]), (2, 40, [2u8; 32])];
+    let code = export_code(streams);
+    assert_eq!(code, export_code(streams), "deterministic");
+    assert_ne!(code, export_code([streams[0]]), "a stream left out");
+    assert_ne!(
+        code,
+        export_code([(1, 6, [1u8; 32]), (2, 41, [2u8; 32])]),
+        "a record more"
+    );
+    assert_ne!(
+        code,
+        export_code([(1, 6, [1u8; 32]), (2, 40, [3u8; 32])]),
+        "another head"
+    );
+    assert_ne!(code, export_code([streams[1], streams[0]]), "the order");
+}

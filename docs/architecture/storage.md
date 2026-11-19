@@ -230,7 +230,7 @@ All integers are little-endian. Blocks are 4 KiB (8 virtio-blk sectors).
 
   | Op | Request | Reply |
   | --- | --- | --- |
-  | 1 `stat` | path | status, kind (u8), length (u64), records (u64) |
+  | 1 `stat` | path | status, kind (u8), length (u64), records (u64), and since #217 the chain head (32 bytes; zeros for a file) |
   | 2 `read` | path, file offset, length, buffer offset (u64 each) | status, bytes copied into the buffer (u64) |
   | 3 `write` | path, length, buffer offset | status (the file is replaced atomically) |
   | 4 `append` | stream path, record (1–200 bytes, inline; larger records later, when a client needs them) | status, record number (u64), chain head (32 bytes) |

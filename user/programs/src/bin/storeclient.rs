@@ -192,6 +192,12 @@ fn writer(f: &mut u64) {
             && u64_at(&r2, 1) == 1
             && r2[9..41] == h2,
     );
+    let (s, r) = c.call(Request::Stat { path: b"log" });
+    report(
+        f,
+        "STAT names a stream's records and chain head (#217)",
+        s == Status::Ok && u64_at(&r, 10) == 2 && r[18..50] == h2,
+    );
     buf.write_bytes(0, b"kept");
     let kept = c.status(Request::Write {
         path: b"keep.txt",

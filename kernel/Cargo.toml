@@ -275,6 +275,10 @@ name = "audit"
 harness = false
 
 [[test]]
+name = "rotate"
+harness = false
+
+[[test]]
 name = "knowledge"
 harness = false
 

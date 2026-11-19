@@ -173,14 +173,22 @@ COMMANDS:
                             regular files under DIR (storage.md part 8).
     store ls <IMAGE>        Mount a store with the storage service's code, check
                             every object, and list them.
-    store audit <IMAGE> [--key <FILE>]
+    store audit <IMAGE> [--key <FILE>] [--archive <DIR>]
                             Check every audit stream (log/<boot>) in a store: each
                             record's CRC-32 and SHA-256 chain, its format, and
                             consecutive sequence numbers from a boot record; then
                             print the records (capabilities.md). With --key (the
                             VM's device key, such as target/xtask/keys/device.key),
                             also check each stream against its last signed head
-                            and print the audit public key (D-047).
+                            and print the audit public key (D-047). With
+                            --archive <DIR> (an export), also check that export
+                            and that a rotate record in the image names it (D-048).
+    store export <IMAGE> <DIR> --key <FILE>
+                            With the VM stopped: check every audit stream against
+                            its signed head, copy the streams and heads into
+                            DIR/audit.img (a store of their own) with DIR/EXPORT,
+                            and print the code for `audit rotate <code>` on the
+                            trusted console, which then frees them (D-048).
     store knowledge <IMAGE> List every knowledge version in a store: author, the
                             hash prefix `verify` takes, and content (knowledge.md).
     bench-ipc [--runs <N>]  Measure the IPC round trip against D-004's 2 us budget:
@@ -271,6 +279,14 @@ enum Task {
         image: PathBuf,
         /// A device key file: also check the signed heads (D-047, #256).
         key: Option<PathBuf>,
+        /// An export directory a `rotate` record in the image must name
+        /// (D-048, #217).
+        archive: Option<PathBuf>,
+    },
+    StoreExport {
+        image: PathBuf,
+        dir: PathBuf,
+        key: PathBuf,
     },
     StoreKnowledge {
         image: PathBuf,
@@ -507,16 +523,33 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
             }
             Some("audit") => {
                 let image = args.next().ok_or("store audit needs an image path")?;
-                let key = match args.next().as_deref() {
-                    None => None,
-                    Some("--key") => Some(PathBuf::from(
-                        args.next().ok_or("--key needs a device key file")?,
-                    )),
-                    Some(other) => return Err(format!("unknown store audit option {other}")),
-                };
+                let (mut key, mut archive) = (None, None);
+                while let Some(option) = args.next() {
+                    let slot = match option.as_str() {
+                        "--key" if key.is_none() => &mut key,
+                        "--archive" if archive.is_none() => &mut archive,
+                        other => return Err(format!("unknown store audit option {other}")),
+                    };
+                    let value = args.next().ok_or(format!("{option} needs a path"))?;
+                    *slot = Some(PathBuf::from(value));
+                }
                 Task::StoreAudit {
                     image: PathBuf::from(image),
                     key,
+                    archive,
+                }
+            }
+            Some("export") => {
+                let usage = "store export needs <IMAGE> <DIR> --key <FILE>";
+                let (image, dir) = (args.next().ok_or(usage)?, args.next().ok_or(usage)?);
+                let key = match (args.next().as_deref(), args.next(), args.next()) {
+                    (Some("--key"), Some(key), None) => key,
+                    _ => return Err(usage.into()),
+                };
+                Task::StoreExport {
+                    image: PathBuf::from(image),
+                    dir: PathBuf::from(dir),
+                    key: PathBuf::from(key),
                 }
             }
             Some("knowledge") => {
@@ -2796,6 +2829,16 @@ const AUDIT_SCRIPT: &[console::Step] = &[
     ("trust: ready", ""),
     ("audit: boot 1, 1 records, head ", "audit\n"),
 ];
+/// Rotating the audit trail (#217, D-048), in a fresh store.
+const ROTATE_TEST: &str = "rotate";
+const ROTATE_BLOCKS: u64 = 64;
+/// A typed rotation with a code no export gave: either nothing is earlier
+/// yet or the code does not match, and both refuse.
+const ROTATE_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    ("audit: boot 1, ", "audit rotate 0123456789abcdef\n"),
+    ("audit rotate: ", ""),
+];
 /// A refused permission is never asked for again.
 const PERMISSIONS_REFUSED: &[&str] = &["approve #4"];
 const MODEL_ENV: &str = "PHAROS_MODEL";
@@ -2883,6 +2926,59 @@ const AGENTS_CRASH: Crash = Crash {
 /// records the first client left and boot 2 at least a dozen; and the
 /// chain head `trust` showed at start is the image's after boot 1's first
 /// record, recomputed here from the stored bytes (the anchor).
+/// After the `rotate` test kernel: only boot 2's stream and heads are
+/// left, every record under a verified signed head, with a `rotate` record
+/// for boot 1; the typed rotation was refused on the trusted console.
+fn rotate_checks(image: &Path, console: &str) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let names: Vec<&str> = streams.iter().map(|(n, _)| n.as_str()).collect();
+    if names != ["audit/log/2"] {
+        return Err(format!(
+            "expected only audit/log/2 after the rotation, got {names:?}"
+        ));
+    }
+    let store = pharos_store::Store::mount(store_image::FileDevice::open(image)?)
+        .map_err(|e| format!("{}: {e}", image.display()))?;
+    let heads: Vec<String> = store
+        .list(b"audit/head/")
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect();
+    if heads != ["audit/head/2"] {
+        return Err(format!(
+            "expected only audit/head/2 after the rotation, got {heads:?}"
+        ));
+    }
+    let public = sign::anchor_public(&TEST_DEVICE_KEY);
+    for s in store_image::signed_heads(image, &public)? {
+        if s.signed != s.records {
+            return Err(format!(
+                "{}: only {} of {} records signed",
+                s.stream, s.signed, s.records
+            ));
+        }
+    }
+    let rotated = streams[0].1.iter().find(|l| {
+        l.contains(" rotate ")
+            && l.rsplit_once("export ").is_some_and(|(_, d)| {
+                d.len() == 16 + " boots 1-1".len()
+                    && d.ends_with(" boots 1-1")
+                    && d[..16].bytes().all(|b| b.is_ascii_hexdigit())
+            })
+    });
+    let rotated = rotated.ok_or("audit/log/2 has no rotate record for boot 1")?;
+    println!("  only boot 2 is left, signed, with {rotated}");
+    let refused = console.lines().any(|l| {
+        let l = l.trim();
+        l == "audit rotate: no earlier streams to free"
+            || l.starts_with("audit rotate: the code matches no export")
+    });
+    if !refused {
+        return Err("trust did not refuse the typed rotation".into());
+    }
+    println!("  trust refused the typed rotation");
+    Ok(())
+}
+
 fn audit_checks(image: &Path, console: &str) -> Result<()> {
     let streams = store_image::audit(image)?;
     let count = |name: &str| {
@@ -4153,6 +4249,9 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     if name == AUDIT_TEST {
         store_image::fresh(&out.join(STORE_IMAGE), AUDIT_BLOCKS)?;
     }
+    if name == ROTATE_TEST {
+        store_image::fresh(&out.join(STORE_IMAGE), ROTATE_BLOCKS)?;
+    }
     if name == TOOLS_TEST || name == INJECTION_TEST {
         store_image::tools(&out.join(STORE_IMAGE))?;
     }
@@ -4187,6 +4286,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         BUDGETS_TEST => (BUDGETS_SCRIPT, &[]),
         EXHAUSTION_TEST => (EXHAUSTION_SCRIPT, &[]),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
+        ROTATE_TEST => (ROTATE_SCRIPT, &[]),
         SUPERVISION_TEST => (SUPERVISION_SCRIPT, &[]),
         SYSTEM_TEST => (SYSTEM_SCRIPT, &[]),
         SOAK_TEST => (SOAK_SCRIPT, &[]),
@@ -4246,6 +4346,9 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == AUDIT_TEST {
                 audit_checks(&out.join(STORE_IMAGE), &output)?;
+            }
+            if name == ROTATE_TEST {
+                rotate_checks(&out.join(STORE_IMAGE), &output)?;
             }
             if name == SUPERVISION_TEST {
                 supervision_checks(&out.join(STORE_IMAGE), &output)?;
@@ -4386,30 +4489,68 @@ fn main() -> ExitCode {
                 Task::FsLs { image } => fs_image::ls(&image),
                 Task::StoreBuild { dir, image, blocks } => store_image::build(&dir, &image, blocks),
                 Task::StoreLs { image } => store_image::ls(&image),
-                Task::StoreAudit { image, key } => store_image::audit(&image).and_then(|streams| {
+                Task::StoreAudit {
+                    image,
+                    key,
+                    archive,
+                } => store_image::audit(&image).and_then(|streams| {
                     for (name, lines) in streams {
                         println!("{name}: {} records", lines.len());
                         for line in lines {
                             println!("  {line}");
                         }
                     }
-                    let Some(key) = key else {
-                        println!("signatures not checked (no --key)");
-                        return Ok(());
+                    let public = match &key {
+                        Some(key) => Some(sign::anchor_public(&sign::read_device_key(key)?)),
+                        None => None,
                     };
-                    let public = sign::anchor_public(&sign::read_device_key(&key)?);
-                    println!("audit key {}", sign::hex(&public));
-                    for s in store_image::signed_heads(&image, &public)? {
+                    match &public {
+                        None => println!("signatures not checked (no --key)"),
+                        Some(public) => {
+                            println!("audit key {}", sign::hex(public));
+                            for s in store_image::signed_heads(&image, public)? {
+                                println!(
+                                    "{}: {} of {} records signed, boot measurement {}",
+                                    s.stream,
+                                    s.signed,
+                                    s.records,
+                                    sign::hex(&s.measurement)
+                                );
+                            }
+                        }
+                    }
+                    if let Some(dir) = archive {
+                        let line = store_image::check_archive(&image, &dir, public.as_ref())?;
                         println!(
-                            "{}: {} of {} records signed, boot measurement {}",
-                            s.stream,
-                            s.signed,
-                            s.records,
-                            sign::hex(&s.measurement)
+                            "the export in {} is the one rotated at {line}",
+                            dir.display()
                         );
                     }
                     Ok(())
                 }),
+                Task::StoreExport { image, dir, key } => {
+                    let public = sign::anchor_public(&sign::read_device_key(&key)?);
+                    store_image::export(&image, &dir, &public).map(|(code, signed)| {
+                        for s in signed {
+                            let unsigned = s.records - s.signed;
+                            println!(
+                                "{}: {} records exported{}",
+                                s.stream,
+                                s.records,
+                                if unsigned > 0 {
+                                    format!(", the last {unsigned} after its last signed head")
+                                } else {
+                                    String::new()
+                                }
+                            );
+                        }
+                        println!("Export: {}", dir.display());
+                        println!(
+                            "Boot the VM, then type on the trusted console: audit rotate {}",
+                            store_image::hex8(&code)
+                        );
+                    })
+                }
                 Task::StoreKnowledge { image } => store_image::knowledge(&image).map(|lines| {
                     for line in lines {
                         println!("{line}");
@@ -4651,15 +4792,55 @@ mod tests {
             parse(args(&["store", "audit", "s.img"])),
             Ok(Task::StoreAudit {
                 image: PathBuf::from("s.img"),
-                key: None
+                key: None,
+                archive: None,
             })
         );
         assert_eq!(
             parse(args(&["store", "audit", "s.img", "--key", "d.key"])),
             Ok(Task::StoreAudit {
                 image: PathBuf::from("s.img"),
-                key: Some(PathBuf::from("d.key"))
+                key: Some(PathBuf::from("d.key")),
+                archive: None,
             })
+        );
+        assert_eq!(
+            parse(args(&[
+                "store",
+                "audit",
+                "s.img",
+                "--archive",
+                "x",
+                "--key",
+                "d.key"
+            ])),
+            Ok(Task::StoreAudit {
+                image: PathBuf::from("s.img"),
+                key: Some(PathBuf::from("d.key")),
+                archive: Some(PathBuf::from("x")),
+            })
+        );
+        assert!(
+            parse(args(&[
+                "store", "audit", "s.img", "--key", "a", "--key", "b"
+            ]))
+            .is_err()
+        );
+        assert!(parse(args(&["store", "audit", "s.img", "--archive"])).is_err());
+        assert_eq!(
+            parse(args(&["store", "export", "s.img", "out", "--key", "d.key"])),
+            Ok(Task::StoreExport {
+                image: PathBuf::from("s.img"),
+                dir: PathBuf::from("out"),
+                key: PathBuf::from("d.key"),
+            })
+        );
+        assert!(parse(args(&["store", "export", "s.img", "out"])).is_err());
+        assert!(
+            parse(args(&[
+                "store", "export", "s.img", "out", "--key", "k", "x"
+            ]))
+            .is_err()
         );
         assert_eq!(
             parse(args(&["store", "knowledge", "s.img"])),

@@ -737,6 +737,9 @@ pub enum Command<'a> {
     Answer(u16, bool),
     /// `audit`: the audit trail's boot, record count, and chain head (#107).
     Audit,
+    /// `audit rotate <code>`: free the earlier streams once exported
+    /// (D-048, #217); the code is 16 hexadecimal digits, as 8 bytes.
+    AuditRotate([u8; 8]),
     /// `usage`: what the runtime, each running agent, and each group use
     /// (#119).
     Usage,
@@ -809,6 +812,12 @@ pub fn command(line: &[u8]) -> Command<'_> {
     match (words.next(), words.next(), words.next()) {
         (Some(b"list"), None, None) => Command::List,
         (Some(b"audit"), None, None) => Command::Audit,
+        (Some(b"audit"), Some(b"rotate"), Some(code)) if words.next().is_none() => {
+            match hex_bytes::<8>(code) {
+                Some(code) => Command::AuditRotate(code),
+                None => Command::Help,
+            }
+        }
         (Some(b"usage"), None, None) => Command::Usage,
         (Some(b"services"), None, None) => Command::Services,
         (Some(b"health"), None, None) => Command::Health,
@@ -868,9 +877,14 @@ fn version_number(v: &[u8]) -> Option<u32> {
 
 /// Exactly 8 hexadecimal digits, either case.
 fn hash_prefix(v: &[u8]) -> Option<[u8; 4]> {
+    hex_bytes(v)
+}
+
+/// Exactly `2 * N` hexadecimal digits as `N` bytes.
+fn hex_bytes<const N: usize>(v: &[u8]) -> Option<[u8; N]> {
     let digit = |b: u8| char::from(b).to_digit(16).map(|d| d as u8);
-    let mut out = [0u8; 4];
-    if v.len() != 8 {
+    let mut out = [0u8; N];
+    if v.len() != 2 * N {
         return None;
     }
     for (o, pair) in out.iter_mut().zip(v.chunks_exact(2)) {
@@ -1301,6 +1315,19 @@ mod tests {
         assert_eq!(command(b"stop group a;b"), Command::Help);
         assert_eq!(command(b"yes 3"), Command::Answer(3, true));
         assert_eq!(command(b"audit"), Command::Audit);
+        assert_eq!(
+            command(b"audit rotate 0123456789abcDEF"),
+            Command::AuditRotate([0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef])
+        );
+        for bad in [
+            &b"audit rotate"[..],
+            b"audit rotate 0123456789abcde",
+            b"audit rotate 0123456789abcdef0",
+            b"audit rotate 0123456789abcdeg",
+            b"audit rotate 0123456789abcdef x",
+        ] {
+            assert_eq!(command(bad), Command::Help, "{bad:?}");
+        }
         assert_eq!(command(b" usage "), Command::Usage);
         assert_eq!(command(b"usage all"), Command::Help);
         assert_eq!(command(b" services "), Command::Services);
