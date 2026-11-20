@@ -67,6 +67,14 @@ const IOMMU_REFUSED: &str =
 /// The `fw_cfg` file that carries the device secret (D-047; must match
 /// `pharos_kernel::key::FW_CFG_NAME`), and its file next to the ISO.
 const DEVICE_KEY_NAME: &str = "opt/org.pharos/device-key";
+/// The `fw_cfg` file that makes a boot a boot check (D-049): the kernel
+/// ends it after `boot ok`. Every headless boot passes it; `run` does not,
+/// so that system keeps running.
+const BOOT_CHECK_NAME: &str = "opt/org.pharos/boot-check";
+/// The boot check that the system keeps running without it (D-049): the
+/// trusted console still answers after `boot ok`.
+const RUNNING_SCRIPT: &[console::Step] =
+    &[("serial: PHAROS: boot ok", "list\n"), (">no agents", "")];
 const DEVICE_KEY: &str = "device.key";
 /// The device key test kernels get: known, so the `device_key` kernel can
 /// check what the kernel read and derived.
@@ -132,8 +140,9 @@ COMMANDS:
                             output on this terminal. UEFI (OVMF) by default; --bios
                             uses SeaBIOS; --gdb waits for GDB on localhost:1234;
                             --kernel boots the given ELF (for example a test
-                            kernel) instead of building the kernel.
-                            Succeeds only if the kernel reports success.
+                            kernel) instead of building the kernel. The system
+                            runs until QEMU is stopped (D-049); fails if the
+                            kernel reports a failure.
     test [--timeout <SECS>] [--shard <N/M>] [--repeat <N>]
                             Boot check: build, make the image, and boot it headless
                             under UEFI and BIOS. Then kernel tests: boot every test
@@ -1235,6 +1244,10 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
     let mut key = OsString::from(format!("name={DEVICE_KEY_NAME},file="));
     key.push(iso.with_file_name(DEVICE_KEY));
     args.extend(["-fw_cfg".into(), key]);
+    args.extend([
+        "-fw_cfg".into(),
+        format!("name={BOOT_CHECK_NAME},string=1").into(),
+    ]);
     // A read-only virtio-blk disk (modern device only, MSI-X) for the
     // driver work in M2.9: `disk.img` next to the ISO (drivers.md).
     let mut disk = OsString::from("if=none,id=disk0,format=raw,readonly=on,file=");
@@ -1364,12 +1377,16 @@ fn run_qemu(paths: &Paths, bios: bool, gdb: bool, kernel: Option<PathBuf>) -> Re
         trust.with_extension("out").display(),
         trust.with_extension("in").display()
     );
-    let status = qemu_command(qemu_args(&iso, &vars, OsStr::new("stdio"), bios, gdb))
+    let args = qemu_args(&iso, &vars, OsStr::new("stdio"), bios, gdb);
+    let status = qemu_command(without_fw_cfg(args, BOOT_CHECK_NAME))
         .status()
         .map_err(qemu_error)?;
-    interpret_qemu_status(status.code())?;
-    println!("Kernel reported success (QEMU exit status {QEMU_EXIT_SUCCESS}).");
-    Ok(())
+    // The system runs until QEMU is stopped (D-049); only a failure
+    // the kernel reports is an error.
+    match status.code() {
+        Some(QEMU_EXIT_FAILURE) => interpret_qemu_status(status.code()),
+        _ => Ok(()),
+    }
 }
 
 /// What a headless boot produced.
@@ -1755,7 +1772,10 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
     let mut serial = OsString::from("file:");
     serial.push(&log);
     let _ = fs::remove_file(&log);
-    let args = without_key(qemu_args(&iso, &vars, &serial, false, false));
+    let args = without_fw_cfg(
+        qemu_args(&iso, &vars, &serial, false, false),
+        DEVICE_KEY_NAME,
+    );
     let run = run_headless(args, &log, timeout)?;
     refused(
         "boot check (no device key)",
@@ -1764,19 +1784,70 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
         KEY_REFUSED,
         timeout,
     )?;
+    running(&iso, &logs, timeout)?;
     println!("All boot checks passed.");
     Ok(())
 }
 
-/// `args` without the device key's `fw_cfg` file.
-fn without_key(args: Vec<OsString>) -> Vec<OsString> {
+/// D-049: the main image booted without [`BOOT_CHECK_NAME`] keeps
+/// running after `boot ok`, and its trusted console answers `list`.
+fn running(iso: &Path, logs: &Path, timeout: Duration) -> Result<()> {
+    let label = "boot check (keeps running without the boot-check file)";
+    let log = logs.join("boot-running.log");
+    let vars = logs.join("boot-running-ovmf-vars.fd");
+    prepare_firmware(&vars, false)?;
+    let dir = iso.parent().unwrap_or(Path::new("."));
+    recovery::fresh_fifos(dir)?;
+    let base = console::fifos(dir)?;
+    let _ = fs::remove_file(&log);
+    let script = console::Script::start(&base, None, Some(&log), RUNNING_SCRIPT)?;
+    let mut serial = OsString::from("file:");
+    serial.push(&log);
+    let args = qemu_args(iso, &vars, &serial, false, false);
+    let start = Instant::now();
+    let mut child = qemu_command(without_fw_cfg(args, BOOT_CHECK_NAME))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .map_err(qemu_error)?;
+    let outcome = loop {
+        if script.finish(&[]).is_ok() {
+            break Ok(());
+        }
+        if let Some(status) = child.try_wait().map_err(qemu_error)? {
+            break Err(format!("QEMU exited ({status}) instead of running on"));
+        }
+        if start.elapsed() > timeout {
+            break Err(format!("no answer within {} s", timeout.as_secs()));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    let said = script.finish(&[]).err().unwrap_or_default();
+    outcome
+        .map(|()| println!("{label}: PASS in {:.1} s", start.elapsed().as_secs_f32()))
+        .map_err(|e| {
+            format!(
+                "{label}: {e} (log: {}){}",
+                log.display(),
+                if said.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{said}")
+                }
+            )
+        })
+}
+
+/// `args` without the `fw_cfg` file `name`.
+fn without_fw_cfg(args: Vec<OsString>, name: &str) -> Vec<OsString> {
     let mut out = Vec::with_capacity(args.len());
     let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
-        let key = args.peek().is_some_and(|next| {
-            next.to_string_lossy()
-                .starts_with(&format!("name={DEVICE_KEY_NAME},"))
-        });
+        let key = args
+            .peek()
+            .is_some_and(|next| next.to_string_lossy().starts_with(&format!("name={name},")));
         if arg == "-fw_cfg" && key {
             args.next();
         } else {
@@ -5167,10 +5238,34 @@ mod tests {
             args[key + 1],
             "name=opt/org.pharos/device-key,file=img/device.key"
         );
-        let without = without_key(args.clone());
+        let without = without_fw_cfg(args.clone(), DEVICE_KEY_NAME);
         assert_eq!(without.len(), args.len() - 2);
-        assert!(!without.iter().any(|a| a == "-fw_cfg"));
+        assert!(
+            !without
+                .iter()
+                .any(|a| a.to_string_lossy().contains("device-key"))
+        );
         assert_eq!(&TEST_DEVICE_KEY[..3], &[0, 1, 2]);
+    }
+
+    #[test]
+    fn every_machine_is_a_boot_check_but_run_and_the_running_check() {
+        let (iso, vars) = (Path::new("img/pharos.iso"), Path::new("vars.fd"));
+        let args = qemu_args(iso, vars, OsStr::new("stdio"), false, false);
+        let flag = "name=opt/org.pharos/boot-check,string=1";
+        let at = args
+            .iter()
+            .position(|a| a == flag)
+            .expect("the boot-check file");
+        assert_eq!(args[at - 1], "-fw_cfg");
+        let without = without_fw_cfg(args.clone(), BOOT_CHECK_NAME);
+        assert_eq!(without.len(), args.len() - 2);
+        assert!(!without.iter().any(|a| a == flag));
+        assert!(
+            without
+                .iter()
+                .any(|a| a.to_string_lossy().contains("device-key"))
+        );
     }
 
     #[test]

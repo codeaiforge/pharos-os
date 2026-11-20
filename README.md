@@ -71,7 +71,7 @@ cargo xtask run          # UEFI (OVMF)
 cargo xtask run --bios   # BIOS (SeaBIOS)
 ```
 
-The serial output shows `init` starting the services, then ends with `PHAROS: boot ok`, and the command exits 0 only when the kernel reports success. `cargo xtask test` runs the same boot headless under both firmwares, with a time limit, and reports pass or fail for each; CI runs it on every push to `main`.
+The serial output shows `init` starting the services, then `PHAROS: boot ok`; the system then keeps running until QEMU is stopped (D-049), and the command fails only if the kernel reports a failure. `cargo xtask test` runs the same boot headless under both firmwares, with a time limit, and reports pass or fail for each; CI runs it on every push to `main`.
 
 ## CLI usage
 

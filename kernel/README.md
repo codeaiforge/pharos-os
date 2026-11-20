@@ -48,7 +48,7 @@ cargo xtask test         # headless boot check (UEFI and BIOS) and the test kern
 
 To add a kernel test, see [Kernel tests (QEMU)](../docs/development/testing.md#kernel-tests-qemu).
 
-The serial output ends with `PHAROS: boot ok`, and the command exits 0 only on the kernel's success signal (QEMU exit status 33). Boot failures and panics print `PHAROS: boot failed: ...` or `PHAROS: panic: ...`; QEMU then exits with status 35 and `cargo xtask run` fails.
+The serial output shows `PHAROS: boot ok`, and the system keeps running until QEMU is stopped. Only a boot check, which the host asks for with the `fw_cfg` file `opt/org.pharos/boot-check` (D-049, as `cargo xtask test` does), ends there with the kernel's success signal (QEMU exit status 33). Boot failures and panics print `PHAROS: boot failed: ...` or `PHAROS: panic: ...`; QEMU then exits with status 35 and `cargo xtask run` fails.
 
 ## Printing
 

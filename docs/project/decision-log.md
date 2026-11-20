@@ -1606,3 +1606,30 @@ On the reference platform (D-044) the host's VM configuration is already in the 
 - The archive's integrity rests on the signed heads (D-047), which the export checks before it writes anything.
 
 **Evidence.** The issue's options (#217). The store already keeps each stream's chain head (`Info::head`); `STAT` gains it on the wire. The kernel's endpoints are synchronous (`ipc::send` blocks until a receiver takes the message), which rules out a blocking report from the audit service to `init`.
+
+### D-049: The system keeps running after the boot check
+
+- **Status:** Accepted
+- **Needed by:** M5.5
+- **Date accepted:** 2026-11-20 (issue #263)
+
+**Context.** Since M2.2 the main kernel ends every boot the same way: it prints `PHAROS: boot ok`, writes QEMU's debug-exit port (status 33, D-009), and stops the CPU with interrupts off. That made the boot a test, but it also stops a booted release with its services: the trusted console never answers, and `audit rotate` (D-048) cannot be typed outside a test kernel. Found while writing the user guide (#260).
+
+**Options.**
+1. The kernel exits only when the host asks for a boot check, with a `fw_cfg` file `opt/org.pharos/boot-check`; otherwise it keeps running. xtask passes the file to every headless boot.
+2. The kernel never exits after `boot ok`; the boot check passes on the serial marker and kills QEMU.
+3. No change: v0.5 only boots and checks itself, and running is planned for Phase 6.
+
+**Evaluation criteria.** A released image is usable as a system. Boot checks keep D-009's pass rule (status 33 and the marker). The image, and so its boot measurement, stays the same for both uses.
+
+**Decision (the maintainer chose option 1, 2026-11-20).**
+- The kernel reads the file once, right after the device key and before `init` starts (the `fw_cfg` selector is shared state). Present: after `boot ok` it exits as before. Absent: it prints `running: until the VM is stopped` and its boot task blocks forever; the services and the idle task run.
+- Failures are unchanged: a boot failure or a panic still writes status 35 and halts.
+- `cargo xtask run` and a user's own QEMU command do not pass the file.
+
+**Consequences.**
+- The host chooses; the file is outside the measured image. The host is trusted on the reference platform (D-036, D-044), and the file only decides whether the VM exits after a successful boot.
+- `cargo xtask run` no longer ends by itself; the user stops QEMU. The store is crash-consistent, so stopping the VM loses at most what was not yet committed.
+- A sixth boot check, without the file, requires the trusted console to answer after `boot ok`.
+
+**Evidence.** A boot of the release with the user guide's QEMU command (2026-11-20): `trust` printed its start lines, then answered nothing typed; `kmain` ends in `halt()` (`cli; hlt`) after `qemu_exit`.

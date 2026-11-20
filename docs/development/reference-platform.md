@@ -46,7 +46,7 @@ Run by the maintainer's assistant on the maintainer's development host, at commi
 | Kernel's CPU check | `cpu: not affected by Meltdown or MDS (IntelNotAffected)` under KVM (`-cpu host`) |
 | Kernel's IOMMU | `iommu: 1 unit(s) translating, 3-level tables, nothing attached` |
 
-**Release matrix** (`cargo xtask matrix <cell>`, one cell after another; each runs the four boot checks and every test kernel):
+**Release matrix** (`cargo xtask matrix <cell>`, one cell after another; each runs the boot checks, four at the time of this report, and every test kernel):
 
 | Cell | Result | Time | Kernels |
 | --- | --- | --- | --- |

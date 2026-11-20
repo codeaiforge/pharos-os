@@ -14,7 +14,7 @@ extern crate alloc;
 use core::panic::PanicInfo;
 
 use pharos_kernel::arch::x86_64::{
-    _print_panic, QemuExit, apic, cpu_identity, gdt, halt, idt, paging, qemu_exit,
+    _print_panic, QemuExit, apic, cpu_identity, fw_cfg_file, gdt, halt, idt, paging, qemu_exit,
     run_on_kernel_stack,
 };
 use pharos_kernel::boot_info::{BootMode, boot_mode, firmware_name, mib, summarize};
@@ -271,6 +271,10 @@ extern "C" fn kernel_main() -> ! {
         Ok(()) => kprintln!("  key:        device key read"),
         Err(error) => fail(format_args!("{error}")),
     }
+    // D-049: a boot check (the host passes this `fw_cfg` file) ends after
+    // `boot ok`; otherwise the system runs until the VM is stopped. Read
+    // now: the `fw_cfg` selector is shared, and no other task runs yet.
+    let boot_check = fw_cfg_file(BOOT_CHECK, &mut []).is_some();
     let functions = pci::enumerate();
     kprintln!("  pci:        {functions} functions");
     for d in pci::devices() {
@@ -345,9 +349,20 @@ extern "C" fn kernel_main() -> ! {
     }
 
     kprintln!("PHAROS: boot ok");
-    qemu_exit(QemuExit::Success);
-    halt()
+    if boot_check {
+        qemu_exit(QemuExit::Success);
+        halt()
+    }
+    kprintln!("  running:    until the VM is stopped");
+    // Nothing wakes this task: the services run, and the idle task when
+    // none is ready. The loop guards against a stray wake.
+    loop {
+        sched::block_current();
+    }
 }
+
+/// The `fw_cfg` file that makes this boot a boot check (D-049).
+const BOOT_CHECK: &[u8] = b"opt/org.pharos/boot-check";
 
 /// Reports a fatal boot error and halts.
 fn fail(message: core::fmt::Arguments<'_>) -> ! {
