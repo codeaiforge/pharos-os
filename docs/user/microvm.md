@@ -2,14 +2,14 @@
 
 ## Status
 
-This guide is for v0.5, the microVM release (M5.5). It covers verifying a release, setting up a VM for it, booting it, using the trusted console, and exporting and checking the audit trail. Every command in it was run on the [reference platform](../development/reference-platform.md) on 2026-11-20, on a release built at `0c7b5d3`: two boots of one VM, with an export between them and a rotation in the second.
+This guide is for v0.5, the microVM release (M5.5). It covers verifying a release, setting up a VM for it, booting it, using the trusted console, and exporting and checking the audit trail. Every command in it was run on the development host on 2026-11-20, as two boots of one VM with an export between them and a rotation in the second: under KVM on a release built at `0c7b5d3`, before Secure Boot; and with the Secure Boot firmware and variable store on a release built with `--secure-boot` and test keys (#258), under TCG, because another hypervisor held the CPU's virtualization then.
 
 | Part | State |
 | --- | --- |
 | Verifying a release's files and signature (`cargo xtask release verify`) | **implemented** (#259); the first signed release, and `RELEASE-KEY` in the repository, come with the v0.5 gate (#261) |
 | Booting a release in QEMU with KVM, a device key per VM, and the trusted console | **implemented** (D-047, D-049) |
 | The audit trail: checking it, warnings as it fills, export, and rotation | **implemented** (D-047, D-048) |
-| Secure Boot: a variable store with Pharos's keys, `OVMF_VARS_4M.pharos.fd` | **planned** (#258). Until then a release boots with the distribution's OVMF and Secure Boot off, and nothing stops a changed kernel or module from booting; the boot measurement in every audit head shows it afterwards |
+| Secure Boot: Limine signed with Pharos's `db` key, and the variable store `OVMF_VARS_4M.pharos.fd` with Pharos's keys | **implemented** (#258) |
 | A model for local inference in the release image | **planned**. The release image has no model; S1 runs it in a test kernel ([testing.md](../development/testing.md#s1-end-to-end)) |
 | Other VMMs (Cloud Hypervisor, Firecracker) and bare metal | **untested** |
 
@@ -21,7 +21,7 @@ This guide is for v0.5, the microVM release (M5.5). It covers verifying a releas
 
 ## 2. Get and verify the release
 
-A release is a directory with `pharos-<version>.iso`, `disk.img`, `store.img`, `BUILDINFO`, `SHA256SUMS`, and `SHA256SUMS.sig` ([release-integrity.md](../architecture/release-integrity.md#6-signed-release-artifacts-259)).
+A release is a directory with `pharos-<version>.iso`, `disk.img`, `store.img`, `OVMF_VARS_4M.pharos.fd`, `BUILDINFO`, `SHA256SUMS`, and `SHA256SUMS.sig` ([release-integrity.md](../architecture/release-integrity.md#6-signed-release-artifacts-259)).
 
 ```sh
 cargo xtask release verify <RELEASE_DIR> --key RELEASE-KEY
@@ -36,7 +36,7 @@ cargo xtask release          # target/xtask/release/<version>/
 diff target/xtask/release/<version>/SHA256SUMS <RELEASE_DIR>/SHA256SUMS
 ```
 
-`BUILDINFO` names the commit and the compiler; `rust-toolchain.toml` pins the compiler, so a checkout of the tag uses the same one.
+`BUILDINFO` names the commit and the compiler; `rust-toolchain.toml` pins the compiler, so a checkout of the tag uses the same one. Your build has no Secure Boot signature, so its ISO differs from the release's in Limine's signature only, and it has no variable store: compare the rest of `SHA256SUMS`, and Limine with its signature removed ([release-integrity.md](../architecture/release-integrity.md#5-secure-boot-258)).
 
 ## 3. Set up a VM
 
@@ -46,7 +46,7 @@ Each VM gets its own directory with four files. The release's files stay read-on
 mkdir vm1 && cd vm1
 (umask 077; head -c 32 /dev/urandom > device.key)
 cp <RELEASE_DIR>/store.img store.img
-cp /usr/share/OVMF/OVMF_VARS_4M.fd vars.fd
+cp <RELEASE_DIR>/OVMF_VARS_4M.pharos.fd vars.fd
 mkfifo trust.in trust.out
 ```
 
@@ -54,7 +54,7 @@ mkfifo trust.in trust.out
 | --- | --- |
 | `device.key` | The VM's device secret: 32 random bytes, which the kernel reads once at boot (D-047). Without it the kernel refuses to boot. |
 | `store.img` | The VM's writable store: the audit trail, the knowledge service, agent tasks, the slot record. A copy per VM. |
-| `vars.fd` | OVMF's variable store, written by the firmware. A copy per VM. |
+| `vars.fd` | OVMF's variable store with Pharos's Secure Boot keys enrolled and Secure Boot on, written by the firmware as it runs. A copy per VM. |
 | `trust.in`, `trust.out` | The trusted console's input and output (D-018). |
 
 **The device key.** Keep it for as long as you keep the VM's trails, readable by you only:
@@ -68,9 +68,10 @@ From the VM's directory, with `R` the release directory:
 
 ```sh
 R=<RELEASE_DIR>
-qemu-system-x86_64 -M q35 -enable-kvm -cpu host -m 256M \
+qemu-system-x86_64 -M q35,smm=on -enable-kvm -cpu host -m 256M \
+  -global driver=cfi.pflash01,property=secure,value=on \
   -device intel-iommu,intremap=off \
-  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd \
   -drive if=pflash,format=raw,file=vars.fd \
   -cdrom $R/pharos-*.iso \
   -fw_cfg name=opt/org.pharos/device-key,file=device.key \
@@ -87,6 +88,7 @@ qemu-system-x86_64 -M q35 -enable-kvm -cpu host -m 256M \
 ```
 
 What each part is for:
+- **`smm=on`, the secure flash, `OVMF_CODE_4M.secboot.fd`, and `vars.fd`:** OVMF with Secure Boot on and only Pharos's keys enrolled. The firmware boots Limine only with Pharos's signature, and Limine boots the kernel and the factory image only if their hashes match its configuration, whose own hash is in the signed Limine (#258). A changed file stops the boot on the screen, before the kernel, and nothing reaches `serial.log`.
 - **`-enable-kvm -cpu host`:** the kernel checks the host CPU's real `IA32_ARCH_CAPABILITIES` and refuses a CPU affected by Meltdown or MDS (D-044).
 - **`intel-iommu`, before the devices, and `iommu_platform=on` on each:** every device's DMA goes through the IOMMU; without one the kernel refuses to boot (#242).
 - **The first disk, `disk.img`, read-only; the second, `store.img`:** the storage service takes the second virtio-blk device, so keep this order.
@@ -172,4 +174,5 @@ Keep `export-1/` with the device key: the export's heads are signed by it.
 
 - Updates of the system image (`update propose` and `apply`, [boot.md](../architecture/boot.md)), safe mode and recovery.
 - Several VMs from one release: give each its own directory as in section 3.
-- Secure Boot (#258) and a model in the image, both planned.
+- A model in the image, planned.
+- Booting with Secure Boot off (the distribution's `OVMF_CODE_4M.fd` and `OVMF_VARS_4M.fd`) works too, but then nothing checks Limine, and a changed Limine could skip the checks of the kernel and the factory image.

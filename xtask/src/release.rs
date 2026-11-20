@@ -13,7 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{DISK_IMAGE, Paths, Result, STORE_IMAGE, io_err, sign};
+use crate::{DISK_IMAGE, Paths, Result, STORE_IMAGE, io_err, secure_boot, sign};
 
 pub const SUMS: &str = "SHA256SUMS";
 pub const SIG: &str = "SHA256SUMS.sig";
@@ -21,13 +21,30 @@ const MEASUREMENT: &str = "boot-measurement";
 const BUILDINFO: &str = "BUILDINFO";
 /// In `BUILDINFO`'s source line when tracked files differ from the commit.
 const MODIFIED: &str = " (modified)";
+/// `BUILDINFO`'s line naming the `db` certificate that signed Limine
+/// (#258): this, then its SHA-256 in hex.
+const SECURE_BOOT: &str = "secure-boot db ";
 
-/// `cargo xtask release`: builds the main image and puts the release files
-/// and `SHA256SUMS` in `target/xtask/release/<version>/`. The device key
-/// next to the image is never copied: it is this host's secret.
-pub fn build(paths: &Paths) -> Result<PathBuf> {
+/// `cargo xtask release [--secure-boot <KEYDIR>]`: builds the main image
+/// and puts the release files and `SHA256SUMS` in
+/// `target/xtask/release/<version>/`. The device key next to the image is
+/// never copied: it is this host's secret. With `KEYDIR` (`PK.crt`,
+/// `KEK.crt`, `db.crt`, `db.key`; #258), Limine in the ISO is signed with
+/// the `db` key, and the release gets the variable store with the three
+/// certificates enrolled.
+pub fn build(paths: &Paths, keys: Option<&Path>) -> Result<PathBuf> {
     crate::build(paths)?;
-    let (iso, measurement) = crate::main_image(paths, None)?;
+    let (mut iso, measurement) = crate::main_image(paths, None)?;
+    if let Some(keys) = keys {
+        let out = paths
+            .target
+            .join("xtask")
+            .join("secure-boot")
+            .join("release");
+        iso = secure_boot::signed(paths, &iso.with_file_name("iso-root"), keys, &out, |_| {
+            Ok(())
+        })?;
+    }
     let version = env!("CARGO_PKG_VERSION");
     let dir = paths.target.join("xtask").join("release").join(version);
     crate::recreate_dir(&dir)?;
@@ -43,8 +60,18 @@ pub fn build(paths: &Paths) -> Result<PathBuf> {
         host_free(&dir.join(name), &host)?;
         entries.push((name.clone(), hash(&dir.join(name))?));
     }
+    if let Some(keys) = keys {
+        let vars = dir.join(secure_boot::VARS);
+        secure_boot::vars(keys, &vars)?;
+        entries.push((secure_boot::VARS.to_owned(), hash(&vars)?));
+    }
+    let mut info_text = buildinfo(paths)?;
+    if let Some(keys) = keys {
+        let db = hash(&keys.join("db.crt"))?;
+        info_text.push_str(&format!("{SECURE_BOOT}{}\n", sign::hex(&db)));
+    }
     let info = dir.join(BUILDINFO);
-    fs::write(&info, buildinfo(paths)?).map_err(io_err("cannot write", &info))?;
+    fs::write(&info, info_text).map_err(io_err("cannot write", &info))?;
     entries.push((BUILDINFO.to_owned(), hash(&info)?));
     let text = sums(&entries, &measurement);
     let path = dir.join(SUMS);
@@ -69,13 +96,18 @@ pub fn sign(paths: &Paths, dir: &Path, key: &Path) -> Result<()> {
     }
     let text = read(&dir.join(SUMS))?;
     let (entries, _) = check_files(dir, &text)?;
-    if entries.iter().any(|(n, _)| n == BUILDINFO) && read(&dir.join(BUILDINFO))?.contains(MODIFIED)
-    {
+    let info = if entries.iter().any(|(n, _)| n == BUILDINFO) {
+        read(&dir.join(BUILDINFO))?
+    } else {
+        String::new()
+    };
+    if info.contains(MODIFIED) {
         return Err(format!(
             "{} was built from a modified tree; build the release from a clean checkout",
             dir.display()
         ));
     }
+    secure_boot_signed(paths, dir, &entries, &info)?;
     let signature = pharos_image::sign_message(text.as_bytes(), &seed);
     let public = pharos_image::public_key(&seed);
     // ponytail: checks our own output with the code `verify` uses.
@@ -86,6 +118,37 @@ pub fn sign(paths: &Paths, dir: &Path, key: &Path) -> Result<()> {
     fs::write(&path, sign::hex(&signature) + "\n").map_err(io_err("cannot write", &path))?;
     println!("signed {}: {}", dir.join(SUMS).display(), path.display());
     println!("release key {}", sign::hex(&public));
+    Ok(())
+}
+
+/// Refuses a release whose Limine is not signed for Secure Boot, or is
+/// signed with the test `db` key (#258).
+fn secure_boot_signed(
+    paths: &Paths,
+    dir: &Path,
+    entries: &[(String, [u8; 32])],
+    info: &str,
+) -> Result<()> {
+    let db = info.lines().find_map(|l| l.strip_prefix(SECURE_BOOT));
+    let (Some(db), true) = (db, entries.iter().any(|(n, _)| n == secure_boot::VARS)) else {
+        return Err(format!(
+            "{} has no Secure Boot signature; build it with `cargo xtask release --secure-boot <KEYDIR>`",
+            dir.display()
+        ));
+    };
+    let test = paths
+        .target
+        .join("xtask")
+        .join("keys")
+        .join("secureboot")
+        .join("db.crt");
+    if test.is_file() && sign::hex(&hash(&test)?) == db {
+        return Err(format!(
+            "{}'s Limine is signed with the test db key ({}); sign it with the maintainer's",
+            dir.display(),
+            test.display()
+        ));
+    }
     Ok(())
 }
 
@@ -252,7 +315,13 @@ mod tests {
         crate::recreate_dir(&dir).unwrap();
         fs::write(dir.join("a.iso"), b"iso").unwrap();
         fs::write(dir.join("store.img"), b"store").unwrap();
-        let entries: Vec<_> = ["store.img", "a.iso"]
+        fs::write(dir.join(secure_boot::VARS), b"vars").unwrap();
+        fs::write(
+            dir.join(BUILDINFO),
+            format!("source x\n{SECURE_BOOT}{}\n", sign::hex(&[7; 32])),
+        )
+        .unwrap();
+        let entries: Vec<_> = [BUILDINFO, secure_boot::VARS, "store.img", "a.iso"]
             .iter()
             .map(|n| (n.to_string(), hash(&dir.join(n)).unwrap()))
             .collect();
@@ -275,7 +344,7 @@ mod tests {
         let (dir, key) = release("ok");
         assert_eq!(verify(&dir, &key), Ok([9; 32]));
         let text = read(&dir.join(SUMS)).unwrap();
-        assert!(text.starts_with(&format!(
+        assert!(text.contains(&format!(
             "{}  a.iso\n",
             sign::hex(&hash(&dir.join("a.iso")).unwrap())
         )));
@@ -342,6 +411,50 @@ mod tests {
         };
         let err = sign(&paths, &dir, &dir.join("release.key")).unwrap_err();
         assert!(err.contains("is the test key"), "{err}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `dir`'s `SHA256SUMS` rewritten for its files `names`, then signed.
+    fn resign(dir: &Path, names: &[&str]) -> Result<()> {
+        let entries: Vec<_> = names
+            .iter()
+            .map(|n| (n.to_string(), hash(&dir.join(n)).unwrap()))
+            .collect();
+        fs::write(dir.join(SUMS), sums(&entries, &[9; 32])).unwrap();
+        let paths = Paths {
+            root: dir.to_path_buf(),
+            target: dir.join("target"),
+        };
+        sign(&paths, dir, &dir.join("release.key"))
+    }
+
+    #[test]
+    fn a_release_without_secure_boot_is_not_signed() {
+        let (dir, _) = release("no-sb");
+        let err = resign(&dir, &[BUILDINFO, "store.img", "a.iso"]).unwrap_err();
+        assert!(err.contains("no Secure Boot signature"), "{err}");
+        fs::write(dir.join(BUILDINFO), "source x\n").unwrap();
+        let err = resign(&dir, &[BUILDINFO, secure_boot::VARS, "a.iso"]).unwrap_err();
+        assert!(err.contains("no Secure Boot signature"), "{err}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_release_signed_with_the_test_db_key_is_not_signed() {
+        let (dir, _) = release("test-db");
+        let keys = dir.join("target/xtask/keys/secureboot");
+        fs::create_dir_all(&keys).unwrap();
+        fs::write(keys.join("db.crt"), b"test db cert").unwrap();
+        let db = sign::hex(&hash(&keys.join("db.crt")).unwrap());
+        fs::write(
+            dir.join(BUILDINFO),
+            format!("source x\n{SECURE_BOOT}{db}\n"),
+        )
+        .unwrap();
+        let err = resign(&dir, &[BUILDINFO, secure_boot::VARS, "a.iso"]).unwrap_err();
+        assert!(err.contains("test db key"), "{err}");
+        fs::write(keys.join("db.crt"), b"another cert").unwrap();
+        resign(&dir, &[BUILDINFO, secure_boot::VARS, "a.iso"]).unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
 

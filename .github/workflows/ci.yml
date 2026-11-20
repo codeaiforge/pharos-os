@@ -143,14 +143,14 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/apt-debs
-          key: apt-${{ steps.image.outputs.version }}-qemu-ovmf-xorriso
+          key: apt-${{ steps.image.outputs.version }}-qemu-ovmf-xorriso-sbsign-mtools
 
       # On a cache hit, install from the cached files without touching the
       # mirror. If that fails (or on a miss), download, keep the files for
       # the cache, and install.
-      - name: Install QEMU, OVMF, and xorriso
+      - name: Install QEMU, OVMF, xorriso, sbsigntool, and mtools
         run: |
-          pkgs="qemu-system-x86 ovmf xorriso"
+          pkgs="qemu-system-x86 ovmf xorriso sbsigntool mtools"
           if ls ~/apt-debs/*.deb >/dev/null 2>&1 &&
              sudo apt-get install -y --no-install-recommends ~/apt-debs/*.deb; then
             echo "Installed from the cache"
@@ -162,6 +162,14 @@ jobs:
             sudo apt-get install -y --no-install-recommends $pkgs
           fi
           qemu-system-x86_64 --version | head -1
+
+      # Secure Boot (#258): virt-fw-vars writes the test variable store.
+      # Pinned as release-integrity.md part 8 decides; pipx, because
+      # Ubuntu 24.04's Python refuses a system-wide pip install.
+      - name: Install virt-firmware
+        run: |
+          pipx install virt-firmware==26.10
+          virt-fw-vars --help >/dev/null
 
       # The Rust build each share repeats (xtask, the kernel and test
       # kernels, the user programs) and the downloaded Limine archive, which

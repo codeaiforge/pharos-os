@@ -23,6 +23,7 @@ mod fs_image;
 mod matrix;
 mod recovery;
 mod release;
+mod secure_boot;
 mod sign;
 mod store_image;
 
@@ -122,15 +123,20 @@ COMMANDS:
                             as 64 hex digits; without --key, the test key in
                             target/xtask/keys/ (made on first use). Prints the
                             public key, for PHAROS_IMAGE_KEY.
-    release                 Build the release (release-integrity.md part 6) in
+    release [--secure-boot <KEYDIR>]
+                            Build the release (release-integrity.md part 6) in
                             target/xtask/release/<version>/: the ISO, disk.img,
                             store.img, and SHA256SUMS with their hashes and the
                             boot measurement. Two builds give the same SHA256SUMS.
+                            With --secure-boot, Limine is signed with KEYDIR's
+                            db.key, and the release adds OVMF_VARS_4M.pharos.fd
+                            with KEYDIR's PK.crt, KEK.crt, and db.crt (#258).
     release sign <DIR> --release-key <FILE>
                             Check DIR's files against its SHA256SUMS and sign it
                             into SHA256SUMS.sig. FILE holds the maintainer's
-                            Ed25519 seed as 64 hex digits; the test key is
-                            refused. Prints the public key, for RELEASE-KEY.
+                            Ed25519 seed as 64 hex digits; the test key, a release
+                            without Secure Boot, and the test db key are refused.
+                            Prints the public key, for RELEASE-KEY.
     release verify <DIR> --key <FILE>
                             Check SHA256SUMS.sig under the public key in FILE
                             (such as RELEASE-KEY), then every file; print the
@@ -229,7 +235,9 @@ enum Task {
     Image {
         kernel: Option<PathBuf>,
     },
-    Release,
+    Release {
+        secure_boot: Option<PathBuf>,
+    },
     ReleaseSign {
         dir: PathBuf,
         key: PathBuf,
@@ -353,7 +361,13 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
         }
         Some("release") => {
             let task = match args.next().as_deref() {
-                None => return Ok(Task::Release),
+                None => return Ok(Task::Release { secure_boot: None }),
+                Some("--secure-boot") => {
+                    let keys = args.next().ok_or("--secure-boot needs <KEYDIR>")?;
+                    Task::Release {
+                        secure_boot: Some(PathBuf::from(keys)),
+                    }
+                }
                 Some(sub @ ("sign" | "verify")) => {
                     let flag = if sub == "sign" {
                         "--release-key"
@@ -1092,7 +1106,6 @@ fn image(
             kernel.display()
         ));
     }
-    let epoch = source_date_epoch()?;
     let (limine, tool) = ensure_limine(paths)?;
 
     let root = out.join("iso-root");
@@ -1110,11 +1123,14 @@ fn image(
         let path = module_dir.join(name);
         fs::write(&path, bytes).map_err(io_err("cannot write", &path))?;
     }
+    // Secure Boot steps 1 and 2 (#258): every path hashed, and the
+    // config's hash enrolled into Limine below; no key needed.
+    let conf = boot_limine.join("limine.conf");
     fs::write(
-        boot_limine.join("limine.conf"),
-        limine_conf(modules, cmdline),
+        &conf,
+        secure_boot::hash_paths(&limine_conf(modules, cmdline), &root)?,
     )
-    .map_err(io_err("cannot write", &boot_limine))?;
+    .map_err(io_err("cannot write", &conf))?;
     for name in [
         "limine-bios.sys",
         "limine-bios-cd.bin",
@@ -1125,10 +1141,11 @@ fn image(
     // Limine is BSD-2-Clause: images carry its license notice.
     copy(&limine.join("LICENSE"), &boot_limine.join("LICENSE"))?;
     copy(&limine.join("BOOTX64.EFI"), &efi.join("BOOTX64.EFI"))?;
+    secure_boot::enroll(&tool, &efi.join("BOOTX64.EFI"), &conf)?;
 
     // SOURCE_DATE_EPOCH alone does not make the ISO byte-identical; file
     // timestamps must be pinned too (prototype finding, boot-evaluation.md).
-    pin_timestamps(&root, SystemTime::UNIX_EPOCH + Duration::from_secs(epoch))?;
+    secure_boot::finish(&root)?;
 
     // The device secret (D-047), passed by `qemu_args` through `fw_cfg`:
     // the known test key for test kernels, this host's key otherwise.
@@ -1141,6 +1158,14 @@ fn image(
     let disk = out.join(DISK_IMAGE);
     fs::write(&disk, disk_image()).map_err(io_err("cannot write", &disk))?;
     store_image::fresh(&out.join(STORE_IMAGE), STORE_BLOCKS)?;
+    pack_iso(paths, &root, &iso)?;
+    Ok(iso)
+}
+
+/// Packs the image tree `root` into the hybrid BIOS/UEFI ISO `iso`.
+fn pack_iso(paths: &Paths, root: &Path, iso: &Path) -> Result<()> {
+    let epoch = source_date_epoch()?;
+    let (_, tool) = ensure_limine(paths)?;
     run(
         Command::new("xorriso")
             .env("SOURCE_DATE_EPOCH", epoch.to_string())
@@ -1154,19 +1179,16 @@ fn image(
                 "--efi-boot-image",
                 "--protective-msdos-label",
             ])
-            .arg(&root)
+            .arg(root)
             .arg("-o")
-            .arg(&iso),
+            .arg(iso),
         false,
     )?;
     run(
-        Command::new(&tool)
-            .arg(OsStr::new("bios-install"))
-            .arg(&iso),
+        Command::new(&tool).arg(OsStr::new("bios-install")).arg(iso),
         false,
     )?;
-
-    Ok(iso)
+    Ok(())
 }
 
 /// Builds the main image and prints its path, hash, and boot measurement,
@@ -1785,6 +1807,10 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
         timeout,
     )?;
     running(&iso, &logs, timeout)?;
+    // Secure Boot is UEFI only; the `bios` cell has no OVMF.
+    if !matrix::current().bios {
+        secure_boot_checks(paths, &iso, &logs, timeout)?;
+    }
     println!("All boot checks passed.");
     Ok(())
 }
@@ -1838,6 +1864,141 @@ fn running(iso: &Path, logs: &Path, timeout: Duration) -> Result<()> {
                 }
             )
         })
+}
+
+/// How long a refused Secure Boot boot is watched for a kernel line.
+const REFUSAL_WAIT: Duration = Duration::from_secs(20);
+/// The kernel's first line on serial: a boot that never prints it never
+/// reached the kernel.
+const KERNEL_LINE: &str = "bootloader: Limine";
+
+/// Secure Boot (#258, release-integrity.md part 5), under UEFI with the
+/// Secure Boot firmware and a variable store holding the test keys: the
+/// signed image boots; the unsigned image, and a signed one whose kernel,
+/// `root` module, or `limine.conf` changed after hashing, never reach the
+/// kernel. Limine says why on the screen only, so each refusal's screen
+/// is kept as `boot-sb-<case>.ppm` beside its log.
+fn secure_boot_checks(paths: &Paths, iso: &Path, logs: &Path, timeout: Duration) -> Result<()> {
+    let keys = secure_boot::test_keys(paths)?;
+    let vars = logs.join(secure_boot::VARS);
+    secure_boot::vars(&keys, &vars)?;
+    let root = iso.with_file_name("iso-root");
+    let out = paths.target.join("xtask").join("secure-boot");
+    let flip = |file: &'static str| {
+        move |tree: &Path| -> Result<()> {
+            let path = tree.join(file);
+            let mut bytes = fs::read(&path).map_err(io_err("cannot read", &path))?;
+            let at = bytes.len() / 2;
+            bytes[at] ^= 1;
+            fs::write(&path, bytes).map_err(io_err("cannot write", &path))
+        }
+    };
+    let signed = secure_boot::signed(paths, &root, &keys, &out.join("signed"), |_| Ok(()))?;
+    let run = secure_boot_boot(&signed, &vars, &logs.join("boot-sb-signed.log"), timeout)?;
+    let label = "boot check (Secure Boot, signed)";
+    match evaluate_boot(&run, BOOT_MARKER, timeout) {
+        Ok(()) => println!("{label}: PASS in {:.1} s", run.elapsed.as_secs_f32()),
+        Err(reason) => {
+            report_failure(label, &run, &logs.join("boot-sb-signed.log"), &reason);
+            return Err(format!("{label}: {reason}"));
+        }
+    }
+    let kernel = secure_boot::signed(
+        paths,
+        &root,
+        &keys,
+        &out.join("kernel"),
+        flip("boot/kernel"),
+    )?;
+    let module = secure_boot::signed(
+        paths,
+        &root,
+        &keys,
+        &out.join("module"),
+        flip("boot/modules/root"),
+    )?;
+    let conf = secure_boot::signed(paths, &root, &keys, &out.join("conf"), |tree: &Path| {
+        let path = tree.join("boot/limine/limine.conf");
+        let text = fs::read_to_string(&path).map_err(io_err("cannot read", &path))?;
+        fs::write(&path, text + "\n# changed\n").map_err(io_err("cannot write", &path))
+    })?;
+    for (case, image) in [
+        ("unsigned", iso),
+        ("kernel", kernel.as_path()),
+        ("module", module.as_path()),
+        ("conf", conf.as_path()),
+    ] {
+        let log = logs.join(format!("boot-sb-{case}.log"));
+        let run = secure_boot_boot(image, &vars, &log, REFUSAL_WAIT)?;
+        let label = format!("boot check (Secure Boot, {case} refused)");
+        if run.log.contains(KERNEL_LINE) {
+            report_failure(&label, &run, &log, "the kernel started");
+            return Err(format!(
+                "{label}: the kernel started (log: {})",
+                log.display()
+            ));
+        }
+        println!("{label}: PASS, no kernel in {} s", REFUSAL_WAIT.as_secs());
+    }
+    Ok(())
+}
+
+/// Boots `iso` under the Secure Boot firmware with a copy of `vars`, for
+/// at most `limit`; at the limit, saves the screen next to `log` (`.ppm`)
+/// through QEMU's monitor, then stops QEMU.
+fn secure_boot_boot(iso: &Path, vars: &Path, log: &Path, limit: Duration) -> Result<BootRun> {
+    let copy = log.with_extension("vars.fd");
+    fs::copy(vars, &copy).map_err(io_err("cannot copy", vars))?;
+    console::fifos(iso.parent().unwrap_or(Path::new(".")))?;
+    let _ = fs::remove_file(log);
+    // A socket path must be short (108 bytes), so not beside the log.
+    let monitor = env::temp_dir().join(format!(
+        "pharos-sb-{}-{}.monitor",
+        std::process::id(),
+        log.file_stem().and_then(|s| s.to_str()).unwrap_or("boot")
+    ));
+    let _ = fs::remove_file(&monitor);
+    let mut serial = OsString::from("file:");
+    serial.push(log);
+    let mut args = secure_boot::qemu_args(qemu_args(iso, &copy, &serial, false, false), &copy);
+    let mut socket = OsString::from("unix:");
+    socket.push(&monitor);
+    socket.push(",server=on,wait=off");
+    args.extend(["-monitor".into(), socket]);
+    let start = Instant::now();
+    let mut child = qemu_command(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .map_err(qemu_error)?;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(qemu_error)? {
+            break status.code();
+        }
+        if start.elapsed() >= limit {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let timed_out = status.is_none() && child.try_wait().ok().flatten().is_none();
+    if timed_out {
+        if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&monitor) {
+            let _ = std::io::Write::write_fmt(
+                &mut s,
+                format_args!("screendump {}\n", log.with_extension("ppm").display()),
+            );
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let bytes = fs::read(log).unwrap_or_default();
+    Ok(BootRun {
+        status,
+        timed_out,
+        log: String::from_utf8_lossy(&bytes).into_owned(),
+        elapsed: start.elapsed(),
+    })
 }
 
 /// `args` without the `fw_cfg` file `name`.
@@ -4530,7 +4691,9 @@ fn main() -> ExitCode {
                 }
                 Task::Build => build(&paths),
                 Task::Image { kernel } => main_image(&paths, kernel).map(|_| ()),
-                Task::Release => release::build(&paths).map(|_| ()),
+                Task::Release { secure_boot } => {
+                    release::build(&paths, secure_boot.as_deref()).map(|_| ())
+                }
                 Task::ReleaseSign { dir, key } => release::sign(&paths, &dir, &key),
                 Task::ReleaseVerify { dir, key } => release::verify(&dir, &key).map(|_| ()),
                 Task::ImageSign {
@@ -4672,7 +4835,14 @@ mod tests {
     #[test]
     fn release_parses() {
         let p = |list: &[&str]| parse(args(list));
-        assert_eq!(p(&["release"]), Ok(Task::Release));
+        assert_eq!(p(&["release"]), Ok(Task::Release { secure_boot: None }));
+        assert_eq!(
+            p(&["release", "--secure-boot", "k"]),
+            Ok(Task::Release {
+                secure_boot: Some("k".into())
+            })
+        );
+        assert!(p(&["release", "--secure-boot"]).is_err());
         assert_eq!(
             p(&["release", "sign", "d", "--release-key", "k"]),
             Ok(Task::ReleaseSign {

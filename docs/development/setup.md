@@ -72,6 +72,8 @@ Expected:
 | xorriso | M2.2 | Build the hybrid BIOS/UEFI ISO (D-003) | `sudo apt install xorriso` |
 | `x86_64-unknown-none` Rust target | M2.2 | Compile the kernel (D-003) | `rustup target add x86_64-unknown-none` (added to `rust-toolchain.toml` in M2.2) |
 | Limine 12.9.4 | M2.2 | Bootloader in the boot image (D-001) | downloaded and checksum-verified by `cargo xtask image` into `target/`; not installed system-wide |
+| mtools, b2sum | M5.5 | `cargo xtask image` puts the Limine binary with the enrolled config hash into the ISO's EFI boot image (`mcopy`) and hashes every boot file (`b2sum`, coreutils; #258) | `sudo apt install mtools` |
+| sbsigntool, virt-firmware 26.10 | M5.5 | The Secure Boot boot checks and `cargo xtask release --secure-boot`: sign Limine (`sbsign`) and write the variable store (`virt-fw-vars`; #258) | `sudo apt install sbsigntool`; `pip install virt-firmware==26.10` |
 | curl, tar (with xz), cc | M2.2 | Used by `cargo xtask image` to fetch, unpack, and build the Limine host tool | usually preinstalled; `sudo apt install curl xz-utils build-essential` |
 | GDB | M2.4 | Kernel debugging via QEMU's GDB stub | `sudo apt install gdb` |
 | markdownlint-cli2 | any time | Lint Markdown (config in `.markdownlint-cli2.jsonc`) | `npx markdownlint-cli2 "**/*.md"` (requires Node.js) |
