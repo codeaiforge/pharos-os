@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+### Fixed
+
+- `cargo xtask bench-ipc` and `bench-infer` found no test kernel since Rust 1.100 (#261, found at the v0.5 gate): Cargo now puts test executables in `build/<package>/<hash>/out/`, not `deps/`; they are now found by file name in either
+
 ## [0.5.0] - 2026-11-20
 
 Phase 5 (Deployment and Release), v0.5, the microVM release. Pharos runs as a microVM on QEMU with KVM, the reference platform: every device behind its own VT-d domain, a CPU check instead of KPTI, a device key per VM from the host, the audit trail's head signed after every record and checked by a verifier outside Pharos, export and rotation of the trail, Secure Boot with Pharos's keys, and reproducible, signed release files, with a user guide and written release criteria. Experimental: one CPU, QEMU only; see the threat model for the open limits.

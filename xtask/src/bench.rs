@@ -20,13 +20,18 @@ const KVM: &str = "/dev/kvm";
 
 /// The executable of test kernel `name` from Cargo's JSON messages.
 fn executable(json: &str, name: &str) -> Option<PathBuf> {
-    let deps = format!("/deps/{name}-");
+    // `<name>-<hash>`, in `deps/` before Cargo 1.100 and in
+    // `build/<package>/<hash>/out/` since.
+    let file = format!("{name}-");
     json.lines()
         .filter(|l| l.contains("\"reason\":\"compiler-artifact\""))
         .find_map(|l| {
             let at = l.find("\"executable\":\"")? + "\"executable\":\"".len();
-            let path = &l[at..at + l[at..].find('"')?];
-            path.contains(&deps).then(|| PathBuf::from(path))
+            let path = PathBuf::from(&l[at..at + l[at..].find('"')?]);
+            path.file_name()?
+                .to_str()?
+                .starts_with(&file)
+                .then_some(path)
         })
 }
 
@@ -245,6 +250,19 @@ mod tests {
             ))
         );
         assert_eq!(executable(r#"{"reason":"build-finished"}"#, "ipc"), None);
+        // Cargo 1.100's layout; the kernel itself is not a match.
+        let new = concat!(
+            r#"{"reason":"compiler-artifact","executable":"/w/target/x86_64-unknown-none/release/pharos-kernel"}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","executable":"/w/target/x86_64-unknown-none/release/build/pharos-kernel/bb3e/out/inference-bb3e"}"#,
+        );
+        assert_eq!(
+            executable(new, "inference"),
+            Some(PathBuf::from(
+                "/w/target/x86_64-unknown-none/release/build/pharos-kernel/bb3e/out/inference-bb3e"
+            ))
+        );
+        assert_eq!(executable(new, "ipc"), None);
         assert_eq!(executable(json, "inference"), None);
         let log = "x\nIPC round trip: 1987 ns (100000 round trips in 198700 us; ...)\n";
         assert_eq!(round_trip_ns(log), Some(1987));
