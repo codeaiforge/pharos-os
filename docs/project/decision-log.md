@@ -1595,7 +1595,7 @@ On the reference platform (D-044) the host's VM configuration is already in the 
 1. **The host exports, and the user confirms with its code (1a).**
    - Only finished boots are archived: every stream before the current one. The current stream is never freed.
    - A rotation with no code, or one that does not match, is refused. The service never shows the code it expects, so the only way to get it is to export.
-   - Before freeing anything, the service stores a `rotate` record that carries the code. `cargo xtask store audit --archive <export>` checks that this record matches the export.
+   - After freeing the streams, the service stores a `rotate` record that carries the code in the current stream; a full trail has no room for it before. `cargo xtask store audit --archive <export>` checks that this record matches the export. (Corrected 2026-11-20: this item first said the record came before freeing, which the implementation, #217, does not do.)
 2. **The warning goes through `init` (2a)** at 80% and 95% of the space the trail may use. That space is its own blocks and objects plus what is still free, less the blocks the next commit's index needs, so 100% means the next append does not fit. Each level is reported once per boot.
    - The service offers the report with `try_send`, never a blocking `send`, because `init` calls the audit service too. It offers it again every 100 ms until `init` takes it.
    - `trust` prints `audit: the trail is <n>% full; export it on the host (cargo xtask store export), then audit rotate <code>`.

@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- The user guide for running Pharos as a microVM (#260, `docs/user/microvm.md`): verifying a release, a VM's device key, store, and variable store, the QEMU command for the reference platform, the trusted console, and checking, exporting, and rotating the audit trail; run end to end on a release built at `0c7b5d3`. Secure Boot and a model in the image are marked planned.
+- Written release criteria (#260, `docs/project/release-criteria.md`): eleven criteria on the release commit, among them the push checks and the release matrix, the 8-hour soak, S1, two bit-identical builds, a rewritten trail rejected, Secure Boot enforced, no open critical or high finding, and the signed `SHA256SUMS` with `RELEASE-KEY`, each with the evidence its gate records.
 - Audit-trail warnings (#217, D-048): the trusted console shows `audit: the trail is 80% full; …` and again at 95%. The space counted is the trail's blocks and objects plus what is still free, less the next commit's index, so 100% means the next append does not fit. The store answers a new request, `SPACE` (op 10), for the audit namespace only. The audit service reports each level it crosses to `init` with `try_send`, retried every 100 ms, and `init` passes it to `trust` as a new `SERVICE` event, `AuditFull`. Tested by the `audit` and `store` test kernels and on the host
 - Audit-trail export and rotation (#217, D-048, [capabilities.md](docs/architecture/capabilities.md)):
   - `cargo xtask store export <IMAGE> <DIR> --key <FILE>` (VM stopped) checks every stream against its signed head, copies the streams and heads into `DIR/audit.img`, writes `DIR/EXPORT`, and prints a code.

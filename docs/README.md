@@ -1,10 +1,15 @@
 # Pharos OS documentation
 
+## Using Pharos
+
+- [Running Pharos as a microVM](user/microvm.md) — verifying a release, setting up and booting a VM, the trusted console, and exporting and checking the audit trail.
+
 ## Project
 
 - [Vision](project/vision.md) — purpose, principles, goals, and non-goals.
 - [Architecture](project/architecture.md) — what is implemented, and the layers, boundaries, and capability model.
 - [Implementation roadmap](project/implementation-roadmap.md) — the authoritative phased plan with milestone gates.
+- [Release criteria](project/release-criteria.md) — what a release must pass, and the evidence its gate records.
 - [Decision log](project/decision-log.md) — decision-record template and open decisions.
 - [Glossary](project/glossary.md) — project terminology.
 

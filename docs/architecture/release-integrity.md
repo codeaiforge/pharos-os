@@ -39,7 +39,7 @@
   - makes `target/xtask/keys/device.key` from `/dev/urandom` on first use, as for the update-signing test key;
   - passes the key to every QEMU it starts;
   - lets a test kernel ask to run without it, as `without_iommu` does, for the refusal check.
-- **Key files:** the host keeps one file per VM. The user guide (#260) says how; losing the file means old trails can no longer be verified as signed.
+- **Key files:** the host keeps one file per VM. The [user guide](../user/microvm.md#3-set-up-a-vm) says how; losing the file means old trails can no longer be verified as signed.
 
 ### Derived keys and the `Key` capability
 
@@ -146,7 +146,7 @@ The chain the M4.3 evaluation showed holds ([boot-evaluation.md](boot-evaluation
   - The device key next to the image is never copied: it is the build host's secret.
   - **Planned with #258:** the Secure Boot hashes in the ISO and `OVMF_VARS_4M.pharos.fd`.
 - **`cargo xtask release sign <DIR> --release-key <FILE>`**, on the maintainer's machine: checks every file against `SHA256SUMS`, then signs `SHA256SUMS` with the release key (Ed25519, `pharos_image::sign_message`), giving `SHA256SUMS.sig` (128 hex digits). It refuses the test key (`target/xtask/keys/test.key`) and a build from a modified tree. It prints the public key. Signing Limine with the db key and rebuilding the ISO first (`--db-key`) are **planned** with #258.
-- **The release key:** an Ed25519 seed as 64 hex digits, made and kept offline by the maintainer, for example `(umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > release.key)`. Its public key goes into `RELEASE-KEY` at the repository root when the first release is signed (#260).
+- **The release key:** an Ed25519 seed as 64 hex digits, made and kept offline by the maintainer, for example `(umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > release.key)`. Its public key goes into `RELEASE-KEY` at the repository root when the first release is signed, at the v0.5 gate (#261; [release criteria](../project/release-criteria.md) item 10).
 - **Verifying:** `cargo xtask release verify <DIR> --key RELEASE-KEY` checks the signature, then every file, and prints the boot measurement. Without `xtask`, `sha256sum -c SHA256SUMS` checks the files (it warns that the measurement line is not a file); it does not check the signature.
 - **Two independent builds:** CI's `qemu` job (share 1) builds the release twice and compares `SHA256SUMS`, which covers the ISO, `disk.img`, `store.img`, `BUILDINFO`, and the measurement; the log keeps it. The maintainer builds it locally from the same commit with the same compiler, `cargo +<version> xtask release` with the version from CI's `BUILDINFO`. The two `SHA256SUMS` must be equal, and both are recorded at the gate (#261). `rust-toolchain.toml` pins the compiler (1.100.0 since 2026-11-18), so both builds use the same one; `BUILDINFO` records it. It first tracked `stable`, and CI (1.100.0) and the development host (1.99.1) built different ISOs from the same commit. Host paths were the second cause: dependencies' panic locations named their source under the builder's Cargo home, so xtask remaps it to `/cargo`, and `release` refuses a file that still contains Cargo's home or the source tree's path.
 - **Tested:** two local builds on 2026-11-18 (rustc 1.99.1, xorriso 1.5.6, Limine 12.9.4) gave the same `SHA256SUMS`. The host tests cover a signing and verifying round trip; a changed file, `SHA256SUMS`, or key refused; the test key and a modified tree refused; the line rules; and the measurement's order.
