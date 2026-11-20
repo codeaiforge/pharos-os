@@ -77,12 +77,12 @@ The serial output shows `init` starting the services, then `PHAROS: boot ok`; th
 
 ```console
 $ cargo run -q -p pharos-cli -- version
-pharos 0.4.0
+pharos 0.5.0
 
 $ cargo run -q -p pharos-cli -- info
-Pharos OS 0.4.0
+Pharos OS 0.5.0
 Project of: CodeAIForge
-Stage:      Phase 5 - Deployment and Release (M5.1, M5.4, and M5.2 complete, M5.5 next)
+Stage:      Phase 5 - Deployment and Release (v0.5, the microVM release: M5.5 at its gate)
 ...
 
 $ cargo run -q -p pharos-cli -- doctor

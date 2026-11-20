@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-20
+
+Phase 5 (Deployment and Release), v0.5, the microVM release. Pharos runs as a microVM on QEMU with KVM, the reference platform: every device behind its own VT-d domain, a CPU check instead of KPTI, a device key per VM from the host, the audit trail's head signed after every record and checked by a verifier outside Pharos, export and rotation of the trail, Secure Boot with Pharos's keys, and reproducible, signed release files, with a user guide and written release criteria. Experimental: one CPU, QEMU only; see the threat model for the open limits.
+
 ### Added
 
 - Secure Boot (#258, D-047 item 3, D-028): every image's `limine.conf` has a BLAKE2b hash on each boot path and its own hash enrolled into Limine (in `EFI/BOOT/` and the ISO's EFI boot image); `cargo xtask release --secure-boot <KEYDIR>` signs Limine with the `db` key and adds `OVMF_VARS_4M.pharos.fd` with the PK, KEK, and db certificates enrolled (`virt-fw-vars`, virt-firmware 26.10); `release sign` refuses a release without it or signed with the test keys. Five boot checks under the Secure Boot firmware: the signed image boots; the unsigned one and signed copies with a changed kernel, `root` module, or `limine.conf` never reach the kernel, with the screen saved beside each log. Needs `mtools` for every image, and `sbsigntool` and virt-firmware for the boot checks; CI installs them. The user guide boots with Secure Boot.
@@ -480,7 +484,8 @@ Initial scaffold, completing Phase 1 (Foundation). Pharos OS is not bootable; th
 - Private vulnerability reporting through GitHub, documented in `SECURITY.md`.
 - Issue and pull-request templates, editor configuration, and optional VS Code recommendations.
 
-[Unreleased]: https://github.com/codeaiforge/pharos-os/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/codeaiforge/pharos-os/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/codeaiforge/pharos-os/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/codeaiforge/pharos-os/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/codeaiforge/pharos-os/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/codeaiforge/pharos-os/compare/v0.1.0...v0.2.0
