@@ -864,9 +864,19 @@ fn ensure_limine(paths: &Paths) -> Result<(PathBuf, PathBuf)> {
 
 fn build(paths: &Paths) -> Result<()> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let (src, commit) = std_source(paths)?;
     run(
         Command::new(cargo)
             .current_dir(&paths.root)
+            // Replaces `.cargo/config.toml`'s flags for the target, so
+            // they are repeated here (#261).
+            .env(
+                "CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS",
+                format!(
+                    "-C relocation-model=static {}",
+                    std_remap_flag(&src, &commit)
+                ),
+            )
             .args([
                 "build",
                 "--release",
@@ -953,14 +963,44 @@ const USER_PROGRAM_RANGE: std::ops::Range<u64> = 0x40_0000..0x40_0000 + 16 * 102
 /// Dependencies' panic locations name their source under Cargo's home, so
 /// it is remapped to `/cargo`: a release must not depend on the host that
 /// built it (#259).
-fn user_rustflags(root: &Path, cargo_home: &Path) -> String {
+fn user_rustflags(root: &Path, cargo_home: &Path, std_remap: &str) -> String {
     let script = root.join("user").join("programs").join("user.ld");
     format!(
         "-C relocation-model=static -C panic=abort -C link-arg=-nostartfiles -C link-arg=-nostdlib \
-         -C link-arg=-static -C link-arg=-T{} --cfg pharos_user --remap-path-prefix={}=/cargo",
+         -C link-arg=-static -C link-arg=-T{} --cfg pharos_user --remap-path-prefix={}=/cargo {std_remap}",
         script.display(),
         cargo_home.display()
     )
+}
+
+/// The standard library's sources in this host's toolchain, and the
+/// compiler's commit: `<sysroot>/lib/rustlib/src/rust` and `rustc -vV`'s
+/// `commit-hash`.
+fn std_source(paths: &Paths) -> Result<(PathBuf, String)> {
+    let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let text = |args: &[&str]| -> Result<String> {
+        let out = run(
+            Command::new(&rustc).current_dir(&paths.root).args(args),
+            false,
+        )?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    };
+    let sysroot = PathBuf::from(text(&["--print", "sysroot"])?.trim());
+    let commit = text(&["-vV"])?
+        .lines()
+        .find_map(|l| l.strip_prefix("commit-hash: "))
+        .map(str::to_owned)
+        .ok_or("rustc -vV names no commit-hash")?;
+    Ok((sysroot.join("lib/rustlib/src/rust"), commit))
+}
+
+/// Maps the standard library's sources at `src` to rustc's own name for
+/// them, `/rustc/<commit>` (#261). With the `rust-src` component
+/// installed, rustc names them by their path in this host's toolchain, and
+/// panic locations carry it; without it (CI's minimal profile), by
+/// `/rustc/<commit>`. Mapped, every host builds the same bytes.
+fn std_remap_flag(src: &Path, commit: &str) -> String {
+    format!("--remap-path-prefix={}=/rustc/{commit}", src.display())
 }
 
 /// Cargo's home (`CARGO_HOME`, else `~/.cargo`), where dependency sources
@@ -992,7 +1032,10 @@ fn build_user_programs_with(paths: &Paths, key: Option<&str>) -> Result<Vec<Imag
         command
             .current_dir(&paths.root)
             .env("CARGO_TARGET_DIR", &target_dir)
-            .env("RUSTFLAGS", user_rustflags(&paths.root, &cargo_home()))
+            .env("RUSTFLAGS", {
+                let (src, commit) = std_source(paths)?;
+                user_rustflags(&paths.root, &cargo_home(), &std_remap_flag(&src, &commit))
+            })
             .args([
                 "build",
                 "--release",
@@ -5416,6 +5459,22 @@ mod tests {
                 .any(|a| a.to_string_lossy().contains("device-key"))
         );
         assert_eq!(&TEST_DEVICE_KEY[..3], &[0, 1, 2]);
+    }
+
+    #[test]
+    fn the_standard_library_is_named_as_rustc_names_it() {
+        let src = Path::new("/home/me/.rustup/toolchains/1.100.0/lib/rustlib/src/rust");
+        assert_eq!(
+            std_remap_flag(src, "0ef1bc38"),
+            "--remap-path-prefix=/home/me/.rustup/toolchains/1.100.0/lib/rustlib/src/rust=/rustc/0ef1bc38"
+        );
+        let flags = user_rustflags(
+            Path::new("/r"),
+            Path::new("/c"),
+            "--remap-path-prefix=/s=/rustc/x",
+        );
+        assert!(flags.contains("--remap-path-prefix=/c=/cargo"));
+        assert!(flags.ends_with("--remap-path-prefix=/s=/rustc/x"));
     }
 
     #[test]

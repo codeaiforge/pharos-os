@@ -174,7 +174,9 @@ pub fn finish(root: &Path) -> Result<()> {
     let time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(epoch);
     crate::pin_timestamps(root, time)?;
     run(
+        // FAT keeps local time: in UTC, every host writes the same bytes.
         Command::new("mcopy")
+            .env("TZ", "UTC")
             .args(["-m", "-o", "-i"])
             .arg(root.join("boot").join("limine").join("limine-uefi-cd.bin"))
             .arg(root.join("EFI").join("BOOT").join("BOOTX64.EFI"))

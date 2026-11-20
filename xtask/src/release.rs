@@ -54,7 +54,9 @@ pub fn build(paths: &Paths, keys: Option<&Path>) -> Result<PathBuf> {
         (STORE_IMAGE.to_owned(), iso.with_file_name(STORE_IMAGE)),
     ];
     let mut entries = Vec::new();
-    let host = [crate::cargo_home(), paths.root.clone()];
+    // The toolchain too: its standard-library sources (#261).
+    let toolchain = crate::std_source(paths)?.0;
+    let host = [crate::cargo_home(), paths.root.clone(), toolchain];
     for (name, from) in &files {
         crate::copy(from, &dir.join(name))?;
         host_free(&dir.join(name), &host)?;
