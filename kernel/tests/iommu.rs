@@ -6,20 +6,25 @@
 //! disk, asks its device to read sector 0 into a kernel canary frame. The
 //! canary must be unchanged, the unit must record the blocked write for
 //! that device and page, the driver's read into its own buffer must still
-//! work, and once it has ended its buffers must be unmapped. Runs under
-//! UEFI (D-009).
+//! work, and once it has ended its buffers must be unmapped, with one
+//! IOTLB invalidation (#250), and the blocked write logged and counted
+//! (#246). Then flushes that fail, injected (#247, #248): the domain ID is
+//! retired, and a grant whose flush fails leaves the device blocked. Runs
+//! under UEFI (D-009).
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::Ordering;
 use core::time::Duration;
 
 use pharos_kernel::acpi::{self, DirectMap};
-use pharos_kernel::arch::x86_64::iommu::Unit;
+use pharos_kernel::arch::x86_64::iommu::{self as iommu_hw, Unit};
 use pharos_kernel::arch::x86_64::{apic, gdt, idt, paging};
 use pharos_kernel::cap::{CONFIG, Capability, IRQ, MAP, Object, WRITE};
 use pharos_kernel::device::DeviceHandle;
@@ -134,6 +139,7 @@ fn attack(t: &mut TestRun, hhdm: u64) {
         t.check("the disk is granted", false);
         return;
     };
+    let flushes = iommu_hw::IOTLB_INVALIDATIONS.load(Ordering::Relaxed);
     let caps = vec![
         Capability::new(Object::DebugConsole, WRITE),
         Capability::new(Object::Device(handle), MAP | CONFIG | IRQ),
@@ -162,9 +168,23 @@ fn attack(t: &mut TestRun, hhdm: u64) {
     let said = |text: &[u8]| lines.iter().any(|l| l == text);
     t.check("dmaprobe submitted the attack", said(b"attack submitted"));
     t.check("the canary is unchanged", canary_intact());
+    let a = blk.address;
+    // #246: read from the unit and logged when the driver ended, before
+    // anything here asked for faults.
+    t.check(
+        "the blocked write was logged and counted when the driver ended",
+        iommu::fault_count(a) >= 1,
+    );
+    // #250: its two buffers unmapped, then one invalidation; the handle's
+    // drop (its last reference was the driver's) detaches with another.
+    let flushed = iommu_hw::IOTLB_INVALIDATIONS.load(Ordering::Relaxed) - flushes;
+    kprintln!("  IOTLB invalidations at the driver's end: {flushed}");
+    t.check(
+        "the driver's end cost one IOTLB invalidation for its buffers, one to detach",
+        flushed == 2,
+    );
     let faults = iommu::take_faults();
     kprintln!("  faults: {faults:?}");
-    let a = blk.address;
     t.check(
         "a blocked write recorded for the disk and the canary's page",
         faults.iter().any(|f| {
@@ -191,4 +211,53 @@ fn attack(t: &mut TestRun, hhdm: u64) {
                 .iter()
                 .all(|&b| (0..2).all(|p| iommu::translate(a, b + p * 4096).is_none())),
     );
+    flush_failures(t, &blk);
+}
+
+/// A unit that does not confirm an invalidation (#247, #248), injected:
+/// its domain ID is never used again, and the function stays blocked.
+fn flush_failures(t: &mut TestRun, blk: &Arc<pci::Device>) {
+    let a = blk.address;
+    t.check(
+        "after it ends: the disk is detached",
+        iommu::domain_id(a).is_none(),
+    );
+    let Some(handle) = DeviceHandle::grant(blk.clone()) else {
+        t.check("the disk is granted again", false);
+        return;
+    };
+    let first = iommu::domain_id(a);
+    iommu::fail_next_flush();
+    drop(handle);
+    t.check(
+        "a failed detach flush retires the domain's ID",
+        first.is_some_and(|id| iommu::retired_ids().contains(&id)),
+    );
+    let Some(handle) = DeviceHandle::grant(blk.clone()) else {
+        t.check("the disk is granted after the failed detach", false);
+        return;
+    };
+    t.check(
+        "the next grant gets another domain ID",
+        iommu::domain_id(a).is_some() && iommu::domain_id(a) != first,
+    );
+    drop(handle);
+    let retired = iommu::retired_ids().len();
+    iommu::fail_next_flush();
+    t.check(
+        "a grant whose context flush fails is refused",
+        DeviceHandle::grant(blk.clone()).is_none(),
+    );
+    t.check(
+        "and leaves the disk blocked, its ID retired",
+        iommu::context_domain(a).is_none()
+            && iommu::domain_id(a).is_none()
+            && iommu::retired_ids().len() == retired + 1,
+    );
+    let again = DeviceHandle::grant(blk.clone());
+    t.check(
+        "the disk is granted again with a fresh ID",
+        iommu::domain_id(a).is_some_and(|id| !iommu::retired_ids().contains(&id)),
+    );
+    drop(again);
 }

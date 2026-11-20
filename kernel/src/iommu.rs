@@ -419,6 +419,40 @@ pub fn covers(
         .any(|u| u.flags & crate::acpi::INCLUDE_PCI_ALL != 0 || u.scopes.iter().any(named))
 }
 
+/// How long a unit may take to confirm a command before it counts as
+/// stalled (#250). QEMU confirms at once, hardware within microseconds;
+/// the wait runs with interrupts off.
+pub const UNIT_TIMEOUT: core::time::Duration = core::time::Duration::from_millis(10);
+/// Polls allowed before the clock runs (a test kernel may start the IOMMU
+/// first), when there is no time to measure.
+pub const UNIT_POLLS: u32 = 1_000_000;
+
+/// When a wait for a unit gives up: [`UNIT_TIMEOUT`] after it started by
+/// the clock, or after [`UNIT_POLLS`] polls while the clock reads zero.
+pub struct Deadline {
+    end: Option<core::time::Duration>,
+    polls: u32,
+}
+
+impl Deadline {
+    /// A wait starting at uptime `now` (zero: no clock yet).
+    pub fn new(now: core::time::Duration) -> Self {
+        Self {
+            end: (!now.is_zero()).then(|| now + UNIT_TIMEOUT),
+            polls: 0,
+        }
+    }
+
+    /// After one more poll at uptime `now`: whether the wait is over.
+    pub fn passed(&mut self, now: core::time::Duration) -> bool {
+        self.polls = self.polls.saturating_add(1);
+        match self.end {
+            Some(end) => now >= end,
+            None => self.polls >= UNIT_POLLS,
+        }
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 pub use global::*;
 
@@ -447,7 +481,19 @@ mod global {
         scopes: Vec<acpi::Unit>,
         /// The attached devices' domains, by requester ID.
         domains: BTreeMap<u16, Domain>,
+        /// Domain IDs never used again: a flush with them failed, so a
+        /// unit may still cache entries tagged with them (#247, #248).
+        /// Their tables are leaked with them.
+        retired: Vec<u16>,
+        /// Faults read from the units and logged, kept for
+        /// [`take_faults`]; at most [`KEPT_FAULTS`].
+        faults: Vec<Fault>,
+        /// Faults logged per requester ID (#246).
+        fault_counts: BTreeMap<u16, u64>,
     }
+
+    /// Faults kept for [`take_faults`]; older ones are only counted.
+    const KEPT_FAULTS: usize = 64;
 
     impl State {
         fn each_unit(&self, f: impl Fn(&Unit) -> Result<(), UnitError>) -> Result<(), DeviceError> {
@@ -529,6 +575,9 @@ mod global {
             caps,
             scopes: dmar.units.clone(),
             domains: BTreeMap::new(),
+            retired: Vec::new(),
+            faults: Vec::new(),
+            fault_counts: BTreeMap::new(),
         });
         Ok(caps)
     }
@@ -576,7 +625,7 @@ mod global {
         // ponytail: linear scan for a free ID; few devices.
         let id = (1..state.caps.domains.min(1 << 16))
             .map(|i| i as u16)
-            .find(|i| state.domains.values().all(|d| d.id() != *i))
+            .find(|i| state.domains.values().all(|d| d.id() != *i) && !state.retired.contains(i))
             .ok_or(DeviceError::NoDomainId)?;
         let domain =
             Domain::new(&mut state.mem, id, state.caps.levels).map_err(DeviceError::Table)?;
@@ -588,8 +637,35 @@ mod global {
             domain.destroy(&mut state.mem);
             return Err(DeviceError::Table(e));
         }
+        if let Err(e) = flush(state, Unit::invalidate_context) {
+            // A unit may have cached the new entry (#247): block the
+            // function again, and never reuse the domain's ID or tables.
+            state
+                .tables
+                .detach(&mut state.mem, a.bus, a.device << 3 | a.function);
+            state.retired.push(id);
+            return Err(e);
+        }
         state.domains.insert(rid(a), domain);
-        state.each_unit(Unit::invalidate_context)
+        Ok(())
+    }
+
+    static FAIL_NEXT_FLUSH: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+
+    /// Fault injection for test kernels, as [`fail_next_map`]: the next
+    /// invalidation [`attach`], [`detach`], or [`unmap`] asks for fails
+    /// as if a unit timed out. QEMU's units never do.
+    pub fn fail_next_flush() {
+        FAIL_NEXT_FLUSH.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// `f` on every unit, or the injected failure.
+    fn flush(state: &State, f: impl Fn(&Unit) -> Result<(), UnitError>) -> Result<(), DeviceError> {
+        if FAIL_NEXT_FLUSH.swap(false, core::sync::atomic::Ordering::Relaxed) {
+            return Err(DeviceError::Unit(UnitError::Timeout("injected")));
+        }
+        state.each_unit(f)
     }
 
     static FAIL_NEXT_MAP: core::sync::atomic::AtomicBool =
@@ -623,10 +699,10 @@ mod global {
         Ok(())
     }
 
-    /// Unmaps `pages` pages at `phys` from function `a`'s domain, then
-    /// invalidates the IOTLB and waits: when this returns, the device
-    /// cannot reach them, and the frames may be freed.
-    pub fn unmap(a: Address, phys: u64, pages: usize) -> Result<(), DeviceError> {
+    /// Unmaps `buffers` (`(phys, pages)`) from function `a`'s domain,
+    /// then invalidates the IOTLB once and waits (#250): when this
+    /// returns, the device cannot reach them, and the frames may be freed.
+    pub fn unmap(a: Address, buffers: &[(u64, usize)]) -> Result<(), DeviceError> {
         let mut guard = STATE.lock();
         let state = guard.as_mut().ok_or(DeviceError::NotStarted)?;
         let domain = state
@@ -634,10 +710,13 @@ mod global {
             .get_mut(&rid(a))
             .ok_or(DeviceError::NotAttached)?;
         let mut empty = Vec::new();
-        for page in 0..pages as u64 {
-            domain.unmap(&mut state.mem, phys + page * PAGE, &mut empty);
+        for &(phys, pages) in buffers {
+            for page in 0..pages as u64 {
+                domain.unmap(&mut state.mem, phys + page * PAGE, &mut empty);
+            }
         }
-        state.each_unit(Unit::invalidate_iotlb)?;
+        // On failure the emptied tables stay allocated: a unit may walk them.
+        flush(state, Unit::invalidate_iotlb)?;
         // Only now can no unit be walking them.
         for table in empty {
             state.mem.free(table);
@@ -658,15 +737,40 @@ mod global {
         state
             .tables
             .detach(&mut state.mem, a.bus, a.device << 3 | a.function);
-        let flushed = state
-            .each_unit(Unit::invalidate_context)
-            .and_then(|()| state.each_unit(Unit::invalidate_iotlb));
+        let flushed = flush(state, Unit::invalidate_context)
+            .and_then(|()| flush(state, Unit::invalidate_iotlb));
         // A unit that did not confirm the invalidation may still use the
-        // old tables: leak them rather than reuse their frames.
-        if flushed.is_ok() {
-            domain.destroy(&mut state.mem);
+        // old tables and hold entries tagged with the domain's ID: leak
+        // the tables rather than reuse their frames, and retire the ID
+        // (#248). The function may be granted again, with a new ID.
+        match flushed {
+            Ok(()) => domain.destroy(&mut state.mem),
+            Err(_) => state.retired.push(domain.id()),
         }
         flushed
+    }
+
+    /// Function `a`'s domain ID, if attached. For tests.
+    pub fn domain_id(a: Address) -> Option<u16> {
+        STATE.lock().as_ref()?.domains.get(&rid(a)).map(Domain::id)
+    }
+
+    /// The domain ID function `a`'s context entry names, if any: what the
+    /// units see. For tests.
+    pub fn context_domain(a: Address) -> Option<u16> {
+        let guard = STATE.lock();
+        let state = guard.as_ref()?;
+        state
+            .tables
+            .domain_of(&state.mem, a.bus, a.device << 3 | a.function)
+    }
+
+    /// The domain IDs retired after a failed flush. For tests.
+    pub fn retired_ids() -> Vec<u16> {
+        STATE
+            .lock()
+            .as_ref()
+            .map_or_else(Vec::new, |s| s.retired.clone())
     }
 
     /// Where function `a`'s DMA to `iova` goes, and whether it may write
@@ -689,11 +793,56 @@ mod global {
         Some((on, state.tables.root()))
     }
 
-    /// The faults the units recorded since the last call, cleared.
+    /// Reads the units' fault records, clears them, and logs each on the
+    /// kernel console, counted per device (#246). Called when a device is
+    /// stopped, released by a driver that ended, or dropped, so a blocked
+    /// DMA is reported, and the units' few records are free for the next.
+    pub fn log_faults() {
+        let new: Vec<Fault> = {
+            let mut guard = STATE.lock();
+            let Some(state) = guard.as_mut() else {
+                return;
+            };
+            let new: Vec<Fault> = state.units.iter().flat_map(Unit::take_faults).collect();
+            for f in &new {
+                *state.fault_counts.entry(f.source).or_insert(0) += 1;
+            }
+            state.faults.extend(&new);
+            let over = state.faults.len().saturating_sub(KEPT_FAULTS);
+            state.faults.drain(..over);
+            new
+        };
+        // Printed outside the lock, which holds interrupts off.
+        for f in new {
+            crate::kprintln!(
+                "iommu: blocked {} of {:#x} by {:02x}:{:02x}.{} (reason {})",
+                if f.write { "write" } else { "read" },
+                f.page,
+                f.source >> 8,
+                f.source >> 3 & 0x1f,
+                f.source & 7,
+                f.reason
+            );
+        }
+    }
+
+    /// Faults logged for function `a` since boot.
+    pub fn fault_count(a: Address) -> u64 {
+        STATE
+            .lock()
+            .as_ref()
+            .and_then(|s| s.fault_counts.get(&rid(a)).copied())
+            .unwrap_or(0)
+    }
+
+    /// The faults recorded since the last call: those already logged,
+    /// then any still in the units (logged now), cleared. For tests.
     pub fn take_faults() -> Vec<Fault> {
-        STATE.lock().as_ref().map_or_else(Vec::new, |s| {
-            s.units.iter().flat_map(Unit::take_faults).collect()
-        })
+        log_faults();
+        STATE
+            .lock()
+            .as_mut()
+            .map_or_else(Vec::new, |s| core::mem::take(&mut s.faults))
     }
 }
 
@@ -826,6 +975,19 @@ mod tests {
         assert!(!covers(&units, (0, 0, 0), qemu_bridge));
         assert!(!covers(&units, (1, 0, 0), |_, _, _| None), "not a bridge");
         assert_eq!(requester(1, 0x1f, 7), 0x01ff);
+    }
+
+    #[test]
+    fn a_unit_wait_ends_by_the_clock_or_by_polls_before_it() {
+        use core::time::Duration;
+        let start = Duration::from_millis(5);
+        let mut d = Deadline::new(start);
+        assert!(!d.passed(start + UNIT_TIMEOUT - Duration::from_nanos(1)));
+        assert!(d.passed(start + UNIT_TIMEOUT));
+        // No clock yet: a fixed number of polls.
+        let mut d = Deadline::new(Duration::ZERO);
+        assert!((1..UNIT_POLLS).all(|_| !d.passed(Duration::ZERO)));
+        assert!(d.passed(Duration::ZERO));
     }
 
     #[test]

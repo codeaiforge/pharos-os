@@ -35,9 +35,10 @@ impl From<MapError> for UnitError {
     }
 }
 
-/// Polls of a status bit before giving up. QEMU completes every command
-/// before the write returns; hardware within microseconds.
-const POLLS: u32 = 1_000_000;
+/// IOTLB invalidations every unit has been asked for since boot: the
+/// test kernel checks a driver's end costs one (#250).
+pub static IOTLB_INVALIDATIONS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 
 /// One VT-d unit, at the register base its DMAR entry names.
 pub struct Unit {
@@ -94,20 +95,24 @@ impl Unit {
         self.write32(offset + 4, (value >> 32) as u32)
     }
 
-    /// Polls `offset` until `done` holds for its value.
+    /// Polls `offset` until `done` holds for its value, for at most
+    /// `crate::iommu::UNIT_TIMEOUT` (#250).
     fn wait(
         &self,
         offset: u64,
         name: &'static str,
         done: impl Fn(u64) -> bool,
     ) -> Result<(), UnitError> {
-        for _ in 0..POLLS {
+        let mut deadline = crate::iommu::Deadline::new(crate::time::uptime());
+        loop {
             if done(self.read64(offset)?) {
                 return Ok(());
             }
+            if deadline.passed(crate::time::uptime()) {
+                return Err(UnitError::Timeout(name));
+            }
             core::hint::spin_loop();
         }
-        Err(UnitError::Timeout(name))
     }
 
     /// Sets one `GCMD` bit, keeping the others enabled, and waits for
@@ -141,6 +146,7 @@ impl Unit {
     /// reaches a page the tables no longer map.
     pub fn invalidate_iotlb(&self) -> Result<(), UnitError> {
         let offset = self.capabilities().iotlb_offset;
+        IOTLB_INVALIDATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         self.write64(offset, IOTLB_IVT | IOTLB_GLOBAL | IOTLB_DRAIN)?;
         self.wait(offset, "IOTLB.IVT", |v| v & IOTLB_IVT == 0)
     }

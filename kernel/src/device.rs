@@ -97,6 +97,18 @@ impl core::fmt::Debug for DeviceHandle {
     }
 }
 
+/// The address of a reservation that holds no buffer yet.
+const RESERVED: u64 = u64::MAX;
+
+/// The buffers among `entries`: reservations dropped.
+fn buffers(entries: Vec<(u64, usize, u64)>) -> Vec<(u64, usize)> {
+    entries
+        .into_iter()
+        .filter(|b| b.0 != RESERVED)
+        .map(|(p, n, _)| (p, n))
+        .collect()
+}
+
 impl DeviceHandle {
     /// A handle without touching the hardware (host tests).
     pub fn new(pci: Arc<pci::Device>) -> Self {
@@ -111,24 +123,48 @@ impl DeviceHandle {
         self.dma.lock().iter().map(|&(_, n, _)| n).sum()
     }
 
-    /// True if `pages` more DMA pages stay within [`MAX_DMA_PAGES`].
-    pub fn dma_fits(&self, pages: usize) -> bool {
-        self.dma_pages() + pages <= MAX_DMA_PAGES
+    /// Reserves `pages` DMA pages for process `owner` if they stay within
+    /// [`MAX_DMA_PAGES`], checked and counted under one lock (#249), so
+    /// drivers sharing the device cannot each pass the check. The
+    /// reservation is a placeholder that [`Self::fill_dma`] turns into the
+    /// buffer, or [`Self::unreserve_dma`] removes.
+    pub fn reserve_dma(&self, pages: usize, owner: u64) -> bool {
+        let mut dma = self.dma.lock();
+        let held: usize = dma.iter().map(|&(_, n, _)| n).sum();
+        if held + pages > MAX_DMA_PAGES {
+            return false;
+        }
+        dma.push((RESERVED, pages, owner));
+        true
     }
 
-    /// Records a DMA buffer the handle now owns, allocated by process
-    /// `owner`.
-    pub fn add_dma(&self, phys: u64, pages: usize, owner: u64) {
-        self.dma.lock().push((phys, pages, owner));
+    /// Removes a reservation [`Self::reserve_dma`] made, when the buffer
+    /// could not be allocated.
+    pub fn unreserve_dma(&self, pages: usize, owner: u64) {
+        let mut dma = self.dma.lock();
+        if let Some(i) = dma.iter().position(|&b| b == (RESERVED, pages, owner)) {
+            dma.remove(i);
+        }
+    }
+
+    /// Records the buffer at `phys` in the reservation for `pages` pages of
+    /// process `owner` (or as a new entry, if it has none).
+    pub fn fill_dma(&self, phys: u64, pages: usize, owner: u64) {
+        let mut dma = self.dma.lock();
+        match dma.iter_mut().find(|b| **b == (RESERVED, pages, owner)) {
+            Some(b) => b.0 = phys,
+            None => dma.push((phys, pages, owner)),
+        }
     }
 
     /// Takes the buffers process `owner` allocated, to be freed once the
-    /// device can no longer reach them.
+    /// device can no longer reach them. Its reservations go too; they hold
+    /// no memory.
     pub fn take_owned(&self, owner: u64) -> Vec<(u64, usize)> {
         let mut dma = self.dma.lock();
         let (mine, rest): (Vec<_>, Vec<_>) = dma.drain(..).partition(|b| b.2 == owner);
         *dma = rest;
-        mine.into_iter().map(|(p, n, _)| (p, n)).collect()
+        buffers(mine)
     }
 }
 
@@ -180,6 +216,8 @@ mod kernel {
             if let Some(m) = self.pci.msix {
                 hw::set_msix_control(self.pci.address, m.offset, false, true);
             }
+            // What it tried and the IOMMU blocked, while it ran (#246).
+            crate::iommu::log_faults();
         }
     }
 
@@ -211,26 +249,27 @@ mod kernel {
                 return;
             }
             hw::set_bus_master(self.pci.address, false);
-            for &(phys, pages) in &mine {
-                if let Err(e) = crate::iommu::unmap(self.pci.address, phys, pages) {
-                    return leak(self, e);
-                }
+            crate::iommu::log_faults();
+            // All of them, then one invalidation (#250).
+            if let Err(e) = crate::iommu::unmap(self.pci.address, &mine) {
+                return leak(self, e);
             }
             free(mine);
         }
 
-        /// Records a DMA buffer process `owner` allocated and maps it in
-        /// the device's domain, so the device may use it once this returns.
-        /// On an error the buffer stays recorded, and is freed with the
-        /// others once the device cannot reach it; the caller has already
-        /// pinned the handle for the process that maps it.
+        /// Records a DMA buffer process `owner` allocated, in its
+        /// reservation, and maps it in the device's domain, so the device
+        /// may use it once this returns. On an error the buffer stays
+        /// recorded, and is freed with the others once the device cannot
+        /// reach it; the caller has already pinned the handle for the
+        /// process that maps it.
         pub fn give_dma(
             &self,
             phys: u64,
             pages: usize,
             owner: u64,
         ) -> Result<(), crate::iommu::DeviceError> {
-            self.add_dma(phys, pages, owner);
+            self.fill_dma(phys, pages, owner);
             crate::iommu::map(self.pci.address, phys, pages)
         }
 
@@ -253,9 +292,9 @@ mod kernel {
             self.stop();
             // Only once the IOMMU confirms it reaches nothing may its
             // buffers be reused.
-            let buffers = core::mem::take(&mut *self.dma.lock());
+            let held = buffers(core::mem::take(&mut *self.dma.lock()));
             match crate::iommu::detach(self.pci.address) {
-                Ok(()) => free(buffers.into_iter().map(|(p, n, _)| (p, n))),
+                Ok(()) => free(held),
                 Err(e) => leak(self, e),
             }
             // Stopped and its memory freed: it may be granted again.
@@ -385,26 +424,48 @@ mod tests {
     #[test]
     fn dma_page_limit() {
         let h = DeviceHandle::new(Arc::new(device()));
-        assert!(h.dma_fits(MAX_DMA_PAGES));
-        h.add_dma(0x10_0000, 60, 7);
-        assert!(h.dma_fits(4) && !h.dma_fits(5));
-        assert_eq!(h.dma_pages(), 60);
+        assert!(h.reserve_dma(60, 7));
+        h.fill_dma(0x10_0000, 60, 7);
+        assert!(!h.reserve_dma(5, 8));
+        assert!(h.reserve_dma(4, 8));
+        assert_eq!(h.dma_pages(), 64);
+    }
+
+    #[test]
+    fn a_reservation_counts_before_its_buffer_exists() {
+        // #249: two drivers sharing the device each reserve before either
+        // has a buffer; the second cannot pass the limit.
+        let h = DeviceHandle::new(Arc::new(device()));
+        assert!(h.reserve_dma(40, 7));
+        assert!(!h.reserve_dma(40, 8), "the first reservation counts");
+        h.unreserve_dma(40, 7);
+        assert!(
+            h.reserve_dma(40, 8),
+            "an undone reservation frees its pages"
+        );
+        // A process that ends holding a reservation gives back no memory
+        // to unmap or free, and its pages count no more.
+        assert_eq!(h.take_owned(8), std::vec![]);
+        assert_eq!(h.dma_pages(), 0);
+        assert!(h.reserve_dma(4, 9));
+        h.fill_dma(0x10_0000, 4, 9);
+        assert_eq!(h.take_owned(9), std::vec![(0x10_0000, 4)]);
     }
 
     #[test]
     fn an_ended_process_gives_back_only_its_own_buffers() {
         let h = DeviceHandle::new(Arc::new(device()));
-        h.add_dma(0x10_0000, 4, 7);
-        h.add_dma(0x20_0000, 2, 8);
-        h.add_dma(0x30_0000, 1, 7);
+        h.fill_dma(0x10_0000, 4, 7);
+        h.fill_dma(0x20_0000, 2, 8);
+        h.fill_dma(0x30_0000, 1, 7);
         assert_eq!(h.take_owned(9), std::vec![], "a process with none");
         assert_eq!(h.take_owned(7), std::vec![(0x10_0000, 4), (0x30_0000, 1)]);
         assert_eq!(h.dma_pages(), 2);
         // A restarted driver can allocate again: 16 starts of 4 pages
         // fit only if each start's pages come back (review F1).
         for start in 0..20 {
-            assert!(h.dma_fits(4), "start {start}");
-            h.add_dma(0x40_0000, 4, 100 + start);
+            assert!(h.reserve_dma(4, 100 + start), "start {start}");
+            h.fill_dma(0x40_0000, 4, 100 + start);
             assert_eq!(h.take_owned(100 + start).len(), 1);
         }
     }

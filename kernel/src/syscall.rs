@@ -1342,7 +1342,10 @@ mod kernel {
                 addr,
             } => {
                 let (via, device) = device_cap(&process, handle, cap::MAP)?;
-                if !device.dma_fits(pages) {
+                // Checked and counted under one lock (#249), undone below
+                // if no buffer comes of it.
+                let owner = process.record.id;
+                if !device.reserve_dma(pages, owner) {
                     return Err(Error::NoMemory);
                 }
                 let class = sched::current_class();
@@ -1363,7 +1366,9 @@ mod kernel {
                         _ => Error::BadAddress,
                     })
                 })
-                .ok_or(Error::BadAddress)??;
+                .ok_or(Error::BadAddress)
+                .and_then(|r| r)
+                .inspect_err(|_| device.unreserve_dma(pages, owner))?;
                 // Recorded and pinned before the IOMMU mapping, so a failed
                 // one still follows the buffer's normal end: revocation or
                 // the driver's exit unmaps, invalidates, then frees it. The
@@ -1371,7 +1376,7 @@ mod kernel {
                 // review V-1).
                 record_device(&process, via, device.clone(), addr, pages as u64);
                 // In the device's IOMMU domain before the driver sees it.
-                if device.give_dma(phys, pages, process.record.id).is_err() {
+                if device.give_dma(phys, pages, owner).is_err() {
                     return Err(Error::NoMemory);
                 }
                 // Off since a previous driver ended, or for a hot-added

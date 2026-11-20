@@ -39,11 +39,11 @@ The main session (Claude Code, which wrote the driver) checked every finding aga
 
 | Issue | Proposed severity | Found by | Finding |
 | --- | --- | --- | --- |
-| #246 | Low (Gemini), Info (Claude) | both (Claude V-8, Gemini V-4) | Fault records are read only by the test kernel; a blocked DMA in production is not logged, and after the first fault the single fault register overflows. iommu.md said otherwise and is corrected |
-| #247 | High (Gemini), Info (Claude) | both (Claude V-6, Gemini V-2) | A failed context invalidation in `attach` leaves the entry and the domain installed: the function can never be granted again. Fails closed; not triggerable by a driver |
-| #248 | Low | Claude V-5 | After a failed invalidation in `detach`, the domain ID and the function can be reused while the unit's caches may hold old entries. Needs a unit timeout, which a driver cannot cause on QEMU |
-| #249 | Low | Claude V-2 | `DmaAlloc` checks the 64-page limit and records the buffer under different locks: drivers sharing a device can exceed it. Bounded by the trusted reserve |
-| #250 | Info | Claude V-9 | Status polling counts reads, not time, with interrupts off, and a driver's end invalidates once per buffer |
+| #246 (fixed: faults logged and counted on device stop, release, and drop, 2026-11-20) | Low (Gemini), Info (Claude) | both (Claude V-8, Gemini V-4) | Fault records are read only by the test kernel; a blocked DMA in production is not logged, and after the first fault the single fault register overflows. iommu.md said otherwise and is corrected |
+| #247 (fixed: the context entry removed and the ID retired, 2026-11-20) | High (Gemini), Info (Claude) | both (Claude V-6, Gemini V-2) | A failed context invalidation in `attach` leaves the entry and the domain installed: the function can never be granted again. Fails closed; not triggerable by a driver |
+| #248 (fixed: the ID retired, the tables leaked, 2026-11-20) | Low | Claude V-5 | After a failed invalidation in `detach`, the domain ID and the function can be reused while the unit's caches may hold old entries. Needs a unit timeout, which a driver cannot cause on QEMU |
+| #249 (fixed: reserved under one lock, 2026-11-20) | Low | Claude V-2 | `DmaAlloc` checks the 64-page limit and records the buffer under different locks: drivers sharing a device can exceed it. Bounded by the trusted reserve |
+| #250 (fixed: a 10 ms clock timeout, one invalidation per driver end, 2026-11-20) | Info | Claude V-9 | Status polling counts reads, not time, with interrupts off, and a driver's end invalidates once per buffer |
 | #251 | Medium (Gemini), Low (Claude) | both (V-3; V-4 and V-7 Claude, V-5 Gemini) | For bare metal (M8.1), not reachable on QEMU's topology:<ul><li>requester-ID aliasing behind conventional PCI bridges;</li><li>bridge scopes trusting live bus numbers;</li><li>table levels and the domain count taken from the first unit only</li></ul> |
 
 ## Checked and found correct (both reviewers)
