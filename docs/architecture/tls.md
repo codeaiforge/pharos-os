@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-- **Design:** **Proposed** (#269), awaiting the maintainer's review. It follows [D-034](../project/decision-log.md#d-034-tcp-and-tls-stack) (accepted 2026-11-21) and amends [networking.md](networking.md) (D-015) and the [audit service](capabilities.md#the-audit-service-107).
+- **Design:** **Accepted**: approved by the maintainer on 2026-11-21 (#269), with each open question decided as recommended (section 7). It follows [D-034](../project/decision-log.md#d-034-tcp-and-tls-stack) (accepted 2026-11-21) and amends [networking.md](networking.md) (D-015) and the [audit service](capabilities.md#the-audit-service-107).
 - **Implementation:** **planned** (M6.1): TCP (#270), the TLS client (#271), the fuzz targets (#272), the `tls` test kernel (#273). Nothing below is implemented.
 
 ## 2. Context
@@ -165,6 +165,8 @@ flowchart LR
 1. **Time:** a `clock_real` system call (recommended: one read-only value, any service can use it), or the boot date passed to the TLS service through `init`?
 2. **Randomness:** the virtio-rng driver inside the TLS service (recommended for M6.1; moved to its own service when the vault needs it in M6.2), or a separate `rng` service now?
 3. **The release image's roots:** ship none in M6.1 (recommended: no real endpoint is reachable before M6.2 anyway), or a small set now?
+
+**Decided (2026-11-21, #269):** 1. the `clock_real` system call; 2. the virtio-rng driver in the TLS service, moved to its own service when the vault needs it (M6.2); 3. no roots in the release image in M6.1.
 
 ## Implementation issues
 

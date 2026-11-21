@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
-- The TCP and TLS design, proposed (#269, M6.1, [tls.md](docs/architecture/tls.md)): smoltcp in the network service with TCP as `net` v2; the TLS service with interface `tls` v1, destinations (address, port, server name) listed by `init` and opened by index; the pinned root set in the measured image; time from Limine's date at boot with a floor at the build date; an HMAC-DRBG seeded from virtio-rng and RDSEED; audit client 4; timeouts and limits; the threat model's planned rows
+- The TCP and TLS design, accepted 2026-11-21 with the open questions decided as recommended (#269, M6.1, [tls.md](docs/architecture/tls.md)): smoltcp in the network service with TCP as `net` v2; the TLS service with interface `tls` v1, destinations (address, port, server name) listed by `init` and opened by index; the pinned root set in the measured image; time from Limine's date at boot with a floor at the build date; an HMAC-DRBG seeded from virtio-rng and RDSEED; audit client 4; timeouts and limits; the threat model's planned rows
 - A comparison with the alternatives D-033 weighs (#266, M6.0, [comparison.md](docs/project/comparison.md)): Pharos against microVM and gVisor sandboxes, agent CLIs' OS sandboxes, MCP gateways, a runtime on seL4, and Windows' agent workspace, on five properties (no ambient authority, fail closed, a trusted path, evidence checkable outside, enforcement outside the model), each Pharos claim with the test kernel that shows it and each claim about an alternative with a source read on 2026-11-21; where an alternative is better (cost, ecosystem, a verified kernel), it says so
 
 ### Changed

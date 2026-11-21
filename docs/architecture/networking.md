@@ -4,7 +4,7 @@
 
 - **Design:** **Accepted**: reviewed and approved by the maintainer on 2026-10-28 (M2.10, #59). It follows [D-015](../project/decision-log.md#d-015-network-stack-and-service-model) (as amended on 2026-10-28) and builds on [drivers.md](drivers.md) (device capabilities, the virtio transport) and [services.md](services.md) (badges, notifications, `init`).
 - **Implementation:** the virtio-net driver is **implemented** (#62: `pharos_programs::virtio_net` on the shared `virtio::Transport` and `virtio::Queue`, `irq_notify`, a virtio-net card on every QEMU run; tested by `virtio_net` with the `netprobe` program). So are the network service and stack (#63: `pharos_programs::net` with `classify`, the builders, the ARP cache, and the client encoding; `user/programs/src/bin/net.rs`; `call` and non-blocking `send`; started by `init` at boot; tested by `network` with the `netclient` program, and fuzzed on the host). So is the host endpoint (#64: `xtask/src/echo.rs`, started by `cargo xtask runner` around each test-kernel boot; `network` exchanges a datagram with it; `PHAROS_PCAP=1` records the traffic).
-- **M6.1 (D-034):** smoltcp in place of this stack's IP layer, and TCP as interface `net` v2: **planned**, designed in [tls.md](tls.md) (proposed, #269).
+- **M6.1 (D-034):** smoltcp in place of this stack's IP layer, and TCP as interface `net` v2: **planned**, designed in [tls.md](tls.md) (accepted 2026-11-21, #269).
 
 ## 2. Context
 

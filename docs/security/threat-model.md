@@ -126,7 +126,7 @@ Design: [networking.md](../architecture/networking.md). The first four rows are 
 
 ### TCP and TLS (M6.1)
 
-Design: [tls.md](../architecture/tls.md) (proposed, #269; D-034). Every row is **planned** (#270–#273); none is implemented.
+Design: [tls.md](../architecture/tls.md) (accepted 2026-11-21, #269; D-034). Every row is **planned** (#270–#273); none is implemented.
 
 | Threat | Mitigation |
 | --- | --- |
