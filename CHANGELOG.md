@@ -4,8 +4,14 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+### Added
+
+- A comparison with the alternatives D-033 weighs (#266, M6.0, [comparison.md](docs/project/comparison.md)): Pharos against microVM and gVisor sandboxes, agent CLIs' OS sandboxes, MCP gateways, a runtime on seL4, and Windows' agent workspace, on five properties (no ambient authority, fail closed, a trusted path, evidence checkable outside, enforcement outside the model), each Pharos claim with the test kernel that shows it and each claim about an alternative with a source read on 2026-11-21; where an alternative is better (cost, ecosystem, a verified kernel), it says so
+
 ### Changed
 
+- The vision rewritten for D-033 (#264, M6.0, [vision.md](docs/project/vision.md)): Pharos as an agent cell and authority broker for organizations, the three tiers and who enforces each one's limits, principles (no ambient authority, fail closed, a trusted path, evidence a third party can check), goals labelled implemented or planned with their milestones, and D-033's non-goals; the README's vision paragraph with it
+- The architecture rewritten for D-033 (#265, M6.0, [architecture.md](docs/project/architecture.md)): the implemented part brought to v0.5.0 (the reference platform, IOMMU, the evidence chain, test counts), and a planned section: the cell, the broker's parts with their milestones and open decision records, and the trusted base of each tier
 - M5.5 gate (#261), closing Phase 5: all eleven release criteria met on the release commit `7c3eba0` (CI run 44719279691; release matrix run 44719284111, 38 jobs; the 8-hour soak, 2,821 cycles and 33,862 audit records; S1 and `bench-infer` under KVM; CI's and the local `SHA256SUMS` equal; both throwaway branches failed CI); the release signed with the maintainer's offline key and verified, `RELEASE-KEY` added; roadmap: M5.5 and Phase 5 done (v0.5.0), Phase 6 and M6.0 current; threat model updated at the gate, the limits carried to Phase 5 given places in M6.10 and M8.1; README and `pharos info`: Phase 6 stage
 
 ### Fixed

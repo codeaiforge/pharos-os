@@ -665,7 +665,7 @@ Rules for every planned milestone below: nothing moves into the kernel (each com
 
 ### M6.0 — Repositioning: vision and architecture
 
-- **Objective and scope:** Update `vision.md` and `architecture.md` for the agent cell, the broker, the three tiers, and the organizational scope. **Status: Current** (since 2026-11-21).
+- **Objective and scope:** Update `vision.md` and `architecture.md` for the agent cell, the broker, the three tiers, and the organizational scope. **Status: Current** (since 2026-11-21): the vision (#264), the architecture (#265), and the comparison (#266) written; the gate (#267) waits for the maintainer's review.
 - **Deliverables:** Vision goals and non-goals as D-033 decides; architecture overview; a comparison with the alternatives D-033 weighs (sandboxes on Linux, a runtime on seL4, Windows' agent workspace), every claim sourced.
 - **Prerequisites:** D-033 accepted.
 - **Acceptance criteria:** Every claimed difference cites a source or a Pharos test; status labels honest; the maintainer approves.

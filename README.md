@@ -37,7 +37,7 @@ Pharos OS by CodeAIForge is an experimental project to build a local-first AI ag
 
 ## Vision
 
-Pharos OS aims to run AI agents locally under an operating-system design where agents are untrusted by default: they get explicit, least-privilege capabilities, inference runs isolated from privileged code, and model output is never trusted as instructions to the kernel. The project favors correctness, security, reproducibility, and small verifiable milestones over feature count. Read more in [vision](docs/project/vision.md) and [architecture](docs/project/architecture.md).
+Pharos OS is an agent cell: a small capability system, run as a microVM on an ordinary KVM host, that holds all the authority an AI agent can use (capabilities, credentials, approvals, and the audit trail) and gives the agent none of it directly, so organizations can put agents into operations where a mistake is costly without handing them the keys. Agents and model output are untrusted; every action goes through a granted capability, an approval on a path no agent can reach where policy asks for one, and a signed audit record a verifier outside Pharos can check. Native agents run on Pharos today; WASM agents and existing agent frameworks in a Linux microVM beside it are planned (D-033). The project favors correctness, security, reproducibility, and small verifiable milestones over feature count. Read more in [vision](docs/project/vision.md), [architecture](docs/project/architecture.md), and the [comparison with the alternatives](docs/project/comparison.md).
 
 ## Development environment
 
@@ -120,7 +120,7 @@ This runs the same checks as CI ([.github/workflows/ci.yml](.github/workflows/ci
 ## Documentation
 
 - [Implementation roadmap](docs/project/implementation-roadmap.md)
-- [Architecture](docs/project/architecture.md)
+- [Vision](docs/project/vision.md), [architecture](docs/project/architecture.md), and [comparison](docs/project/comparison.md)
 - [Development setup](docs/development/setup.md) and [workflow](docs/development/workflow.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md) and [threat model](docs/security/threat-model.md)

@@ -6,8 +6,9 @@
 
 ## Project
 
-- [Vision](project/vision.md) — purpose, principles, goals, and non-goals.
-- [Architecture](project/architecture.md) — what is implemented, and the layers, boundaries, and capability model.
+- [Vision](project/vision.md) — Pharos as an agent cell and authority broker: purpose, the three tiers, principles, goals, and non-goals.
+- [Comparison](project/comparison.md) — Pharos against sandboxes on Linux, a runtime on seL4, and Windows' agent workspace, every claim sourced.
+- [Architecture](project/architecture.md) — what is implemented, the layers, boundaries, and capability model, and the planned cell, broker, and tiers.
 - [Implementation roadmap](project/implementation-roadmap.md) — the authoritative phased plan with milestone gates.
 - [Release criteria](project/release-criteria.md) — what a release must pass, and the evidence its gate records.
 - [Decision log](project/decision-log.md) — decision-record template and open decisions.
