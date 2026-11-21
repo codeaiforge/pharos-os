@@ -124,6 +124,21 @@ Design: [networking.md](../architecture/networking.md). The first four rows are 
 | A forged ARP message redirects traffic | **Limit:** ARP is believed, as in any ARP; on slirp the only other host is the gateway |
 | A guest program reaches beyond the host in tests | **Limit:** slirp's NAT is not restricted (`restrict=on` would also block the echo server); nothing in the guest sends anywhere but `10.0.2.2` |
 
+### TCP and TLS (M6.1)
+
+Design: [tls.md](../architecture/tls.md) (proposed, #269; D-034). Every row is **planned** (#270–#273); none is implemented.
+
+| Threat | Mitigation |
+| --- | --- |
+| A hostile server or network peer crashes or takes over the TLS service | rustls and rustls-webpki (safe Rust; rustls forbids `unsafe`) and `pharos-tls` parse every record, message, and certificate; fuzzed on the host; the service holds no store, no agent grant, and only the virtio-rng device, so a fault reaches only its own connections |
+| A client reaches a host it was not given, or has a certificate checked against a name of its choice | A client opens a connection only by the index of a destination `init` listed for it (address, port, and server name); the name for SNI and the check comes from `init`, never the client; no DNS |
+| A server presents a certificate it should not pass: another issuer, expired, or for another name | webpki against the pinned root set in the measured image, `serverAuth` only; rustls's name check; TLS 1.3 with one suite, no fallback; the `tls` kernel's three refusals and a throwaway branch that skips the name check |
+| A reset or wrong clock makes an expired certificate look valid | Limine's date at boot with a floor at the build's `SOURCE_DATE_EPOCH`; no date, no handshake. **Limit:** the host sets the clock and is trusted until M8.2 |
+| Predictable randomness breaks key exchange | HMAC-DRBG seeded from virtio-rng, mixed with RDSEED where present, reseeded; no seed, no handshake. **Limit:** the host supplies virtio-rng and is trusted until M8.2 |
+| A connection is made without a record | `INTENT` stored before connecting, else `NO_AUDIT`; `OUTCOME` and byte counts after; content never recorded |
+| A silent server holds a client or the service | Timeouts on every deferred reply (connect 5 s, handshake 10 s, idle 60 s); per-client and total connection limits |
+| **Limits** | No revocation checks; no RSA or P-384, so most public servers are unreachable until M6.2; sizes and timing visible to the host and the network |
+
 ### User environment and storage (M3.0)
 
 Design: [user-environment.md](../architecture/user-environment.md) and [storage.md part 8](../architecture/storage.md#8-the-writable-store-m30), from D-016 and D-017. Rows are marked implemented as their issues land (#74–#78, #80); all are reviewed at the M3.0 gate.
