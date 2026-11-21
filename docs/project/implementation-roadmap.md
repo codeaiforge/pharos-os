@@ -677,7 +677,7 @@ Rules for every planned milestone below: nothing moves into the kernel (each com
 
 ### M6.1 — TCP and TLS as a user-space service
 
-- **Objective and scope:** TCP and TLS as user-space services, `no_std` and fuzzed, so an allowed action reaches an HTTPS service. Agents never hold sockets; they keep holding destination capabilities as today (D-012, D-015). **Status: Current** (since 2026-11-21); D-034 is open.
+- **Objective and scope:** TCP and TLS as user-space services, `no_std` and fuzzed, so an allowed action reaches an HTTPS service. Agents never hold sockets; they keep holding destination capabilities as today (D-012, D-015). **Status: Current** (since 2026-11-21): D-034 (#268) and the design (#269) first, then TCP (#270), the TLS client (#271), the fuzz targets (#272), and the `tls` test kernel (#273); the gate is #274. D-034 is open.
 - **Deliverables:** TCP (in the network service or beside it, per D-034); a TLS client; certificate validation against a pinned root set; host fuzz targets for every new parser (D-020 pattern).
 - **Prerequisites:** D-034 accepted; M5.2.
 - **Acceptance criteria:** An HTTPS round trip to a test server in a QEMU regression kernel (`tls`); a wrong, expired, or mismatched certificate refused; the fuzzers run in CI for a fixed budget without findings.
