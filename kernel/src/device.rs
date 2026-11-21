@@ -57,7 +57,7 @@ pub fn mmio_range(device: &pci::Device, bar: u64, offset: u64, len: u64) -> Resu
     else {
         return Err(MmioError::NoBar);
     };
-    if len == 0 || offset % PAGE != 0 || len % PAGE != 0 {
+    if len == 0 || !offset.is_multiple_of(PAGE) || !len.is_multiple_of(PAGE) {
         return Err(MmioError::Misaligned);
     }
     let end = offset.checked_add(len).ok_or(MmioError::OutOfRange)?;

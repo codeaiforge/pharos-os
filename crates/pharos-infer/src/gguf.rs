@@ -150,7 +150,9 @@ impl<'a> Reader<'a> {
 fn tensor_bytes(ty: u32, n: u64) -> Option<u64> {
     match ty {
         TYPE_F32 => n.checked_mul(4),
-        TYPE_Q8_0 if n % QK8_0 as u64 == 0 => (n / QK8_0 as u64).checked_mul(Q8_0_BYTES as u64),
+        TYPE_Q8_0 if n.is_multiple_of(QK8_0 as u64) => {
+            (n / QK8_0 as u64).checked_mul(Q8_0_BYTES as u64)
+        }
         _ => None,
     }
 }
@@ -341,7 +343,9 @@ impl Tensor<'_> {
         }
         Ok(self
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect())
     }

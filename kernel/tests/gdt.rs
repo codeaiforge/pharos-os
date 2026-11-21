@@ -32,5 +32,8 @@ fn run(t: &mut TestRun) {
         "TSS IST1 is the top of the double-fault stack",
         ist == top && top > bottom,
     );
-    t.check("double-fault stack top is 16-byte aligned", ist % 16 == 0);
+    t.check(
+        "double-fault stack top is 16-byte aligned",
+        ist.is_multiple_of(16),
+    );
 }

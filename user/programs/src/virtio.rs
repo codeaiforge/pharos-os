@@ -458,7 +458,7 @@ impl Blk {
             return Err("a request is already in flight");
         }
         if op != Op::Flush {
-            if len == 0 || len > MAX_READ || len % SECTOR != 0 {
+            if len == 0 || len > MAX_READ || !len.is_multiple_of(SECTOR) {
                 return Err("bad request length");
             }
             let end = sector.checked_add((len / SECTOR) as u64);

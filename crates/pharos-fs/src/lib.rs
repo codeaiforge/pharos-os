@@ -61,7 +61,7 @@ impl BlockDevice for [u8] {
     }
 
     fn read(&self, block: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-        if buf.is_empty() || buf.len() % BLOCK_SIZE != 0 {
+        if buf.is_empty() || !buf.len().is_multiple_of(BLOCK_SIZE) {
             return Err(BlockError::BadLength);
         }
         let count = (buf.len() / BLOCK_SIZE) as u64;
@@ -338,7 +338,10 @@ impl<D: BlockDevice> Image<D> {
         let count = count as usize;
         let dir_end = (HEADER_SIZE + count * ENTRY_SIZE) as u64;
         let image_size = u64_at(h, 16);
-        if image_size % BLOCK_SIZE as u64 != 0 || image_size < dir_end || image_size > MAX_IMAGE {
+        if !image_size.is_multiple_of(BLOCK_SIZE as u64)
+            || image_size < dir_end
+            || image_size > MAX_IMAGE
+        {
             return Err(FsError::BadImageSize(image_size));
         }
         if image_size > device_bytes {
@@ -355,7 +358,7 @@ impl<D: BlockDevice> Image<D> {
         // 3. Entries.
         let mut entries: Vec<Entry> = Vec::with_capacity(count);
         let mut data_end = dir_end;
-        for (index, raw) in dir.chunks_exact(ENTRY_SIZE).enumerate() {
+        for (index, raw) in dir.as_chunks::<ENTRY_SIZE>().0.iter().enumerate() {
             let path_len = u16_at(raw, 20) as usize;
             if path_len == 0 || path_len > MAX_PATH {
                 return Err(FsError::EntryPath { index });
@@ -367,10 +370,10 @@ impl<D: BlockDevice> Image<D> {
             if !valid_path(&path_bytes[..path_len]) {
                 return Err(FsError::EntryPath { index });
             }
-            if let Some(prev) = entries.last() {
-                if prev.path() >= &path_bytes[..path_len] {
-                    return Err(FsError::EntryOrder { index });
-                }
+            if let Some(prev) = entries.last()
+                && prev.path() >= &path_bytes[..path_len]
+            {
+                return Err(FsError::EntryOrder { index });
             }
             let (offset, size) = (u64_at(raw, 0), u64_at(raw, 8));
             match offset.checked_add(size) {

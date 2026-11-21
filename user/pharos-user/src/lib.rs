@@ -485,7 +485,7 @@ pub fn spawn_with(
     if caps.len() > MAX_SPAWN_CAPS + 1 {
         return Err(Error::TooLarge);
     }
-    for (entry, grant) in entries.chunks_exact_mut(16).zip(caps) {
+    for (entry, grant) in entries.as_chunks_mut::<16>().0.iter_mut().zip(caps) {
         entry[..8].copy_from_slice(&grant.handle.to_le_bytes());
         entry[8..12].copy_from_slice(&grant.rights.to_le_bytes());
         entry[12..].copy_from_slice(&grant.badge.to_le_bytes());

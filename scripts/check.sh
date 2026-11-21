@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the same checks as the CI `check` job (.github/workflows/ci.yml), in the
-# same order, then the `msrv` job's checks if Rust 1.85 is installed, and stops
+# same order, then the `msrv` job's checks if Rust 1.91 is installed, and stops
 # at the first failure.
 # Read-only apart from Cargo's target/ directory. No root, no network beyond
 # what Cargo itself needs. Usage: scripts/check.sh
@@ -28,15 +28,15 @@ run python3 -m unittest -q scripts/test_bench_inference.py
 
 # The CI `msrv` job: the same host builds and tests on the minimum supported
 # Rust. Runs only if that toolchain is installed (rustup toolchain install
-# 1.85 --profile minimal); otherwise says so, because CI will still run it.
-if rustup run 1.85 rustc --version >/dev/null 2>&1; then
-    run cargo +1.85 build --workspace --exclude pharos-kernel --exclude pharos-programs --locked
-    run cargo +1.85 test --workspace --exclude pharos-kernel --exclude pharos-programs --locked
-    run cargo +1.85 test -p pharos-programs --lib --locked
-    run cargo +1.85 test -p pharos-kernel --lib --locked
+# 1.91 --profile minimal); otherwise says so, because CI will still run it.
+if rustup run 1.91 rustc --version >/dev/null 2>&1; then
+    run cargo +1.91 build --workspace --exclude pharos-kernel --exclude pharos-programs --locked
+    run cargo +1.91 test --workspace --exclude pharos-kernel --exclude pharos-programs --locked
+    run cargo +1.91 test -p pharos-programs --lib --locked
+    run cargo +1.91 test -p pharos-kernel --lib --locked
 else
-    printf '\n==> SKIPPED: Rust 1.85 not installed, so the CI msrv job was not repeated locally.\n'
-    printf '    Install it with: rustup toolchain install 1.85 --profile minimal\n'
+    printf '\n==> SKIPPED: Rust 1.91 not installed, so the CI msrv job was not repeated locally.\n'
+    printf '    Install it with: rustup toolchain install 1.91 --profile minimal\n'
 fi
 
 printf '\nAll checks passed.\n'

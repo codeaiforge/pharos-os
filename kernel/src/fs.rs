@@ -158,7 +158,7 @@ mod kernel {
         }
 
         fn read(&self, block: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-            if buf.is_empty() || buf.len() % pharos_fs::BLOCK_SIZE != 0 {
+            if buf.is_empty() || !buf.len().is_multiple_of(pharos_fs::BLOCK_SIZE) {
                 return Err(BlockError::BadLength);
             }
             let count = (buf.len() / pharos_fs::BLOCK_SIZE) as u64;
@@ -179,10 +179,10 @@ mod kernel {
         /// allocator locked: the last capability on the filesystem is
         /// dropped after the system call's locks are released.
         fn drop(&mut self) {
-            if let Some(space) = self.space.take() {
-                if let Some(frames) = crate::mm::frames().as_mut() {
-                    space.destroy(frames);
-                }
+            if let Some(space) = self.space.take()
+                && let Some(frames) = crate::mm::frames().as_mut()
+            {
+                space.destroy(frames);
             }
             COPIES.fetch_sub(1, Ordering::AcqRel);
         }

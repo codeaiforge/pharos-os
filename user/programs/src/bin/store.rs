@@ -200,10 +200,9 @@ impl Service {
                 .clients
                 .iter()
                 .position(|c| c.as_ref().is_some_and(|c| c.badge == client))
+                && let Some(old) = self.clients[i].take()
             {
-                if let Some(old) = self.clients[i].take() {
-                    let _ = mem_unmap(old.buffer);
-                }
+                let _ = mem_unmap(old.buffer);
             }
             return Ok(1);
         }

@@ -103,7 +103,7 @@ impl Q8Vec {
     pub fn quantize(&mut self, x: &[f32]) {
         self.scales.clear();
         self.values.clear();
-        for block in x.chunks_exact(QK8_0) {
+        for block in x.as_chunks::<QK8_0>().0 {
             let amax = block
                 .iter()
                 .fold(0.0f32, |m, v| if abs(*v) > m { abs(*v) } else { m });
@@ -125,8 +125,10 @@ impl Default for Q8Vec {
 /// The f32 values of one row of Q8_0 blocks.
 pub fn dequantize_q8_0(row: &[u8], out: &mut [f32]) {
     for (block, out) in row
-        .chunks_exact(Q8_0_BYTES)
-        .zip(out.chunks_exact_mut(QK8_0))
+        .as_chunks::<Q8_0_BYTES>()
+        .0
+        .iter()
+        .zip(out.as_chunks_mut::<QK8_0>().0.iter_mut())
     {
         let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
         for (o, q) in out.iter_mut().zip(&block[2..]) {
@@ -149,9 +151,11 @@ fn block_dot(w: &[i16; QK8_0], x: &[i16]) -> i32 {
 pub fn dot_q8_0(row: &[u8], x: &Q8Vec) -> f32 {
     let mut sum = 0.0f32;
     for ((block, d_x), q_x) in row
-        .chunks_exact(Q8_0_BYTES)
+        .as_chunks::<Q8_0_BYTES>()
+        .0
+        .iter()
         .zip(&x.scales)
-        .zip(x.values.chunks_exact(QK8_0))
+        .zip(x.values.as_chunks::<QK8_0>().0.iter())
     {
         let d_w = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
         let isum: i32 = block[2..]
@@ -178,7 +182,7 @@ pub fn dot_q8_0_many(row: &[u8], xs: &Q8Vec, out: &mut [f32]) {
     out.fill(0.0);
     let blocks = row.len() / Q8_0_BYTES;
     let mut w = [0i16; QK8_0];
-    for (k, block) in row.chunks_exact(Q8_0_BYTES).enumerate() {
+    for (k, block) in row.as_chunks::<Q8_0_BYTES>().0.iter().enumerate() {
         let d_w = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
         for (w, b) in w.iter_mut().zip(&block[2..]) {
             *w = i16::from(*b as i8);
@@ -195,7 +199,7 @@ pub fn dot_q8_0_many(row: &[u8], xs: &Q8Vec, out: &mut [f32]) {
 /// models), with llama.cpp's reference rounding (`roundf`).
 pub fn quantize_row_q8_0(x: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(x.len() / QK8_0 * Q8_0_BYTES);
-    for block in x.chunks_exact(QK8_0) {
+    for block in x.as_chunks::<QK8_0>().0 {
         let amax = block
             .iter()
             .fold(0.0f32, |m, v| if abs(*v) > m { abs(*v) } else { m });

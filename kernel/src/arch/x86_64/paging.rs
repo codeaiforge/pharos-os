@@ -504,7 +504,7 @@ impl AddressSpace {
         pages: usize,
         frames: &mut FrameAllocator<'_>,
     ) -> Result<u64, MapError> {
-        if virt % FRAME_SIZE != 0 {
+        if !virt.is_multiple_of(FRAME_SIZE) {
             return Err(MapError::Misaligned);
         }
         if !self.range_free(virt, pages as u64) {
@@ -545,7 +545,7 @@ impl AddressSpace {
         extra: u64,
         frames: &mut FrameAllocator<'_>,
     ) -> Result<(), MapError> {
-        if virt % size.bytes() != 0 || phys % size.bytes() != 0 {
+        if !virt.is_multiple_of(size.bytes()) || !phys.is_multiple_of(size.bytes()) {
             return Err(MapError::Misaligned);
         }
         // A process must not touch the shared kernel half or the last user
@@ -1067,7 +1067,7 @@ fn mmio_page(phys: u64) -> Result<u64, MapError> {
 /// `phys` must be inside a device's memory BAR, never RAM: this function
 /// cannot tell the two apart (#218: an unchecked MSI-X offset once could).
 pub(super) fn mmio_write32(phys: u64, value: u32) -> Result<(), MapError> {
-    if phys % 4 != 0 {
+    if !phys.is_multiple_of(4) {
         return Err(MapError::Misaligned);
     }
     let virt = mmio_page(phys)?;
@@ -1081,7 +1081,7 @@ pub(super) fn mmio_write32(phys: u64, value: u32) -> Result<(), MapError> {
 /// Reads the device register at physical address `phys` (4-byte aligned),
 /// which must be inside a device's memory BAR, as for [`mmio_write32`].
 pub(super) fn mmio_read32(phys: u64) -> Result<u32, MapError> {
-    if phys % 4 != 0 {
+    if !phys.is_multiple_of(4) {
         return Err(MapError::Misaligned);
     }
     let virt = mmio_page(phys)?;

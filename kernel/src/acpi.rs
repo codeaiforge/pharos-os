@@ -252,7 +252,12 @@ fn unit(b: &[u8]) -> Option<Unit> {
             kind: s[0],
             enumeration_id: s[4],
             start_bus: s[5],
-            path: s[6..].chunks_exact(2).map(|p| (p[0], p[1])).collect(),
+            path: s[6..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|p| (p[0], p[1]))
+                .collect(),
         });
         at += len;
     }

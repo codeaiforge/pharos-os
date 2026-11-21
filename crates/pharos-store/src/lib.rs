@@ -384,8 +384,7 @@ fn read_slot<D: Device>(dev: &mut D, slot: u64) -> Result<Generation, SlotError>
         return Err(OutOfRange);
     }
     let mut bytes = vec![0u8; index.count as usize * BLOCK];
-    for (i, chunk) in bytes.chunks_exact_mut(BLOCK).enumerate() {
-        let chunk: &mut Block = chunk.try_into().map_err(|_| Io)?;
+    for (i, chunk) in bytes.as_chunks_mut::<BLOCK>().0.iter_mut().enumerate() {
         dev.read(index.start + i as u64, chunk).map_err(|_| Io)?;
     }
     bytes.truncate(len);
@@ -844,10 +843,10 @@ impl<D: Device> Store<D> {
         if !valid_path(path) {
             return Err(Error::BadPath);
         }
-        if let Ok(i) = self.find(path) {
-            if self.current.objects[i].kind != Kind::File {
-                return Err(Error::WrongKind);
-            }
+        if let Ok(i) = self.find(path)
+            && self.current.objects[i].kind != Kind::File
+        {
+            return Err(Error::WrongKind);
         }
         let mut alloc = self.alloc();
         let extents = alloc.take(len.div_ceil(BLOCK as u64), MAX_EXTENTS)?;

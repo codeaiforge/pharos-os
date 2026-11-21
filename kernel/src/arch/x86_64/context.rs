@@ -346,10 +346,10 @@ impl Drop for Context {
         assert!(!self.is_running(), "dropping the running context");
         // Not running, so not active either: a switch away from this
         // context loaded another root.
-        if let Some(space) = self.space.take() {
-            if let Some(frames) = crate::mm::frames().as_mut() {
-                space.into_inner().destroy(frames);
-            }
+        if let Some(space) = self.space.take()
+            && let Some(frames) = crate::mm::frames().as_mut()
+        {
+            space.into_inner().destroy(frames);
         }
     }
 }

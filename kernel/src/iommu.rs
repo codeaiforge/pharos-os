@@ -258,7 +258,7 @@ impl Domain {
 
     fn check(&self, iova: u64) -> Result<(), Error> {
         let reach = 1u64 << (12 + 9 * self.levels);
-        if iova % PAGE != 0 || iova >= reach {
+        if !iova.is_multiple_of(PAGE) || iova >= reach {
             return Err(Error::BadAddress(iova));
         }
         Ok(())
@@ -279,7 +279,7 @@ impl Domain {
         write: bool,
     ) -> Result<(), Error> {
         self.check(iova)?;
-        if phys % PAGE != 0 || phys & !ADDRESS != 0 {
+        if !phys.is_multiple_of(PAGE) || phys & !ADDRESS != 0 {
             return Err(Error::BadAddress(phys));
         }
         let mut table = self.root;

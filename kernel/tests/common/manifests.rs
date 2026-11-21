@@ -98,10 +98,11 @@ impl<'a> Audit<'a> {
         }
         let mut owned: Vec<Arc<Endpoint>> = Vec::new();
         for (_, c) in caps_of(init) {
-            if let Some(e) = endpoint(&c) {
-                if !Arc::ptr_eq(e, report) && !owned.iter().any(|o| Arc::ptr_eq(o, e)) {
-                    owned.push(e.clone());
-                }
+            if let Some(e) = endpoint(&c)
+                && !Arc::ptr_eq(e, report)
+                && !owned.iter().any(|o| Arc::ptr_eq(o, e))
+            {
+                owned.push(e.clone());
             }
         }
         let kids: Vec<Caps> = children(init).into_iter().map(caps_of).collect();

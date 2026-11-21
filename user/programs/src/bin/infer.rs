@@ -210,10 +210,10 @@ impl Service {
             Some(_) => self.load(&MANIFEST[i]),
             None => Err(Step::Read),
         };
-        if matches!(result, Err(Step::Read)) {
-            if let Some(w) = self.window.take() {
-                let _ = mem_unmap(w);
-            }
+        if matches!(result, Err(Step::Read))
+            && let Some(w) = self.window.take()
+        {
+            let _ = mem_unmap(w);
         }
         let step: &[u8] = match result {
             Ok(_) => b"loaded",
@@ -449,10 +449,10 @@ impl Service {
                 self.end(Stop::Cancelled);
             }
             for slot in self.clients.iter_mut() {
-                if slot.as_ref().is_some_and(|c| c.badge == client) {
-                    if let Some(c) = slot.take() {
-                        let _ = mem_unmap(c.buffer);
-                    }
+                if slot.as_ref().is_some_and(|c| c.badge == client)
+                    && let Some(c) = slot.take()
+                {
+                    let _ = mem_unmap(c.buffer);
                 }
             }
             out[0] = Status::Ok as u8;

@@ -301,7 +301,7 @@ pub enum Call {
 /// A whole-mapping range in the map region (`mem_unmap`, `mem_share`).
 fn mapping(addr: u64, len: u64) -> Result<(u64, u64), Error> {
     match map_pages(len) {
-        Some(pages) if addr % 4096 == 0 && crate::process::MAP_REGION.contains(&addr) => {
+        Some(pages) if addr.is_multiple_of(4096) && crate::process::MAP_REGION.contains(&addr) => {
             Ok((addr, pages))
         }
         _ => Err(Error::BadAddress),
@@ -320,7 +320,7 @@ fn map_pages(len: u64) -> Option<u64> {
 /// revocation sweep left in a `mem_map` reservation, which `mem_unmap` then
 /// frees as the process's own (#219).
 fn device_pages(addr: u64, len: u64) -> Result<u64, Error> {
-    if addr % 4096 != 0 || len == 0 || len % 4096 != 0 {
+    if !addr.is_multiple_of(4096) || len == 0 || !len.is_multiple_of(4096) {
         return Err(Error::BadAddress);
     }
     if !user_range_ok(addr, len) {
@@ -1089,7 +1089,7 @@ mod kernel {
         sched::with_current_space(|space| space.read_user(addr, entries))
             .ok_or(Error::BadAddress)??;
         let mut caps = alloc::vec::Vec::new();
-        for entry in entries.chunks_exact(SPAWN_ENTRY) {
+        for entry in entries.as_chunks::<SPAWN_ENTRY>().0 {
             let field = |at: usize, len: usize| {
                 entry[at..at + len]
                     .iter()

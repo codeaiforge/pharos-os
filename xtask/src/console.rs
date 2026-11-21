@@ -152,10 +152,10 @@ impl Read for Tail {
             if self.file.is_none() {
                 self.file = std::fs::File::open(&self.path).ok();
             }
-            if let Some(n) = self.file.as_mut().map(|f| f.read(buf)).transpose()? {
-                if n > 0 {
-                    return Ok(n);
-                }
+            if let Some(n) = self.file.as_mut().map(|f| f.read(buf)).transpose()?
+                && n > 0
+            {
+                return Ok(n);
             }
             std::thread::sleep(Duration::from_millis(20));
         }

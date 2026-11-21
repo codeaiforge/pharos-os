@@ -274,11 +274,11 @@ impl Service {
             Ok(Packet::ArpReply { mac, ip }) => {
                 self.arp.insert(ip, mac);
                 for i in 0..self.used {
-                    if let Some(d) = self.clients[i].parked {
-                        if next_hop(d.ip) == ip {
-                            self.clients[i].parked = None;
-                            self.send_udp(i, d);
-                        }
+                    if let Some(d) = self.clients[i].parked
+                        && next_hop(d.ip) == ip
+                    {
+                        self.clients[i].parked = None;
+                        self.send_udp(i, d);
                     }
                     self.send_ping(i);
                 }
@@ -310,10 +310,10 @@ impl Service {
                 let found = self.clients[..self.used].iter_mut().find(|c| {
                     c.port == id && c.ping.is_some_and(|p| p.sent && p.seq == seq && p.ip == ip)
                 });
-                if let Some(c) = found {
-                    if let Some(p) = c.ping.take() {
-                        answer(&mut self.stats, p.reply, &encode_pong(seq));
-                    }
+                if let Some(c) = found
+                    && let Some(p) = c.ping.take()
+                {
+                    answer(&mut self.stats, p.reply, &encode_pong(seq));
                 }
             }
             Ok(Packet::Udp {

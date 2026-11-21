@@ -88,12 +88,12 @@ pub fn gguf_file(meta: &[(&str, Meta<'_>)], tensors: &[TensorSpec]) -> Vec<u8> {
         offsets.push(offset);
         offset += (t.data.len() as u64).div_ceil(32) * 32;
     }
-    while out.len() % 32 != 0 {
+    while !out.len().is_multiple_of(32) {
         out.push(0);
     }
     for t in tensors {
         out.extend(&t.data);
-        while out.len() % 32 != 0 {
+        while !out.len().is_multiple_of(32) {
             out.push(0);
         }
     }

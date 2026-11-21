@@ -77,7 +77,7 @@ fn run(t: &mut TestRun) {
     let aligned = Box::new(PageAligned([7; 64]));
     t.check(
         "4 KiB-aligned allocation",
-        (&*aligned as *const PageAligned as usize) % 4096 == 0 && aligned.0[63] == 7,
+        (&*aligned as *const PageAligned as usize).is_multiple_of(4096) && aligned.0[63] == 7,
     );
     t.check("heap in use", mm::heap_stats().used > 0);
     drop((boxed, squares, text, map, aligned));

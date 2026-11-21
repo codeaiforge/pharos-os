@@ -360,11 +360,10 @@ extern "C" fn dispatch(frame: &mut ExceptionFrame) {
         crate::irq::on_vector(index);
         return;
     }
-    // (No let chains: the minimum supported Rust is 1.85.)
-    if frame.cs & 3 == 3 {
-        if let Some(hook) = user_fault_hook() {
-            hook(frame);
-        }
+    if frame.cs & 3 == 3
+        && let Some(hook) = user_fault_hook()
+    {
+        hook(frame);
     }
     if let Some(hook) = fatal_hook() {
         hook(frame);
@@ -391,7 +390,7 @@ fn gp_context(frame: &ExceptionFrame) {
     if frame.vector != u64::from(GENERAL_PROTECTION)
         || frame.cs & 3 != 0
         || frame.rsp < KERNEL_HALF
-        || frame.rsp % 8 != 0
+        || !frame.rsp.is_multiple_of(8)
     {
         return;
     }

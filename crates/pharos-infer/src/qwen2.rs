@@ -94,11 +94,11 @@ impl<'a> Qwen2<'a> {
         };
         let ok = c.vocab_size > 0
             && c.vocab_size <= MAX_VOCAB
-            && c.dim % c.n_heads == 0
-            && c.n_heads % c.n_kv_heads == 0
-            && c.head_size() % 2 == 0
-            && c.dim % QK8_0 == 0
-            && c.hidden_dim % QK8_0 == 0
+            && c.dim.is_multiple_of(c.n_heads)
+            && c.n_heads.is_multiple_of(c.n_kv_heads)
+            && c.head_size().is_multiple_of(2)
+            && c.dim.is_multiple_of(QK8_0)
+            && c.hidden_dim.is_multiple_of(QK8_0)
             && c.rope_base > 0.0
             && c.rms_eps > 0.0;
         if !ok {

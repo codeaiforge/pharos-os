@@ -218,7 +218,7 @@ impl Mapped {
         let mut i = 0;
         while i < buf.len() {
             let at = offset + i;
-            if at % 8 == 0 && buf.len() - i >= 8 {
+            if at.is_multiple_of(8) && buf.len() - i >= 8 {
                 buf[i..i + 8].copy_from_slice(&self.read64(at).to_le_bytes());
                 i += 8;
             } else {
@@ -233,7 +233,7 @@ impl Mapped {
         let mut i = 0;
         while i < bytes.len() {
             let at = offset + i;
-            if at % 8 == 0 && bytes.len() - i >= 8 {
+            if at.is_multiple_of(8) && bytes.len() - i >= 8 {
                 let mut word = [0u8; 8];
                 word.copy_from_slice(&bytes[i..i + 8]);
                 self.write64(at, u64::from_le_bytes(word));
@@ -247,7 +247,8 @@ impl Mapped {
 
     fn at(&self, offset: usize, size: usize) -> usize {
         assert!(
-            offset % size == 0 && offset.checked_add(size).is_some_and(|end| end <= self.len),
+            offset.is_multiple_of(size)
+                && offset.checked_add(size).is_some_and(|end| end <= self.len),
             "mapped memory access out of bounds or misaligned"
         );
         self.base + offset
@@ -948,7 +949,10 @@ mod tests {
             (5000, 8),
         ] {
             let p = heap.alloc(size, align);
-            assert!(p != 0 && p % align == 0, "size {size} align {align}");
+            assert!(
+                p != 0 && p.is_multiple_of(align),
+                "size {size} align {align}"
+            );
             blocks.push((p, size));
         }
         for (i, a) in blocks.iter().enumerate() {
@@ -964,7 +968,7 @@ mod tests {
         assert_eq!(heap.alloc(20, 4), p, "reused");
         // Large allocations are their own mapping, unmapped when freed.
         let big = heap.alloc(LARGE + 1, 8);
-        assert!(big != 0 && big % 4096 == 0);
+        assert!(big != 0 && big.is_multiple_of(4096));
         assert!(mapped().contains(&(big, LARGE + 4096)));
         heap.free(big, LARGE + 1, 8);
         assert_eq!(mapped().len(), 1, "unmapped");
@@ -994,7 +998,7 @@ mod tests {
         let mut heap = Test(Heap::new(base, 2 * LARGE, refuse, never));
         let small = heap.alloc(16, 8);
         let big = heap.alloc(LARGE + 1, 8);
-        assert!(big >= base + 4096 && big % 4096 == 0 && big > small);
+        assert!(big >= base + 4096 && big.is_multiple_of(4096) && big > small);
         heap.free(big, LARGE + 1, 8);
         assert_eq!(
             heap.alloc(LARGE + 1, 8),

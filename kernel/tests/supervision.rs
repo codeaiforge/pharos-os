@@ -164,10 +164,11 @@ fn run(t: &mut TestRun) {
         if summary.is_none() {
             summary = ipc::poll(&report, Duration::from_millis(1)).map(|m| m.bytes().to_vec());
         }
-        if !steady_stopped && w.has("init: steady ready") {
-            if let Some(id) = w.who("svc: steady") {
-                steady_stopped = process::stop(id);
-            }
+        if !steady_stopped
+            && w.has("init: steady ready")
+            && let Some(id) = w.who("svc: steady")
+        {
+            steady_stopped = process::stop(id);
         }
         if !store_killed && w.has("client: kill the store") {
             store_killed = store_of(init).is_some_and(|id| process::kill(id, KILLED));

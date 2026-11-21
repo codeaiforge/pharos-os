@@ -1349,22 +1349,21 @@ impl Init {
                     self.tell_trust(Event::AuditFull, b"", [level.into(), 0, 0], &[]);
                 } else if let (Some(service), Some(State::Running(p))) =
                     (self.table.get(i), self.state.get(i).copied())
+                    && service.kind == Kind::Daemon
                 {
-                    if service.kind == Kind::Daemon {
-                        say(service.name, "ready", None);
-                        self.state[i] = State::Ok(p);
-                        self.answered[i] = uptime();
-                        // Checked at once, so its first answer is seen
-                        // (M4.5 review F2); `i` is below `MAX_SERVICES`.
-                        self.heard &= !(1 << i);
-                        self.next_check = 0;
-                        if core::mem::take(&mut self.by_user[i]) {
-                            let name = service.name.as_bytes();
-                            self.tell_trust(Event::ByUser, name, [by_user::READY, 0, 0], &[]);
-                        }
-                        if service.path == b"bin/net" {
-                            self.allow();
-                        }
+                    say(service.name, "ready", None);
+                    self.state[i] = State::Ok(p);
+                    self.answered[i] = uptime();
+                    // Checked at once, so its first answer is seen
+                    // (M4.5 review F2); `i` is below `MAX_SERVICES`.
+                    self.heard &= !(1 << i);
+                    self.next_check = 0;
+                    if core::mem::take(&mut self.by_user[i]) {
+                        let name = service.name.as_bytes();
+                        self.tell_trust(Event::ByUser, name, [by_user::READY, 0, 0], &[]);
+                    }
+                    if service.path == b"bin/net" {
+                        self.allow();
                     }
                 }
                 if cap != 0 {
@@ -1668,10 +1667,10 @@ impl Init {
                 self.system(&[name, b": attempts used up; bad"].concat(), None);
             }
         }
-        if *record != loaded {
-            if let Some(slots) = slots.as_ref() {
-                let _ = slots.save(record);
-            }
+        if *record != loaded
+            && let Some(slots) = slots.as_ref()
+        {
+            let _ = slots.save(record);
         }
     }
 

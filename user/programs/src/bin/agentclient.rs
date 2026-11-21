@@ -137,12 +137,12 @@ impl Client {
     /// Waits up to `secs` for `task` to end: its status and result.
     fn wait(&self, task: u32, secs: u32) -> Option<(TaskStatus, Vec<u8>)> {
         for _ in 0..secs * 10 {
-            if let Some(s) = self.status(task) {
-                if !matches!(s.state, State::Pending | State::Running) {
-                    let mut result = alloc::vec![0u8; s.result_len as usize];
-                    self.buffer.read_bytes(0, &mut result);
-                    return Some((s, result));
-                }
+            if let Some(s) = self.status(task)
+                && !matches!(s.state, State::Pending | State::Running)
+            {
+                let mut result = alloc::vec![0u8; s.result_len as usize];
+                self.buffer.read_bytes(0, &mut result);
+                return Some((s, result));
             }
             sleep(100_000);
         }

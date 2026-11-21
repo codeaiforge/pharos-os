@@ -449,7 +449,7 @@ mod kernel {
     /// per slot; signals `init` if a slot has an event or is powering on.
     /// No allocation, no writes.
     pub fn tick(ticks: u64) {
-        if ticks % POLL_TICKS != 0 {
+        if !ticks.is_multiple_of(POLL_TICKS) {
             return;
         }
         let powering = POWERING.load(core::sync::atomic::Ordering::Relaxed) != 0;

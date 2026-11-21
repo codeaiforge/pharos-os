@@ -2930,10 +2930,10 @@ impl Runtime {
         if code != net::OK {
             return Err(code);
         }
-        if let Some(s) = self.slots[i].as_mut() {
-            if !s.peers.contains(&(addr, port)) {
-                s.peers.push((addr, port));
-            }
+        if let Some(s) = self.slots[i].as_mut()
+            && !s.peers.contains(&(addr, port))
+        {
+            s.peers.push((addr, port));
         }
         Ok(())
     }

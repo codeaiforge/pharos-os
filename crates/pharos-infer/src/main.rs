@@ -190,10 +190,10 @@ fn tokenize(model_path: &str, text_path: &str) -> Result<(), String> {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
-    if let [_, cmd, model, file] = args {
-        if cmd == "tokenize" {
-            return tokenize(model, file);
-        }
+    if let [_, cmd, model, file] = args
+        && cmd == "tokenize"
+    {
+        return tokenize(model, file);
     }
     if let Some(path) = args.get(1) {
         let start = Instant::now();

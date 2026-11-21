@@ -112,10 +112,10 @@ impl Usage {
         if !within(self.tokens, n, budget.tokens) {
             return Err(Over::Tokens);
         }
-        if let Some((g, u)) = &group {
-            if !u.tokens.fits(now, g.tokens_per_min, n) {
-                return Err(Over::GroupTokens);
-            }
+        if let Some((g, u)) = &group
+            && !u.tokens.fits(now, g.tokens_per_min, n)
+        {
+            return Err(Over::GroupTokens);
         }
         self.tokens += n;
         if let Some((_, u)) = group {
@@ -167,10 +167,10 @@ impl Usage {
         if !within(self.net_bytes, bytes, budget.net_bytes) {
             return Err(Over::NetBytes);
         }
-        if let Some((g, u)) = &group {
-            if !u.net.fits(now, g.net_bytes_per_min, bytes) {
-                return Err(Over::GroupNet);
-            }
+        if let Some((g, u)) = &group
+            && !u.net.fits(now, g.net_bytes_per_min, bytes)
+        {
+            return Err(Over::GroupNet);
         }
         self.net_sends += 1;
         self.net_bytes += bytes;

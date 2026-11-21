@@ -146,9 +146,9 @@ impl Config {
             && in_range(self.n_kv_heads, self.n_heads)
             && in_range(self.vocab_size, MAX_VOCAB)
             && in_range(self.seq_len, MAX_SEQ)
-            && self.dim % self.n_heads == 0
-            && self.n_heads % self.n_kv_heads == 0
-            && self.head_size() % 2 == 0;
+            && self.dim.is_multiple_of(self.n_heads)
+            && self.n_heads.is_multiple_of(self.n_kv_heads)
+            && self.head_size().is_multiple_of(2);
         if ok { Ok(()) } else { Err(Error::BadConfig) }
     }
 
@@ -223,7 +223,9 @@ impl Reader<'_> {
     fn f32s(&mut self, n: usize) -> Result<Vec<f32>, Error> {
         let bytes = self.take(n.checked_mul(4).ok_or(Error::Truncated)?)?;
         Ok(bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect())
     }
@@ -537,10 +539,10 @@ impl Tokenizer {
     /// pair with the highest score.
     pub fn encode(&self, text: &str) -> Vec<usize> {
         let mut tokens = vec![BOS];
-        if !text.is_empty() {
-            if let Some(space) = self.lookup(b" ") {
-                tokens.push(space);
-            }
+        if !text.is_empty()
+            && let Some(space) = self.lookup(b" ")
+        {
+            tokens.push(space);
         }
         let mut buf = [0u8; 4];
         for ch in text.chars() {
@@ -557,10 +559,10 @@ impl Tokenizer {
                 merged.clear();
                 merged.extend_from_slice(self.piece(tokens[i]));
                 merged.extend_from_slice(self.piece(tokens[i + 1]));
-                if let Some(id) = self.lookup(&merged) {
-                    if best.is_none_or(|(score, _, _)| self.scores[id] > score) {
-                        best = Some((self.scores[id], id, i));
-                    }
+                if let Some(id) = self.lookup(&merged)
+                    && best.is_none_or(|(score, _, _)| self.scores[id] > score)
+                {
+                    best = Some((self.scores[id], id, i));
                 }
             }
             match best {

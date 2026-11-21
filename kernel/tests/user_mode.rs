@@ -91,7 +91,7 @@ fn run(t: &mut TestRun) {
     t.check(
         "the TSS ring-0 stack is a task stack top while processes run",
         (STACK_WINDOW + 1..=STACK_WINDOW + MAX_STACKS * SLOT_SIZE).contains(&gdt::kernel_stack())
-            && gdt::kernel_stack() % SLOT_SIZE == 0,
+            && gdt::kernel_stack().is_multiple_of(SLOT_SIZE),
     );
 
     // Each of these processes tries something forbidden and is killed.

@@ -35,7 +35,7 @@ impl<'a> Bitmap<'a> {
         words.fill(0);
         // Mark the unused tail bits of the last word as used, so searches
         // never return them.
-        if len % 64 != 0 {
+        if !len.is_multiple_of(64) {
             words[needed - 1] = !0u64 << (len % 64);
         }
         Self {
@@ -108,7 +108,7 @@ impl<'a> Bitmap<'a> {
         let mut start = from.next_multiple_of(align);
         while start < to && start + count <= self.len {
             // Skip whole used words quickly (the common case when full).
-            if start % 64 == 0 && self.words[start / 64] == !0 {
+            if start.is_multiple_of(64) && self.words[start / 64] == !0 {
                 start += 64;
                 continue;
             }

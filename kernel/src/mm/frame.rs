@@ -22,7 +22,7 @@ pub struct Frame(u64);
 impl Frame {
     /// The frame starting at `addr`, which must be 4 KiB-aligned.
     pub const fn from_addr(addr: u64) -> Option<Frame> {
-        if addr % FRAME_SIZE == 0 {
+        if addr.is_multiple_of(FRAME_SIZE) {
             Some(Frame(addr))
         } else {
             None

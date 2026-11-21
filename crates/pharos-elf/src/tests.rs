@@ -261,7 +261,7 @@ fn random_mutations_never_panic_and_accepted_programs_follow_the_rules() {
                 }
             }
         }
-        let size = if rng.next() % 8 == 0 {
+        let size = if rng.next().is_multiple_of(8) {
             rng.next() % 0x3000
         } else {
             f.len() as u64

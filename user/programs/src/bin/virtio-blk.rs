@@ -48,7 +48,7 @@ impl BlockDevice for Disk {
     }
 
     fn read(&self, block: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-        if buf.is_empty() || buf.len() % BLOCK_SIZE != 0 {
+        if buf.is_empty() || !buf.len().is_multiple_of(BLOCK_SIZE) {
             return Err(BlockError::BadLength);
         }
         let mut blk = self.blk.borrow_mut();

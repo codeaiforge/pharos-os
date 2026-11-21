@@ -43,7 +43,7 @@ fn run(t: &mut TestRun) {
     );
     t.check(
         "IST tops are 16-byte aligned",
-        nmi.1 % 16 == 0 && mc.1 % 16 == 0,
+        nmi.1.is_multiple_of(16) && mc.1.is_multiple_of(16),
     );
     let disjoint = |a: (u64, u64), b: (u64, u64)| a.1 <= b.0 || b.1 <= a.0;
     t.check(

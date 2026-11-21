@@ -100,7 +100,7 @@ pub fn capabilities(
     let mut caps = Vec::new();
     let mut next = first;
     while next != 0 {
-        if next < 0x40 || next % 4 != 0 {
+        if next < 0x40 || !next.is_multiple_of(4) {
             return (caps, Some(CapListError::BadPointer(next)));
         }
         if caps.len() == MAX_CAPS {

@@ -312,10 +312,10 @@ impl<'a> Tokenizer<'a> {
         let mut heap = BinaryHeap::new();
         let push = |heap: &mut BinaryHeap<_>, sym: &[(u32, usize, usize)], i: usize| {
             let j = sym[i].2;
-            if j != NONE {
-                if let Some((rank, merged)) = self.rank(sym[i].0, sym[j].0) {
-                    heap.push(Reverse((rank, i, sym[i].0, sym[j].0, merged)));
-                }
+            if j != NONE
+                && let Some((rank, merged)) = self.rank(sym[i].0, sym[j].0)
+            {
+                heap.push(Reverse((rank, i, sym[i].0, sym[j].0, merged)));
             }
         };
         for i in 0..sym.len() {

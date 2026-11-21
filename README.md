@@ -44,7 +44,7 @@ Pharos OS is an agent cell: a small capability system, run as a microVM on an or
 | | Initial target |
 | --- | --- |
 | Host | Linux Mint (other x86-64 Linux distributions should work) |
-| Language | Rust, stable channel, edition 2024 (minimum Rust 1.85) |
+| Language | Rust, stable channel, edition 2024 (minimum Rust 1.91, D-034) |
 | Architecture | x86-64 |
 | Emulator | QEMU with OVMF (UEFI) and SeaBIOS (BIOS) |
 
@@ -100,7 +100,7 @@ Exit status: `0` success, `1` the command reported a problem (for example, `doct
 scripts/check.sh
 ```
 
-This runs the same checks as CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)): formatting, Clippy with warnings as errors, build, tests, rustdoc, and Markdown links. The kernel is checked for its bare-metal target, separately from the host crates. CI also builds and tests the host crates on Rust 1.85. The individual commands are in [testing.md](docs/development/testing.md#quality-gates).
+This runs the same checks as CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)): formatting, Clippy with warnings as errors, build, tests, rustdoc, and Markdown links. The kernel is checked for its bare-metal target, separately from the host crates. CI also builds and tests the host crates on Rust 1.91, the minimum supported. The individual commands are in [testing.md](docs/development/testing.md#quality-gates).
 
 ## Repository layout
 

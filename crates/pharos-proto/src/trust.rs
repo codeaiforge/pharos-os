@@ -887,7 +887,7 @@ fn hex_bytes<const N: usize>(v: &[u8]) -> Option<[u8; N]> {
     if v.len() != 2 * N {
         return None;
     }
-    for (o, pair) in out.iter_mut().zip(v.chunks_exact(2)) {
+    for (o, pair) in out.iter_mut().zip(v.as_chunks::<2>().0) {
         *o = digit(pair[0])? << 4 | digit(pair[1])?;
     }
     Some(out)

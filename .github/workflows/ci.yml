@@ -81,7 +81,7 @@ jobs:
         run: python3 -m unittest -q scripts/test_bench_inference.py
 
   msrv:
-    name: minimum supported Rust (1.85)
+    name: minimum supported Rust (1.91)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -91,17 +91,17 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.85
-        run: rustup toolchain install 1.85 --profile minimal
+      - name: Install Rust 1.91
+        run: rustup toolchain install 1.91 --profile minimal
 
-      # `+1.85` overrides rust-toolchain.toml for these commands. Host crates
+      # `+1.91` overrides rust-toolchain.toml for these commands. Host crates
       # only; the kernel target is checked on stable in the `check` job.
-      - name: Build and test on 1.85
+      - name: Build and test on 1.91
         run: |
-          cargo +1.85 build --workspace --exclude pharos-kernel --exclude pharos-programs --locked
-          cargo +1.85 test --workspace --exclude pharos-kernel --exclude pharos-programs --locked
-          cargo +1.85 test -p pharos-programs --lib --locked
-          cargo +1.85 test -p pharos-kernel --lib --locked
+          cargo +1.91 build --workspace --exclude pharos-kernel --exclude pharos-programs --locked
+          cargo +1.91 test --workspace --exclude pharos-kernel --exclude pharos-programs --locked
+          cargo +1.91 test -p pharos-programs --lib --locked
+          cargo +1.91 test -p pharos-kernel --lib --locked
 
   qemu:
     name: QEMU boot check and test kernels (${{ matrix.shard }} of 4)

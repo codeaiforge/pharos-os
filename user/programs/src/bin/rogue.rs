@@ -335,10 +335,10 @@ fn runaway() -> u64 {
     say(&[b"rogue: ready, never receiving"]);
     let mut buf = [0u8; 16];
     loop {
-        if let Ok(Received::Message { len, .. }) = receive(own, &mut buf) {
-            if buf[..len.min(16)] == *b"exhaust" {
-                exhaust();
-            }
+        if let Ok(Received::Message { len, .. }) = receive(own, &mut buf)
+            && buf[..len.min(16)] == *b"exhaust"
+        {
+            exhaust();
         }
     }
 }
