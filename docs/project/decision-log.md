@@ -501,7 +501,7 @@ Two system calls per direction plus two task switches and two address-space swit
 
 ### D-015: Network stack and service model
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [D-034](#d-034-tcp-and-tls-stack) on 2026-11-21 (smoltcp in place of the own stack's IP layer, and TCP)
 - **Needed by:** M2.10
 - **Date accepted:** 2026-10-28
 
@@ -1249,9 +1249,9 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-034: TCP and TLS stack
 
-- **Status:** Proposed (2026-11-21, #268)
+- **Status:** Accepted (#268)
 - **Needed by:** M6.1
-- **Date accepted:**
+- **Date accepted:** 2026-11-21
 
 **Context.** D-015 chose an own minimal stack with UDP and no TCP. The broker must reach business services over HTTPS. TCP and TLS are the largest parsers Pharos would run, and they sit on the egress path. Two things a TLS client needs are missing today: a wall clock (certificate validity; knowledge.md notes there is none) and a source of randomness (key shares and nonces; the device key is a long-term secret, not fresh randomness).
 
@@ -1273,7 +1273,7 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 **Evaluation criteria.** `no_std` without `unsafe` in Pharos code; MSRV within the workspace's; licence compatible with Apache-2.0; size in the trusted base; host fuzzing (D-020); certificate validation against a pinned root set; maintenance.
 
-**Decision.** Proposed:
+**Decision.** Accepted by the maintainer on 2026-11-21, as proposed:
 
 1. **TCP: smoltcp 0.14** (a2) in the network service, behind its interface: smoltcp takes over Ethernet, ARP, IPv4, ICMP, and UDP from the own stack, so one IP layer and one ARP cache serve the card, and the clients' interface (D-019) stays as it is, with TCP added to it. Features: `medium-ethernet`, `proto-ipv4`, `socket-tcp`, `socket-udp`, `socket-icmp`; no IPv6, DHCP, or DNS.
 2. **TLS: rustls 0.23** (c), client only, **TLS 1.3 only** (no `tls12` feature), through the unbuffered API, in its own process, the **TLS service**, so a fault in TLS reaches neither the driver's device capabilities nor an agent. Agents still hold no sockets: the service opens a connection only to a destination its caller holds a capability for (D-012, D-015).

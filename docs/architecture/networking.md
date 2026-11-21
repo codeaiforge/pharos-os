@@ -139,7 +139,7 @@ All parsing is in `pharos_programs::net`: safe Rust, no allocation per packet, e
 
 ## 6. Alternatives
 
-- **`smoltcp`:** a full stack including TCP. Its releases 0.13 and 0.14 need Rust 1.91 (D-015); revisit with TCP.
+- **`smoltcp`:** a full stack including TCP. Its releases 0.13 and 0.14 need Rust 1.91 (D-015). Chosen for TCP by [D-034](../project/decision-log.md#d-034-tcp-and-tls-stack) (2026-11-21): smoltcp 0.14 replaces this stack's IP layer in M6.1 (**planned**).
 - **The stack as a separate process from the driver:** this needs shared memory or many messages per frame.
 - **DHCP:** slirp offers it, but static addresses are enough for a fixed QEMU network.
 - **slirp `guestfwd`:** forwards TCP only, while the test exchange is UDP.
