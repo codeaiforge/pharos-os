@@ -10,6 +10,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Changed
 
+- D-034 proposed (#268, M6.1): smoltcp 0.14 in the network service in place of the own stack's IP layer; rustls 0.23, TLS 1.3 client only, in its own TLS service; rustls-webpki against a pinned root set; Pharos's own crypto provider on RustCrypto (AES-128-GCM, X25519 and P-256, ECDSA P-256 and Ed25519); the minimum Rust raised from 1.85 to 1.91; host time and a seeded random generator, each failing closed; measured on a `no_std` probe (56 crates, licences, minimums)
 - M6.0 gate (#267): the vision, architecture, and comparison approved by the maintainer, every claimed difference citing a source or a Pharos test, link check clean; roadmap: M6.0 done, M6.1 current; README and `pharos info`: M6.1 stage
 - The vision rewritten for D-033 (#264, M6.0, [vision.md](docs/project/vision.md)): Pharos as an agent cell and authority broker for organizations, the three tiers and who enforces each one's limits, principles (no ambient authority, fail closed, a trusted path, evidence a third party can check), goals labelled implemented or planned with their milestones, and D-033's non-goals; the README's vision paragraph with it
 - The architecture rewritten for D-033 (#265, M6.0, [architecture.md](docs/project/architecture.md)): the implemented part brought to v0.5.0 (the reference platform, IOMMU, the evidence chain, test counts), and a planned section: the cell, the broker's parts with their milestones and open decision records, and the trusted base of each tier

@@ -1249,21 +1249,44 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-034: TCP and TLS stack
 
-- **Status:** Open
+- **Status:** Proposed (2026-11-21, #268)
 - **Needed by:** M6.1
 - **Date accepted:**
 
-**Context.** D-015 chose an own minimal stack with UDP and no TCP. The broker must reach business services over HTTPS. TCP and TLS are the largest parsers Pharos would run, and they sit on the egress path.
+**Context.** D-015 chose an own minimal stack with UDP and no TCP. The broker must reach business services over HTTPS. TCP and TLS are the largest parsers Pharos would run, and they sit on the egress path. Two things a TLS client needs are missing today: a wall clock (certificate validity; knowledge.md notes there is none) and a source of randomness (key shares and nonces; the device key is a long-term secret, not fresh randomness).
 
-**Options.** (a) smoltcp for TCP. Checked locally: `no_std`, 0BSD licence; version 0.14.0 needs Rust 1.91 and 0.12.0 needs 1.80, against the workspace's `rust-version` 1.85 (the `msrv` CI job). (b) TCP added to the own stack. (c) rustls for TLS. Checked locally (0.23.46): `#![no_std]`, Apache-2.0, ISC, or MIT, Rust 1.71; it needs a crypto provider, and the default ones (ring, aws-lc-rs) bring C or assembly; a pure-Rust provider is unverified. (d) Another `no_std` TLS crate, not evaluated. Unverified: each crate's transitive dependency count and its fit with Pharos's allocator.
+**Options.** Measured on 2026-11-21 with a probe crate built `no_std` for `x86_64-unknown-linux-gnu`, the target user programs build for (user-environment.md). Lines are `.rs` lines under each crate's `src/`, tests and unused modules included; `unsafe` sites are `unsafe {`, `unsafe fn`, and `unsafe impl` in those files.
+
+- **TCP.**
+  - (a1) **smoltcp 0.12.0** (0BSD, Rust 1.80): fits the 1.85 minimum, but 0.13.0 (2026-03-20) fixed two panics a peer can cause (a SYN from the unspecified address to a listening socket, and a SACK sequence-number overflow with overflow checks on), and later TCP fixes are not backported. Refused.
+  - (a2) **smoltcp 0.14.0** (0BSD, 2026-08-07, Rust 1.91): `#![deny(unsafe_code)]`; its 18 `unsafe` sites are all in `phy/sys` (raw sockets, TAP, BPF), which a `no_std` build does not compile. With `medium-ethernet`, `proto-ipv4`, and `socket-tcp`: 7 dependencies, about 89,000 lines with them.
+  - (b) **TCP in the own stack:** no new dependency, but the largest new code Pharos would write, with retransmission, windows, and congestion control, and no use elsewhere.
+- **TLS.**
+  - (c) **rustls 0.23.46** (Apache-2.0, ISC, or MIT, Rust 1.71; 0.23 releases monthly, the last 2026-10-14): `#![no_std]` and `#![forbid(unsafe_code)]`; without `std` it offers the unbuffered client API and needs a crypto provider and a time provider from the caller. With **rustls-webpki 0.103** (ISC, `#![no_std]`, no `unsafe`) for certificates: 6 dependencies, about 69,000 lines.
+  - (d) **embedded-tls 0.19.0** (Apache-2.0): TLS 1.3 client, no allocator, about 8,400 lines, but one `unsafe` block, its own certificate code (`pki.rs`) or rustls-webpki, and a README that says some features are not implemented.
+- **Crypto provider for rustls.**
+  - (e) ring or aws-lc-rs, rustls's defaults: C or assembly in the trusted base. Refused.
+  - (f) **rustls-rustcrypto 0.1.0-pre.0** (2026-11-09): a pre-release, Rust 1.87. Refused for now.
+  - (g) graviola 0.4.5: Rust 1.89; not evaluated further.
+  - (h) **Pharos's own provider** in safe Rust on RustCrypto crates: aes-gcm 0.11.1 (2026-08-21), p256 0.14.0 (2026-07-03, ECDSA and ECDH), x25519-dalek 3.0.0, sha2 0.11. With rustls and smoltcp: 56 crates in the built code (build-time macro crates left out), about 345,000 lines and 850 `unsafe` sites, most in heapless (360), aes (60, AES-NI with a software fallback chosen at run time), once_cell (50), byteorder (40), sha2 (39), and hybrid-array (36). All builds succeeded; the highest minimums are aes (1.89) and smoltcp (1.91). The 0.10 and 0.13 RustCrypto lines still meet 1.85 but are superseded. RSA (rsa 0.9.10) adds 29 crates; its README lists RUSTSEC-2023-0071 (Marvin), a private-key attack that verification does not expose.
+- **Licences of the proposed set (56 crates):** MIT or Apache-2.0 (47), BSD-3-Clause (3: curve25519-dalek, x25519-dalek, subtle), ISC (2), 0BSD (2), Unlicense or MIT (1), Apache-2.0 or ISC or MIT (1): all compatible with Apache-2.0.
 
 **Evaluation criteria.** `no_std` without `unsafe` in Pharos code; MSRV within the workspace's; licence compatible with Apache-2.0; size in the trusted base; host fuzzing (D-020); certificate validation against a pinned root set; maintenance.
 
-**Decision.** (empty while Open)
+**Decision.** Proposed:
 
-**Consequences.** A TLS service and fuzz targets; D-015 amended.
+1. **TCP: smoltcp 0.14** (a2) in the network service, behind its interface: smoltcp takes over Ethernet, ARP, IPv4, ICMP, and UDP from the own stack, so one IP layer and one ARP cache serve the card, and the clients' interface (D-019) stays as it is, with TCP added to it. Features: `medium-ethernet`, `proto-ipv4`, `socket-tcp`, `socket-udp`, `socket-icmp`; no IPv6, DHCP, or DNS.
+2. **TLS: rustls 0.23** (c), client only, **TLS 1.3 only** (no `tls12` feature), through the unbuffered API, in its own process, the **TLS service**, so a fault in TLS reaches neither the driver's device capabilities nor an agent. Agents still hold no sockets: the service opens a connection only to a destination its caller holds a capability for (D-012, D-015).
+3. **Certificates: rustls-webpki 0.103** against a pinned root set built into the image, no system or bundled roots; rustls checks the name. No revocation checks in M6.1 (a carried limit).
+4. **Crypto: Pharos's own provider** (h) in a new crate, `pharos-tls`, safe Rust: the suite `TLS13_AES_128_GCM_SHA256` (the one RFC 8446 requires), key exchange X25519 and secp256r1, signatures ECDSA P-256 with SHA-256 and Ed25519 (`ed25519-compact`, already a dependency). HKDF and HMAC from `pharos-crypto`. RSA and P-384, which public certificate chains use, wait for M6.2, when the egress gateway's real endpoints say which are needed.
+5. **The workspace minimum rises from 1.85 to 1.91**, in its own change before the first dependency lands; the pinned toolchain (1.100.0) is unchanged.
+6. **Time:** the host gives the wall-clock time at boot, the kernel's monotonic clock advances it, and the TLS service refuses every handshake without it. The host is already trusted (threat model; until M8.2). The mechanism is in the design (#269).
+7. **Randomness:** a deterministic random bit generator in the TLS service, seeded from the host's virtio-rng device and mixed with RDSEED where the CPU has it (QEMU's default `qemu64` model has neither RDSEED nor RDRAND, so CPU instructions alone would not cover the matrix). No seed, no handshake. The mechanism is in the design (#269).
+8. **Fuzzing** stays on stable Rust (no `cargo-fuzz`, which needs nightly), as every Pharos parser is fuzzed today: generated and mutated inputs in host tests with a fixed seed and count. TLS records and handshakes reach rustls through `pharos-tls`, frames reach the network service's receive path through smoltcp, and the CI budget is the count.
 
-**Evidence.** The local checks above.
+**Consequences.** Seven new direct dependencies (smoltcp, rustls, rustls-webpki, aes-gcm, p256, x25519-dalek, sha2) and 49 transitive ones join the trusted base of the network and TLS services, not the kernel; each is recorded in NOTICE when it lands, with the reasons AGENTS.md section 6 asks. The own stack's IP code is retired, and its interface tests are kept. The network service's tests (`network`, `agents_net`, and the host tests) must still pass on smoltcp. D-015 is amended (TCP, and smoltcp in place of the own stack). New services: virtio-rng, and the host's time source. Limits carried: no revocation; one cipher suite and two signature algorithms, so until RSA lands the client lacks the RSA signatures RFC 8446 section 9.1 also requires and cannot reach a server with an RSA certificate; no TLS 1.2 servers.
+
+**Evidence.** The probe crate and the measurements above (2026-11-21): builds of every option listed as measured; dependency counts from `cargo tree -e normal`; minimums from each crate's `rust-version`; licences from `cargo metadata`; smoltcp's fixes from its CHANGELOG for 0.13.0; release dates from crates.io.
 
 ### D-035: Credential vault and egress gateway
 
