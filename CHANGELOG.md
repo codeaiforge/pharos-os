@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+### Changed
+
+- M5.5 gate (#261), closing Phase 5: all eleven release criteria met on the release commit `7c3eba0` (CI run 44719279691; release matrix run 44719284111, 38 jobs; the 8-hour soak, 2,821 cycles and 33,862 audit records; S1 and `bench-infer` under KVM; CI's and the local `SHA256SUMS` equal; both throwaway branches failed CI); the release signed with the maintainer's offline key and verified, `RELEASE-KEY` added; roadmap: M5.5 and Phase 5 done (v0.5.0), Phase 6 and M6.0 current; threat model updated at the gate, the limits carried to Phase 5 given places in M6.10 and M8.1; README and `pharos info`: Phase 6 stage
+
 ### Fixed
 
 - `cargo xtask bench-ipc` and `bench-infer` found no test kernel since Rust 1.100 (#261, found at the v0.5 gate): Cargo now puts test executables in `build/<package>/<hash>/out/`, not `deps/`; they are now found by file name in either

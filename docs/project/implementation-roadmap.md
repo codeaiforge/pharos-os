@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), Phase 3 — AI Agent Platform (v0.3.0), and Phase 4 — Full Operating System (v0.4.0) are done. Current milestone: M5.5 — Reproducible builds, release artifacts, documentation, and release criteria.** M5.1, M5.4, and M5.2 are done; the rest of Phase 5 is **planned, not implemented**. The roadmap runs to Phase 8: Phases 6–8 are **planned, not implemented**, and follow D-033 (accepted 2026-11-13).
+**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), Phase 3 — AI Agent Platform (v0.3.0), Phase 4 — Full Operating System (v0.4.0), and Phase 5 — Deployment and Release (v0.5.0, the microVM release) are done. Current milestone: M6.0 — Repositioning: vision and architecture.** The roadmap runs to Phase 8: Phases 6–8 are **planned, not implemented**, and follow D-033 (accepted 2026-11-13).
 
 ## How to read this roadmap
 
@@ -44,8 +44,8 @@ The phases are not strictly sequential. These tracks run through every phase:
 | 2 | Core System | Done (v0.2.0) |
 | 3 | AI Agent Platform | Done (v0.3.0; gate passed 2026-11-06 with M3.8) |
 | 4 | Full Operating System | Done (v0.4.0; gate passed 2026-11-09 with M4.6) |
-| 5 | Deployment and Release | **Current** (M5.5) |
-| 6 | Authority broker and demo engine (Tier 3) | Planned (D-033) |
+| 5 | Deployment and Release | Done (v0.5.0; gate passed 2026-11-21 with M5.5) |
+| 6 | Authority broker and demo engine (Tier 3) | **Current** (M6.0; D-033) |
 | 7 | Skins, pilots, and the WASM tier (Tier 2) | Planned (D-033) |
 | 8 | Real hardware and long-term targets | Planned (D-033) |
 
@@ -567,7 +567,7 @@ Ordering notes:
 
 ## Phase 5 — Deployment and Release
 
-**Status: Current** (M5.5).
+**Status: Done** — gate passed 2026-11-21 with the M5.5 gate: every M5.x gate passed (M5.3 folded into M6.10), the release criteria are met on the release commit, and the threat model is updated at the gate: the limits carried to Phase 5 have new places in M6.10 and M8.1. Released as v0.5.0.
 
 - **Objective and scope:** Make the system releasable: broad testing, the KVM microVM reference platform, security review, and reproducible artifacts. Reordered and narrowed on 2026-11-13 with D-033: M5.4 comes next after M5.1; M5.2 is narrowed to the KVM microVM reference platform, with bare metal moved to M8.1; M5.3 is folded into M6.10; M5.5 becomes v0.5, the microVM release.
 - **Deliverables:** M5.1, M5.2, M5.4, M5.5 (M5.3 superseded).
@@ -621,7 +621,7 @@ Ordering notes:
 
 ### M5.5 — Reproducible builds, release artifacts, documentation, and release criteria
 
-- **Objective and scope:** Produce verifiable releases: **v0.5, the microVM release** (renamed on 2026-11-13, D-033). **Status: Current** (since 2026-11-18). D-047 accepted (#253, 2026-11-18). Issues: design #254; device secret #255; signed audit head #256; slot record #257; Secure Boot #258; signed artifacts and reproducible builds #259; release criteria and user guide #260; a running system after the boot check #263 (D-049); audit export and rotation #217; gate #261.
+- **Objective and scope:** Produce verifiable releases: **v0.5, the microVM release** (renamed on 2026-11-13, D-033). **Status: Done** — gate passed 2026-11-21 (#261), all eleven [release criteria](release-criteria.md) met on the release commit `7c3eba0`: the push checks ([run 44719279691](https://github.com/codeaiforge/pharos-os/actions/runs/44719279691)); the release matrix ([run 44719284111](https://github.com/codeaiforge/pharos-os/actions/runs/44719284111): all 38 jobs, the 60-minute soak, the repeat pass, and S1); the 8-hour soak on the development host (2,821 cycles, 33,862 audit records, nothing drifted); S1 under KVM (the model's `read_file` call run, its text equal to the host's; first token 6.65 s against 10 s, 13.3 tokens/s against 5); CI's two builds and the maintainer's local build with the same `SHA256SUMS` (boot measurement `fbf9aa6a…90d8`); a verifier skipping the signature check and an image without path hashes each failed CI on a throwaway branch ([run 44713676203](https://github.com/codeaiforge/pharos-os/actions/runs/44713676203), [run 44713683110](https://github.com/codeaiforge/pharos-os/actions/runs/44713683110)); no open critical or high finding; the release built with the maintainer's Secure Boot keys, signed with the offline release key (`RELEASE-KEY`), verified, and booted under Secure Boot as the [user guide](../user/microvm.md) says; the maintainer's approval. Found at the gate and fixed: two causes of a local build differing from CI's (`7c3eba0`), and the benchmarks' kernel lookup under Cargo 1.100 (`df7d504`). Released as v0.5.0. D-047 accepted (#253, 2026-11-18). Issues: design #254; device secret #255; signed audit head #256; slot record #257; Secure Boot #258; signed artifacts and reproducible builds #259; release criteria and user guide #260; a running system after the boot check #263 (D-049); audit export and rotation #217; gate #261.
 - **Deliverables:** Reproducible build procedure; signed artifacts; user documentation for running Pharos as a microVM on the reference platform; written release criteria; Secure Boot enforcement and a secret-keyed audit anchor, moved here from M4.3 (D-028); an authenticated slot record; measured boot, and the audit chain's head signed and exportable, so a verifier outside Pharos can check a trail (anchoring it outside the system is M6.7). A virtual TPM on the reference platform is an option to evaluate; with one, the host is in the trusted base for the anchor, as it is for Tier 3 (D-036).
 - **Prerequisites:** M5.2, M5.4.
 - **Acceptance criteria:** Two independent builds produce bit-identical artifacts; release criteria documented and met; the 8-hour soak passes on the release commit (D-032 amended); a trail rewritten consistently from the disk is rejected by the verifier.
@@ -651,7 +651,7 @@ Rules for every planned milestone below: nothing moves into the kernel (each com
 
 ## Phase 6 — Authority broker and demo engine (Tier 3)
 
-**Status: Planned** (D-033).
+**Status: Current** (M6.0; D-033).
 
 - **Objective and scope:** Pharos brokers all authority for foreign agents in a Linux microVM, reaches real services over TLS without agents ever holding credentials, and produces evidence an auditor can read. The phase ends with a recorded five-beat demo: (1) a real Python agent does useful work; (2) it is attacked or makes a mistake (prompt injection, a malicious tool, a destructive command); (3) Pharos refuses the action; (4) a human approves the legitimate action after seeing its full payload, then pulls the kill switch; (5) Pharos produces a one-page evidence report.
 - **Deliverables:** M6.0–M6.10.
@@ -665,7 +665,7 @@ Rules for every planned milestone below: nothing moves into the kernel (each com
 
 ### M6.0 — Repositioning: vision and architecture
 
-- **Objective and scope:** Update `vision.md` and `architecture.md` for the agent cell, the broker, the three tiers, and the organizational scope. **Status: Planned.**
+- **Objective and scope:** Update `vision.md` and `architecture.md` for the agent cell, the broker, the three tiers, and the organizational scope. **Status: Current** (since 2026-11-21).
 - **Deliverables:** Vision goals and non-goals as D-033 decides; architecture overview; a comparison with the alternatives D-033 weighs (sandboxes on Linux, a runtime on seL4, Windows' agent workspace), every claim sourced.
 - **Prerequisites:** D-033 accepted.
 - **Acceptance criteria:** Every claimed difference cites a source or a Pharos test; status labels honest; the maintainer approves.
@@ -976,4 +976,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3 (released as v0.3.0 at its gate commit, `693c896`, tagged after the fact). M4.1 (integration of kernel and user-space services) and M4.2 (security model and privilege separation) passed their gates on 2026-11-06, M4.3 (reliable boot and recovery) on 2026-11-08, and M4.4 (device and service management), M4.5 (system configuration and diagnostics), and M4.6 (integration of AI services without unrestricted kernel access) on 2026-11-09, which closed Phase 4 (released as v0.4.0). M5.1 (QEMU regression and release testing) passed its gate on 2026-11-13, M5.4 (security review and threat-model update, reordered ahead of M5.2) on 2026-11-14, and M5.2 (KVM microVM as the reference platform) on 2026-11-18. The current milestone is **M5.5 — v0.5, the microVM release**. After it comes Phase 6 (D-033, accepted 2026-11-13); M5.3 is folded into M6.10. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3 (released as v0.3.0 at its gate commit, `693c896`, tagged after the fact). M4.1 (integration of kernel and user-space services) and M4.2 (security model and privilege separation) passed their gates on 2026-11-06, M4.3 (reliable boot and recovery) on 2026-11-08, and M4.4 (device and service management), M4.5 (system configuration and diagnostics), and M4.6 (integration of AI services without unrestricted kernel access) on 2026-11-09, which closed Phase 4 (released as v0.4.0). M5.1 (QEMU regression and release testing) passed its gate on 2026-11-13, M5.4 (security review and threat-model update, reordered ahead of M5.2) on 2026-11-14, M5.2 (KVM microVM as the reference platform) on 2026-11-18, and M5.5 (v0.5, the microVM release) on 2026-11-21, which closed Phase 5 (released as v0.5.0); M5.3 is folded into M6.10. The current milestone is **M6.0 — Repositioning: vision and architecture**, the first of Phase 6 (D-033, accepted 2026-11-13). D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.

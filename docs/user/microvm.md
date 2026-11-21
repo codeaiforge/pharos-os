@@ -2,11 +2,11 @@
 
 ## Status
 
-This guide is for v0.5, the microVM release (M5.5). It covers verifying a release, setting up a VM for it, booting it, using the trusted console, and exporting and checking the audit trail. Every command in it was run on the development host on 2026-11-20, as two boots of one VM with an export between them and a rotation in the second: under KVM on a release built at `0c7b5d3`, before Secure Boot; and with the Secure Boot firmware and variable store on a release built with `--secure-boot` and test keys (#258), under TCG, because another hypervisor held the CPU's virtualization then.
+This guide is for v0.5, the microVM release (M5.5). It covers verifying a release, setting up a VM for it, booting it, using the trusted console, and exporting and checking the audit trail. Every command in it was run on the development host on 2026-11-20, as two boots of one VM with an export between them and a rotation in the second: under KVM on a release built at `0c7b5d3`, before Secure Boot; and with the Secure Boot firmware and variable store on a release built with `--secure-boot` and test keys (#258), under TCG, because another hypervisor held the CPU's virtualization then. At the v0.5 gate (#261) sections 2 to 6 were run again under KVM on the signed v0.5.0 release, with the Secure Boot firmware and the maintainer's keys.
 
 | Part | State |
 | --- | --- |
-| Verifying a release's files and signature (`cargo xtask release verify`) | **implemented** (#259); the first signed release, and `RELEASE-KEY` in the repository, come with the v0.5 gate (#261) |
+| Verifying a release's files and signature (`cargo xtask release verify`) | **implemented** (#259); v0.5.0 is the first signed release, and its public key is `RELEASE-KEY` in the repository (#261) |
 | Booting a release in QEMU with KVM, a device key per VM, and the trusted console | **implemented** (D-047, D-049) |
 | The audit trail: checking it, warnings as it fills, export, and rotation | **implemented** (D-047, D-048) |
 | Secure Boot: Limine signed with Pharos's `db` key, and the variable store `OVMF_VARS_4M.pharos.fd` with Pharos's keys | **implemented** (#258) |
