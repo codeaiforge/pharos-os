@@ -5,8 +5,10 @@
 //! trades datagrams with another over our own address, a datagram to a
 //! port nobody holds is counted, and a client whose badge is no port is
 //! refused. Each client sends only to the destinations `init` listed for
-//! it (#109): others, and an `ALLOW` of its own, are refused. Runs under
-//! UEFI (D-009).
+//! it (#109): others, and an `ALLOW` of its own, are refused. On smoltcp
+//! since #270, a fourth client opens TCP to the host echo server, gets its
+//! data back, and is refused where it should be (tls.md). Runs under UEFI
+//! (D-009).
 
 #![no_std]
 #![no_main]
@@ -23,7 +25,7 @@ use pharos_kernel::{fs, ipc, kprintln, mm, pci, process, sched, storage, time};
 pharos_kernel::test_kernel!(run);
 
 /// Client steps that must pass.
-const STEPS: [&str; 18] = [
+const STEPS: [&str; 27] = [
     "echoer: registered",
     "sender: non-blocking send with nobody waiting: WOULD_BLOCK",
     "sender: ping 10.0.2.2 answered",
@@ -39,9 +41,18 @@ const STEPS: [&str; 18] = [
     "sender: its own ALLOW refused with NO_ACCESS",
     "sender: POLL with nothing waiting answers NOT_FOUND",
     "sender: counters show frames both ways and the lost datagram",
-    "sender: version 2: VERSION, supported 1 to 1",
+    "sender: version 3: VERSION, supported 1 to 2",
     "sender: INFO names the interface and its versions",
     "unported: refused with NO_PORT",
+    "tcper: buffer attached",
+    "tcper: connected to the host echo server",
+    "tcper: write queued",
+    "tcper: the echo came back",
+    "tcper: closed",
+    "tcper: a write on the closed connection answers CLOSED",
+    "tcper: a destination not listed for TCP refused with NO_ACCESS",
+    "tcper: a listed port nothing listens on answers REFUSED",
+    "tcper: a TCP request as version 1 is BAD_REQUEST",
 ];
 
 fn run(t: &mut TestRun) {
@@ -78,13 +89,14 @@ fn run(t: &mut TestRun) {
     let report = ipc::Endpoint::new();
     pharos_kernel::testing::init_key();
     let caps = process::init_capabilities(programs.clone(), report.clone(), true);
-    let id = process::spawn_elf(&programs, b"bin/init", 2, caps);
+    let id =
+        process::spawn_elf_limited(&programs, b"bin/init", 2, caps, process::INIT_MEMORY_LIMIT);
     t.check("init started with the network table", id.is_ok());
 
     let summary = ipc::poll(&report, Duration::from_secs(10));
     t.check(
-        "every service and client succeeded: 4 ready, 0 failed",
-        summary.is_some_and(|m| m.bytes() == [4, 0, 0, 0]),
+        "every service and client succeeded: 5 ready, 0 failed",
+        summary.is_some_and(|m| m.bytes() == [5, 0, 0, 0]),
     );
     let lines: Vec<Vec<u8>> = process::debug_output()
         .into_iter()

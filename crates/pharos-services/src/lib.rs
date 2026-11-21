@@ -206,6 +206,9 @@ pub struct Service {
     pub caps: &'static [Give],
     /// The destinations its network capability may send to (#109).
     pub net: &'static [Dest],
+    /// The destinations its network capability may open TCP to (M6.1,
+    /// tls.md); empty for every service that does not use TCP.
+    pub tcp: &'static [Dest],
     /// Indexes of earlier entries that must have succeeded first.
     pub after: &'static [usize],
     /// Pages it may `mem_map` (0: none).
@@ -427,7 +430,7 @@ mod tests {
     fn the_rogue_tables_are_the_boot_table_but_their_programs() {
         let fields = |s: &Service| {
             (
-                s.name, s.kind, s.restart, s.caps, s.net, s.after, s.limit, s.gains,
+                s.name, s.kind, s.restart, s.caps, s.net, s.tcp, s.after, s.limit, s.gains,
             )
         };
         for (table, swapped) in [

@@ -1130,25 +1130,33 @@ impl Init {
             if give.rights & SEND == 0 {
                 continue;
             }
-            let dests = service.net;
-            let req = Allowed::new(dests)
-                .zip(u16::try_from(port).ok())
-                .map(|(dests, client)| NetRequest::Allow { client, dests });
-            let mut msg = [0u8; 64];
-            let Some(n) = req.and_then(|r| net::encode(&r, &mut msg)) else {
+            let Ok(client) = u16::try_from(port) else {
                 continue;
             };
-            // The request is sent from this buffer too.
-            let mut buf = [0u8; 64];
-            let answered = call_timeout(self.net, &msg[..n], self.reply, &mut buf, RELEASE_US)
-                .is_ok_and(|r| matches!(r, Received::Message { len, .. } if len >= 1))
-                && buf[0] == net::OK;
-            if !answered {
-                say(
-                    service.name,
-                    "destinations not sent, port",
-                    Some(port.into()),
-                );
+            let udp = Allowed::new(service.net).map(|dests| NetRequest::Allow { client, dests });
+            // TCP destinations (M6.1) only for entries that list some, so
+            // UDP-only clients need nothing a version 1 service lacks.
+            let tcp = (!service.tcp.is_empty())
+                .then(|| Allowed::new(service.tcp))
+                .map(|d| d.map(|dests| NetRequest::AllowTcp { client, dests }));
+            for req in [Some(udp), tcp].into_iter().flatten() {
+                let mut msg = [0u8; 64];
+                let answered = req
+                    .and_then(|r| net::encode(&r, &mut msg))
+                    .is_some_and(|n| {
+                        // The request is sent from this buffer too.
+                        let mut buf = [0u8; 64];
+                        call_timeout(self.net, &msg[..n], self.reply, &mut buf, RELEASE_US)
+                            .is_ok_and(|r| matches!(r, Received::Message { len, .. } if len >= 1))
+                            && buf[0] == net::OK
+                    });
+                if !answered {
+                    say(
+                        service.name,
+                        "destinations not sent, port",
+                        Some(port.into()),
+                    );
+                }
             }
         }
     }

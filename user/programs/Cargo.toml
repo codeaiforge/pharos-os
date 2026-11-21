@@ -19,6 +19,9 @@ pharos-proto = { path = "../../crates/pharos-proto" }
 pharos-services = { path = "../../crates/pharos-services" }
 pharos-store = { path = "../../crates/pharos-store" }
 pharos-user = { path = "../pharos-user" }
+# TCP, IP, ARP, ICMP, and UDP for the network service (D-034, #270; 0BSD,
+# no unsafe in what it compiles here, 7 dependencies).
+smoltcp = { version = "0.14.0", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "socket-icmp"] }
 
 # `unsafe` is denied (not forbidden) only so `pharos_user::entry!` can mark
 # its `no_mangle` attribute; programs themselves use none.

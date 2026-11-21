@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-21 (#269), with each open question decided as recommended (section 7). It follows [D-034](../project/decision-log.md#d-034-tcp-and-tls-stack) (accepted 2026-11-21) and amends [networking.md](networking.md) (D-015) and the [audit service](capabilities.md#the-audit-service-107).
-- **Implementation:** **planned** (M6.1): TCP (#270), the TLS client (#271), the fuzz targets (#272), the `tls` test kernel (#273). Nothing below is implemented.
+- **Implementation:** TCP is **implemented** (#270): smoltcp 0.14 in the network service and `net` v2, as "The network service" below describes, tested by the `network` test kernel against the host's TCP echo server ([networking.md](networking.md#smoltcp-270-d-034)). **Planned** (M6.1): the TLS client (#271), the fuzz targets (#272), the `tls` test kernel (#273).
 
 ## 2. Context
 

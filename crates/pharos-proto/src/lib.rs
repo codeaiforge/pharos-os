@@ -79,9 +79,15 @@ pub fn split(msg: &[u8], version: u8) -> Result<(u8, &[u8]), Refused> {
 /// The reply to `refused`, for a service speaking only `version`; returns
 /// its length.
 pub fn refusal(refused: Refused, version: u8, out: &mut [u8]) -> usize {
+    refusal_range(refused, version, version, out)
+}
+
+/// The reply to `refused`, for a service speaking versions `low` to
+/// `high`; returns its length.
+pub fn refusal_range(refused: Refused, low: u8, high: u8, out: &mut [u8]) -> usize {
     match refused {
         Refused::Version => {
-            out[..3].copy_from_slice(&[status::VERSION, version, version]);
+            out[..3].copy_from_slice(&[status::VERSION, low, high]);
             3
         }
         Refused::Bad => {

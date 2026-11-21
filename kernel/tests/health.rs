@@ -56,7 +56,8 @@ fn run(t: &mut TestRun) {
     let report = ipc::Endpoint::new();
     pharos_kernel::testing::init_key();
     let caps = process::init_capabilities(programs.clone(), report.clone(), false);
-    let id = process::spawn_elf(&programs, b"bin/init", 4, caps);
+    let id =
+        process::spawn_elf_limited(&programs, b"bin/init", 4, caps, process::INIT_MEMORY_LIMIT);
     t.check("init started with the health table", id.is_ok());
     let id = id.unwrap_or(u64::MAX);
     t.check(

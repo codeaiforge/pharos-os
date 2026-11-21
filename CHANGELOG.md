@@ -6,17 +6,23 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- TCP in the network service (#270, M6.1, D-034, [networking.md](docs/architecture/networking.md#smoltcp-270-d-034)): smoltcp 0.14 replaces the own Ethernet, ARP, IPv4, ICMP, and UDP code; interface `net` v2 adds `ATTACH`, `TCP_OPEN`, `TCP_WRITE`, `TCP_READ`, `TCP_CLOSE`, and `ALLOW_TCP` (version 1 requests unchanged); TCP only to destinations `init` lists in a new `tcp` field of the service table; 16 connections, 4 per client, 8 KiB windows, a 5 s connect timeout, 60 s idle; the host test endpoint also echoes TCP; the `network` test kernel's fourth client connects, gets its data back, and is refused where it should be (33 checks); the network service's page limit is 2 MiB; NOTICE lists smoltcp and its seven dependencies
 - The TCP and TLS design, accepted 2026-11-21 with the open questions decided as recommended (#269, M6.1, [tls.md](docs/architecture/tls.md)): smoltcp in the network service with TCP as `net` v2; the TLS service with interface `tls` v1, destinations (address, port, server name) listed by `init` and opened by index; the pinned root set in the measured image; time from Limine's date at boot with a floor at the build date; an HMAC-DRBG seeded from virtio-rng and RDSEED; audit client 4; timeouts and limits; the threat model's planned rows
 - A comparison with the alternatives D-033 weighs (#266, M6.0, [comparison.md](docs/project/comparison.md)): Pharos against microVM and gVisor sandboxes, agent CLIs' OS sandboxes, MCP gateways, a runtime on seL4, and Windows' agent workspace, on five properties (no ambient authority, fail closed, a trusted path, evidence checkable outside, enforcement outside the model), each Pharos claim with the test kernel that shows it and each claim about an alternative with a source read on 2026-11-21; where an alternative is better (cost, ecosystem, a verified kernel), it says so
 
 ### Changed
 
+- The `network`, `services`, and `health` test kernels start `init` with its boot page budget, as the others do, so it can give the network service its limit (#270)
 - The minimum supported Rust is 1.91, up from 1.85 (D-034, #270: smoltcp 0.14 needs it): `rust-version`, the CI `msrv` job, and `scripts/check.sh`; the pinned toolchain stays 1.100.0
 - D-034 accepted (#268, M6.1; D-015 amended): smoltcp 0.14 in the network service in place of the own stack's IP layer; rustls 0.23, TLS 1.3 client only, in its own TLS service; rustls-webpki against a pinned root set; Pharos's own crypto provider on RustCrypto (AES-128-GCM, X25519 and P-256, ECDSA P-256 and Ed25519); the minimum Rust raised from 1.85 to 1.91; host time and a seeded random generator, each failing closed; measured on a `no_std` probe (56 crates, licences, minimums)
 - M6.0 gate (#267): the vision, architecture, and comparison approved by the maintainer, every claimed difference citing a source or a Pharos test, link check clean; roadmap: M6.0 done, M6.1 current; README and `pharos info`: M6.1 stage
 - The vision rewritten for D-033 (#264, M6.0, [vision.md](docs/project/vision.md)): Pharos as an agent cell and authority broker for organizations, the three tiers and who enforces each one's limits, principles (no ambient authority, fail closed, a trusted path, evidence a third party can check), goals labelled implemented or planned with their milestones, and D-033's non-goals; the README's vision paragraph with it
 - The architecture rewritten for D-033 (#265, M6.0, [architecture.md](docs/project/architecture.md)): the implemented part brought to v0.5.0 (the reference platform, IOMMU, the evidence chain, test counts), and a planned section: the cell, the broker's parts with their milestones and open decision records, and the trusted base of each tier
 - M5.5 gate (#261), closing Phase 5: all eleven release criteria met on the release commit `7c3eba0` (CI run 44719279691; release matrix run 44719284111, 38 jobs; the 8-hour soak, 2,821 cycles and 33,862 audit records; S1 and `bench-infer` under KVM; CI's and the local `SHA256SUMS` equal; both throwaway branches failed CI); the release signed with the maintainer's offline key and verified, `RELEASE-KEY` added; roadmap: M5.5 and Phase 5 done (v0.5.0), Phase 6 and M6.0 current; threat model updated at the gate, the limits carried to Phase 5 given places in M6.10 and M8.1; README and `pharos info`: Phase 6 stage
+
+### Removed
+
+- The own network stack's parsers, builders, ARP cache, and their host tests in `pharos_programs::net` (#270): smoltcp does their work; the constants, the client helpers, and the counter indexes stay
 
 ### Fixed
 

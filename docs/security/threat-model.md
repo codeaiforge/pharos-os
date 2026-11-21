@@ -115,7 +115,7 @@ Design: [networking.md](../architecture/networking.md). The first four rows are 
 
 | Threat | Mitigation |
 | --- | --- |
-| A malformed or hostile packet crashes or corrupts the network service | Every layer is parsed by safe, allocation-free code with checked lengths and checksums, fuzzed on the host; bad frames are dropped and counted |
+| A malformed or hostile packet crashes or corrupts the network service | Every layer is parsed by safe, allocation-free code with checked lengths and checksums, fuzzed on the host; bad frames are dropped and counted. **Since #270:** smoltcp 0.14 (safe Rust, `deny(unsafe_code)`, none of its `unsafe` compiled here) parses every frame, including TCP; its receive path is to be fuzzed in #272 (planned) |
 | A process uses the network without permission | Network access only through a badged `SEND` capability on the service's endpoint; a badge that is no port is refused; badge 0 is `init`'s, which may only list destinations (`ALLOW`); revocable |
 | A client impersonates another client or spoofs addresses | Identity is the kernel-delivered badge (one UDP port per client); the service builds every header itself |
 | A client blocks or floods the service | Replies are non-blocking sends; per-client queues and outstanding requests are bounded; drops are counted |
@@ -126,7 +126,7 @@ Design: [networking.md](../architecture/networking.md). The first four rows are 
 
 ### TCP and TLS (M6.1)
 
-Design: [tls.md](../architecture/tls.md) (accepted 2026-11-21, #269; D-034). Every row is **planned** (#270–#273); none is implemented.
+Design: [tls.md](../architecture/tls.md) (accepted 2026-11-21, #269; D-034). TCP in the network service is **implemented** (#270): its timeouts and connection limits (the "silent server" row) and TCP destinations listed by `init` hold for TCP today. Every TLS row is **planned** (#271–#273).
 
 | Threat | Mitigation |
 | --- | --- |

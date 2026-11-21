@@ -13,6 +13,11 @@
 //! - Argument 2, port 40001: registers, reports ready, answers one
 //!   datagram with `pong`, then idles.
 //! - Argument 3, a badge over 16 bits: must be refused.
+//! - Argument 4, port 40002 (#270, tls.md): attaches a buffer, opens TCP to
+//!   the host echo server at `10.0.2.2:47000`, writes and reads its echo
+//!   back, closes, and is refused: a write on the closed connection
+//!   (`CLOSED`), a destination not listed for TCP (`NO_ACCESS`), a listed
+//!   port nothing listens on (`REFUSED`), and a TCP request as version 1.
 //!
 //! Each step prints `ok <step>` or `FAIL <step>`; the exit code is the
 //! number of failures.
@@ -22,9 +27,15 @@
 
 use pharos_programs::net::client::{NO_PORT, OK, ping, raw, recv, send_to, stats};
 use pharos_programs::net::{GATEWAY, OUR_IP, stat};
-use pharos_proto::net::{Allowed, NAME, NO_ACCESS, NOT_FOUND, Request, VERSION, encode};
+use pharos_proto::net::{
+    Allowed, BAD_REQUEST, CLOSED, NAME, NO_ACCESS, NOT_FOUND, REFUSED, Request, TCP_VERSION,
+    VERSION, encode, parse_count,
+};
 use pharos_proto::{Info, versions};
-use pharos_user::{Error, debug_write, endpoint_create, receive, send, try_send};
+use pharos_user::rights::{READ, WRITE};
+use pharos_user::{
+    Error, Handle, debug_write, endpoint_create, mem_map, mem_share, receive, send, try_send,
+};
 
 pharos_user::entry!(main);
 
@@ -144,12 +155,12 @@ fn main(arg: u64) -> u64 {
             );
             let mut v2 = [0u8; 8];
             let n = encode(&Request::Stats, &mut v2).unwrap_or(0);
-            v2[0] = VERSION + 1;
+            v2[0] = TCP_VERSION + 1;
             report(
                 &mut f,
-                "sender: version 2: VERSION, supported 1 to 1",
+                "sender: version 3: VERSION, supported 1 to 2",
                 raw(NET, reply, &v2[..n])
-                    .is_ok_and(|(r, len)| versions(&r[..len]) == Some((VERSION, VERSION))),
+                    .is_ok_and(|(r, len)| versions(&r[..len]) == Some((VERSION, TCP_VERSION))),
             );
             let n = encode(&Request::Info, &mut v2).unwrap_or(0);
             report(
@@ -157,7 +168,7 @@ fn main(arg: u64) -> u64 {
                 "sender: INFO names the interface and its versions",
                 raw(NET, reply, &v2[..n]).is_ok_and(|(r, len)| {
                     Info::parse(&r[..len])
-                        .is_some_and(|i| i.name == NAME && (i.low, i.high) == (1, 1))
+                        .is_some_and(|i| i.name == NAME && (i.low, i.high) == (1, 2))
                 }),
             );
             f
@@ -190,6 +201,7 @@ fn main(arg: u64) -> u64 {
             }
             idle()
         }
+        4 => tcp(reply),
         3 => {
             report(
                 &mut f,
@@ -200,4 +212,100 @@ fn main(arg: u64) -> u64 {
         }
         _ => 99,
     }
+}
+
+/// The TCP steps (argument 4).
+fn tcp(reply: Handle) -> u64 {
+    let mut f = 0;
+    let call = |req: Request<'_>| -> Option<([u8; 256], usize)> {
+        let mut msg = [0u8; 64];
+        let n = encode(&req, &mut msg)?;
+        raw(NET, reply, &msg[..n]).ok()
+    };
+    let count = |req: Request<'_>| call(req).and_then(|(r, n)| parse_count(&r[..n]));
+    let opened = |ip, port| call(Request::TcpOpen { ip, port }).map(|(r, _)| (r[0], r[1]));
+    const LEN: u64 = 4096;
+    let buffer = mem_map(LEN).ok();
+    let attached = buffer.as_ref().is_some_and(|b| {
+        let mut msg = [0u8; 16];
+        let n = encode(&Request::Attach { len: LEN }, &mut msg).unwrap_or(0);
+        mem_share(b).is_ok_and(|m| send(NET, &msg[..n], m, READ | WRITE, 0).is_ok())
+    });
+    report(&mut f, "tcper: buffer attached", attached);
+    let open = opened(GATEWAY, HOST_ECHO_PORT);
+    report(
+        &mut f,
+        "tcper: connected to the host echo server",
+        open.is_some_and(|(s, _)| s == OK),
+    );
+    let (Some(buffer), Some((OK, conn))) = (buffer, open) else {
+        return f + 1;
+    };
+    const HELLO: &[u8] = b"hello over tcp";
+    buffer.write_bytes(0, HELLO);
+    let wrote = count(Request::TcpWrite {
+        conn,
+        offset: 0,
+        len: HELLO.len() as u32,
+    });
+    report(
+        &mut f,
+        "tcper: write queued",
+        wrote == Some((OK, HELLO.len() as u32)),
+    );
+    let mut got = 0u32;
+    for _ in 0..8 {
+        match count(Request::TcpRead {
+            conn,
+            offset: 1024 + got,
+            max: HELLO.len() as u32 - got,
+        }) {
+            Some((OK, n)) if n > 0 => got += n,
+            _ => break,
+        }
+        if got as usize == HELLO.len() {
+            break;
+        }
+    }
+    let mut back = [0u8; HELLO.len()];
+    buffer.read_bytes(1024, &mut back);
+    report(
+        &mut f,
+        "tcper: the echo came back",
+        got as usize == HELLO.len() && back == *HELLO,
+    );
+    report(
+        &mut f,
+        "tcper: closed",
+        call(Request::TcpClose { conn }).is_some_and(|(r, _)| r[0] == OK),
+    );
+    report(
+        &mut f,
+        "tcper: a write on the closed connection answers CLOSED",
+        count(Request::TcpWrite {
+            conn,
+            offset: 0,
+            len: 1,
+        })
+        .is_some_and(|(s, _)| s == CLOSED),
+    );
+    report(
+        &mut f,
+        "tcper: a destination not listed for TCP refused with NO_ACCESS",
+        opened(GATEWAY, 47003).is_some_and(|(s, _)| s == NO_ACCESS),
+    );
+    report(
+        &mut f,
+        "tcper: a listed port nothing listens on answers REFUSED",
+        opened(GATEWAY, 47002).is_some_and(|(s, _)| s == REFUSED),
+    );
+    let mut v1 = [0u8; 16];
+    let n = encode(&Request::TcpClose { conn }, &mut v1).unwrap_or(0);
+    v1[0] = VERSION;
+    report(
+        &mut f,
+        "tcper: a TCP request as version 1 is BAD_REQUEST",
+        raw(NET, reply, &v1[..n]).is_ok_and(|(r, len)| len >= 1 && r[0] == BAD_REQUEST),
+    );
+    f
 }
