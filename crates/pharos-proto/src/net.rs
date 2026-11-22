@@ -528,7 +528,8 @@ mod tests {
             Err(Refused::Bad),
             "no connection"
         );
-        crate::fuzz(100_000, 6, |m| {
+        // Bytes 0-15 reach every operation, the TCP ones (7-13) included.
+        crate::fuzz(100_000, 16, |m| {
             let mut v = [0u8; 302];
             v[0] = if m.first().is_some_and(|b| b & 1 == 0) {
                 VERSION

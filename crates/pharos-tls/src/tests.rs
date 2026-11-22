@@ -478,3 +478,234 @@ fn a_server_alert_is_a_protocol_refusal() {
         Refusal::Protocol
     );
 }
+
+// --- Fuzzing (#272, D-020) ---
+
+/// A random source that repeats itself after [`Replay::reset`], so every
+/// session sends the same ClientHello and one server flight answers them
+/// all.
+#[derive(Debug)]
+struct Replay(std::sync::atomic::AtomicU64);
+
+impl Replay {
+    fn reset(&self) {
+        self.0
+            .store(0x0123_4567_89ab_cdef, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl SecureRandom for Replay {
+    fn fill(&self, buf: &mut [u8]) -> Result<(), rustls::crypto::GetRandomFailed> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut x = self.0.load(Relaxed);
+        for b in buf {
+            *b = xorshift(&mut x) as u8;
+        }
+        self.0.store(x, Relaxed);
+        Ok(())
+    }
+}
+
+fn xorshift(x: &mut u64) -> u64 {
+    *x ^= *x << 13;
+    *x ^= *x >> 7;
+    *x ^= *x << 17;
+    *x
+}
+
+/// Server flights fed to the client, mutated; CI runs this many.
+const TLS_ROUNDS: usize = 100_000;
+
+#[test]
+fn fuzzed_server_flights_never_panic_and_errors_stay_final() {
+    use std::io::Write;
+    let ca = Ca::new("Pharos Test CA", P256);
+    let random: &'static Replay = Box::leak(Box::new(Replay(Default::default())));
+    let roots = roots(&encode_roots(&[ca.der.as_ref()])).unwrap();
+    let cfg = config(roots, random, Arc::new(Fixed(NOW))).unwrap();
+    let start = || {
+        random.reset();
+        let mut c = Session::new(cfg.clone(), "good.test").unwrap();
+        let hello = c.take_outgoing();
+        (c, hello)
+    };
+    // One real server answers the ClientHello; its flight, a record of
+    // data, and close_notify are the templates.
+    let (mut c, hello) = start();
+    let mut s = ServerConnection::new(server(
+        ca.leaf("good.test", 2025, 2035, P256),
+        |_| {},
+        TLS13,
+    ))
+    .unwrap();
+    s.read_tls(&mut &hello[..]).unwrap();
+    s.process_new_packets().unwrap();
+    let mut flight = Vec::new();
+    while s.wants_write() {
+        s.write_tls(&mut flight).unwrap();
+    }
+    c.receive(&flight).unwrap();
+    assert!(c.is_open());
+    let mut finished = &c.take_outgoing()[..];
+    s.read_tls(&mut finished).unwrap();
+    s.process_new_packets().unwrap();
+    s.writer().write_all(b"secret").unwrap();
+    s.send_close_notify();
+    let mut after = Vec::new();
+    while s.wants_write() {
+        s.write_tls(&mut after).unwrap();
+    }
+    let mut template = flight.clone();
+    template.extend_from_slice(&after);
+    // Unchanged, the templates replay: the same ClientHello, a handshake,
+    // the data, and the close.
+    let (mut c, again) = start();
+    assert_eq!(again, hello, "the ClientHello repeats");
+    c.receive(&template).unwrap();
+    assert_eq!((c.readable(), c.peer_closed()), (6, true));
+
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    let (mut opened, mut failed) = (0, 0);
+    for _ in 0..TLS_ROUNDS {
+        let mut m = template.clone();
+        // A few bytes changed: mostly in the ServerHello and the record
+        // headers, which are plaintext; sometimes anywhere.
+        for _ in 0..1 + xorshift(&mut x) % 4 {
+            let at = match xorshift(&mut x) % 3 {
+                0 => xorshift(&mut x) as usize % m.len(),
+                _ => xorshift(&mut x) as usize % flight.len().min(160),
+            };
+            m[at] = xorshift(&mut x) as u8;
+        }
+        match xorshift(&mut x) % 8 {
+            0 => m.truncate(xorshift(&mut x) as usize % m.len()),
+            1 => {
+                let at = xorshift(&mut x) as usize % m.len();
+                let junk: Vec<u8> = (0..xorshift(&mut x) % 32)
+                    .map(|_| xorshift(&mut x) as u8)
+                    .collect();
+                m.splice(at..at, junk);
+            }
+            // Random bytes instead of a flight.
+            2 => {
+                m = (0..xorshift(&mut x) % 2_000)
+                    .map(|_| xorshift(&mut x) as u8)
+                    .collect();
+            }
+            _ => {}
+        }
+        if m.is_empty() {
+            continue;
+        }
+        let (mut c, _) = start();
+        // Fed in pieces of random sizes, with the client's own calls between.
+        let mut rest = &m[..];
+        while !rest.is_empty() {
+            let n = 1 + xorshift(&mut x) as usize % rest.len().min(700);
+            let _ = c.receive(&rest[..n]);
+            rest = &rest[n..];
+            let _ = c.write(b"request");
+            // Read only sometimes, so plaintext can be waiting when an
+            // error comes.
+            if xorshift(&mut x).is_multiple_of(4) {
+                let mut out = [0u8; 16];
+                let _ = c.read(&mut out);
+            }
+            c.sent(c.outgoing().len());
+            if c.error().is_some() {
+                break;
+            }
+        }
+        if c.error().is_some() {
+            failed += 1;
+            assert!(c.write(b"x").is_err() && c.receive(&[]).is_err());
+            assert_eq!(c.readable(), 0, "nothing readable after an error");
+        } else if c.is_open() || c.peer_closed() {
+            opened += 1;
+        }
+    }
+    // Both outcomes are reached, so mutations land where they are parsed.
+    assert!(
+        failed > TLS_ROUNDS / 4 && opened > 0,
+        "failed {failed}, opened {opened}"
+    );
+}
+
+#[test]
+fn fuzzed_root_files_never_panic() {
+    let a = Ca::new("Pharos Test A", P256);
+    let b = Ca::new("Pharos Test B", &rcgen::PKCS_ED25519);
+    let file = encode_roots(&[a.der.as_ref(), b.der.as_ref()]);
+    let mut x = 0x5851_f42d_4c95_7f2du64;
+    for _ in 0..20_000 {
+        let mut m = file.clone();
+        for _ in 0..1 + xorshift(&mut x) % 4 {
+            let at = xorshift(&mut x) as usize % m.len();
+            m[at] = xorshift(&mut x) as u8;
+        }
+        if xorshift(&mut x).is_multiple_of(4) {
+            m.truncate(xorshift(&mut x) as usize % m.len());
+        }
+        let _ = roots(&m);
+        let random: Vec<u8> = (0..xorshift(&mut x) % 600)
+            .map(|_| xorshift(&mut x) as u8)
+            .collect();
+        let _ = roots(&random);
+    }
+}
+
+#[test]
+fn fuzzed_certificates_never_panic_and_only_the_real_one_passes() {
+    use rustls::client::WebPkiServerVerifier;
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::ServerName;
+    let ca = Ca::new("Pharos Test CA", P256);
+    let (chain, _) = ca.leaf("good.test", 2025, 2035, P256);
+    let random: &'static SharedDrbg = Box::leak(Box::new(SharedDrbg::new()));
+    assert!(random.seed(&[0x5a; 48]));
+    let roots = roots(&encode_roots(&[ca.der.as_ref()])).unwrap();
+    // The verifier the client builds: the pinned roots and the provider's
+    // signature algorithms.
+    let verifier = WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots),
+        Arc::new(crate::provider::provider(random)),
+    )
+    .build()
+    .unwrap();
+    let name = ServerName::try_from("good.test").unwrap();
+    let now = UnixTime::since_unix_epoch(Duration::from_secs(NOW));
+    let check = |leaf: &[u8], ca: &[u8]| {
+        verifier
+            .verify_server_cert(
+                &CertificateDer::from(leaf),
+                &[CertificateDer::from(ca)],
+                &name,
+                &[],
+                now,
+            )
+            .is_ok()
+    };
+    let (leaf, issuer) = (chain[0].to_vec(), chain[1].to_vec());
+    assert!(check(&leaf, &issuer), "the real chain passes");
+    let mut x = 0x6a09_e667_f3bc_c909u64;
+    for _ in 0..100_000 {
+        let (mut l, mut c) = (leaf.clone(), issuer.clone());
+        let m = if xorshift(&mut x).is_multiple_of(4) {
+            &mut c
+        } else {
+            &mut l
+        };
+        for _ in 0..1 + xorshift(&mut x) % 3 {
+            let at = xorshift(&mut x) as usize % m.len();
+            m[at] = xorshift(&mut x) as u8;
+        }
+        if xorshift(&mut x).is_multiple_of(8) {
+            m.truncate(xorshift(&mut x) as usize % m.len());
+        }
+        // A changed leaf must never pass: its signature covers every byte
+        // that is read. The issuer is only a hint; the root is pinned.
+        if check(&l, &c) {
+            assert_eq!(l, leaf, "a mutated leaf passed");
+        }
+    }
+}

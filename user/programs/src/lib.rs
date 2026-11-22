@@ -18,6 +18,8 @@ pub mod sequence;
 pub mod supervise;
 pub mod system;
 pub mod tasks;
+#[cfg(test)]
+mod tcp_fuzz;
 pub mod tools;
 pub mod virtio;
 pub mod virtio_console;

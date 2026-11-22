@@ -330,4 +330,32 @@ mod tests {
         assert_eq!(parse_opened(&r[..2]), None);
         assert_eq!(parse_opened(&[]), None);
     }
+
+    #[test]
+    fn fuzzed_messages_never_panic_and_what_parses_round_trips() {
+        // Bytes 0-127 reach every operation and printable names; half the
+        // messages start with the right version, and their short prefixes
+        // are tried too, so some are well formed.
+        let mut accepted = 0;
+        crate::fuzz(100_000, 128, |m| {
+            let mut v = [0u8; 301];
+            v[0] = if m.first().is_some_and(|b| b & 1 == 0) {
+                VERSION
+            } else {
+                m.first().copied().unwrap_or(0)
+            };
+            v[1..1 + m.len()].copy_from_slice(m);
+            let prefixes = (1..=m.len().min(80)).map(|k| &v[..k]);
+            for msg in prefixes.chain([&v[..1 + m.len()], m]) {
+                if let Ok(req) = parse(msg) {
+                    accepted += 1;
+                    let mut out = [0u8; 512];
+                    let n = encode(&req, &mut out).expect("what parses encodes");
+                    assert_eq!(&out[..n], msg, "{req:?}");
+                }
+            }
+            let _ = parse_opened(m);
+        });
+        assert!(accepted > 100, "only {accepted} fuzzed messages parsed");
+    }
 }
