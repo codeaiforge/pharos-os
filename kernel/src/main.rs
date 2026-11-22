@@ -79,6 +79,12 @@ extern "C" fn kernel_main() -> ! {
     if let Some(firmware) = requests::FIRMWARE_TYPE.get(&boot) {
         kprintln!("  firmware:   {}", firmware_name(firmware.firmware_type));
     }
+    let date = requests::DATE_AT_BOOT.get(&boot).map(|d| d.timestamp);
+    if pharos_kernel::time::set_boot_date(date) {
+        kprintln!("  date:       {} (Unix seconds)", date.unwrap_or(0));
+    } else {
+        kprintln!("  date:       none at or after the build's; TLS refuses (NO_CLOCK)");
+    }
     let entry = kmain as *const () as usize;
     kprintln!("  entry:      {entry:#x}");
     kprintln!("  HHDM:       {:#x}", hhdm.offset);

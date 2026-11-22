@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-21 (#269), with each open question decided as recommended (section 7). It follows [D-034](../project/decision-log.md#d-034-tcp-and-tls-stack) (accepted 2026-11-21) and amends [networking.md](networking.md) (D-015) and the [audit service](capabilities.md#the-audit-service-107).
-- **Implementation:** TCP is **implemented** (#270): smoltcp 0.14 in the network service and `net` v2, as "The network service" below describes, tested by the `network` test kernel against the host's TCP echo server ([networking.md](networking.md#smoltcp-270-d-034)). The crate `pharos-tls` is **implemented** (#271): the provider, the HMAC-DRBG, the root file, the configuration, and a sans-I/O session, host-tested against a rustls server. **Planned** (M6.1): the rest of the TLS client (#271: `clock_real`, the TLS service, the virtio-rng driver, `tls` v1), the fuzz targets (#272), the `tls` test kernel (#273).
+- **Implementation:** TCP is **implemented** (#270): smoltcp 0.14 in the network service and `net` v2, as "The network service" below describes, tested by the `network` test kernel against the host's TCP echo server ([networking.md](networking.md#smoltcp-270-d-034)). The crate `pharos-tls` is **implemented** (#271): the provider, the HMAC-DRBG, the root file, the configuration, and a sans-I/O session, host-tested against a rustls server; and `clock_real` (system call 33). **Planned** (M6.1): the rest of the TLS client (#271: the TLS service, the virtio-rng driver, `tls` v1), the fuzz targets (#272), the `tls` test kernel (#273).
 
 ## 2. Context
 

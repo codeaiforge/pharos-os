@@ -156,6 +156,7 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 27 | `fs_mount` (M4.3, D-028, #163, [boot.md](boot.md#the-kernel-call-fsmount)) | filesystem handle, `Memory` handle, offset, length (1 byte to 16 MiB; past the memory's end is `TOO_LARGE`) | a new filesystem handle (`READ`, `GRANT`) over a kernel-owned copy; `BAD_IMAGE` if the copy fails a `pharos-fs` check; `NO_MEMORY` with two copies mounted | filesystem `MOUNT` (`1 << 10`, only on `init`'s root); memory `READ` |
 | 31 | `key_read` (M5.5, D-047, #255, [release-integrity.md](release-integrity.md)) | `Key` handle, address of a 32-byte buffer | 0; the buffer holds the key derived from the device secret for the capability's purpose, never the secret; `NOT_FOUND` if the kernel has no secret | key, `READ` |
 | 32 | `key_measurement` (M5.5, D-047, #256) | any `Key` handle, address of a 32-byte buffer | 0; the buffer holds the boot measurement (`pharos_crypto::measurement` over the kernel's file and each module); `NOT_FOUND` if the boot was not measured | key, `READ` |
+| 33 | `clock_real` (M6.1, D-034, #271, [tls.md](tls.md#time)) | — | the wall-clock time in Unix seconds: the firmware's date at boot (Limine's date request) plus uptime; `NOT_FOUND` if the boot gave no date at or after the build's `SOURCE_DATE_EPOCH` | none |
 
 Error codes (`rax`):
 

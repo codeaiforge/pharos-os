@@ -236,6 +236,20 @@ pub const fn firmware_type_request() -> Request<FirmwareTypeResponse> {
     Request::new([0x8c2f75d90bef28a8, 0x7045a4688eac00c3])
 }
 
+/// "Date at Boot Feature": the firmware clock's date when Limine booted,
+/// in Unix seconds (tls.md, time; #271). Under QEMU the RTC follows the
+/// host's clock.
+#[repr(C)]
+pub struct DateAtBootResponse {
+    revision: u64,
+    pub timestamp: i64,
+}
+
+/// A request for [`DateAtBootResponse`].
+pub const fn date_at_boot_request() -> Request<DateAtBootResponse> {
+    Request::new([0x502746e184c088aa, 0xfbc5ec83e6327893])
+}
+
 /// "RSDP Feature": where the ACPI tables start (#241, iommu.md). Since base
 /// revision 4 `address` is a direct-map (HHDM) address, not a physical one.
 #[repr(C)]

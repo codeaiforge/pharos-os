@@ -46,6 +46,7 @@ pub mod number {
     pub const SLOT_ANSWER: u64 = 30;
     pub const KEY_READ: u64 = 31;
     pub const KEY_MEASUREMENT: u64 = 32;
+    pub const CLOCK_REAL: u64 = 33;
 }
 
 /// What `process_usage` reports (its second argument).
@@ -245,6 +246,8 @@ pub enum Call {
         micros: u64,
     },
     Uptime,
+    /// The wall-clock time in Unix seconds (tls.md, time).
+    ClockReal,
     MemMap {
         pages: u64,
     },
@@ -435,6 +438,7 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
         }),
         number::SLEEP => Ok(Call::Sleep { micros: args[0] }),
         number::UPTIME => Ok(Call::Uptime),
+        number::CLOCK_REAL => Ok(Call::ClockReal),
         number::ENDPOINT_CREATE => Ok(Call::EndpointCreate),
         number::SPAWN => {
             // Capabilities in bits 0-31, the child's page limit in 32-63;
@@ -1418,6 +1422,10 @@ mod kernel {
             // Microseconds since boot, for timing work (D-021). Needs no
             // capability: timeouts already let a program measure time.
             Call::Uptime => Ok(crate::time::uptime().as_micros() as u64),
+            // The date at boot plus uptime, in seconds (#271, tls.md). Needs
+            // no capability: one coarse, read-only value; `NOT_FOUND` if the
+            // boot gave no date at or after the build's floor.
+            Call::ClockReal => crate::time::real_seconds().ok_or(Error::NotFound),
             Call::EndpointCreate => {
                 let endpoint = Object::Endpoint(ipc::Endpoint::new());
                 let rights = cap::SEND | cap::RECEIVE | cap::GRANT;
@@ -1670,7 +1678,7 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(33, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(34, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(32, [2, 0, 0, 0, 0, 0]), Err(Error::BadAddress));
         // key_read: a 32-byte user buffer.
         assert_eq!(decode(31, [2, 0, 0, 0, 0, 0]), Err(Error::BadAddress));
@@ -1847,6 +1855,7 @@ mod tests {
             Ok(Call::Sleep { micros: 0 })
         );
         assert_eq!(decode(24, [9; 6]), Ok(Call::Uptime));
+        assert_eq!(decode(33, [9; 6]), Ok(Call::ClockReal));
         assert_eq!(
             decode(25, [4, 9, 9, 9, 9, 9]),
             Ok(Call::ProcessStop { handle: 4 })

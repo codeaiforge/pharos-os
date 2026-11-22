@@ -51,6 +51,10 @@ fn run(t: &mut TestRun) {
             .is_some_and(|fw| fw.firmware_type == FIRMWARE_UEFI64),
     );
     t.check(
+        "the date at boot is at or after the build's floor (#271)",
+        pharos_kernel::time::set_boot_date(requests::DATE_AT_BOOT.response().map(|d| d.timestamp)),
+    );
+    t.check(
         "test kernel runs at the linked higher-half address",
         run as *const () as usize >= KERNEL_BASE,
     );

@@ -108,6 +108,7 @@ pub mod number {
     pub const SLOT_ANSWER: u64 = 30;
     pub const KEY_READ: u64 = 31;
     pub const KEY_MEASUREMENT: u64 = 32;
+    pub const CLOCK_REAL: u64 = 33;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -367,6 +368,13 @@ pub fn sleep(micros: u64) {
 /// Microseconds since boot.
 pub fn uptime() -> u64 {
     call(number::UPTIME, [0; 6]).unwrap_or(0)
+}
+
+/// The wall-clock time in Unix seconds: the firmware's date at boot plus
+/// uptime, or `None` if the boot gave no date at or after the build's date
+/// (tls.md, time). The host sets it and is trusted with it (until M8.2).
+pub fn clock_real() -> Option<u64> {
+    call(number::CLOCK_REAL, [0; 6]).ok()
 }
 
 /// Creates an endpoint; the handle has `SEND`, `RECEIVE`, and `GRANT`.

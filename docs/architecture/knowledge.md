@@ -33,7 +33,7 @@ What M3.8 builds on:
   - up to 4 **tags** (agent-name rules), for queries;
   - up to 4 **evidence** references, each `scope/key/version`, which must exist when it is written;
   - its **evidence scopes**: the scopes of its evidence and of their evidence scopes, computed by the service when it is written (at most 8; more is refused), so one check covers the whole chain;
-  - **provenance**, set by the service from who sent it, never from the content: the author (`agent <name> task <id>` from the runtime, or `user` from the host tool), the source (`written`, `promoted <file>`, or `host`), and the time (the audit trail's boot number and `uptime` microseconds; Pharos has no wall clock yet).
+  - **provenance**, set by the service from who sent it, never from the content: the author (`agent <name> task <id>` from the runtime, or `user` from the host tool), the source (`written`, `promoted <file>`, or `host`), and the time (the audit trail's boot number and `uptime` microseconds; the wall clock, `clock_real` since #271, is not used here).
 - **Status is derived, never stored in the version:**
   - **heads** are the versions no other version replaces; a key with more than one head that is not a retraction is **conflicting** (two writers corrected the same version without seeing each other); the service keeps both, and a reader sees both;
   - a version is **superseded** when another version replaces it, and **retracted** when that version is a retraction;
@@ -92,7 +92,7 @@ What M3.8 builds on:
 - **No forged provenance:** the author comes from the runtime's badge and the task it runs, the hash and time from the service, and the verified status only from a user's mark; an agent cannot write a version as another agent, as the user, or as verified.
 - **No rewritten history:** versions are written once; a correction or retraction is a new version, and a conflict keeps both sides.
 - **Trusted:** the service (stores what it is told, enforces scopes, versions, and evidence), the runtime (authorship, readable scopes), and `trust` (marks).
-- **Carried:** a poisoned but unverified entry can still mislead an agent that reads it (its status and author say what it is); a supervisor can delegate `knowledge read` or `write` (as any permission it holds, #135); staleness by age needs a wall clock (planned).
+- **Carried:** a poisoned but unverified entry can still mislead an agent that reads it (its status and author say what it is); a supervisor can delegate `knowledge read` or `write` (as any permission it holds, #135); staleness by age (planned; the wall clock it needs, `clock_real`, exists since #271).
 
 ## 5. Testing
 

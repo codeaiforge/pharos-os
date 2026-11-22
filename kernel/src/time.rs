@@ -160,6 +160,52 @@ pub fn uptime() -> Duration {
     }
 }
 
+/// The earliest date `clock_real` accepts: the build's `SOURCE_DATE_EPOCH`
+/// (passed by `cargo xtask`; its default otherwise), so a reset firmware
+/// clock (1970 or 2000) cannot make an expired certificate look valid
+/// (tls.md, time).
+pub const DATE_FLOOR: u64 = match option_env!("SOURCE_DATE_EPOCH") {
+    Some(s) => parse_seconds(s),
+    None => 1_761_436_800,
+};
+
+const fn parse_seconds(s: &str) -> u64 {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut n = 0u64;
+    while i < b.len() {
+        assert!(b[i].is_ascii_digit(), "SOURCE_DATE_EPOCH must be seconds");
+        n = n * 10 + (b[i] - b'0') as u64;
+        i += 1;
+    }
+    n
+}
+
+/// The firmware's date at boot in Unix seconds, or 0 for none.
+static BOOT_DATE: AtomicU64 = AtomicU64::new(0);
+
+/// Keeps the date Limine reported at boot, if it is not before
+/// [`DATE_FLOOR`]. Returns whether it was kept.
+pub fn set_boot_date(unix: Option<i64>) -> bool {
+    let date = accept_date(unix, DATE_FLOOR);
+    BOOT_DATE.store(date.unwrap_or(0), Ordering::Relaxed);
+    date.is_some()
+}
+
+fn accept_date(unix: Option<i64>, floor: u64) -> Option<u64> {
+    let date = u64::try_from(unix?).ok()?;
+    (date >= floor).then_some(date)
+}
+
+/// The wall-clock time in Unix seconds: the date at boot plus [`uptime`],
+/// or `None` if the boot gave no date at or after the floor.
+pub fn real_seconds() -> Option<u64> {
+    match BOOT_DATE.load(Ordering::Relaxed) {
+        0 => None,
+        date => Some(date + uptime().as_secs()),
+    }
+}
+
 /// Busy-waits for at least `duration`. Returns at once before [`init`].
 pub fn delay(duration: Duration) {
     if TSC_PER_MS.load(Ordering::Relaxed) == 0 {
@@ -174,6 +220,24 @@ pub fn delay(duration: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_date_before_the_floor_is_no_date() {
+        assert_eq!(
+            accept_date(Some(2_000_000_000), 1_761_436_800),
+            Some(2_000_000_000)
+        );
+        assert_eq!(
+            accept_date(Some(1_761_436_800), 1_761_436_800),
+            Some(1_761_436_800)
+        );
+        // A reset RTC: 2000-01-01, 1970, before 1970.
+        assert_eq!(accept_date(Some(946_684_800), 1_761_436_800), None);
+        assert_eq!(accept_date(Some(0), 1_761_436_800), None);
+        assert_eq!(accept_date(Some(-1), 1_761_436_800), None);
+        assert_eq!(accept_date(None, 1_761_436_800), None);
+        assert_eq!(parse_seconds("1761436800"), 1_761_436_800);
+    }
 
     #[test]
     fn smallest_run_counts() {

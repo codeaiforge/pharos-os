@@ -34,7 +34,9 @@ const LIMINE_SHA256: &str = "9880cc04681262214db9b824ed8a5c55296955027d8caa9f55a
 const LIMINE_ARCHIVE: &str = "limine-binary.tar.xz";
 
 /// Default timestamp for every file in the ISO, so builds are byte-identical.
-/// Overridable through the standard `SOURCE_DATE_EPOCH` variable.
+/// Overridable through the standard `SOURCE_DATE_EPOCH` variable, which the
+/// kernel's builds inherit: the kernel's clock floor (`time::DATE_FLOOR`)
+/// reads it, with this same default.
 const DEFAULT_SOURCE_DATE_EPOCH: u64 = 1_761_436_800;
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
@@ -4848,6 +4850,12 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_kernel_clock_floor_defaults_to_the_build_date() {
+        assert_eq!(super::DEFAULT_SOURCE_DATE_EPOCH, 1_761_436_800);
+        assert!(include_str!("../../kernel/src/time.rs").contains("None => 1_761_436_800,"));
+    }
+
     use super::*;
 
     fn args(list: &[&str]) -> Vec<String> {

@@ -93,12 +93,13 @@ macro_rules! limine_requests {
         #[allow(unsafe_code)]
         mod requests {
             use $crate::limine::{
-                BaseRevisionTag, BootloaderInfoResponse, ExecutableAddressResponse,
-                ExecutableCmdlineResponse, ExecutableFileResponse, FirmwareTypeResponse,
-                HhdmResponse, MemmapResponse, ModuleResponse, REQUESTS_END_MARKER,
-                REQUESTS_START_MARKER, Request, RsdpResponse, bootloader_info_request,
-                executable_address_request, executable_cmdline_request, executable_file_request,
-                firmware_type_request, hhdm_request, memmap_request, module_request, rsdp_request,
+                BaseRevisionTag, BootloaderInfoResponse, DateAtBootResponse,
+                ExecutableAddressResponse, ExecutableCmdlineResponse, ExecutableFileResponse,
+                FirmwareTypeResponse, HhdmResponse, MemmapResponse, ModuleResponse,
+                REQUESTS_END_MARKER, REQUESTS_START_MARKER, Request, RsdpResponse,
+                bootloader_info_request, date_at_boot_request, executable_address_request,
+                executable_cmdline_request, executable_file_request, firmware_type_request,
+                hhdm_request, memmap_request, module_request, rsdp_request,
             };
 
             #[used]
@@ -145,6 +146,10 @@ macro_rules! limine_requests {
             #[used]
             #[unsafe(link_section = ".limine_requests")]
             pub static RSDP: Request<RsdpResponse> = rsdp_request();
+
+            #[used]
+            #[unsafe(link_section = ".limine_requests")]
+            pub static DATE_AT_BOOT: Request<DateAtBootResponse> = date_at_boot_request();
 
             #[used]
             #[unsafe(link_section = ".limine_requests_end")]
