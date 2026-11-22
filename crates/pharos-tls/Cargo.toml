@@ -1,0 +1,32 @@
+[package]
+name = "pharos-tls"
+description = "Pharos OS TLS 1.3 client parts (D-034, tls.md): a rustls crypto provider on RustCrypto and pharos-crypto, an HMAC-DRBG, the pinned root file, and a sans-I/O client session."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pharos-crypto = { path = "../pharos-crypto" }
+# TLS 1.3 client, no_std, through the unbuffered API (D-034 item 2).
+rustls = { version = "0.23.46", default-features = false }
+# AES-128-GCM, the one suite (D-034 item 4); the software and AES-NI paths
+# are chosen at run time.
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes"] }
+# secp256r1 key exchange and ECDSA P-256 verification (SHA-256 through sha2).
+p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa"] }
+# X25519 key exchange.
+x25519-dalek = { version = "3.0.0", default-features = false }
+# Ed25519 verification, already in the trusted base (pharos-image, D-028).
+ed25519-compact = { version = "2.6.0", default-features = false }
+
+[dev-dependencies]
+# Host tests only, never in an image (tls.md, testing): a rustls server with
+# rustls's ring provider (C and assembly, on the host) for each refusal, and
+# rcgen to make the test certificates at run time.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "crypto"] }
+
+[lints]
+workspace = true

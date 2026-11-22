@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-21 (#269), with each open question decided as recommended (section 7). It follows [D-034](../project/decision-log.md#d-034-tcp-and-tls-stack) (accepted 2026-11-21) and amends [networking.md](networking.md) (D-015) and the [audit service](capabilities.md#the-audit-service-107).
-- **Implementation:** TCP is **implemented** (#270): smoltcp 0.14 in the network service and `net` v2, as "The network service" below describes, tested by the `network` test kernel against the host's TCP echo server ([networking.md](networking.md#smoltcp-270-d-034)). **Planned** (M6.1): the TLS client (#271), the fuzz targets (#272), the `tls` test kernel (#273).
+- **Implementation:** TCP is **implemented** (#270): smoltcp 0.14 in the network service and `net` v2, as "The network service" below describes, tested by the `network` test kernel against the host's TCP echo server ([networking.md](networking.md#smoltcp-270-d-034)). The crate `pharos-tls` is **implemented** (#271): the provider, the HMAC-DRBG, the root file, the configuration, and a sans-I/O session, host-tested against a rustls server. **Planned** (M6.1): the rest of the TLS client (#271: `clock_real`, the TLS service, the virtio-rng driver, `tls` v1), the fuzz targets (#272), the `tls` test kernel (#273).
 
 ## 2. Context
 
@@ -142,7 +142,7 @@ flowchart LR
 
 | Layer | Tests |
 | --- | --- |
-| Host, `pharos-tls` | The key schedule against RFC 8448's TLS 1.3 traces (their RSA signatures are outside the provider), and the algorithms' published test vectors (AES-128-GCM, X25519, P-256 ECDH and ECDSA, HKDF); the HMAC-DRBG against NIST's CAVP vectors; a handshake with a rustls server for each refusal (rustls with its default provider as a host-only test dependency: C and assembly on the host, never in an image; justified in #271 as AGENTS.md section 6 asks): unknown issuer, expired, not yet valid, wrong name, a suite or group not offered, a truncated record |
+| Host, `pharos-tls` | The key schedule on `pharos-crypto` against RFC 8448's early, derived, and handshake secrets (its RSA signatures are outside the provider), X25519 against RFC 7748, and AES-128-GCM, secp256r1, ECDSA P-256, and Ed25519 through handshakes with rustls's ring provider (as built, #271: the glue is what Pharos adds; the crates carry their own vectors); the HMAC-DRBG against NIST's CAVP vectors; a handshake with a rustls server for each refusal (rustls with its default provider as a host-only test dependency: C and assembly on the host, never in an image; justified in #271 as AGENTS.md section 6 asks): unknown issuer, expired, not yet valid, wrong name, a suite or group not offered, a truncated record |
 | Host, fuzzing (D-020 pattern, #272) | Stable-Rust tests with a fixed seed and count: 100,000 random and mutated server flights into the client through `pharos-tls`, 100,000 mutated certificates into the webpki check, 100,000 mutated frames into the network service's smoltcp receive path, and the `net` v2 and `tls` codecs; none may panic, and nothing accepted may break the rules. The count is the CI budget |
 | Host, `pharos_proto` | `net` v2 and `tls` round trips, every truncation, bad versions, names over 64 bytes, `ALLOW` without badge 0 |
 | Host, `xtask` | The test authority, a good certificate, an expired one (`-not_after` in the past), and one for another name are made; `s_server` starts, serves, stops, and reports a taken port |
