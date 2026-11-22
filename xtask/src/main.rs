@@ -914,7 +914,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 33] = [
+const USER_PROGRAMS: [&str; 34] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -948,6 +948,7 @@ const USER_PROGRAMS: [&str; 33] = [
     "spinner",
     "rogue",
     "dmaprobe",
+    "tls",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -1344,6 +1345,12 @@ fn qemu_args(iso: &Path, vars: &Path, serial: &OsStr, bios: bool, gdb: bool) -> 
         "virtio-serial-pci,disable-legacy=on,iommu_platform=on".into(),
         "-device".into(),
         "virtconsole,chardev=trust".into(),
+        // The TLS service's seed (tls.md, randomness; #271): the host's
+        // `/dev/urandom`, last in PCI order so no other device moves.
+        "-object".into(),
+        "rng-random,id=rng0,filename=/dev/urandom".into(),
+        "-device".into(),
+        "virtio-rng-pci,rng=rng0,disable-legacy=on,iommu_platform=on".into(),
     ]);
     args.push("-serial".into());
     args.push(serial.into());
@@ -5530,7 +5537,7 @@ mod tests {
             .map(|a| a.to_string_lossy())
             .filter(|a| a.starts_with("virtio-") && a.contains("-pci"))
             .collect();
-        assert_eq!(virtio.len(), 4);
+        assert_eq!(virtio.len(), 5, "two disks, net, serial, rng");
         assert!(
             virtio.iter().all(|a| a.ends_with(",iommu_platform=on")),
             "{virtio:?}"

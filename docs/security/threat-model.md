@@ -126,7 +126,7 @@ Design: [networking.md](../architecture/networking.md). The first four rows are 
 
 ### TCP and TLS (M6.1)
 
-Design: [tls.md](../architecture/tls.md) (accepted 2026-11-21, #269; D-034). TCP in the network service is **implemented** (#270): its timeouts and connection limits (the "silent server" row) and TCP destinations listed by `init` hold for TCP today. Every TLS row is **planned** (#271–#273).
+Design: [tls.md](../architecture/tls.md) (accepted 2026-11-21, #269; D-034). TCP in the network service is **implemented** (#270): its timeouts and connection limits (the "silent server" row) and TCP destinations listed by `init` hold for TCP today. The TLS service is **implemented** (#271): certificate validation and each refusal are host-tested against a rustls server, and in QEMU the service refuses before sending anything when it has no audit trail; the rows that need a handshake in QEMU (the `tls` kernel's refusals, the throwaway branch) and the fuzzing are **planned** (#272, #273).
 
 | Threat | Mitigation |
 | --- | --- |

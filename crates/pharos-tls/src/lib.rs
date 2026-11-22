@@ -34,6 +34,8 @@ use rustls::time_provider::TimeProvider;
 use rustls::{CertificateError, ClientConfig, Error, RootCertStore};
 
 pub use provider::{TLS13_AES_128_GCM_SHA256, provider};
+/// The rustls this crate is built on, for its callers' types.
+pub use rustls;
 pub use session::Session;
 
 /// Most roots in the root file (tls.md).

@@ -179,6 +179,10 @@ struct Conn {
     socket: SocketHandle,
     /// The deferred `TCP_OPEN` and its deadline.
     opening: Option<(Handle, u64)>,
+    /// A `TCP_CONNECT` still connecting, and its deadline.
+    connecting: Option<u64>,
+    /// It failed to connect: `TCP_POLL` says `REFUSED` once, then it goes.
+    refused: bool,
     read: Option<Read>,
     /// When the client closed it (it is no longer the client's).
     closed: Option<u64>,
@@ -373,6 +377,17 @@ impl Service {
                     socket.abort();
                     gone = true;
                 }
+            } else if conn.refused {
+                // Kept until its client polls and learns it.
+            } else if let Some(deadline) = conn.connecting {
+                if state == tcp::State::Established {
+                    conn.connecting = None;
+                    conn.active = t;
+                } else if state == tcp::State::Closed || t > deadline {
+                    socket.abort();
+                    conn.connecting = None;
+                    conn.refused = true;
+                }
             } else if let Some((reply, deadline)) = conn.opening {
                 if state == tcp::State::Established {
                     conn.opening = None;
@@ -438,10 +453,12 @@ impl Service {
         self.conns
             .get_mut(usize::from(index))?
             .as_mut()
-            .filter(|c| c.owner == owner && c.closed.is_none() && c.opening.is_none())
+            .filter(|c| c.owner == owner && c.closed.is_none() && c.opening.is_none() && !c.refused)
     }
 
-    fn tcp_open(&mut self, i: usize, ip: [u8; 4], port: u16, reply: Handle) {
+    /// `TCP_OPEN` (deferred: `reply` is kept) or `TCP_CONNECT` (answered
+    /// at once).
+    fn tcp_open(&mut self, i: usize, ip: [u8; 4], port: u16, reply: Handle, deferred: bool) {
         let owner = self.clients[i].port;
         let held = self
             .conns
@@ -474,11 +491,17 @@ impl Service {
         self.conns[slot] = Some(Conn {
             owner,
             socket: handle,
-            opening: Some((reply, t + CONNECT_US)),
+            opening: deferred.then_some((reply, t + CONNECT_US)),
+            connecting: (!deferred).then_some(t + CONNECT_US),
+            refused: false,
             read: None,
             closed: None,
             active: t,
         });
+        if !deferred {
+            // At most MAX_CONNS (16) slots.
+            answer(&mut self.stats, reply, &encode_opened(OK, slot as u8));
+        }
     }
 
     fn tcp_write(&mut self, owner: u16, conn: u8, offset: u32, len: u32) -> [u8; 6] {
@@ -499,8 +522,70 @@ impl Service {
         let socket = self.sockets.get_mut::<tcp::Socket>(handle);
         match socket.send_slice(&data[..n]) {
             Ok(sent) => encode_count(OK, sent as u32),
+            // Still connecting (`TCP_CONNECT`): nothing taken yet.
+            Err(_)
+                if matches!(
+                    socket.state(),
+                    tcp::State::SynSent | tcp::State::SynReceived
+                ) =>
+            {
+                encode_count(OK, 0)
+            }
             Err(_) => encode_count(CLOSED, 0),
         }
+    }
+
+    /// `TCP_POLL`: what `TCP_READ` would answer, at once; `NOT_FOUND` if
+    /// nothing has arrived or it is still connecting.
+    fn tcp_poll(&mut self, owner: u16, conn: u8, offset: u32, max: u32) -> [u8; 6] {
+        let at = usize::from(conn);
+        let refused = (self.conns.get(at).and_then(Option::as_ref))
+            .is_some_and(|c| c.owner == owner && c.refused && c.closed.is_none());
+        if refused {
+            if let Some(c) = self.conns[at].take() {
+                self.sockets.remove(c.socket);
+            }
+            return encode_count(REFUSED, 0);
+        }
+        let Some(i) = self.clients.iter().position(|c| c.port == owner) else {
+            return encode_count(CLOSED, 0);
+        };
+        if max == 0 || in_buffer(&self.clients[i].buffer, offset, max).is_none() {
+            return encode_count(NO_BUFFER, 0);
+        }
+        let Some(c) = self.conn(owner, conn) else {
+            return encode_count(CLOSED, 0);
+        };
+        if c.read.is_some() {
+            return encode_count(BUSY, 0);
+        }
+        if c.connecting.is_some() {
+            return encode_count(NOT_FOUND, 0);
+        }
+        c.active = uptime();
+        let handle = c.socket;
+        let socket = self.sockets.get_mut::<tcp::Socket>(handle);
+        if socket.can_recv() {
+            let mut data = [0u8; WINDOW];
+            let n = (max as usize).min(WINDOW);
+            let Ok(n) = socket.recv_slice(&mut data[..n]) else {
+                return encode_count(CLOSED, 0);
+            };
+            if let Some(b) = in_buffer(&self.clients[i].buffer, offset, max) {
+                b.write_bytes(offset as usize, &data[..n]);
+            }
+            return encode_count(OK, n as u32);
+        }
+        if !socket.may_recv() {
+            // The peer's FIN (0 bytes, the end) or a reset.
+            let status = if socket.state() == tcp::State::Closed {
+                CLOSED
+            } else {
+                OK
+            };
+            return encode_count(status, 0);
+        }
+        encode_count(NOT_FOUND, 0)
     }
 
     fn attach(&mut self, badge: u32, memory: Handle, len: u64) {
@@ -573,7 +658,9 @@ impl Service {
             Request::Ping { ip, .. } if !allowed.pings(ip) => {
                 answer(&mut self.stats, reply, &[NO_ACCESS]);
             }
-            Request::TcpOpen { ip, port } if !tcp.sends_to(ip, port) => {
+            Request::TcpOpen { ip, port } | Request::TcpConnect { ip, port }
+                if !tcp.sends_to(ip, port) =>
+            {
                 answer(&mut self.stats, reply, &encode_opened(NO_ACCESS, 0));
             }
             Request::Send { ip, port, payload } => {
@@ -619,7 +706,12 @@ impl Service {
                 let n = info.encode(&mut out).unwrap_or(0);
                 answer(&mut self.stats, reply, &out[..n]);
             }
-            Request::TcpOpen { ip, port } => self.tcp_open(i, ip, port, reply),
+            Request::TcpOpen { ip, port } => self.tcp_open(i, ip, port, reply, true),
+            Request::TcpConnect { ip, port } => self.tcp_open(i, ip, port, reply, false),
+            Request::TcpPoll { conn, offset, max } => {
+                let out = self.tcp_poll(port, conn, offset, max);
+                answer(&mut self.stats, reply, &out);
+            }
             Request::TcpWrite { conn, offset, len } => {
                 let out = self.tcp_write(port, conn, offset, len);
                 answer(&mut self.stats, reply, &out);

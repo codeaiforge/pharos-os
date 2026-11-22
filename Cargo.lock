@@ -639,6 +639,7 @@ dependencies = [
  "pharos-proto",
  "pharos-services",
  "pharos-store",
+ "pharos-tls",
  "pharos-user",
  "smoltcp",
 ]

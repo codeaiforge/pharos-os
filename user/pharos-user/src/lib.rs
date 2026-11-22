@@ -8,7 +8,7 @@
 
 mod syscall;
 
-pub use syscall::{Mapped, vector};
+pub use syscall::{Mapped, entropy, vector};
 
 /// Probes for tests (M4.6, #183): system calls given a kernel-half
 /// address, which the kernel must refuse (`BAD_ADDRESS`). Each refuses a

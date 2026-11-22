@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-21 (#269), with each open question decided as recommended (section 7). It follows [D-034](../project/decision-log.md#d-034-tcp-and-tls-stack) (accepted 2026-11-21) and amends [networking.md](networking.md) (D-015) and the [audit service](capabilities.md#the-audit-service-107).
-- **Implementation:** TCP is **implemented** (#270): smoltcp 0.14 in the network service and `net` v2, as "The network service" below describes, tested by the `network` test kernel against the host's TCP echo server ([networking.md](networking.md#smoltcp-270-d-034)). The crate `pharos-tls` is **implemented** (#271): the provider, the HMAC-DRBG, the root file, the configuration, and a sans-I/O session, host-tested against a rustls server; `clock_real` (system call 33); and the `tls` v1 codec, `pharos_proto::tls`, with audit client 4 and action `tls` (24). **Planned** (M6.1): the rest of the TLS client (#271: the TLS service and its virtio-rng driver), the fuzz targets (#272), the `tls` test kernel (#273).
+- **Implementation:** TCP is **implemented** (#270): smoltcp 0.14 in the network service and `net` v2, as "The network service" below describes, tested by the `network` test kernel against the host's TCP echo server ([networking.md](networking.md#smoltcp-270-d-034)). The TLS client is **implemented** (#271): the crate `pharos-tls` (the provider, the HMAC-DRBG, the root file, the configuration, and a sans-I/O session, host-tested against a rustls server), `clock_real` (system call 33), the `tls` v1 codec (`pharos_proto::tls`, with audit client 4 and action `tls`, 24), and the TLS service with its virtio-rng driver (`bin/tls`), in the `network` test kernel's table only, where it has no audit trail and is checked to refuse before sending anything. Three changes to the design, found while building it, are marked *As built (#271)* below. **Planned** (M6.1): the fuzz targets (#272), and the `tls` test kernel (#273), the first to complete a handshake in QEMU.
 
 ## 2. Context
 
@@ -77,12 +77,13 @@ flowchart LR
   | 11 `ALLOW_TCP` | as `ALLOW`, only without a badge (`init`) | `[status]` |
 
   New statuses: 34 `REFUSED` (reset or no answer), 35 `CLOSED` (the connection is gone). The local port is the service's choice; a client cannot pick it. Limits: 4 connections per client, 16 in all, each with 8 KiB receive and send windows; a connection idle for 60 s is closed.
+- *As built (#271):* two operations that never defer, for the TLS service: **12 `TCP_CONNECT`** (as `TCP_OPEN`, answered at once with the connection, which connects in the background; writes take 0 bytes until it is connected) and **13 `TCP_POLL`** (as `TCP_READ`, answered at once, `NOT_FOUND` when nothing has arrived or it is still connecting, `REFUSED` once if the connection failed). IPC is synchronous and a server answers with `try_send`, which reaches only a caller waiting at that moment, so a single-threaded service cannot wait in a deferred call while it serves its own clients and `init`'s health checks; it polls each open connection every 10 ms instead.
 - **Destinations:** a client opens TCP only to an address and port `ALLOW_TCP` listed for it, sent by `init` each time the service reports ready, as `ALLOW` is today (#109).
 - **Fuzzing:** frames reach the receive path through smoltcp in host tests (the D-020 pattern, below).
 
 ### The TLS service and `tls` v1
 
-- **Started by `init`** after the network and audit services, with: its endpoint; `SEND` on the network service with TCP destinations; `SEND` on `audit` (client 4); the virtio-rng device; the root set (below); and a page limit. No store capability and no device but virtio-rng.
+- **Started by `init`** after the network and audit services, with: its endpoint; `SEND` on the network service with TCP destinations; `SEND` on `audit` (client 4); the virtio-rng device; the root set (below); and a page limit. No store capability and no device but virtio-rng. *As built (#271),* in handle order: the console, the virtio-rng device, `RECEIVE` on its endpoint, the report endpoint, `READ` on the root filesystem, the network service (badged port 40443), and the audit service as client 4 (without it every `OPEN` is `NO_AUDIT`).
 - **A client's capability** is `SEND` on the TLS service's endpoint, badged by `init` with a client number (1–8). In M6.1 only services and test programs get one; the agent runtime gets none, so no agent reaches HTTPS before the egress gateway (M6.2).
 - **Destinations come from `init`, never from the client.** `ALLOW` (badge 0 only) sets, for one client, destination *i*: an address, a port, and the server name used both for SNI and for the certificate check (at most 64 bytes, a DNS name; no IP-address names). A client opens a connection by **index**, so it can neither name another host nor make the service check a certificate against a name of its choosing. There is no DNS.
 - **Operations** (each request starts with the version, 1):
@@ -104,7 +105,7 @@ flowchart LR
 ### The pinned root set
 
 - **One file in the image, `system/tls/roots`:** DER certificates, each preceded by its length (u16), at most 16 roots and 16 KiB. The image is measured at boot, so the signed audit head covers the roots ([release-integrity.md](release-integrity.md)).
-- `init` reads it from the root filesystem and passes it to the TLS service in a shared buffer at start; a missing or malformed file leaves the service with no roots, so every `OPEN` fails with reason 1.
+- `init` reads it from the root filesystem and passes it to the TLS service in a shared buffer at start; a missing or malformed file leaves the service with no roots, so every `OPEN` fails with reason 1. *As built (#271):* the service reads the file itself, with `READ` on the root filesystem. A buffer from `init` would take a `send`, which has no timeout, so `init` could hang on a TLS service that is not receiving. The image is public and measured, so reading the rest of it gives the service nothing secret.
 - **The release image ships no roots in M6.1;** the test images carry the test authority's certificate, made by `cargo xtask` for each build. The roots for real endpoints come with M6.2's egress gateway, which knows its endpoints.
 - No system or bundled roots (no `webpki-roots`), no revocation checks (D-034's carried limit), and only the `serverAuth` purpose is accepted.
 
@@ -116,7 +117,7 @@ flowchart LR
 
 ### Randomness
 
-- **The TLS service drives a `virtio-rng-pci` device** (behind the IOMMU, as every virtio device) and seeds an HMAC-DRBG with 48 bytes from it, mixed with 32 bytes of RDSEED when CPUID reports it. It reseeds after 1 MiB of output or 10,000 requests, whichever comes first.
+- **The TLS service drives a `virtio-rng-pci` device** (behind the IOMMU, as every virtio device) and seeds an HMAC-DRBG with 48 bytes from it, mixed with 32 bytes of RDSEED when CPUID reports it. It reseeds after 1 MiB of output or 10,000 requests, whichever comes first. *As built (#271):* RDSEED is read through `pharos_user::entropy::rdseed64`, the one new `unsafe` (inline assembly in `pharos-user`'s `syscall.rs`, the module AGENTS.md section 5 allows it in); it reseeds from the device before every handshake, so neither limit is reached in practice; the generator still refuses past them.
 - **No seed, no handshake:** if the device is absent or gives fewer bytes than asked within 1 s, `OPEN` fails with `NO_RANDOM`. A virtio-rng device that returns data cannot be told apart from a good one, which is why RDSEED is mixed in where the CPU has it.
 - `cargo xtask` adds `-object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0,iommu_platform=on,disable-legacy=on` to every QEMU run, and the user guide's command gains it.
 

@@ -7,8 +7,10 @@
 //! refused. Each client sends only to the destinations `init` listed for
 //! it (#109): others, and an `ALLOW` of its own, are refused. On smoltcp
 //! since #270, a fourth client opens TCP to the host echo server, gets its
-//! data back, and is refused where it should be (tls.md). Runs under UEFI
-//! (D-009).
+//! data back, and is refused where it should be (tls.md); since #271 it
+//! also connects and polls without waiting. The TLS service starts with
+//! no audit trail, and its client is refused before anything is sent.
+//! Runs under UEFI (D-009).
 
 #![no_std]
 #![no_main]
@@ -25,7 +27,7 @@ use pharos_kernel::{fs, ipc, kprintln, mm, pci, process, sched, storage, time};
 pharos_kernel::test_kernel!(run);
 
 /// Client steps that must pass.
-const STEPS: [&str; 27] = [
+const STEPS: [&str; 36] = [
     "echoer: registered",
     "sender: non-blocking send with nobody waiting: WOULD_BLOCK",
     "sender: ping 10.0.2.2 answered",
@@ -52,7 +54,16 @@ const STEPS: [&str; 27] = [
     "tcper: a write on the closed connection answers CLOSED",
     "tcper: a destination not listed for TCP refused with NO_ACCESS",
     "tcper: a listed port nothing listens on answers REFUSED",
+    "tcper: TCP_CONNECT answers at once with a connection",
+    "tcper: TCP_POLL gets the echo, NOT_FOUND until then",
+    "tcper: TCP_POLL on a refused TCP_CONNECT answers REFUSED",
     "tcper: a TCP request as version 1 is BAD_REQUEST",
+    "tlser: INFO names tls v1",
+    "tlser: its own ALLOW refused with NO_ACCESS",
+    "tlser: a destination not listed refused with NO_ACCESS",
+    "tlser: OPEN without an audit trail is NO_AUDIT, after the clock and seed",
+    "tlser: READ on no connection is CLOSED",
+    "tlser: version 2: VERSION, supported 1 to 1",
 ];
 
 fn run(t: &mut TestRun) {
@@ -79,6 +90,10 @@ fn run(t: &mut TestRun) {
         return;
     }
     process::init();
+    t.check(
+        "the date at boot is kept, for clock_real (#271)",
+        time::set_boot_date(requests::DATE_AT_BOOT.response().map(|d| d.timestamp)),
+    );
     t.check("preemption enabled", sched::enable_preemption().is_ok());
     pharos_kernel::testing::init_iommu(crate::requests::RSDP.response());
     pci::enumerate();
@@ -95,8 +110,8 @@ fn run(t: &mut TestRun) {
 
     let summary = ipc::poll(&report, Duration::from_secs(10));
     t.check(
-        "every service and client succeeded: 5 ready, 0 failed",
-        summary.is_some_and(|m| m.bytes() == [5, 0, 0, 0]),
+        "every service and client succeeded: 7 ready, 0 failed",
+        summary.is_some_and(|m| m.bytes() == [7, 0, 0, 0]),
     );
     let lines: Vec<Vec<u8>> = process::debug_output()
         .into_iter()

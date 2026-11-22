@@ -48,6 +48,13 @@ pub mod op {
     pub const TCP_CLOSE: u8 = 10;
     /// Version 2, `init` only: the TCP destinations of client `port`.
     pub const ALLOW_TCP: u8 = 11;
+    /// Version 2: `TCP_OPEN` answered at once with the connection, which
+    /// connects in the background (`TCP_POLL` says `REFUSED` if it fails),
+    /// for a service that cannot wait in a deferred call (#271).
+    pub const TCP_CONNECT: u8 = 12;
+    /// Version 2: `TCP_READ` answered at once: `NOT_FOUND` if nothing has
+    /// arrived (or it is still connecting).
+    pub const TCP_POLL: u8 = 13;
 }
 
 pub const OK: u8 = status::OK;
@@ -158,6 +165,15 @@ pub enum Request<'a> {
     TcpClose {
         conn: u8,
     },
+    TcpConnect {
+        ip: [u8; 4],
+        port: u16,
+    },
+    TcpPoll {
+        conn: u8,
+        offset: u32,
+        max: u32,
+    },
     AllowTcp {
         client: u16,
         dests: Allowed,
@@ -191,6 +207,12 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
     let req = match code {
         common::ATTACH => r.u64().map(|len| Request::Attach { len }),
         op::TCP_OPEN if tcp => addressed(&mut r).map(|(port, ip)| Request::TcpOpen { ip, port }),
+        op::TCP_CONNECT if tcp => {
+            addressed(&mut r).map(|(port, ip)| Request::TcpConnect { ip, port })
+        }
+        op::TCP_POLL if tcp => {
+            range(&mut r).map(|(conn, offset, max)| Request::TcpPoll { conn, offset, max })
+        }
         op::TCP_WRITE if tcp => {
             range(&mut r).map(|(conn, offset, len)| Request::TcpWrite { conn, offset, len })
         }
@@ -264,6 +286,16 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.u32(max)?;
         }
         Request::TcpClose { conn } => w.bytes(&[TCP_VERSION, op::TCP_CLOSE, conn])?,
+        Request::TcpConnect { ip, port } => {
+            w.bytes(&[TCP_VERSION, op::TCP_CONNECT])?;
+            w.u16(port)?;
+            w.bytes(&ip)?;
+        }
+        Request::TcpPoll { conn, offset, max } => {
+            w.bytes(&[TCP_VERSION, op::TCP_POLL, conn])?;
+            w.u32(offset)?;
+            w.u32(max)?;
+        }
     }
     Some(w.len())
 }
@@ -403,6 +435,15 @@ mod tests {
                 max: 4096,
             },
             Request::TcpClose { conn: 255 },
+            Request::TcpConnect {
+                ip: [10, 0, 2, 2],
+                port: 47_443,
+            },
+            Request::TcpPoll {
+                conn: 15,
+                offset: 2048,
+                max: 8192,
+            },
             Request::AllowTcp {
                 client: 40_100,
                 dests: Allowed::new(&[([10, 0, 2, 2], 443); MAX_ALLOWED]).unwrap(),
@@ -419,6 +460,8 @@ mod tests {
                     | Request::TcpWrite { .. }
                     | Request::TcpRead { .. }
                     | Request::TcpClose { .. }
+                    | Request::TcpConnect { .. }
+                    | Request::TcpPoll { .. }
                     | Request::AllowTcp { .. }
             );
             assert_eq!(

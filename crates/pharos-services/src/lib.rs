@@ -46,6 +46,9 @@ pub const MAX_SERVICES: usize = 32;
 
 /// An IPv4 address and UDP port (`pharos_proto::net::Dest`).
 pub type Dest = ([u8; 4], u16);
+/// A TLS destination: address, port, and the server's name
+/// (`pharos_proto::tls::Destination`).
+pub type TlsDest = ([u8; 4], u16, &'static [u8]);
 
 /// What happens when a service crashes, exits, or sends no `ready` in
 /// time (#150). A service the user stopped is never restarted, whatever
@@ -87,6 +90,9 @@ pub enum Ep {
     Agents,
     Audit,
     Knowledge,
+    /// The TLS service's (M6.1, tls.md): a client's badge is its client
+    /// number, 1 to 8.
+    Tls,
 }
 
 impl Ep {
@@ -101,6 +107,7 @@ impl Ep {
             Self::Agents => "agents",
             Self::Audit => "audit",
             Self::Knowledge => "knowledge",
+            Self::Tls => "tls",
         })
     }
 }
@@ -209,6 +216,9 @@ pub struct Service {
     /// The destinations its network capability may open TCP to (M6.1,
     /// tls.md); empty for every service that does not use TCP.
     pub tcp: &'static [Dest],
+    /// The TLS destinations of its TLS capability, by index (M6.1,
+    /// tls.md); empty for every service that is no TLS client.
+    pub tls: &'static [TlsDest],
     /// Indexes of earlier entries that must have succeeded first.
     pub after: &'static [usize],
     /// Pages it may `mem_map` (0: none).
@@ -430,7 +440,7 @@ mod tests {
     fn the_rogue_tables_are_the_boot_table_but_their_programs() {
         let fields = |s: &Service| {
             (
-                s.name, s.kind, s.restart, s.caps, s.net, s.tcp, s.after, s.limit, s.gains,
+                s.name, s.kind, s.restart, s.caps, s.net, s.tcp, s.tls, s.after, s.limit, s.gains,
             )
         };
         for (table, swapped) in [

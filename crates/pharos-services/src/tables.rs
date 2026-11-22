@@ -12,6 +12,7 @@ use crate::{
 pub const VIRTIO_BLK: u32 = 0x1042_1af4;
 pub const VIRTIO_NET: u32 = 0x1041_1af4;
 pub const VIRTIO_CONSOLE: u32 = 0x1043_1af4;
+pub const VIRTIO_RNG: u32 = 0x1044_1af4;
 
 /// The program `init` registers with `trust` as the agent runtime.
 pub const RUNTIME_PATH: &[u8] = b"bin/agents";
@@ -71,6 +72,7 @@ const NET: Service = Service {
     caps: &[CONSOLE, device(VIRTIO_NET, 0), receive(Ep::Net), REPORT],
     net: &[],
     tcp: &[],
+    tls: &[],
     after: &[],
     // smoltcp's sockets and the clients' TCP buffers (tls.md): 2 MiB.
     limit: 512,
@@ -87,6 +89,7 @@ const STORE: Service = Service {
     caps: &[CONSOLE, device(VIRTIO_BLK, 1), receive(Ep::Store), REPORT],
     net: &[],
     tcp: &[],
+    tls: &[],
     after: &[],
     limit: STORE_LIMIT,
     gains: &[],
@@ -110,6 +113,7 @@ const fn infer(store: usize) -> Service {
         caps: INFER_CAPS,
         net: &[],
         tcp: &[],
+        tls: &[],
         after: match store {
             0 => &[0],
             _ => &[2],
@@ -139,6 +143,7 @@ const fn audit(store: usize) -> Service {
         caps: AUDIT_CAPS,
         net: &[],
         tcp: &[],
+        tls: &[],
         after: match store {
             0 => &[0],
             _ => &[2],
@@ -166,6 +171,7 @@ const fn svc(
         caps,
         net: &[],
         tcp: &[],
+        tls: &[],
         after,
         limit: 0,
         gains: &[],
@@ -184,6 +190,7 @@ const BOOT_ENTRIES: [Service; 9] = [
         caps: &[CONSOLE, device(VIRTIO_BLK, 0)],
         net: &[],
         tcp: &[],
+        tls: &[],
         after: &[],
         limit: 0,
         gains: &[],
@@ -212,6 +219,7 @@ const BOOT_ENTRIES: [Service; 9] = [
         ],
         net: &[],
         tcp: &[],
+        tls: &[],
         after: &[2],
         limit: KNOWLEDGE_LIMIT,
         gains: &[],
@@ -236,6 +244,7 @@ const BOOT_ENTRIES: [Service; 9] = [
         ],
         net: &[],
         tcp: &[],
+        tls: &[],
         after: &[4, 5],
         limit: 0,
         gains: &[Gain::Processes, Gain::RuntimeChannel],
@@ -269,6 +278,7 @@ const BOOT_ENTRIES: [Service; 9] = [
         ],
         net: &[],
         tcp: &[],
+        tls: &[],
         after: &[2, 3, 6],
         limit: AGENTS_LIMIT,
         gains: &[Gain::Processes],
@@ -286,11 +296,43 @@ const BOOT_ENTRIES: [Service; 9] = [
         caps: &[CONSOLE, arrived(VIRTIO_BLK), REPORT],
         net: &[],
         tcp: &[],
+        tls: &[],
         after: &[],
         limit: 0,
         gains: &[],
     },
 ];
+
+/// The TLS service's capabilities (tls.md): its device, its endpoint, the
+/// root filesystem for its roots, the network service, then the audit
+/// service when the table has one.
+const TLS_CAPS: [Give; 6] = [
+    CONSOLE,
+    device(VIRTIO_RNG, 0),
+    receive(Ep::Tls),
+    REPORT,
+    ROOT,
+    send(Ep::Net, TLS_NET_PORT),
+];
+/// The TLS service's client port at the network service.
+pub const TLS_NET_PORT: u32 = 40_443;
+/// The TLS service's pages (tls.md, budgets): 4 MiB.
+pub const TLS_LIMIT: u32 = 1024;
+
+const TLS_NO_AUDIT: Service = Service {
+    name: "tls",
+    path: b"bin/tls",
+    arg: 0,
+    kind: Kind::Daemon,
+    restart: Restart::Up(3),
+    caps: &TLS_CAPS,
+    net: &[],
+    tcp: &[([10, 0, 2, 2], 47_443)],
+    tls: &[],
+    after: &[0],
+    limit: TLS_LIMIT,
+    gains: &[],
+};
 
 pub const NETWORK: &[Service] = &[
     NET,
@@ -303,6 +345,7 @@ pub const NETWORK: &[Service] = &[
         caps: &[CONSOLE, send(Ep::Net, 40001), REPORT],
         net: &[(OUR_IP, 40000)],
         tcp: &[],
+        tls: &[],
         after: &[0],
         limit: 0,
         gains: &[],
@@ -316,6 +359,7 @@ pub const NETWORK: &[Service] = &[
         caps: &[CONSOLE, send(Ep::Net, 40000)],
         net: &[HOST_ECHO, (OUR_IP, 40001), (OUR_IP, 40999)],
         tcp: &[],
+        tls: &[],
         after: &[1],
         limit: 0,
         gains: &[],
@@ -330,6 +374,7 @@ pub const NETWORK: &[Service] = &[
         caps: &[CONSOLE, send(Ep::Net, 40002)],
         net: &[],
         tcp: &[HOST_ECHO, ([10, 0, 2, 2], 47_002)],
+        tls: &[],
         after: &[0],
         limit: 4,
         gains: &[],
@@ -344,7 +389,25 @@ pub const NETWORK: &[Service] = &[
         caps: &[CONSOLE, send(Ep::Net, 1 << 16)],
         net: &[HOST_ECHO],
         tcp: &[],
+        tls: &[],
         after: &[0],
+        limit: 0,
+        gains: &[],
+    },
+    // The TLS service (#271): no audit trail in this table, so its OPEN
+    // must be refused before anything is sent; no roots in the image.
+    TLS_NO_AUDIT,
+    Service {
+        name: "tlser",
+        path: b"bin/netclient",
+        arg: 5,
+        kind: Kind::OneShot,
+        restart: Restart::Never,
+        caps: &[CONSOLE, send(Ep::Tls, 1)],
+        net: &[],
+        tcp: &[],
+        tls: &[([10, 0, 2, 2], 47_443, b"pharos-test.local")],
+        after: &[5],
         limit: 0,
         gains: &[],
     },
@@ -397,6 +460,7 @@ const fn soak(boot: [Service; 9]) -> [Service; 10] {
         caps: SOAKER_CAPS,
         net: &[],
         tcp: &[],
+        tls: &[],
         after: &[AGENTS],
         limit: 64,
         gains: &[],
@@ -462,6 +526,7 @@ pub const TEST: &[Service] = &[
         caps: &[CONSOLE],
         net: &[],
         tcp: &[],
+        tls: &[],
         after: &[],
         limit: 0,
         gains: &[],
@@ -475,6 +540,7 @@ pub const TEST: &[Service] = &[
         caps: &[CONSOLE, device(VIRTIO_BLK, 0)],
         net: &[],
         tcp: &[],
+        tls: &[],
         after: &[],
         limit: 0,
         gains: &[],
@@ -505,6 +571,7 @@ pub const SUPERVISE: &[Service] = &[
         ],
         net: &[],
         tcp: &[],
+        tls: &[],
         after: &[1],
         limit: 0,
         gains: &[Gain::Processes, Gain::RuntimeChannel],
@@ -554,6 +621,7 @@ pub const SUPERVISE: &[Service] = &[
         caps: &[CONSOLE, send(Ep::Infer, 2), send(Ep::Store, 3)],
         net: &[],
         tcp: &[],
+        tls: &[],
         after: &[0, 3],
         limit: 1024,
         gains: &[],
@@ -569,6 +637,7 @@ pub const SUPERVISE: &[Service] = &[
         caps: &[CONSOLE, send(Ep::Store, 1)],
         net: &[],
         tcp: &[],
+        tls: &[],
         after: &[0],
         limit: 2048,
         gains: &[],

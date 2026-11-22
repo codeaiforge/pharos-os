@@ -18,6 +18,7 @@ pharos-infer = { path = "../../crates/pharos-infer" }
 pharos-proto = { path = "../../crates/pharos-proto" }
 pharos-services = { path = "../../crates/pharos-services" }
 pharos-store = { path = "../../crates/pharos-store" }
+pharos-tls = { path = "../../crates/pharos-tls" }
 pharos-user = { path = "../pharos-user" }
 # TCP, IP, ARP, ICMP, and UDP for the network service (D-034, #270; 0BSD,
 # no unsafe in what it compiles here, 7 dependencies).

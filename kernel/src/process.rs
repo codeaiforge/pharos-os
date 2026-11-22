@@ -740,7 +740,13 @@ pub fn start_class(
 }
 
 /// PCI vendor and device IDs of the devices `init` is given.
-pub const INIT_DEVICES: [(u16, u16); 3] = [(0x1af4, 0x1042), (0x1af4, 0x1041), (0x1af4, 0x1043)];
+pub const INIT_DEVICES: [(u16, u16); 4] = [
+    (0x1af4, 0x1042),
+    (0x1af4, 0x1041),
+    (0x1af4, 0x1043),
+    // virtio-rng, for the TLS service (#271).
+    (0x1af4, 0x1044),
+];
 
 /// The capabilities the kernel starts `init` with (services.md): 1 the
 /// debug console, 2 `fs`, 3 `report` (`SEND`), then each device in

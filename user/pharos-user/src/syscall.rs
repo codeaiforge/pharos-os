@@ -117,6 +117,14 @@ mod mem {
     /// because programs abort on panic instead of unwinding.
     #[unsafe(no_mangle)]
     pub extern "C" fn rust_eh_personality() {}
+
+    /// Referenced by landing pads in the prebuilt `alloc` that rustls's
+    /// code reaches (#271); never called for the same reason, and ends the
+    /// program if it ever were.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn _Unwind_Resume(_: *mut c_void) -> ! {
+        crate::exit(101)
+    }
 }
 
 /// Makes system call `number` with up to six arguments; returns `rax`
@@ -302,6 +310,52 @@ impl Mapped {
         let at = self.at(offset, 8);
         // SAFETY: as in `write8`; `at` is 8-byte aligned (checked).
         unsafe { (at as *mut u64).write_volatile(value) }
+    }
+}
+
+/// RDSEED (tls.md, randomness; #271): 64 bits from the CPU's entropy
+/// source, mixed into the TLS service's seed where the CPU has it.
+pub mod entropy {
+    /// Whether CPUID reports RDSEED (leaf 7, `EBX` bit 18).
+    #[allow(unused_unsafe)] // `__cpuid` is safe in recent Rust, `unsafe` in 1.85
+    pub fn has_rdseed() -> bool {
+        // SAFETY: CPUID is available in user mode and has no side effects.
+        let leaf0 = unsafe { core::arch::x86_64::__cpuid(0) };
+        if leaf0.eax < 7 {
+            return false;
+        }
+        // SAFETY: as above; leaf 7 exists (checked).
+        let leaf7 = unsafe { core::arch::x86_64::__cpuid_count(7, 0) };
+        leaf7.ebx & (1 << 18) != 0
+    }
+
+    /// 64 bits from RDSEED, or `None` if the CPU has none or gave none in
+    /// 100 tries (it may run dry briefly; Intel's guidance is to retry).
+    pub fn rdseed64() -> Option<u64> {
+        if !has_rdseed() {
+            return None;
+        }
+        for _ in 0..100 {
+            let value: u64;
+            let ok: u8;
+            // SAFETY: CPUID reports RDSEED (checked), which is allowed in
+            // user mode; it writes only the named register and the carry
+            // flag, read with `setc`.
+            unsafe {
+                core::arch::asm!(
+                    "rdseed {v}",
+                    "setc {ok}",
+                    v = out(reg) value,
+                    ok = out(reg_byte) ok,
+                    options(nomem, nostack),
+                )
+            };
+            if ok == 1 {
+                return Some(value);
+            }
+            core::hint::spin_loop();
+        }
+        None
     }
 }
 
@@ -869,6 +923,16 @@ mod heap {
 #[cfg(test)]
 mod tests {
     use super::heap::*;
+
+    #[test]
+    fn rdseed_gives_values_where_the_cpu_has_it() {
+        let a = super::entropy::rdseed64();
+        assert_eq!(a.is_some(), super::entropy::has_rdseed());
+        if a.is_some() {
+            // Two 64-bit draws are equal with probability 2^-64.
+            assert_ne!(a, super::entropy::rdseed64());
+        }
+    }
 
     #[test]
     fn vector_probes_work_on_the_host() {

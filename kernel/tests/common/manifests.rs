@@ -29,7 +29,7 @@ use pharos_kernel::sched::{self, TaskId};
 use pharos_kernel::{pci, process};
 use pharos_services::{Ep, Gain, Object as Is, Service, rights};
 
-const EPS: [Ep; 8] = [
+const EPS: [Ep; 9] = [
     Ep::Events,
     Ep::Net,
     Ep::Store,
@@ -38,6 +38,7 @@ const EPS: [Ep; 8] = [
     Ep::Agents,
     Ep::Audit,
     Ep::Knowledge,
+    Ep::Tls,
 ];
 
 /// A process's capabilities, each with its handle.

@@ -202,6 +202,7 @@ fn main(arg: u64) -> u64 {
             idle()
         }
         4 => tcp(reply),
+        5 => tls_smoke(reply),
         3 => {
             report(
                 &mut f,
@@ -212,6 +213,73 @@ fn main(arg: u64) -> u64 {
         }
         _ => 99,
     }
+}
+
+/// The TLS service's refusals that need no server (argument 5, #271):
+/// its capability is `SEND` on the TLS service, badged client 1, with one
+/// destination; the table gives the service no audit trail.
+fn tls_smoke(reply: Handle) -> u64 {
+    use pharos_proto::tls::{self, Request as Tls};
+    let mut f = 0;
+    let call = |req: Tls<'_>| -> Option<([u8; 256], usize)> {
+        let mut msg = [0u8; 96];
+        let n = tls::encode(&req, &mut msg)?;
+        raw(NET, reply, &msg[..n]).ok()
+    };
+    let info = call(Tls::Info);
+    report(
+        &mut f,
+        "tlser: INFO names tls v1",
+        info.is_some_and(|(r, n)| {
+            Info::parse(&r[..n]).is_some_and(|i| i.name == tls::NAME && (i.low, i.high) == (1, 1))
+        }),
+    );
+    let allow = Tls::Allow {
+        client: 1,
+        destination: 1,
+        dest: tls::Destination {
+            ip: GATEWAY,
+            port: 443,
+            name: b"elsewhere.test",
+        },
+    };
+    report(
+        &mut f,
+        "tlser: its own ALLOW refused with NO_ACCESS",
+        call(allow).is_some_and(|(r, _)| r[0] == tls::NO_ACCESS),
+    );
+    let opened =
+        |d| call(Tls::Open { destination: d }).and_then(|(r, n)| tls::parse_opened(&r[..n]));
+    report(
+        &mut f,
+        "tlser: a destination not listed refused with NO_ACCESS",
+        opened(1).is_some_and(|(s, ..)| s == tls::NO_ACCESS),
+    );
+    // Clock and seed pass (else NO_CLOCK, NO_RANDOM); nothing is sent
+    // without an intent stored.
+    report(
+        &mut f,
+        "tlser: OPEN without an audit trail is NO_AUDIT, after the clock and seed",
+        opened(0).is_some_and(|(s, ..)| s == tls::NO_AUDIT),
+    );
+    report(
+        &mut f,
+        "tlser: READ on no connection is CLOSED",
+        call(Tls::Read {
+            conn: 0,
+            offset: 0,
+            max: 1,
+        })
+        .and_then(|(r, n)| parse_count(&r[..n]))
+        .is_some_and(|(s, _)| s == tls::CLOSED),
+    );
+    report(
+        &mut f,
+        "tlser: version 2: VERSION, supported 1 to 1",
+        raw(NET, reply, &[2, tls::op::OPEN, 0])
+            .is_ok_and(|(r, n)| versions(&r[..n]) == Some((1, 1))),
+    );
+    f
 }
 
 /// The TCP steps (argument 4).
@@ -298,6 +366,77 @@ fn tcp(reply: Handle) -> u64 {
         &mut f,
         "tcper: a listed port nothing listens on answers REFUSED",
         opened(GATEWAY, 47002).is_some_and(|(s, _)| s == REFUSED),
+    );
+    // TCP_CONNECT and TCP_POLL (#271): answered at once.
+    let started = call(Request::TcpConnect {
+        ip: GATEWAY,
+        port: HOST_ECHO_PORT,
+    })
+    .map(|(r, _)| (r[0], r[1]));
+    report(
+        &mut f,
+        "tcper: TCP_CONNECT answers at once with a connection",
+        started.is_some_and(|(s, _)| s == OK),
+    );
+    if let Some((OK, conn)) = started {
+        let poll = |offset| {
+            count(Request::TcpPoll {
+                conn,
+                offset,
+                max: HELLO.len() as u32,
+            })
+        };
+        // Writes take nothing until it is connected; then the echo.
+        let mut sent = false;
+        let mut back = None;
+        for _ in 0..200 {
+            if !sent {
+                sent = count(Request::TcpWrite {
+                    conn,
+                    offset: 0,
+                    len: HELLO.len() as u32,
+                }) == Some((OK, HELLO.len() as u32));
+            }
+            match poll(2048) {
+                Some((OK, n)) if n > 0 => {
+                    back = Some(n);
+                    break;
+                }
+                Some((NOT_FOUND, _)) => pharos_user::sleep(10_000),
+                _ => break,
+            }
+        }
+        let mut echo = [0u8; HELLO.len()];
+        buffer.read_bytes(2048, &mut echo);
+        report(
+            &mut f,
+            "tcper: TCP_POLL gets the echo, NOT_FOUND until then",
+            back == Some(HELLO.len() as u32) && echo == *HELLO,
+        );
+        let _ = call(Request::TcpClose { conn });
+    }
+    let refused = call(Request::TcpConnect {
+        ip: GATEWAY,
+        port: 47002,
+    })
+    .and_then(|(r, _)| (r[0] == OK).then_some(r[1]))
+    .is_some_and(|conn| {
+        (0..200).any(|_| {
+            let r = count(Request::TcpPoll {
+                conn,
+                offset: 0,
+                max: 1,
+            });
+            if r.is_some_and(|(s, _)| s == NOT_FOUND) {
+                pharos_user::sleep(10_000);
+            }
+            r.is_some_and(|(s, _)| s == REFUSED)
+        })
+    });
+    report(
+        &mut f,
+        "tcper: TCP_POLL on a refused TCP_CONNECT answers REFUSED",
+        refused,
     );
     let mut v1 = [0u8; 16];
     let n = encode(&Request::TcpClose { conn }, &mut v1).unwrap_or(0);

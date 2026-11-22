@@ -73,6 +73,7 @@ use pharos_proto::service::{
     self as listing, Action, Entry, Managed, Reply, Setting, Settings, State as Shown, System,
 };
 use pharos_proto::store::{self, Request as StoreRequest};
+use pharos_proto::tls::{self, Request as TlsRequest};
 use pharos_proto::trust::{self, Event, Names, by_user, image as shown, not_started};
 use pharos_proto::{audit, status};
 use pharos_services::config::{self, Config};
@@ -210,6 +211,7 @@ struct Init {
     agents: Handle,
     audit: Handle,
     knowledge: Handle,
+    tls: Handle,
     devices: [(Handle, u32); 8],
     device_count: usize,
     state: [State; MAX_SERVICES],
@@ -301,6 +303,7 @@ impl Init {
                 Ep::Agents => self.agents,
                 Ep::Audit => self.audit,
                 Ep::Knowledge => self.knowledge,
+                Ep::Tls => self.tls,
             },
             // Per entry, in `grant`.
             Object::Arrived(_) => return None,
@@ -672,7 +675,7 @@ impl Init {
     /// The endpoint `init` checks entry `i`'s health on (M4.5): a daemon
     /// that receives on one of `init`'s endpoints.
     fn checked(&self, i: usize) -> Option<Handle> {
-        const EPS: [Ep; 7] = [
+        const EPS: [Ep; 8] = [
             Ep::Net,
             Ep::Store,
             Ep::Infer,
@@ -680,6 +683,7 @@ impl Init {
             Ep::Agents,
             Ep::Audit,
             Ep::Knowledge,
+            Ep::Tls,
         ];
         let service = &self.table[i];
         if service.kind != Kind::Daemon {
@@ -1161,6 +1165,44 @@ impl Init {
         }
     }
 
+    /// Sends the TLS service each client's destinations (M6.1, tls.md),
+    /// each time it reports ready: for every entry with `SEND` on its
+    /// endpoint badged with a client number, destination `i` of `tls`.
+    fn allow_tls(&self) {
+        for (service, give) in (self.table.iter()).flat_map(|s| s.caps.iter().map(move |g| (s, g)))
+        {
+            let (Object::Endpoint(Ep::Tls), pharos_services::Badge::Fixed(client)) =
+                (give.object, give.badge)
+            else {
+                continue;
+            };
+            let Ok(client) = u8::try_from(client) else {
+                continue;
+            };
+            for (i, &(ip, port, name)) in service.tls.iter().enumerate() {
+                let req = TlsRequest::Allow {
+                    client,
+                    destination: i as u8,
+                    dest: tls::Destination { ip, port, name },
+                };
+                let mut msg = [0u8; 96];
+                let answered = tls::encode(&req, &mut msg).is_some_and(|n| {
+                    let mut buf = [0u8; 96];
+                    call_timeout(self.tls, &msg[..n], self.reply, &mut buf, RELEASE_US)
+                        .is_ok_and(|r| matches!(r, Received::Message { len, .. } if len >= 1))
+                        && buf[0] == tls::OK
+                });
+                if !answered {
+                    say(
+                        service.name,
+                        "TLS destination not sent, index",
+                        Some(i as u64),
+                    );
+                }
+            }
+        }
+    }
+
     /// Service `j`'s process ended (its notification bit was set).
     fn ended(&mut self, j: usize) {
         let (State::Running(p) | State::Ok(p)) = self.state[j] else {
@@ -1372,6 +1414,9 @@ impl Init {
                     }
                     if service.path == b"bin/net" {
                         self.allow();
+                    }
+                    if service.path == b"bin/tls" {
+                        self.allow_tls();
                     }
                 }
                 if cap != 0 {
@@ -2181,7 +2226,7 @@ fn mode_word(mode: Mode) -> &'static [u8] {
 fn main(arg: u64) -> u64 {
     let (table_number, kernel_mode, copy) = pharos_programs::system::split_arg(arg);
     let table = pharos_services::table(table_number);
-    let mut handles = [0; 9];
+    let mut handles = [0; 10];
     for h in handles.iter_mut() {
         match endpoint_create() {
             Ok(e) => *h = e,
@@ -2201,6 +2246,7 @@ fn main(arg: u64) -> u64 {
         agents,
         audit,
         knowledge,
+        tls,
     ] = handles;
     let (devices, device_count) = devices();
     let mut init = Init {
@@ -2214,6 +2260,7 @@ fn main(arg: u64) -> u64 {
         agents,
         audit,
         knowledge,
+        tls,
         devices,
         device_count,
         state: [State::Pending; MAX_SERVICES],

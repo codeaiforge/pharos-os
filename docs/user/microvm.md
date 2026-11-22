@@ -84,6 +84,8 @@ qemu-system-x86_64 -M q35,smm=on -enable-kvm -cpu host -m 256M \
   -chardev pipe,id=trust,path=trust \
   -device virtio-serial-pci,disable-legacy=on,iommu_platform=on \
   -device virtconsole,chardev=trust \
+  -object rng-random,id=rng0,filename=/dev/urandom \
+  -device virtio-rng-pci,rng=rng0,disable-legacy=on,iommu_platform=on \
   -display none -serial file:serial.log
 ```
 
@@ -94,6 +96,7 @@ What each part is for:
 - **The first disk, `disk.img`, read-only; the second, `store.img`:** the storage service takes the second virtio-blk device, so keep this order.
 - **`-netdev user`:** user-mode networking, which needs no host privileges. The guest is 10.0.2.15; agents get no network unless granted (D-012).
 - **`-chardev pipe ... path=trust`:** the trusted console, on `trust.in` and `trust.out`.
+- **`virtio-rng-pci`, last:** the host's randomness for the TLS service's seed (tls.md, #271); the boot table does not start that service in M6.1, so a VM without it still boots. Keep it after the other devices so their PCI order stays the same.
 - **No `opt/org.pharos/boot-check`:** without it the system keeps running after its boot (D-049). `cargo xtask test` passes it so that a boot check ends.
 
 The kernel's log goes to `serial.log`. A boot that worked ends with:
