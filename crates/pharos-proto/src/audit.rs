@@ -71,6 +71,8 @@ pub mod client {
     pub const INIT: u8 = 1;
     pub const TRUST: u8 = 2;
     pub const RUNTIME: u8 = 3;
+    /// The TLS service (#271, tls.md).
+    pub const TLS: u8 = 4;
 }
 
 /// What kind of record.
@@ -129,7 +131,12 @@ pub mod action {
     /// The earlier streams freed on the user's `audit rotate` (D-048,
     /// #217), from the service itself: `export <code> boots <a>-<b>`.
     pub const ROTATE: u8 = 23;
-    pub const LAST: u8 = ROTATE;
+    /// A TLS connection (#271, tls.md), from the TLS service: the intent
+    /// before it connects (client and destination as detail), the outcome
+    /// (the status and reason), and an event on close (bytes each way);
+    /// never content.
+    pub const TLS: u8 = 24;
+    pub const LAST: u8 = TLS;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -157,6 +164,7 @@ pub mod action {
             "manage",
             "device",
             "rotate",
+            "tls",
         ]
         .get(usize::from(code))
         .copied()
