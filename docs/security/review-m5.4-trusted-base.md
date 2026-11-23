@@ -8,7 +8,7 @@
   - the two registry dependencies, `ed25519-compact` 2.6.0 and `libm` 0.2.16.
 - **Design under review:** the [threat model](threat-model.md) (Part 1), AGENTS.md sections 5 and 7, and the architecture pages each scope names.
 - **Dates:** 2026-11-13 to 2026-11-14, milestone M5.4. The code under review is `main` from `37ab5b7` onward; the fixes are listed below.
-- **Status:** **awaiting the maintainer's verdict.** Validity and severity of every finding are the maintainer's to decide. The severities below are the reviewers' proposals, with the main session's opinion where it differs.
+- **Status:** **signed off by the maintainer on 2026-11-14** (the M5.4 gate). The maintainer decided the validity and severity of every finding. The severities below are the reviewers' proposals, with the main session's opinion where it differs; the maintainer's verdicts are under each section.
 
 ## Reviewers and their independence
 
@@ -86,7 +86,7 @@ Checking the findings against the code changed some of them:
 
 ### Low and informational
 
-For the maintainer to accept or file:
+Decided by the maintainer on 2026-11-14 (see [Verdicts on the lows](#verdicts-on-the-lows)):
 
 - **Kernel:**
   - `unmap_owned` frees frames marked `DEVICE`; only the callers' ordering prevents it (F4).
