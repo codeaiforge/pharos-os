@@ -13,6 +13,12 @@ pub const FW_CFG_NAME: &[u8] = b"opt/org.pharos/device-key";
 /// Size of the secret and of each derived key.
 pub const KEY_LEN: usize = 32;
 
+/// The `fw_cfg` file with the vault's secrets (D-035, gateway.md): text
+/// the kernel keeps for the boot and never parses.
+pub const SECRETS_FW_CFG_NAME: &[u8] = b"opt/org.pharos/secrets";
+/// The secrets file's largest size; a larger file is ignored.
+pub const MAX_SECRETS: usize = 4096;
+
 /// What a derived key is for. Each has its own label, so one key reveals
 /// nothing about another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +104,34 @@ mod global {
     }
 
     static MEASUREMENT: IrqMutex<Option<[u8; 32]>> = IrqMutex::new(None);
+
+    /// The secrets file and its length (D-035); empty without one.
+    static SECRETS: IrqMutex<([u8; MAX_SECRETS], usize)> = IrqMutex::new(([0; MAX_SECRETS], 0));
+
+    /// Reads the secrets file from `fw_cfg` (D-035). Call once, during
+    /// boot, before `init` starts. `Ok(len)` (0 without a file), or
+    /// `Err(size)` for a file over [`MAX_SECRETS`], which is ignored.
+    pub fn secrets_init() -> Result<usize, usize> {
+        let mut s = SECRETS.lock();
+        let (buf, len) = &mut *s;
+        match crate::arch::x86_64::fw_cfg_file(SECRETS_FW_CFG_NAME, buf) {
+            None => Ok(0),
+            Some(n) if n <= MAX_SECRETS => {
+                *len = n;
+                Ok(n)
+            }
+            Some(n) => {
+                buf.fill(0);
+                Err(n)
+            }
+        }
+    }
+
+    /// A copy of the secrets file, for `secrets_read`.
+    pub fn secrets() -> alloc::vec::Vec<u8> {
+        let s = SECRETS.lock();
+        s.0[..s.1].to_vec()
+    }
 
     /// Measures the boot (D-047 item 2): SHA-256 of each `(name, contents)`
     /// in boot order, then [`pharos_crypto::measurement`] over them. Call

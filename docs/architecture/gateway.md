@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-23 (#280), with each open question decided as recommended (section 7). It follows [D-035](../project/decision-log.md#d-035-credential-vault-and-egress-gateway) (accepted 2026-11-23) and builds on the [TLS service](tls.md).
-- **Implementation:** **planned**: the vault (#281), the gateway (#282), the fuzz tests (#283), and the `vault` test kernel (#284). Nothing below is implemented yet.
+- **Implementation:** the vault is **implemented** (#281): the secrets file in the kernel and `secrets_read` (system call 34), `init` passing the file to the vault without reading it, the file's parser and the `vault` v1 codec (`pharos_proto::vault`, with audit client 5 and action `vault`, 25), routes in `pharos_services` with the rules the vault relies on, and the vault (`bin/vault`). It runs in the `secrets` test kernel's table only, tested there with a client in the gateway's place; no table starts it at boot yet. *As built (#281)* notes below. **Planned:** the gateway, the runtime's `REQUEST`, RSA and P-384, and `cargo xtask run --secrets` (#282); the fuzz tests (#283); the `vault` test kernel (#284).
 
 ## 2. Context
 
@@ -76,6 +76,7 @@ An agent never names a host, a header, or a secret. It names a route it was gran
   - A new system call, `secrets_read(cap, buf)`, copies the file into the caller's buffer. It needs `READ`.
   - The kernel keeps its copy for the boot, so a restarted vault reads it again. Only a process holding the capability can, and `init` grants it to the vault alone.
 - **Rotation:** replace the host's file and restart the machine. No rebuild. A route whose secret is missing answers `NO_SECRET`.
+- *As built (#281):* `init` finds the capability after the two keys by asking only its size (a length of 0, which needs no buffer), so it never holds the secrets; a file over 4 KiB is ignored with a line on the serial console, and the vault then has none. The kernel zeroes its temporary copy after each `secrets_read`.
 
 ### Routes
 
@@ -115,6 +116,7 @@ Both the vault and the gateway link the table. The vault uses it to check that a
 - **Its only client is the gateway** (badge 1). `RELEASE` is `[1, 1, route:u8]`. The vault checks that the route exists and names a secret it holds, then writes `prefix ‖ value` into the gateway's attached buffer. The answer is `[status, 0, len:u16]`: `OK`, `NO_SECRET`, `NOT_FOUND` (no such route), or `NO_AUDIT`.
 - **Every release and refusal is recorded** before it is answered: action `vault release`, the route's and the secret's names, and the outcome. No value is ever written.
 - `INFO` and `ATTACH` as D-019. There is no operation that lists secrets or returns one by name.
+- *As built (#281):* the gateway's buffer is at most 4 KiB; a release that would not fit is `NO_BUFFER`, recorded like the other refusals. The records are events (action `vault`, 25), outcome `ok` or `refused`, with the detail `release <route> secret <name>`, and ` status <n>` on a refusal; a route that does not exist is named by its number. The vault gets its table's number as its argument and reads that table's routes (`pharos_services::routes`).
 
 ### The gateway and `gateway` v1
 

@@ -141,7 +141,7 @@ Design: [tls.md](../architecture/tls.md) (accepted 2026-11-21, #269; D-034). TCP
 
 ### Credential vault and egress gateway (M6.2)
 
-Design: [gateway.md](../architecture/gateway.md) (accepted 2026-11-23, #280; D-035). Every row is **planned**.
+Design: [gateway.md](../architecture/gateway.md) (accepted 2026-11-23, #280; D-035). The vault is **implemented** (#281): the secrets file reaches only the vault, `init` never reads it, and the vault records each release and refusal by name, tested in the `secrets` kernel, where the value is checked to be absent from the console and the trail. Every other row is **planned** until the gateway lands (#282).
 
 | Threat | Mitigation |
 | --- | --- |

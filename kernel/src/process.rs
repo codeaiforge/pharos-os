@@ -753,8 +753,9 @@ pub const INIT_DEVICES: [(u16, u16); 4] = [
 /// [`INIT_DEVICES`] found by PCI enumeration (granted, in PCI order) when
 /// `devices` is true, then the hotplug object (`HOTPLUG`, M4.4) when
 /// `devices` is true, and last, once the device secret was read (D-047),
-/// the `AuditAnchor` key (`READ | GRANT`, for `audit`) and the
-/// `SlotRecord` key (`READ`, `init`'s own).
+/// the `AuditAnchor` key (`READ | GRANT`, for `audit`), the
+/// `SlotRecord` key (`READ`, `init`'s own), and the secrets file
+/// (`READ | GRANT`, for the vault, D-035; empty without one).
 #[cfg(target_os = "none")]
 pub fn init_capabilities(
     fs: Arc<crate::fs::Fs>,
@@ -788,6 +789,7 @@ pub fn init_capabilities(
             READ | GRANT,
         ));
         caps.push(Capability::new(Object::Key(Purpose::SlotRecord), READ));
+        caps.push(Capability::new(Object::Secrets, READ | GRANT));
     }
     caps
 }

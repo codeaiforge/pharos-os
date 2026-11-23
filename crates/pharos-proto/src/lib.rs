@@ -27,6 +27,7 @@ pub mod store;
 pub mod tls;
 pub mod tool;
 pub mod trust;
+pub mod vault;
 
 /// Status codes common to every interface; an interface's own start at 32.
 pub mod status {

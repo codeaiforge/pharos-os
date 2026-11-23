@@ -86,6 +86,9 @@ pub enum Object {
     /// `READ`, `key_read` returns it. The secret itself never leaves the
     /// kernel.
     Key(crate::key::Purpose),
+    /// The secrets file from the host (D-035, gateway.md): with `READ`,
+    /// `secrets_read` copies it. Only `init` gets it, for the vault.
+    Secrets,
 }
 
 impl fmt::Debug for Object {
@@ -103,6 +106,7 @@ impl fmt::Debug for Object {
             Self::Memory(m) => write!(f, "Memory({} pages)", m.frames().len()),
             Self::Hotplug => f.write_str("Hotplug"),
             Self::Key(p) => write!(f, "Key({p:?})"),
+            Self::Secrets => f.write_str("Secrets"),
         }
     }
 }

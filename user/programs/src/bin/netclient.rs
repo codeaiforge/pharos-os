@@ -25,6 +25,13 @@
 //!   (expired, another name, an authority not pinned) each refused with
 //!   their reason; an index not listed is `NO_ACCESS`.
 //! - Argument 7, the `tls_norandom` kernel (#273): `OPEN` is `NO_RANDOM`.
+//! - Argument 8, the `secrets` kernel (#281): the vault's client, as the
+//!   gateway (handle 2, badge 1) and as another client (handle 3, badge
+//!   2). A route's prefix and secret are released into its buffer; a
+//!   route whose secret is missing, one with none, one that does not
+//!   exist, a release before `ATTACH`, and any release by badge 2 are
+//!   refused; `secrets_read` without the capability is refused. It never
+//!   prints a secret.
 //!
 //! Each step prints `ok <step>` or `FAIL <step>`; the exit code is the
 //! number of failures.
@@ -212,6 +219,7 @@ fn main(arg: u64) -> u64 {
         5 => tls_smoke(reply),
         6 => tls_round(reply),
         7 => tls_no_random(reply),
+        8 => vaulter(reply),
         3 => {
             report(
                 &mut f,
@@ -413,6 +421,87 @@ fn tls_no_random(reply: Handle) -> u64 {
         &mut f,
         "tlsclient: OPEN without virtio-rng is NO_RANDOM",
         tls_open(reply, 0).is_some_and(|(s, ..)| s == pharos_proto::tls::NO_RANDOM),
+    );
+    f
+}
+
+/// The `secrets` kernel's client (argument 8, #281).
+fn vaulter(reply: Handle) -> u64 {
+    use pharos_proto::vault::{self, NO_ACCESS, NO_BUFFER, NO_SECRET, NOT_FOUND, Request as V};
+    let mut f = 0;
+    let call = |to: Handle, req: V| {
+        let mut msg = [0u8; 16];
+        let n = vault::encode(&req, &mut msg)?;
+        raw(to, reply, &msg[..n]).ok()
+    };
+    let release = |to: Handle, route| {
+        call(to, V::Release { route }).and_then(|(r, n)| vault::parse_released(&r[..n]))
+    };
+    report(
+        &mut f,
+        "vaulter: a release before ATTACH is NO_BUFFER",
+        release(NET, 0).is_some_and(|(s, _)| s == NO_BUFFER),
+    );
+    const LEN: u64 = 4096;
+    let buffer = mem_map(LEN).ok();
+    let attached = buffer.as_ref().is_some_and(|b| {
+        let mut msg = [0u8; 16];
+        let n = vault::encode(&V::Attach { len: LEN }, &mut msg).unwrap_or(0);
+        mem_share(b).is_ok_and(|m| send(NET, &msg[..n], m, READ | WRITE, 0).is_ok())
+    });
+    report(&mut f, "vaulter: buffer attached", attached);
+    let want = [
+        b"Bearer ".as_slice(),
+        pharos_services::TEST_SECRET_VALUE.as_bytes(),
+    ]
+    .concat();
+    let released = release(NET, 0)
+        .zip(buffer.as_ref())
+        .is_some_and(|((s, n), b)| {
+            let mut got = [0u8; 64];
+            let n = usize::from(n);
+            n == want.len() && n <= got.len() && {
+                b.read_bytes(0, &mut got[..n]);
+                s == OK && got[..n] == want[..]
+            }
+        });
+    report(
+        &mut f,
+        "vaulter: route 0's prefix and secret are released",
+        released,
+    );
+    for (route, want, step) in [
+        (
+            1,
+            NO_SECRET,
+            "vaulter: a route whose secret the file lacks is NO_SECRET",
+        ),
+        (2, NO_SECRET, "vaulter: a route with no secret is NO_SECRET"),
+        (
+            9,
+            NOT_FOUND,
+            "vaulter: a route that does not exist is NOT_FOUND",
+        ),
+    ] {
+        report(&mut f, step, release(NET, route) == Some((want, 0)));
+    }
+    report(
+        &mut f,
+        "vaulter: another client's release is NO_ACCESS",
+        release(REPORT, 0) == Some((NO_ACCESS, 0)),
+    );
+    report(
+        &mut f,
+        "vaulter: secrets_read without the capability is refused",
+        pharos_user::secrets_read(NET, &mut []).is_err(),
+    );
+    let info = call(NET, V::Info);
+    report(
+        &mut f,
+        "vaulter: INFO names vault, version 1",
+        info.is_some_and(|(r, n)| {
+            Info::parse(&r[..n]).is_some_and(|i| i.name == vault::NAME && i.low == 1)
+        }),
     );
     f
 }

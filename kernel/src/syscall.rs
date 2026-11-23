@@ -47,6 +47,7 @@ pub mod number {
     pub const KEY_READ: u64 = 31;
     pub const KEY_MEASUREMENT: u64 = 32;
     pub const CLOCK_REAL: u64 = 33;
+    pub const SECRETS_READ: u64 = 34;
 }
 
 /// What `process_usage` reports (its second argument).
@@ -286,6 +287,13 @@ pub enum Call {
     KeyRead {
         handle: Handle,
         addr: u64,
+    },
+    /// Copies up to `len` bytes of the secrets file to `addr` (a `Secrets`
+    /// capability, D-035); returns the file's whole size.
+    SecretsRead {
+        handle: Handle,
+        addr: u64,
+        len: u64,
     },
     /// Writes the boot measurement to `addr` (any `Key` capability).
     KeyMeasurement {
@@ -549,6 +557,17 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
                 addr: args[1],
             })
         }
+        number::SECRETS_READ => {
+            // A length of 0 asks only the size: no buffer to check.
+            if args[2] != 0 {
+                buffer_up_to(crate::key::MAX_SECRETS, args[1], args[2])?;
+            }
+            Ok(Call::SecretsRead {
+                handle: args[0],
+                addr: args[1],
+                len: args[2],
+            })
+        }
         number::KEY_MEASUREMENT => {
             buffer(args[1], 32)?;
             Ok(Call::KeyMeasurement {
@@ -577,6 +596,7 @@ pub fn needed_rights(call: &Call) -> cap::Rights {
         Call::Open { .. }
         | Call::Read { .. }
         | Call::KeyRead { .. }
+        | Call::SecretsRead { .. }
         | Call::KeyMeasurement { .. } => cap::READ,
         Call::ConfigRead { .. } => cap::CONFIG,
         Call::MmioMap { .. } | Call::DmaAlloc { .. } => cap::MAP,
@@ -1544,6 +1564,22 @@ mod kernel {
                     .ok_or(Error::BadAddress)??;
                 Ok(0)
             }
+            Call::SecretsRead { handle, addr, len } => {
+                let cap = process.caps.lock().get(handle, cap::READ)?;
+                if !matches!(cap.object(), Object::Secrets) {
+                    return Err(Error::MissingRight);
+                }
+                let mut file = crate::key::secrets();
+                let n = file.len().min(len as usize);
+                let size = file.len() as u64;
+                let done = (n > 0)
+                    .then(|| sched::with_current_space(|space| space.write_user(addr, &file[..n])));
+                file.fill(0);
+                if let Some(done) = done {
+                    done.ok_or(Error::BadAddress)??;
+                }
+                Ok(size)
+            }
             Call::KeyMeasurement { handle, addr } => {
                 let cap = process.caps.lock().get(handle, cap::READ)?;
                 if !matches!(cap.object(), Object::Key(_)) {
@@ -1678,7 +1714,18 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(34, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(35, [0; 6]), Err(Error::UnknownCall));
+        // secrets_read: at most 4 KiB, in user memory.
+        assert_eq!(decode(34, [2, 0, 16, 0, 0, 0]), Err(Error::BadAddress));
+        assert_eq!(
+            decode(34, [2, 1, 0, 0, 0, 0]),
+            Ok(Call::SecretsRead {
+                handle: 2,
+                addr: 1,
+                len: 0
+            })
+        );
+        assert_eq!(decode(34, [2, 0x1000, 4097, 0, 0, 0]), Err(Error::TooLarge));
         assert_eq!(decode(32, [2, 0, 0, 0, 0, 0]), Err(Error::BadAddress));
         // key_read: a 32-byte user buffer.
         assert_eq!(decode(31, [2, 0, 0, 0, 0, 0]), Err(Error::BadAddress));

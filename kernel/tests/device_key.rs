@@ -105,14 +105,16 @@ fn run(t: &mut TestRun) {
         })
         .collect();
     t.check(
-        "init gets the AuditAnchor key (READ | GRANT) and the SlotRecord key (READ), last",
+        "init gets the AuditAnchor key (READ | GRANT), the SlotRecord key (READ), \
+         then the secrets file (READ | GRANT, D-035), last",
         keys == [
             (Purpose::AuditAnchor, READ | GRANT),
             (Purpose::SlotRecord, READ),
         ] && matches!(
-            caps[caps.len() - 2].object(),
+            caps[caps.len() - 3].object(),
             Object::Key(Purpose::AuditAnchor)
-        ),
+        ) && matches!(caps[caps.len() - 1].object(), Object::Secrets)
+            && caps[caps.len() - 1].rights() == READ | GRANT,
     );
 
     let caps = vec![

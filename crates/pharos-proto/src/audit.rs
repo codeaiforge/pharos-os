@@ -73,6 +73,8 @@ pub mod client {
     pub const RUNTIME: u8 = 3;
     /// The TLS service (#271, tls.md).
     pub const TLS: u8 = 4;
+    /// The vault (#281, gateway.md).
+    pub const VAULT: u8 = 5;
 }
 
 /// What kind of record.
@@ -136,7 +138,11 @@ pub mod action {
     /// (the status and reason), and an event on close (bytes each way);
     /// never content.
     pub const TLS: u8 = 24;
-    pub const LAST: u8 = TLS;
+    /// A secret released to the gateway, or refused (#281, gateway.md),
+    /// from the vault: the route's and the secret's names as detail; never
+    /// the value.
+    pub const VAULT: u8 = 25;
+    pub const LAST: u8 = VAULT;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -165,6 +171,7 @@ pub mod action {
             "device",
             "rotate",
             "tls",
+            "vault",
         ]
         .get(usize::from(code))
         .copied()

@@ -93,6 +93,9 @@ pub enum Ep {
     /// The TLS service's (M6.1, tls.md): a client's badge is its client
     /// number, 1 to 8.
     Tls,
+    /// The vault's (M6.2, gateway.md): its only client, the gateway, has
+    /// badge 1.
+    Vault,
 }
 
 impl Ep {
@@ -108,6 +111,7 @@ impl Ep {
             Self::Audit => "audit",
             Self::Knowledge => "knowledge",
             Self::Tls => "tls",
+            Self::Vault => "vault",
         })
     }
 }
@@ -129,7 +133,41 @@ pub enum Object {
     /// The `AuditAnchor` key, derived from the device secret (D-047,
     /// release-integrity.md): `READ` only, and only for the `audit` entry.
     AuditAnchor,
+    /// The host's secrets file (D-035, gateway.md): `READ` only, and only
+    /// for the `vault` entry.
+    Secrets,
 }
+
+/// A route (D-035, gateway.md): the one request shape the gateway sends to
+/// a destination, and the secret it carries. Compiled into each table
+/// ([`routes`]); the vault and the gateway both read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Route {
+    /// What agents' grants and the audit trail name: as an agent's name.
+    pub name: &'static str,
+    /// An index into the gateway's TLS destinations.
+    pub dest: u8,
+    pub method: &'static str,
+    /// Literal segments and `*`, one segment each.
+    pub path: &'static str,
+    /// Whether a query may follow the path.
+    pub query: bool,
+    /// The secret's name in the host's file, if the route carries one.
+    pub secret: Option<&'static str>,
+    /// Where the secret goes: one header's name, and a fixed prefix.
+    pub header: (&'static str, &'static str),
+    /// Fixed headers, at most [`MAX_ROUTE_HEADERS`].
+    pub headers: &'static [(&'static str, &'static str)],
+    pub max_body: u32,
+    pub max_answer: u32,
+    /// The gateway's clients that may use it.
+    pub clients: &'static [u8],
+}
+
+/// Most fixed headers on a route.
+pub const MAX_ROUTE_HEADERS: usize = 4;
+/// Most routes in a table (a route is a byte in `vault` and `gateway`).
+pub const MAX_ROUTES: usize = 32;
 
 impl Service {
     /// The PCI ID this entry drives, if it is a driver entry
@@ -277,7 +315,8 @@ pub enum Broken {
     /// Rights that do not fit the object: device rights only on devices,
     /// `READ` only on the root, `WRITE` only on the console.
     Rights,
-    /// The `AuditAnchor` key given to an entry other than `audit`.
+    /// The `AuditAnchor` key given to an entry other than `audit`, or the
+    /// secrets file to one other than `vault`.
     Key,
     /// A device given twice.
     SameDevice,
@@ -288,6 +327,55 @@ pub enum Broken {
     /// protected, is in another entry's `after`, has more than one
     /// `Arrived`, or is in a table of 32 entries ([`SLOT_BIT`]).
     Driver,
+}
+
+/// A rule a table's routes break (gateway.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrokenRoute {
+    /// More than [`MAX_ROUTES`] routes, or more than [`MAX_ROUTE_HEADERS`]
+    /// fixed headers on one.
+    TooMany,
+    /// A name that is not 1 to 32 bytes of `a`-`z`, `0`-`9`, `-`, `_`,
+    /// or one given twice.
+    Name,
+    /// A secret's name the secrets file could not hold, a secret without
+    /// a header to carry it, or a header without a secret.
+    Secret,
+}
+
+/// Whether `name` is a route's or a secret's name: 1 to 32 bytes of
+/// `a`-`z`, `0`-`9`, `-`, `_` (`pharos_proto::vault::valid_name`).
+pub fn valid_route_name(name: &str) -> bool {
+    (1..=32).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// Checks the rules the vault relies on for `routes`; the first broken
+/// one, with its route. The gateway's (methods, paths, headers) come with
+/// the gateway (#282).
+pub fn check_routes(routes: &[Route]) -> Result<(), (usize, BrokenRoute)> {
+    if routes.len() > MAX_ROUTES {
+        return Err((MAX_ROUTES, BrokenRoute::TooMany));
+    }
+    for (i, r) in routes.iter().enumerate() {
+        let fail = |b| Err((i, b));
+        if r.headers.len() > MAX_ROUTE_HEADERS {
+            return fail(BrokenRoute::TooMany);
+        }
+        if !valid_route_name(r.name) || routes[..i].iter().any(|o| o.name == r.name) {
+            return fail(BrokenRoute::Name);
+        }
+        let carried = match r.secret {
+            Some(s) => valid_route_name(s) && !r.header.0.is_empty(),
+            None => r.header == ("", ""),
+        };
+        if !carried {
+            return fail(BrokenRoute::Secret);
+        }
+    }
+    Ok(())
 }
 
 /// Checks every rule on `table`; the first broken one, with its entry.
@@ -328,9 +416,12 @@ pub fn check(table: &[Service]) -> Result<(), (usize, Broken)> {
                 Object::Root => g.rights == READ,
                 Object::Device(..) | Object::Arrived(_) => g.rights == DEVICE,
                 Object::Endpoint(_) => g.rights & !(SEND | RECEIVE | GRANT) == 0 && g.rights != 0,
-                Object::AuditAnchor => g.rights == READ,
+                Object::AuditAnchor | Object::Secrets => g.rights == READ,
             };
             if g.object == Object::AuditAnchor && s.name != "audit" {
+                return fail(Broken::Key);
+            }
+            if g.object == Object::Secrets && s.name != "vault" {
                 return fail(Broken::Key);
             }
             if !fits {
@@ -364,7 +455,7 @@ pub fn check(table: &[Service]) -> Result<(), (usize, Broken)> {
             let fail = |r| Err((j, r));
             match a.object {
                 Object::Device(..) | Object::Arrived(_) => return fail(Broken::SameDevice),
-                Object::AuditAnchor => return fail(Broken::Key),
+                Object::AuditAnchor | Object::Secrets => return fail(Broken::Key),
                 Object::Endpoint(_) if a.rights & b.rights & RECEIVE != 0 => {
                     return fail(Broken::Receiver);
                 }
@@ -397,9 +488,71 @@ mod tests {
             ("soak", SOAK),
             ("tls", TLS),
             ("tls_norandom", TLS_NORANDOM),
+            ("secrets", SECRETS),
         ] {
             assert_eq!(check(table), Ok(()), "{name}");
         }
+    }
+
+    #[test]
+    fn every_tables_routes_keep_the_rules() {
+        for arg in 0..=10 {
+            assert_eq!(check_routes(routes(arg)), Ok(()), "table {arg}");
+        }
+        assert_eq!(routes(10).len(), 3);
+    }
+
+    #[test]
+    fn routes_breaking_each_rule_are_refused() {
+        let good = routes(10)[0];
+        let with = |f: fn(&mut Route)| {
+            let mut r = good;
+            f(&mut r);
+            r
+        };
+        let cases: [(Route, BrokenRoute); 6] = [
+            (with(|r| r.name = ""), BrokenRoute::Name),
+            (with(|r| r.name = "Upper"), BrokenRoute::Name),
+            (with(|r| r.secret = Some("a.b")), BrokenRoute::Secret),
+            (with(|r| r.header = ("", "Bearer ")), BrokenRoute::Secret),
+            (with(|r| r.secret = None), BrokenRoute::Secret),
+            (
+                with(|r| r.headers = &[("a", "1"), ("b", "2"), ("c", "3"), ("d", "4"), ("e", "5")]),
+                BrokenRoute::TooMany,
+            ),
+        ];
+        for (route, broken) in cases {
+            assert_eq!(check_routes(&[route]), Err((0, broken)), "{route:?}");
+        }
+        assert_eq!(check_routes(&[good, good]), Err((1, BrokenRoute::Name)));
+        assert_eq!(
+            check_routes(&[good; MAX_ROUTES + 1]),
+            Err((MAX_ROUTES, BrokenRoute::TooMany))
+        );
+    }
+
+    #[test]
+    fn the_secrets_file_goes_only_to_the_vault() {
+        const OTHER: [Give; 2] = [CONSOLE, give(Object::Secrets, READ, Badge::None)];
+        let mut caps = std::vec::Vec::from(SECRETS[2].caps);
+        let mut t = std::vec::Vec::from(SECRETS);
+        let other = Service {
+            name: "other",
+            caps: &OTHER,
+            kind: Kind::OneShot,
+            after: &[],
+            ..SECRETS[3]
+        };
+        t.push(other);
+        assert_eq!(check(&t), Err((4, Broken::Key)));
+        caps[3] = give(Object::Secrets, READ | GRANT, Badge::None);
+        let leaked: &'static [Give] = std::vec::Vec::leak(caps);
+        let t = [Service {
+            caps: leaked,
+            after: &[],
+            ..SECRETS[2]
+        }];
+        assert_eq!(check(&t[..]), Err((0, Broken::Rights)));
     }
 
     /// Only the runtime's entry is the runtime, in every table.
@@ -414,7 +567,7 @@ mod tests {
         assert_eq!(runtimes(BOOT), ["agents"]);
         assert_eq!(runtimes(COMPROMISED), ["agents"]);
         assert_eq!(runtimes(SOAK), ["agents"]);
-        for t in [TEST, NETWORK, SUPERVISE, HEALTH, TLS, TLS_NORANDOM] {
+        for t in [TEST, NETWORK, SUPERVISE, HEALTH, TLS, TLS_NORANDOM, SECRETS] {
             assert!(runtimes(t).is_empty());
         }
     }

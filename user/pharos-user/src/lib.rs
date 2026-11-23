@@ -109,6 +109,7 @@ pub mod number {
     pub const KEY_READ: u64 = 31;
     pub const KEY_MEASUREMENT: u64 = 32;
     pub const CLOCK_REAL: u64 = 33;
+    pub const SECRETS_READ: u64 = 34;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -726,6 +727,17 @@ pub fn key_read(key: Handle) -> Result<[u8; 32], Error> {
     let mut out = [0u8; 32];
     call(number::KEY_READ, [key, out.as_mut_ptr() as u64, 0, 0, 0, 0])?;
     Ok(out)
+}
+
+/// Copies the host's secrets file into `buf` through a `Secrets`
+/// capability (`READ`, D-035): as much as fits; returns the file's whole
+/// size, so an empty `buf` asks only the size. At most 4 KiB.
+pub fn secrets_read(secrets: Handle, buf: &mut [u8]) -> Result<usize, Error> {
+    let n = call(
+        number::SECRETS_READ,
+        [secrets, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0, 0],
+    )?;
+    Ok(n as usize)
 }
 
 /// The boot measurement (D-047): SHA-256 over the kernel's file and each

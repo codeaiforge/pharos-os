@@ -1,12 +1,13 @@
 //! The tables: argument 0 boot, 1 the `services` test kernel, 2 the
 //! `network` test kernel, 3 the `supervision` test kernel, 4 the
 //! `health` test kernel, 5 `aifail`, 6 `compromised`, 7 `soak`, 8 `tls`,
-//! 9 `tls_norandom` ([`table`]).
+//! 9 `tls_norandom`, 10 `secrets` ([`table`]); each table's routes
+//! ([`routes`]).
 
 use crate::rights::{GRANT, READ, RECEIVE, SEND};
 use crate::{
-    Badge, CONSOLE, Dest, Ep, Gain, Give, Kind, Object, REPORT, ROOT, Restart, Service, arrived,
-    device, give, receive, send,
+    Badge, CONSOLE, Dest, Ep, Gain, Give, Kind, Object, REPORT, ROOT, Restart, Route, Service,
+    arrived, device, give, receive, send,
 };
 
 pub const VIRTIO_BLK: u32 = 0x1042_1af4;
@@ -61,6 +62,16 @@ pub fn table(arg: u64) -> &'static [Service] {
         7 => SOAK,
         8 => TLS,
         9 => TLS_NORANDOM,
+        10 => SECRETS,
+        _ => &[],
+    }
+}
+
+/// The routes of the table `init` runs for its argument (D-035): the
+/// vault's and the gateway's, which get the table's number as theirs.
+pub fn routes(arg: u64) -> &'static [Route] {
+    match arg {
+        10 => &SECRETS_ROUTES,
         _ => &[],
     }
 }
@@ -756,6 +767,112 @@ pub const SUPERVISE: &[Service] = &[
         tls: &[],
         after: &[0],
         limit: 2048,
+        gains: &[],
+    },
+];
+
+/// The vault's audit client (`pharos_proto::audit::client::VAULT`).
+pub const AUDIT_VAULT: u32 = 5;
+/// The vault's handles (gateway.md): console, its endpoint, the report
+/// endpoint, the secrets file, and the audit service as client 5.
+const VAULT_CAPS: [Give; 5] = [
+    CONSOLE,
+    receive(Ep::Vault),
+    REPORT,
+    give(Object::Secrets, READ, Badge::None),
+    send(Ep::Audit, AUDIT_VAULT),
+];
+
+/// The vault for table `arg`, after the audit service at `audit`.
+const fn vault(arg: u64, audit: &'static [usize]) -> Service {
+    Service {
+        name: "vault",
+        path: b"bin/vault",
+        arg,
+        kind: Kind::Daemon,
+        restart: Restart::Up(3),
+        caps: &VAULT_CAPS,
+        net: &[],
+        tcp: &[],
+        tls: &[],
+        after: audit,
+        // 16 secrets of at most 1 KiB and its 4 KiB file: 64 KiB.
+        limit: 16,
+        gains: &[],
+    }
+}
+
+/// The secret the `secrets` kernel's host file holds (`cargo xtask`
+/// writes it); no other table names it.
+pub const TEST_SECRET_NAME: &str = "test-token";
+/// Its value: a test value, not a credential. The runner checks it never
+/// reaches the console or the audit trail.
+pub const TEST_SECRET_VALUE: &str = "pharos-test-secret-7Hq2vN";
+
+/// The `secrets` kernel's routes (#281): one whose secret the file holds,
+/// one whose secret it lacks, and one with none.
+const SECRETS_ROUTES: [Route; 3] = [
+    Route {
+        name: "with-secret",
+        dest: 0,
+        method: "GET",
+        path: "/items",
+        query: false,
+        secret: Some(TEST_SECRET_NAME),
+        header: ("Authorization", "Bearer "),
+        headers: &[],
+        max_body: 0,
+        max_answer: 4096,
+        clients: &[1],
+    },
+    Route {
+        name: "missing",
+        dest: 0,
+        method: "GET",
+        path: "/items",
+        query: false,
+        secret: Some("absent"),
+        header: ("x-api-key", ""),
+        headers: &[],
+        max_body: 0,
+        max_answer: 4096,
+        clients: &[1],
+    },
+    Route {
+        name: "open",
+        dest: 0,
+        method: "GET",
+        path: "/public",
+        query: false,
+        secret: None,
+        header: ("", ""),
+        headers: &[],
+        max_body: 0,
+        max_answer: 4096,
+        clients: &[1],
+    },
+];
+
+/// The `secrets` kernel (#281): the store and audit service, the vault,
+/// and `vaulter`, which holds the gateway's capability (badge 1) and a
+/// second one with badge 2, which the vault must refuse.
+pub const SECRETS: &[Service] = &[
+    STORE,
+    audit(0),
+    vault(10, &[1]),
+    Service {
+        name: "vaulter",
+        path: b"bin/netclient",
+        arg: 8,
+        kind: Kind::OneShot,
+        restart: Restart::Never,
+        caps: &[CONSOLE, send(Ep::Vault, 1), send(Ep::Vault, 2)],
+        net: &[],
+        tcp: &[],
+        tls: &[],
+        after: &[2],
+        // Its 4 KiB buffer at the vault.
+        limit: 4,
         gains: &[],
     },
 ];

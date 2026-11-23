@@ -915,7 +915,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 34] = [
+const USER_PROGRAMS: [&str; 35] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -950,6 +950,7 @@ const USER_PROGRAMS: [&str; 34] = [
     "rogue",
     "dmaprobe",
     "tls",
+    "vault",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -3110,6 +3111,12 @@ const AUDIT_TEST: &str = "audit";
 const TLS_TEST: &str = "tls";
 /// The `tls` kernel's store: the audit trail of a few connections.
 const TLS_BLOCKS: u64 = 64;
+/// The vault and the host's secrets file (#281, gateway.md): a file with
+/// the test secret through `fw_cfg`, and a fresh store for the trail.
+const SECRETS_TEST: &str = "secrets";
+/// The `fw_cfg` file with the vault's secrets (D-035; must match
+/// `pharos_kernel::key::SECRETS_FW_CFG_NAME`).
+const SECRETS_NAME: &str = "opt/org.pharos/secrets";
 const AUDIT_BLOCKS: u64 = 16;
 /// The knowledge service's test kernel (#143) and its fresh store.
 const KNOWLEDGE_TEST: &str = "knowledge";
@@ -3608,6 +3615,41 @@ fn tls_audit(image: &Path) -> Result<()> {
     }
     println!("  audit trail: {} records; the TLS ones:", lines.len());
     for l in lines.iter().filter(|l| l.contains(" tls ")) {
+        println!("    {l}");
+    }
+    Ok(())
+}
+
+/// After the `secrets` kernel (#281): the vault recorded each release and
+/// refusal by name, and the test secret's value is in neither the trail
+/// nor the console.
+fn secrets_audit(image: &Path, log: &str) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    let value = pharos_services::TEST_SECRET_VALUE;
+    if lines.iter().any(|l| l.contains(value)) || log.contains(value) {
+        return Err("the test secret's value reached the audit trail or the console".into());
+    }
+    let ours: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains(" client 5 Event vault "))
+        .collect();
+    for want in [
+        "vault outcome 1 release with-secret secret test-token",
+        "vault outcome 2 release with-secret secret test-token status 6",
+        "vault outcome 2 release missing secret absent status 40",
+        "vault outcome 2 release open status 40",
+        "vault outcome 2 release 9 status 7",
+        "vault outcome 2 release with-secret secret test-token status 3",
+    ] {
+        if !ours.iter().any(|l| l.ends_with(want)) {
+            return Err(format!("the audit trail has no record like {want:?}"));
+        }
+    }
+    println!("  audit trail: {} records; the vault's:", lines.len());
+    for l in lines.iter().filter(|l| l.contains(" vault ")) {
         println!("    {l}");
     }
     Ok(())
@@ -4561,8 +4603,20 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     } else {
         None
     };
-    if name == TLS_TEST {
+    if name == TLS_TEST || name == SECRETS_TEST {
         store_image::fresh(&out.join(STORE_IMAGE), TLS_BLOCKS)?;
+    }
+    if name == SECRETS_TEST {
+        let file = out.join("secrets");
+        let text = format!(
+            "{} {}\n",
+            pharos_services::TEST_SECRET_NAME,
+            pharos_services::TEST_SECRET_VALUE
+        );
+        fs::write(&file, text).map_err(io_err("cannot write", &file))?;
+        let mut arg = OsString::from(format!("name={SECRETS_NAME},file="));
+        arg.push(&file);
+        extra.extend(["-fw_cfg".into(), arg]);
     }
     if name == LARGE_FILE_TEST {
         let model = env::var_os(MODEL_ENV).map(PathBuf::from);
@@ -4774,6 +4828,8 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
             budgets_audit(&out.join(STORE_IMAGE))
         } else if name == TLS_TEST && run.status == Some(33) {
             tls_audit(&out.join(STORE_IMAGE))
+        } else if name == SECRETS_TEST && run.status == Some(33) {
+            secrets_audit(&out.join(STORE_IMAGE), &clean_log(&run.log))
         } else if let Some(want) = s1_want.as_deref().filter(|_| run.status == Some(33)) {
             s1_checks(&out.join(STORE_IMAGE), &clean_log(&run.log), want)
         } else {

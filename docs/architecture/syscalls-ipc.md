@@ -157,6 +157,7 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 31 | `key_read` (M5.5, D-047, #255, [release-integrity.md](release-integrity.md)) | `Key` handle, address of a 32-byte buffer | 0; the buffer holds the key derived from the device secret for the capability's purpose, never the secret; `NOT_FOUND` if the kernel has no secret | key, `READ` |
 | 32 | `key_measurement` (M5.5, D-047, #256) | any `Key` handle, address of a 32-byte buffer | 0; the buffer holds the boot measurement (`pharos_crypto::measurement` over the kernel's file and each module); `NOT_FOUND` if the boot was not measured | key, `READ` |
 | 33 | `clock_real` (M6.1, D-034, #271, [tls.md](tls.md#time)) | — | the wall-clock time in Unix seconds: the firmware's date at boot (Limine's date request) plus uptime; `NOT_FOUND` if the boot gave no date at or after the build's `SOURCE_DATE_EPOCH` | none |
+| 34 | `secrets_read` (M6.2, D-035, #281, [gateway.md](gateway.md#the-secrets-file)) | `Secrets` handle, buffer address, length (0 to 4 KiB; 0 asks only the size, with no buffer) | the secrets file's size; as much of it as fits is copied to the buffer; 0 without a file. Only `init` gets the capability, for the vault | secrets, `READ` |
 
 Error codes (`rax`):
 

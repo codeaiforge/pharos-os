@@ -212,6 +212,7 @@ struct Init {
     audit: Handle,
     knowledge: Handle,
     tls: Handle,
+    vault: Handle,
     devices: [(Handle, u32); 8],
     device_count: usize,
     state: [State; MAX_SERVICES],
@@ -266,6 +267,9 @@ struct Init {
     anchor: Option<Handle>,
     /// The `SlotRecord` key, the slot record's MAC key (#257).
     slot_key: Option<[u8; 32]>,
+    /// The host's secrets file, for the vault (D-035, #281): found by
+    /// asking its size only; `init` never reads it.
+    secrets: Option<Handle>,
     /// The configuration of the image that runs (M4.5); compiled values
     /// in safe mode and recovery. `config_from`: that image, as `SYSTEM`
     /// numbers it, or `COMPILED`.
@@ -304,10 +308,12 @@ impl Init {
                 Ep::Audit => self.audit,
                 Ep::Knowledge => self.knowledge,
                 Ep::Tls => self.tls,
+                Ep::Vault => self.vault,
             },
             // Per entry, in `grant`.
             Object::Arrived(_) => return None,
             Object::AuditAnchor => self.anchor?,
+            Object::Secrets => self.secrets?,
             Object::Device(id, nth) => {
                 (self.devices[..self.device_count].iter())
                     .filter(|d| d.1 == id)
@@ -2226,7 +2232,7 @@ fn mode_word(mode: Mode) -> &'static [u8] {
 fn main(arg: u64) -> u64 {
     let (table_number, kernel_mode, copy) = pharos_programs::system::split_arg(arg);
     let table = pharos_services::table(table_number);
-    let mut handles = [0; 10];
+    let mut handles = [0; 11];
     for h in handles.iter_mut() {
         match endpoint_create() {
             Ok(e) => *h = e,
@@ -2247,6 +2253,7 @@ fn main(arg: u64) -> u64 {
         audit,
         knowledge,
         tls,
+        vault,
     ] = handles;
     let (devices, device_count) = devices();
     let mut init = Init {
@@ -2261,6 +2268,7 @@ fn main(arg: u64) -> u64 {
         audit,
         knowledge,
         tls,
+        vault,
         devices,
         device_count,
         state: [State::Pending; MAX_SERVICES],
@@ -2288,6 +2296,7 @@ fn main(arg: u64) -> u64 {
         hotplug: None,
         anchor: None,
         slot_key: None,
+        secrets: None,
         config: Config::COMPILED,
         config_from: listing::COMPILED,
         started: [0; MAX_SERVICES],
@@ -2305,7 +2314,13 @@ fn main(arg: u64) -> u64 {
     // the handles after the devices that `key_read` accepts.
     let mut keys = (hotplug..hotplug + 3).filter_map(|h| Some((h, pharos_user::key_read(h).ok()?)));
     init.anchor = keys.next().map(|(h, _)| h);
-    init.slot_key = keys.next().map(|(_, k)| k);
+    let slot = keys.next();
+    init.slot_key = slot.map(|(_, k)| k);
+    // The secrets file follows the keys (D-035); an empty buffer asks
+    // only its size, so `init` never holds the secrets.
+    init.secrets = slot
+        .map(|(h, _)| h + 1)
+        .filter(|&h| pharos_user::secrets_read(h, &mut []).is_ok());
     // Only the boot table boots from an image; the test tables run from
     // the root filesystem.
     if table_number == 0 {

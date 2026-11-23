@@ -277,6 +277,12 @@ extern "C" fn kernel_main() -> ! {
         Ok(()) => kprintln!("  key:        device key read"),
         Err(error) => fail(format_args!("{error}")),
     }
+    // The vault's secrets (D-035): optional; the kernel never parses them.
+    match pharos_kernel::key::secrets_init() {
+        Ok(0) => kprintln!("  secrets:    none"),
+        Ok(n) => kprintln!("  secrets:    {n} bytes"),
+        Err(n) => kprintln!("  secrets:    {n} bytes is over 4 KiB; ignored"),
+    }
     // D-049: a boot check (the host passes this `fw_cfg` file) ends after
     // `boot ok`; otherwise the system runs until the VM is stopped. Read
     // now: the `fw_cfg` selector is shared, and no other task runs yet.

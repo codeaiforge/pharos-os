@@ -331,6 +331,10 @@ name = "tls_norandom"
 harness = false
 
 [[test]]
+name = "secrets"
+harness = false
+
+[[test]]
 name = "vector_state"
 harness = false
 
