@@ -141,7 +141,7 @@ Design: [tls.md](../architecture/tls.md) (accepted 2026-11-21, #269; D-034). TCP
 
 ### Credential vault and egress gateway (M6.2)
 
-Design: [gateway.md](../architecture/gateway.md) (proposed 2026-11-23, #280; D-035). Every row is **planned**.
+Design: [gateway.md](../architecture/gateway.md) (accepted 2026-11-23, #280; D-035). Every row is **planned**.
 
 | Threat | Mitigation |
 | --- | --- |

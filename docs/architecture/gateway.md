@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-- **Design:** **Proposed** (2026-11-23, #280), awaiting the maintainer's review, with four open questions (section 7). It follows [D-035](../project/decision-log.md#d-035-credential-vault-and-egress-gateway) (accepted 2026-11-23) and builds on the [TLS service](tls.md).
+- **Design:** **Accepted**: approved by the maintainer on 2026-11-23 (#280), with each open question decided as recommended (section 7). It follows [D-035](../project/decision-log.md#d-035-credential-vault-and-egress-gateway) (accepted 2026-11-23) and builds on the [TLS service](tls.md).
 - **Implementation:** **planned**: the vault (#281), the gateway (#282), the fuzz tests (#283), and the `vault` test kernel (#284). Nothing below is implemented yet.
 
 ## 2. Context
@@ -247,6 +247,8 @@ That is six or seven records a request, which fills the trail faster than UDP do
 2. **The test server:** Python's standard `http.server` and `ssl` (recommended: no new dependency, Python already runs in `scripts/check.sh` and CI), or a Rust server in `xtask` on rustls with its default provider (C and assembly in a host tool)?
 3. **The release image's roots:** still none (recommended until a release table has a real route), or a small curated set now?
 4. **Asking the user:** grants only in M6.2, with no confirmation per request (recommended: M6.4 adds approval of the exact payload), or an `ask_https` list confirmed on the trusted console as `send` is?
+
+**Decided (2026-11-23, #280):** 1. only the runtime operation `REQUEST` in M6.2, no model tool; 2. Python's standard `http.server` and `ssl` for the test server; 3. no roots in the release image; 4. grants only, no confirmation per request.
 
 ## Implementation issues
 

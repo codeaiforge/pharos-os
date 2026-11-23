@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Changed
 
+- The vault and gateway design accepted (#280, M6.2, [gateway.md](docs/architecture/gateway.md)), each open question as recommended: only the runtime's `REQUEST` in M6.2, a Python test server, no release roots, grants without confirmation per request
 - D-035 accepted (#279, M6.2): secrets delivered by the host at each boot through `fw_cfg` and held by a vault process, nothing on Pharos's disk; an egress gateway with compiled routes and its own HTTP/1.1 code, secrets stripped from answers; RSA and P-384 verification for public certificate chains, measured on a `no_std` probe
 - M6.1 gate (#274): `tls` and `tls_norandom` and the fuzz tests in CI (run 45131592671); the throwaway branch without the name check failed CI (run 45131765126); the [security review](docs/security/review-m6.1-tls.md) of TCP, TLS, and certificate validation, with no Critical finding and its High findings fixed, signed off by the maintainer; roadmap: M6.1 done, M6.2 current; README and `pharos info`: M6.2 stage
 - The `network`, `services`, and `health` test kernels start `init` with its boot page budget, as the others do, so it can give the network service its limit (#270)
