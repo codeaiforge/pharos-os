@@ -167,7 +167,7 @@ flowchart LR
 2. **Randomness:** the virtio-rng driver inside the TLS service (recommended for M6.1; moved to its own service when the vault needs it in M6.2), or a separate `rng` service now?
 3. **The release image's roots:** ship none in M6.1 (recommended: no real endpoint is reachable before M6.2 anyway), or a small set now?
 
-**Decided (2026-11-21, #269):** 1. the `clock_real` system call; 2. the virtio-rng driver in the TLS service, moved to its own service when the vault needs it (M6.2); 3. no roots in the release image in M6.1.
+**Decided (2026-11-21, #269):** 1. the `clock_real` system call; 2. the virtio-rng driver in the TLS service (D-035 later gave the vault no need for randomness: its secrets come from the host, so the driver stays here); 3. no roots in the release image in M6.1.
 
 ## Implementation issues
 

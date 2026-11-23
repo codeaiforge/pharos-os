@@ -1290,9 +1290,9 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-035: Credential vault and egress gateway
 
-- **Status:** Proposed (2026-11-23, #279)
+- **Status:** Accepted (#279)
 - **Needed by:** M6.2
-- **Date accepted:**
+- **Date accepted:** 2026-11-23
 
 **Context.** Agents must never hold credentials, yet their allowed actions need them. Secrets must be injected at the boundary into requests an allow-list permits. What exists at M6.1 (checked 2026-11-23):
 - The kernel reads `fw_cfg` files from the host at boot: the device key (D-047) and the boot check (D-049). It derives keys from the device key with HKDF-SHA256 and gives a process only derived keys.
@@ -1318,7 +1318,7 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 **Evaluation criteria.** No path from a secret to an agent or model input; rotation without a rebuild; every use and refusal audited without the secret; trusted-base size.
 
-**Decision.** Proposed:
+**Decision.** Accepted by the maintainer on 2026-11-23, as proposed:
 
 1. **Secrets come from the host at each boot** (b): one `fw_cfg` file, `opt/org.pharos/secrets`, of at most 16 named secrets and 4 KiB. The kernel reads it at boot as it reads the device key, keeps it for one process, and gives it only to the process `init` names, once; the vault parses it. Nothing is written to Pharos's disk. Rotation: replace the host's file and restart the machine. No secret, no request: a route whose secret is missing is refused.
 2. **A vault process** (e) holds the secrets in memory and answers only the gateway. It releases the one secret a route names for each request the gateway has already checked, and records each release and refusal by the route's and the secret's names, never the value.
