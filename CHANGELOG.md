@@ -36,6 +36,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- The M5.4 review report's status line and its list of lows said they awaited the maintainer's verdict, which was given on 2026-11-14; both now say so
 - The M6.1 security review's findings (#274, [review-m6.1-tls.md](docs/security/review-m6.1-tls.md)): the TLS service checks the count in each `TCP_POLL` reply, so a compromised network service can no longer crash it or feed it another connection's bytes (F1); a refused TCP connection ends on `TCP_CLOSE` or after 10 s, so it can no longer leak a slot at the network service (F2); the TLS service closes a connection idle for 60 s, and `TCP_POLL` counts as activity only when data moves (F3); a `CLOSE` during a handshake records the outcome `closed` and answers `OPEN` `CLOSED` (F4); a success outcome that cannot be stored ends the connection (F5). New steps in the `network` and `tls` kernels for F2 and F4, each failing without its fix; the `tls` kernel's host side adds a listener that never answers on `127.0.0.1:47447`. Filed: #275–#278
 - `cargo xtask bench-ipc` and `bench-infer` found no test kernel since Rust 1.100 (#261, found at the v0.5 gate): Cargo now puts test executables in `build/<package>/<hash>/out/`, not `deps/`; they are now found by file name in either
 
