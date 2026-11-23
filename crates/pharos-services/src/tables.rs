@@ -1,7 +1,7 @@
 //! The tables: argument 0 boot, 1 the `services` test kernel, 2 the
 //! `network` test kernel, 3 the `supervision` test kernel, 4 the
 //! `health` test kernel, 5 `aifail`, 6 `compromised`, 7 `soak`, 8 `tls`,
-//! 9 `tls_norandom`, 10 `secrets` ([`table`]); each table's routes
+//! 9 `tls_norandom`, 10 `secrets`, 11 `vault` ([`table`]); each table's routes
 //! ([`routes`]).
 
 use crate::rights::{GRANT, READ, RECEIVE, SEND};
@@ -63,6 +63,7 @@ pub fn table(arg: u64) -> &'static [Service] {
         8 => TLS,
         9 => TLS_NORANDOM,
         10 => SECRETS,
+        11 => VAULT,
         _ => &[],
     }
 }
@@ -72,6 +73,7 @@ pub fn table(arg: u64) -> &'static [Service] {
 pub fn routes(arg: u64) -> &'static [Route] {
     match arg {
         10 => &SECRETS_ROUTES,
+        11 => &VAULT_ROUTES,
         _ => &[],
     }
 }
@@ -876,3 +878,143 @@ pub const SECRETS: &[Service] = &[
         gains: &[],
     },
 ];
+
+/// The gateway's audit client (`pharos_proto::audit::client::GATEWAY`).
+pub const AUDIT_GATEWAY: u32 = 6;
+/// The `vault` kernel's HTTPS test server (#284, run by `cargo xtask`):
+/// Python's `http.server` with the `tls` kernel's good certificate.
+pub const VAULT_SERVER: Dest = ([10, 0, 2, 2], 47_450);
+
+/// A route of the `vault` kernel carrying the test secret as a bearer
+/// token.
+const fn bearer(name: &'static str, method: &'static str, path: &'static str) -> Route {
+    Route {
+        name,
+        dest: 0,
+        method,
+        path,
+        query: false,
+        secret: Some(TEST_SECRET_NAME),
+        header: ("Authorization", "Bearer "),
+        headers: &[],
+        max_body: 0,
+        max_answer: 4096,
+        clients: &[1],
+    }
+}
+
+/// The `vault` kernel's routes (#284): `items` (the server checks the
+/// header), `echo` (the server sends the header back), `post`, `missing`
+/// (a secret the file lacks), and `other`, which `fetcher` is not granted.
+const VAULT_ROUTES: [Route; 5] = [
+    bearer("items", "GET", "/items"),
+    bearer("echo", "GET", "/echo"),
+    Route {
+        max_body: 1024,
+        headers: &[("Content-Type", "application/json")],
+        ..bearer("post", "POST", "/items")
+    },
+    Route {
+        secret: Some("absent"),
+        header: ("x-api-key", ""),
+        ..bearer("missing", "GET", "/items")
+    },
+    bearer("other", "GET", "/items"),
+];
+
+/// The `vault` kernel (#284): the boot table's services up to `trust`, the
+/// TLS service, the vault, the gateway, the runtime on its `vault` policy
+/// table (3, `fetcher`) with the gateway as handle 12 (handles 9 to 11 are
+/// the console: no network, files, or knowledge), and `agentclient` 17.
+pub const VAULT: &[Service] = &vault_table(BOOT_ENTRIES);
+
+const VAULT_RUNTIME_CAPS: [Give; 12] = [
+    CONSOLE,
+    give(
+        Object::Endpoint(Ep::Agents),
+        RECEIVE | SEND | GRANT,
+        Badge::None,
+    ),
+    REPORT,
+    ROOT,
+    send(Ep::Infer, 1),
+    send(Ep::Trust, TRUST_RUNTIME_BADGE),
+    send(Ep::Store, AGENTS_TASKS),
+    send(Ep::Audit, AUDIT_RUNTIME),
+    CONSOLE,
+    CONSOLE,
+    CONSOLE,
+    send(Ep::Gateway, 1),
+];
+
+const GATEWAY_CAPS: [Give; 6] = [
+    CONSOLE,
+    receive(Ep::Gateway),
+    REPORT,
+    send(Ep::Vault, 1),
+    send(Ep::Tls, 1),
+    send(Ep::Audit, AUDIT_GATEWAY),
+];
+const GATEWAY_DESTS: [crate::TlsDest; 1] = [(VAULT_SERVER.0, VAULT_SERVER.1, TLS_TEST_NAME)];
+const FETCHCLIENT_CAPS: [Give; 2] = [CONSOLE, send(Ep::Agents, AGENTS_CONTROL)];
+
+const fn vault_table(boot: [Service; 9]) -> [Service; 12] {
+    let mut runtime = boot[AGENTS];
+    runtime.arg = 3;
+    runtime.caps = &VAULT_RUNTIME_CAPS;
+    runtime.after = &[2, 3, 6, 9];
+    [
+        boot[0],
+        boot[1],
+        boot[2],
+        boot[3],
+        boot[4],
+        boot[5],
+        boot[6],
+        Service {
+            name: "tls",
+            path: b"bin/tls",
+            arg: 0,
+            kind: Kind::Daemon,
+            restart: Restart::Up(3),
+            caps: &TLS_AUDITED_CAPS,
+            net: &[],
+            tcp: &[VAULT_SERVER],
+            tls: &[],
+            after: &[1, 4],
+            limit: TLS_LIMIT,
+            gains: &[],
+        },
+        vault(11, &[4]),
+        Service {
+            name: "gateway",
+            path: b"bin/gateway",
+            arg: 11,
+            kind: Kind::Daemon,
+            restart: Restart::Up(3),
+            caps: &GATEWAY_CAPS,
+            net: &[],
+            tcp: &[],
+            tls: &GATEWAY_DESTS,
+            after: &[7, 8],
+            // Its buffers and an answer in parsing (gateway.md): 512 KiB.
+            limit: 128,
+            gains: &[],
+        },
+        runtime,
+        Service {
+            name: "fetchclient",
+            path: b"bin/agentclient",
+            arg: 17,
+            kind: Kind::OneShot,
+            restart: Restart::Never,
+            caps: &FETCHCLIENT_CAPS,
+            net: &[],
+            tcp: &[],
+            tls: &[],
+            after: &[10],
+            limit: 64,
+            gains: &[],
+        },
+    ]
+}

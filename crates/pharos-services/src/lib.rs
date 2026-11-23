@@ -591,6 +591,7 @@ mod tests {
             ("tls", TLS),
             ("tls_norandom", TLS_NORANDOM),
             ("secrets", SECRETS),
+            ("vault", VAULT),
         ] {
             assert_eq!(check(table), Ok(()), "{name}");
         }
@@ -598,11 +599,13 @@ mod tests {
 
     #[test]
     fn every_tables_routes_keep_the_rules() {
-        for arg in 0..=10 {
+        for arg in 0..=11 {
             let dests = gateway_dests(table(arg));
             assert_eq!(check_routes(routes(arg), dests), Ok(()), "table {arg}");
         }
         assert_eq!(routes(10).len(), 3);
+        assert_eq!(routes(11).len(), 5);
+        assert_eq!(gateway_dests(VAULT), Some(1));
     }
 
     #[test]

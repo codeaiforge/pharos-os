@@ -27,6 +27,7 @@ mod secure_boot;
 mod sign;
 mod store_image;
 mod tls_server;
+mod vault_server;
 
 /// Pinned Limine release (D-001). To update the pin, follow
 /// "Updating the Limine pin" in docs/architecture/boot.md.
@@ -3166,6 +3167,10 @@ const TLS_BLOCKS: u64 = 64;
 /// The vault and the host's secrets file (#281, gateway.md): a file with
 /// the test secret through `fw_cfg`, and a fresh store for the trail.
 const SECRETS_TEST: &str = "secrets";
+/// The egress gateway end to end (#284, gateway.md): the boot services,
+/// the TLS service, the vault, the gateway, and an agent through the
+/// runtime, against `scripts/vault-test-server.py`.
+const VAULT_TEST: &str = "vault";
 /// The `fw_cfg` file with the vault's secrets (D-035; must match
 /// `pharos_kernel::key::SECRETS_FW_CFG_NAME`).
 const SECRETS_NAME: &str = "opt/org.pharos/secrets";
@@ -3702,6 +3707,74 @@ fn secrets_audit(image: &Path, log: &str) -> Result<()> {
     }
     println!("  audit trail: {} records; the vault's:", lines.len());
     for l in lines.iter().filter(|l| l.contains(" vault ")) {
+        println!("    {l}");
+    }
+    Ok(())
+}
+
+/// The `vault` kernel's checks after the boot (#284): the server saw the
+/// right header on each granted request; the secret's value is in neither
+/// the trail, the console, nor the server's log; and the trail has each
+/// request, release, and refusal.
+fn vault_audit(image: &Path, log: &str, server_log: &Path) -> Result<()> {
+    let value = pharos_services::TEST_SECRET_VALUE;
+    let seen = fs::read_to_string(server_log).map_err(io_err("cannot read", server_log))?;
+    for want in [
+        "GET /items auth=ok",
+        "GET /echo auth=ok",
+        "POST /items auth=ok",
+    ] {
+        if !seen.lines().any(|l| l == want) {
+            return Err(format!("the test server never logged {want:?}:\n{seen}"));
+        }
+    }
+    if seen.contains("auth=wrong") || seen.contains(value) {
+        return Err(format!("the test server saw a wrong header:\n{seen}"));
+    }
+    let streams = store_image::audit(image)?;
+    let lines: Vec<&String> = streams.iter().flat_map(|(_, l)| l).collect();
+    if lines.iter().any(|l| l.contains(value)) || log.contains(value) {
+        return Err("the test secret's value reached the audit trail or the console".into());
+    }
+    for want in [
+        // The runtime's records of the agent's requests, by route.
+        " client 3 Intent https fetcher task 1/1 https items gateway ",
+        " client 3 Event refuse fetcher task 1/1 https other ",
+        // The gateway's intents, refusals, and outcomes.
+        " client 6 Intent https ",
+        "gateway outcome 0 c1 items GET q0 b0 e3b0c44298fc1c14 /items",
+        "gateway outcome 0 c1 post POST q0 b7 ",
+        // The echoed header, stripped once.
+        "status 0 http 200 answer 18 stripped 1",
+        "c1 items status 1",
+        "c1 items status 5",
+        "status 0 http 200 answer 8 stripped 0",
+        "status 0 http 201 ",
+        "status 40 http 0 answer 0 stripped 0",
+        // The vault's releases, twice for each request (send, then strip).
+        "vault outcome 1 release items secret test-token",
+        "vault outcome 1 release echo secret test-token",
+        "vault outcome 2 release missing secret absent status 40",
+    ] {
+        if !lines.iter().any(|l| l.contains(want)) {
+            println!("  audit trail:");
+            for l in &lines {
+                println!("    {l}");
+            }
+            return Err(format!("the audit trail has no record like {want:?}"));
+        }
+    }
+    let releases = lines
+        .iter()
+        .filter(|l| l.contains("release items secret"))
+        .count();
+    if releases < 2 {
+        return Err(format!(
+            "expected two releases for items (send, strip), got {releases}"
+        ));
+    }
+    println!("  audit trail: {} records; the gateway's:", lines.len());
+    for l in lines.iter().filter(|l| l.contains(" client 6 ")) {
         println!("    {l}");
     }
     Ok(())
@@ -4613,6 +4686,20 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         || slotted
     {
         kernel_modules(paths, &programs)?
+    } else if name == VAULT_TEST {
+        // The boot image, with the test authority as its one root and
+        // `fetcher`'s manifest (#284).
+        let mut files = programs.clone();
+        files.push((
+            "system/tls/roots".into(),
+            tls_server::make(&out.join("tls"))?,
+        ));
+        files.extend(
+            (fs_image::TEST_MANIFESTS.iter())
+                .filter(|(path, _)| *path == "agents/fetcher.manifest")
+                .map(|(path, text)| (path.to_string(), text.as_bytes().to_vec())),
+        );
+        kernel_modules(paths, &files)?
     } else if name == TLS_TEST {
         // The test authority, made for this run, is the one pinned root.
         let roots = tls_server::make(&out.join("tls"))?;
@@ -4658,7 +4745,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     if name == TLS_TEST || name == SECRETS_TEST {
         store_image::fresh(&out.join(STORE_IMAGE), TLS_BLOCKS)?;
     }
-    if name == SECRETS_TEST {
+    if name == SECRETS_TEST || name == VAULT_TEST {
         let file = out.join("secrets");
         let text = format!(
             "{} {}\n",
@@ -4670,6 +4757,11 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         arg.push(&file);
         extra.extend(["-fw_cfg".into(), arg]);
     }
+    let _vault_server = if name == VAULT_TEST {
+        Some(vault_server::start(&out.join("tls"), &out.join("secrets"))?)
+    } else {
+        None
+    };
     if name == LARGE_FILE_TEST {
         let model = env::var_os(MODEL_ENV).map(PathBuf::from);
         store_image::model(&out.join(STORE_IMAGE), model.as_deref())?;
@@ -4882,6 +4974,12 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
             tls_audit(&out.join(STORE_IMAGE))
         } else if name == SECRETS_TEST && run.status == Some(33) {
             secrets_audit(&out.join(STORE_IMAGE), &clean_log(&run.log))
+        } else if name == VAULT_TEST && run.status == Some(33) {
+            vault_audit(
+                &out.join(STORE_IMAGE),
+                &clean_log(&run.log),
+                &out.join("tls").join("vault-server.log"),
+            )
         } else if let Some(want) = s1_want.as_deref().filter(|_| run.status == Some(33)) {
             s1_checks(&out.join(STORE_IMAGE), &clean_log(&run.log), want)
         } else {

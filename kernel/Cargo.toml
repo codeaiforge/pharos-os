@@ -335,6 +335,10 @@ name = "secrets"
 harness = false
 
 [[test]]
+name = "vault"
+harness = false
+
+[[test]]
 name = "vector_state"
 harness = false
 

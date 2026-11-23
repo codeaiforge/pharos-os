@@ -49,6 +49,8 @@
 //! - `keeper-d` (#108): started after the audit service died, so its grants
 //!   could not be recorded and it has none: reading its file is refused;
 //!   completes with `d ok`.
+//! - `https` (agent `fetcher`, the `vault` kernel, #284): see
+//!   [`Agent::https`].
 //! - `net-quiet` (agent `listener`, the `agents_net` kernel, #109): holds
 //!   the same grant as `net-talk` but never sends, and must receive nothing
 //!   while `net-talk` runs; completes with `quiet ok`.
@@ -165,6 +167,7 @@ use pharos_proto::agents::{
     self, Asked, Assigned, Begun, CHECKPOINT_AT, CONTROL, Datagram, Deps, KEY, MAX_BUFFER,
     MAX_DATAGRAM, NO_AUDIT, NO_SESSION, Request, encode,
 };
+use pharos_proto::gateway::{self, Answered};
 use pharos_proto::infer::{IDLE_US, Started, Tokens};
 use pharos_proto::knowledge::{self, Author, Kind, List, Put, Source, Summary, flag};
 use pharos_proto::permission::Permission;
@@ -1929,6 +1932,116 @@ impl Agent {
         self.complete(b"quiet ok")
     }
 
+    /// `REQUEST` on `route` with `path` and `body` (#284): the gateway's
+    /// reply, and the content type and answer it put in the buffer.
+    fn request(&self, route: &[u8], path: &[u8], body: &[u8]) -> (Answered, Vec<u8>) {
+        self.buffer.write_bytes(0, path);
+        self.buffer.write_bytes(path.len(), body);
+        let req = Request::Request {
+            route,
+            path_len: path.len() as u16,
+            body_len: body.len() as u32,
+        };
+        let mut msg = [0u8; 256];
+        let mut out = [0u8; 256];
+        let n = encode(&req, &mut msg).unwrap_or(0);
+        // The runtime holds a `REQUEST` for up to 35 s.
+        let a = match call_timeout(RUNTIME, &msg[..n], self.reply, &mut out, 40_000_000) {
+            Ok(Received::Message { len, .. }) => Answered::parse(&out[..len.min(256)]),
+            _ => None,
+        };
+        let a = a.unwrap_or(Answered {
+            status: status::INTERNAL,
+            ..Answered::default()
+        });
+        let len = (usize::from(a.type_len) + a.answer_len as usize).min(self.buffer.len());
+        let mut got = alloc::vec![0u8; len];
+        self.buffer.read_bytes(0, &mut got);
+        (a, got)
+    }
+
+    /// The `vault` kernel's agent (#284, gateway.md): a granted request
+    /// succeeds (the server checks the header), the echo route's answer
+    /// holds `[secret]` and never the secret, and each refusal comes back
+    /// with its status; the whole buffer never holds the secret.
+    fn https(&self) -> u64 {
+        let secret = pharos_services::TEST_SECRET_VALUE.as_bytes();
+        let has = |hay: &[u8], what: &[u8]| hay.windows(what.len()).any(|w| w == what);
+        let (a, got) = self.request(b"items", b"/items", b"");
+        if (a.status, a.http) != (gateway::OK, 200) || got != b"text/plainitems ok" {
+            return self.fail(b"the granted GET was not answered 200 items ok");
+        }
+        let (a, got) = self.request(b"echo", b"/echo", b"");
+        if a.status != gateway::OK
+            || a.stripped == 0
+            || !has(&got, b"[secret]")
+            || has(&got, secret)
+        {
+            return self.fail(b"the echoed header was not stripped");
+        }
+        let (a, got) = self.request(b"post", b"/items", b"{\"n\":1}");
+        if (a.status, a.http) != (gateway::OK, 201) || !has(&got, b"created 7") {
+            return self.fail(b"the granted POST was not answered 201");
+        }
+        // Route, path, body, the status wanted, and what it shows.
+        type Refusal = (
+            &'static [u8],
+            &'static [u8],
+            &'static [u8],
+            u8,
+            &'static [u8],
+        );
+        let refusals: [Refusal; 5] = [
+            (
+                b"other",
+                b"/items",
+                b"",
+                status::NO_ACCESS,
+                b"a route not granted",
+            ),
+            (
+                b"items",
+                b"/items/../admin",
+                b"",
+                gateway::BAD_REQUEST,
+                b"a path with ..",
+            ),
+            (
+                b"items",
+                b"/admin",
+                b"",
+                gateway::BAD_REQUEST,
+                b"a path the pattern refuses",
+            ),
+            (
+                b"items",
+                b"/items",
+                b"x",
+                gateway::TOO_LARGE,
+                b"a body on GET, a method not listed",
+            ),
+            (
+                b"missing",
+                b"/items",
+                b"",
+                gateway::NO_SECRET,
+                b"a route whose secret is missing",
+            ),
+        ];
+        for (route, path, body, want, what) in refusals {
+            let (a, _) = self.request(route, path, body);
+            if a.status != want {
+                return self.fail(&[&b"not refused: "[..], what].concat());
+            }
+        }
+        let mut all = alloc::vec![0u8; self.buffer.len()];
+        self.buffer.read_bytes(0, &mut all);
+        if has(&all, secret) {
+            return self.fail(b"the secret is in the agent's buffer");
+        }
+        self.complete(b"https ok")
+    }
+
     fn net_talk(&self) -> u64 {
         const ECHO: [u8; 4] = [10, 0, 2, 2];
         let asked = Permission::Net {
@@ -2599,6 +2712,7 @@ fn main(_: u64) -> u64 {
         b"keeper-c" => a.keeper_c(),
         b"net-quiet" => a.net_quiet(),
         b"net-talk" => a.net_talk(),
+        b"https" => a.https(),
         b"hostile" => a.hostile(),
         b"spend" => a.spend(),
         b"glut" => a.glut(),

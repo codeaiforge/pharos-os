@@ -30,7 +30,8 @@
 //! reports `ready`, then runs one `worker` `complete` task to its end every
 //! 10 s until stopped, printing `soak: task <n> done` or `soak: task <n>
 //! FAILED`, and forgets each (`FORGET`) once read. Argument 16: the `s1` kernel
-//! (#190): an `s1` task, its result printed in hexadecimal.
+//! (#190): an `s1` task, its result printed in hexadecimal. Argument 17:
+//! `fetcher` in the `vault` table (#284), started by `init`.
 
 #![no_std]
 #![no_main]
@@ -187,6 +188,9 @@ fn main(arg: u64) -> u64 {
     }
     if arg == 16 {
         return s1(c);
+    }
+    if arg == 17 {
+        return vault(c);
     }
     if arg == 2 {
         return permissions(c);
@@ -585,6 +589,33 @@ fn s1(mut c: Client) -> u64 {
 /// One boot of the `agents_crash` kernel.
 /// `soaker` (#189): one task after another, each line counted by the
 /// `soak` kernel.
+/// The `vault` kernel (#284), started by `init` (no report endpoint): one
+/// `fetcher` task, whose agent checks every request; its result or reason
+/// printed, `ok vault: <step>` for each step passed.
+fn vault(c: Client) -> u64 {
+    let say = |line: &[u8]| {
+        let _ = debug_write(CONSOLE, line);
+    };
+    let Ok(task) = c.submit(b"fetcher", b"https") else {
+        say(b"FAILED vault: the fetcher task was not submitted");
+        return 1;
+    };
+    let Some((s, result)) = c.wait(task, 150) else {
+        say(b"FAILED vault: the fetcher task did not end in 150 s");
+        return 1;
+    };
+    let mut line = Vec::from(&b"vault: fetcher ended: "[..]);
+    line.extend_from_slice(&result);
+    say(&line);
+    if s.state == State::Done && result == b"https ok" {
+        say(b"ok vault: the fetcher's requests and refusals all checked");
+        0
+    } else {
+        say(b"FAILED vault: the fetcher task failed");
+        1
+    }
+}
+
 fn soak(c: &Client) -> u64 {
     if send(REPORT, b"ready", 0, 0, 0).is_err() {
         return 1;

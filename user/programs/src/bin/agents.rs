@@ -14,10 +14,13 @@
 //! knowledge service (`SEND`, client 1; #144; optional: without it every
 //! knowledge request is `INTERNAL`), 12 the storage service, badged for
 //! namespace `system/incoming`, read-write (#165; optional: without it
-//! every `PROPOSE` is `INTERNAL`), 13 the egress gateway (`SEND`, client
-//! 1; #282; optional: without it every `REQUEST` is `INTERNAL`). The
+//! every `PROPOSE` is `INTERNAL`), or instead, in a table that runs the
+//! egress gateway, 12 `SEND` on the gateway (client 1; #282, #284; told
+//! apart by its `INFO`: `spawn` passes at most 12 capabilities, so there
+//! is no handle 13; without it every `REQUEST` is `INTERNAL`). The
 //! argument selects the policy table (0: boot, empty; 1: the `agents` and
-//! `agents_crash` test kernels).
+//! `agents_crash` test kernels; 2: `budgets`; 3: the `vault` kernel's
+//! `fetcher`, #284).
 //!
 //! Each policy entry's manifest, `agents/<name>.manifest`, is read and
 //! checked at start; an agent whose manifest is missing or refused never
@@ -149,7 +152,8 @@ const NET: Handle = 9;
 const FILES: Handle = 10;
 const KNOWLEDGE: Handle = 11;
 const INCOMING: Handle = 12;
-const GATEWAY: Handle = 13;
+/// The gateway, when handle 12 answers `INFO` as one (#284).
+const GATEWAY: Handle = INCOMING;
 /// How long the gateway may take: its own 30 s, and a margin.
 const GATEWAY_US: u64 = 35_000_000;
 /// How long the knowledge service may take to answer.
@@ -297,6 +301,33 @@ const SPEND: Budget = Budget {
     rate: u32::MAX,
     group: b"spend",
 };
+
+/// The `vault` kernel's policy table (#284): `fetcher`, granted four of
+/// the table's gateway routes, never `other`.
+const HTTPS_TABLE: &[Entry] = &[Entry {
+    name: b"fetcher",
+    program: b"bin/testagent",
+    pages: 256,
+    models: 0,
+    attempts: 1,
+    progress_ms: 40_000,
+    task_ms: 120_000,
+    data: Data::None,
+    ask_models: 0,
+    ask_data: Data::None,
+    net: &[],
+    ask_net: &[],
+    budget: Budget::UNLIMITED,
+    tools: 0,
+    files: &[],
+    ask_files: &[],
+    knowledge_read: &[],
+    knowledge_write: &[],
+    ask_knowledge: &[],
+    propose: false,
+    https: &[b"items", b"echo", b"post", b"missing"],
+    channels: &[],
+}];
 
 const BUDGETS: &[Entry] = &[
     budget_entry(b"spender", SPEND, 64),
@@ -1196,9 +1227,9 @@ struct Https {
 }
 
 impl Https {
-    /// Attaches the buffer, once handle 13 answers `INFO` as the gateway:
-    /// without it, 13 is the runtime's own first endpoint, and a `send`
-    /// there would wait forever.
+    /// Attaches the buffer, once handle 12 answers `INFO` as the gateway:
+    /// otherwise it is the proposals' store namespace, or a handle the
+    /// runtime made itself, where a blocking `send` could wait forever.
     fn attach(&self) -> bool {
         if GATEWAY == self.reply {
             return false;
@@ -1380,7 +1411,7 @@ struct Runtime {
     knowledge: Option<Knowledge>,
     /// Proposed updates (#165), if `init` gave the runtime handle 12.
     incoming: Option<Store>,
-    /// The egress gateway (#282), if `init` gave the runtime handle 13.
+    /// The egress gateway (#282), if `init` gave it as handle 12.
     https: Option<Https>,
     /// Messages waiting for agents, by name (#133).
     mailboxes: Mailboxes,
@@ -4210,6 +4241,7 @@ fn main(arg: u64) -> u64 {
         0 => (BOOT, &[]),
         1 => (TEST, TEST_GROUPS),
         2 => (BUDGETS, BUDGET_GROUPS),
+        3 => (HTTPS_TABLE, &[]),
         _ => (&[], &[]),
     };
     let Ok(reply) = endpoint_create() else {
@@ -4265,10 +4297,21 @@ fn main(arg: u64) -> u64 {
         };
         files.attach().then_some(files)
     });
+    // The egress gateway (#282, #284): handle 12 if it answers as one;
+    // its buffer holds a request's path and body, then the answer.
+    let https = mem_map(gateway::MAX_BUFFER).ok().and_then(|buffer| {
+        let h = Https {
+            buffer,
+            reply,
+            health: Health::default(),
+        };
+        h.attach().then_some(h)
+    });
     // Proposed updates (#165): optional, as handle 12 is; one data file
     // at a time goes through it.
     let incoming = mem_map(u64::from(agents::MAX_DATA))
         .ok()
+        .filter(|_| https.is_none())
         .and_then(|buffer| {
             let s = Store {
                 handle: INCOMING,
@@ -4279,16 +4322,6 @@ fn main(arg: u64) -> u64 {
             s.attach().then_some(s)
         });
     // Shared knowledge (#144): optional, as handle 11 is.
-    // The egress gateway (#282): optional, as handle 13 is; its buffer
-    // holds a request's path and body, then the answer.
-    let https = mem_map(gateway::MAX_BUFFER).ok().and_then(|buffer| {
-        let h = Https {
-            buffer,
-            reply,
-            health: Health::default(),
-        };
-        h.attach().then_some(h)
-    });
     let knowledge = mem_map(knowledge::MIN_BUFFER).ok().and_then(|buffer| {
         let k = Knowledge {
             buffer,
