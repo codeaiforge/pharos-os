@@ -18,7 +18,7 @@
 
   An attacker wins if a certificate that should be refused passes, if a client reaches another client's connection or a destination it was not given, if the network service sees plaintext, if a connection has no stored intent or a false outcome, if the generator is predictable, or if either service crashes, hangs, or is held by one client.
 - **Dates:** 2026-11-23, milestone M6.1. Code under review: `main` at `c71ee65`.
-- **Status:** **awaiting the maintainer's sign-off** (the M6.1 gate, #274). Findings F1–F5 are fixed in this change; #275–#278 are filed.
+- **Status:** **signed off by the maintainer on 2026-11-23** (the M6.1 gate, #274), with the severities as proposed and #275–#278 filed rather than fixed before the gate. Findings F1–F5 are fixed.
 
 ## Reviewers and their independence
 
@@ -100,4 +100,4 @@ Both reviewers checked these and found them correct; the line names where only o
 | The fuzzers run in CI for their budget without findings | Same run, both host jobs: TCP (200,000 frames), TLS flights (100,000), certificates (100,000), root files, and the `tls` and `net` codecs |
 | The throwaway branch that skips the name check failed CI | `throwaway/tls-no-name-check` at `1a76bf1` ([run 45131765126](https://github.com/codeaiforge/pharos-os/actions/runs/45131765126)): the `pharos-tls` host test and the `tls` kernel failed at the name check; the `network` kernel's failure is a side effect of the mutation (#274 comment) |
 | A security review independent of the authoring agents, no open critical or high finding | This report. Gemini's three High findings (F1, F2, F3) are fixed; nothing Critical was found |
-| The maintainer approves | Pending |
+| The maintainer approves | Approved 2026-11-23 |

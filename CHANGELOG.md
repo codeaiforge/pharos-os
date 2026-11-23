@@ -21,6 +21,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Changed
 
+- M6.1 gate (#274): `tls` and `tls_norandom` and the fuzz tests in CI (run 45131592671); the throwaway branch without the name check failed CI (run 45131765126); the [security review](docs/security/review-m6.1-tls.md) of TCP, TLS, and certificate validation, with no Critical finding and its High findings fixed, signed off by the maintainer; roadmap: M6.1 done, M6.2 current; README and `pharos info`: M6.2 stage
 - The `network`, `services`, and `health` test kernels start `init` with its boot page budget, as the others do, so it can give the network service its limit (#270)
 - The minimum supported Rust is 1.91, up from 1.85 (D-034, #270: smoltcp 0.14 needs it): `rust-version`, the CI `msrv` job, and `scripts/check.sh`; the pinned toolchain stays 1.100.0
 - D-034 accepted (#268, M6.1; D-015 amended): smoltcp 0.14 in the network service in place of the own stack's IP layer; rustls 0.23, TLS 1.3 client only, in its own TLS service; rustls-webpki against a pinned root set; Pharos's own crypto provider on RustCrypto (AES-128-GCM, X25519 and P-256, ECDSA P-256 and Ed25519); the minimum Rust raised from 1.85 to 1.91; host time and a seeded random generator, each failing closed; measured on a `no_std` probe (56 crates, licences, minimums)

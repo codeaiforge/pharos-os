@@ -2,7 +2,7 @@
 
 This is the authoritative plan for Pharos OS. It is ordered by dependency, not by calendar: it contains no dates or effort estimates, because no real project plan supports them yet.
 
-**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), Phase 3 — AI Agent Platform (v0.3.0), Phase 4 — Full Operating System (v0.4.0), and Phase 5 — Deployment and Release (v0.5.0, the microVM release) are done. Current milestone: M6.1 — TCP and TLS as a user-space service.** The roadmap runs to Phase 8: Phases 6–8 are **planned, not implemented**, and follow D-033 (accepted 2026-11-13).
+**Phase 1 — Foundation (v0.1.0), Phase 2 — Core System (v0.2.0), Phase 3 — AI Agent Platform (v0.3.0), Phase 4 — Full Operating System (v0.4.0), and Phase 5 — Deployment and Release (v0.5.0, the microVM release) are done. Current milestone: M6.2 — Credential vault and egress gateway.** The roadmap runs to Phase 8: Phases 6–8 are **planned, not implemented**, and follow D-033 (accepted 2026-11-13).
 
 ## How to read this roadmap
 
@@ -45,7 +45,7 @@ The phases are not strictly sequential. These tracks run through every phase:
 | 3 | AI Agent Platform | Done (v0.3.0; gate passed 2026-11-06 with M3.8) |
 | 4 | Full Operating System | Done (v0.4.0; gate passed 2026-11-09 with M4.6) |
 | 5 | Deployment and Release | Done (v0.5.0; gate passed 2026-11-21 with M5.5) |
-| 6 | Authority broker and demo engine (Tier 3) | **Current** (M6.1; D-033) |
+| 6 | Authority broker and demo engine (Tier 3) | **Current** (M6.2; D-033) |
 | 7 | Skins, pilots, and the WASM tier (Tier 2) | Planned (D-033) |
 | 8 | Real hardware and long-term targets | Planned (D-033) |
 
@@ -651,7 +651,7 @@ Rules for every planned milestone below: nothing moves into the kernel (each com
 
 ## Phase 6 — Authority broker and demo engine (Tier 3)
 
-**Status: Current** (M6.1; D-033). M6.0 done.
+**Status: Current** (M6.2; D-033). M6.0 and M6.1 done.
 
 - **Objective and scope:** Pharos brokers all authority for foreign agents in a Linux microVM, reaches real services over TLS without agents ever holding credentials, and produces evidence an auditor can read. The phase ends with a recorded five-beat demo: (1) a real Python agent does useful work; (2) it is attacked or makes a mistake (prompt injection, a malicious tool, a destructive command); (3) Pharos refuses the action; (4) a human approves the legitimate action after seeing its full payload, then pulls the kill switch; (5) Pharos produces a one-page evidence report.
 - **Deliverables:** M6.0–M6.10.
@@ -677,7 +677,7 @@ Rules for every planned milestone below: nothing moves into the kernel (each com
 
 ### M6.1 — TCP and TLS as a user-space service
 
-- **Objective and scope:** TCP and TLS as user-space services, `no_std` and fuzzed, so an allowed action reaches an HTTPS service. Agents never hold sockets; they keep holding destination capabilities as today (D-012, D-015). **Status: Current** (since 2026-11-21): D-034 (#268) and the design (#269) first, then TCP (#270), the TLS client (#271), the fuzz targets (#272), and the `tls` test kernel (#273); the gate is #274. D-034 accepted 2026-11-21.
+- **Objective and scope:** TCP and TLS as user-space services, `no_std` and fuzzed, so an allowed action reaches an HTTPS service. Agents never hold sockets; they keep holding destination capabilities as today (D-012, D-015). **Status: Done** — gate passed 2026-11-23 (#274): D-034 (#268) and the design (#269), TCP (#270), the TLS client (#271), the fuzz targets (#272), and the `tls` test kernel (#273); `tls` and the fuzzers in CI; the throwaway branch without the name check failed CI; the [security review](../security/review-m6.1-tls.md) found nothing critical and its high findings are fixed; approved by the maintainer.
 - **Deliverables:** TCP (in the network service or beside it, per D-034); a TLS client; certificate validation against a pinned root set; host fuzz targets for every new parser (D-020 pattern).
 - **Prerequisites:** D-034 accepted; M5.2.
 - **Acceptance criteria:** An HTTPS round trip to a test server in a QEMU regression kernel (`tls`); a wrong, expired, or mismatched certificate refused; the fuzzers run in CI for a fixed budget without findings.
@@ -689,7 +689,7 @@ Rules for every planned milestone below: nothing moves into the kernel (each com
 
 ### M6.2 — Credential vault and egress gateway
 
-- **Objective and scope:** Agents never hold credentials. A vault holds secrets as capabilities; an egress gateway injects them at the boundary into requests an allow-list permits (endpoint, method, path). **Status: Planned.**
+- **Objective and scope:** Agents never hold credentials. A vault holds secrets as capabilities; an egress gateway injects them at the boundary into requests an allow-list permits (endpoint, method, path). **Status: Current** (since 2026-11-23); D-035 is open.
 - **Deliverables:** Vault and gateway services; the allow-list format; rotation; every use and refusal audited, with no secret in the trail.
 - **Prerequisites:** D-035 accepted; M6.1.
 - **Acceptance criteria:** Test kernel `vault`: a granted request succeeds with its secret injected; the agent never sees the secret through its memory, the response, errors, or audit records; an endpoint, method, or path not listed is refused and audited.
@@ -976,4 +976,4 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 
 ## Next milestone
 
-Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3 (released as v0.3.0 at its gate commit, `693c896`, tagged after the fact). M4.1 (integration of kernel and user-space services) and M4.2 (security model and privilege separation) passed their gates on 2026-11-06, M4.3 (reliable boot and recovery) on 2026-11-08, and M4.4 (device and service management), M4.5 (system configuration and diagnostics), and M4.6 (integration of AI services without unrestricted kernel access) on 2026-11-09, which closed Phase 4 (released as v0.4.0). M5.1 (QEMU regression and release testing) passed its gate on 2026-11-13, M5.4 (security review and threat-model update, reordered ahead of M5.2) on 2026-11-14, M5.2 (KVM microVM as the reference platform) on 2026-11-18, and M5.5 (v0.5, the microVM release) on 2026-11-21, which closed Phase 5 (released as v0.5.0); M5.3 is folded into M6.10. M6.0 (repositioning: vision and architecture), the first of Phase 6 (D-033, accepted 2026-11-13), passed its gate on 2026-11-21. The current milestone is **M6.1 — TCP and TLS as a user-space service**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
+Phase 1 passed its gate and was released as v0.1.0. M2.1 passed its gate on 2026-10-26, and M2.2 and M2.3 on 2026-10-27. M2.4, M2.5, M2.6, M2.7, and M2.8 passed their gates on 2026-10-27, M2.9 on 2026-10-28, and M2.10 on 2026-10-29, which closed Phase 2 (prepared for release as v0.2.0). M3.1 passed its gate on 2026-10-29 with D-010 accepted, M3.0 (platform prerequisites) on 2026-10-30, M3.2 (local inference) on 2026-11-01, M3.3 (agent lifecycle) on 2026-11-03, M3.4 (permissions and audit) on 2026-11-04, M3.5 (resource accounting and limits) on 2026-11-05, M3.6 (controlled tool integration) on 2026-11-05, M3.7 (agent communication and coordination) on 2026-11-05, and M3.8 (knowledge service) on 2026-11-06, which closed Phase 3 (released as v0.3.0 at its gate commit, `693c896`, tagged after the fact). M4.1 (integration of kernel and user-space services) and M4.2 (security model and privilege separation) passed their gates on 2026-11-06, M4.3 (reliable boot and recovery) on 2026-11-08, and M4.4 (device and service management), M4.5 (system configuration and diagnostics), and M4.6 (integration of AI services without unrestricted kernel access) on 2026-11-09, which closed Phase 4 (released as v0.4.0). M5.1 (QEMU regression and release testing) passed its gate on 2026-11-13, M5.4 (security review and threat-model update, reordered ahead of M5.2) on 2026-11-14, M5.2 (KVM microVM as the reference platform) on 2026-11-18, and M5.5 (v0.5, the microVM release) on 2026-11-21, which closed Phase 5 (released as v0.5.0); M5.3 is folded into M6.10. M6.0 (repositioning: vision and architecture), the first of Phase 6 (D-033, accepted 2026-11-13), passed its gate on 2026-11-21, and M6.1 (TCP and TLS as a user-space service) on 2026-11-23. The current milestone is **M6.2 — Credential vault and egress gateway**. D-004 (final: capability-based microkernel) was accepted and the D-012 direction (kernel-enforced capabilities) recorded on 2026-10-27.
