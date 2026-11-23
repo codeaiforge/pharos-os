@@ -24,12 +24,13 @@ use pharos_kernel::{fs, ipc, kprintln, mm, pci, process, sched, storage, time};
 pharos_kernel::test_kernel!(run);
 
 /// Client steps that must pass.
-const STEPS: [&str; 9] = [
+const STEPS: [&str; 10] = [
     "tlsclient: buffer attached",
     "tlsclient: the good server's handshake completed",
     "tlsclient: the HTTP request written",
     "tlsclient: the HTTP reply came back over TLS",
     "tlsclient: closed",
+    "tlsclient: CLOSE during the handshake answers OK",
     "tlsclient: an expired certificate refused with EXPIRED",
     "tlsclient: a certificate for another name refused with NAME",
     "tlsclient: an authority not pinned refused with UNKNOWN_ISSUER",

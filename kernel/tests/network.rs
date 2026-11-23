@@ -27,7 +27,7 @@ use pharos_kernel::{fs, ipc, kprintln, mm, pci, process, sched, storage, time};
 pharos_kernel::test_kernel!(run);
 
 /// Client steps that must pass.
-const STEPS: [&str; 36] = [
+const STEPS: [&str; 37] = [
     "echoer: registered",
     "sender: non-blocking send with nobody waiting: WOULD_BLOCK",
     "sender: ping 10.0.2.2 answered",
@@ -57,6 +57,7 @@ const STEPS: [&str; 36] = [
     "tcper: TCP_CONNECT answers at once with a connection",
     "tcper: TCP_POLL gets the echo, NOT_FOUND until then",
     "tcper: TCP_POLL on a refused TCP_CONNECT answers REFUSED",
+    "tcper: a refused TCP_CONNECT closed unpolled frees its slot, five times",
     "tcper: a TCP request as version 1 is BAD_REQUEST",
     "tlser: INFO names tls v1",
     "tlser: its own ALLOW refused with NO_ACCESS",

@@ -3584,6 +3584,8 @@ fn tls_audit(image: &Path) -> Result<()> {
         (1, "handshake 2"),
         (2, "handshake 3"),
         (3, "handshake 1"),
+        // Closed by its client during the handshake (review F4, #274).
+        (4, " closed"),
     ] {
         match outcome(dest) {
             Some(l) if l.ends_with(want) => {}
@@ -3595,7 +3597,7 @@ fn tls_audit(image: &Path) -> Result<()> {
             }
         }
     }
-    if lines.iter().any(|l| l.contains("dest 4")) {
+    if lines.iter().any(|l| l.contains("dest 5")) {
         return Err("the destination not listed has an intent recorded".into());
     }
     let closed = lines

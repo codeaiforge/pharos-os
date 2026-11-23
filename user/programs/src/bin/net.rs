@@ -378,7 +378,11 @@ impl Service {
                     gone = true;
                 }
             } else if conn.refused {
-                // Kept until its client polls and learns it.
+                // Kept until its client polls or closes it, or for
+                // `LINGER_US` if it does neither (review F2, #274).
+                if t > conn.active + LINGER_US {
+                    gone = true;
+                }
             } else if let Some(deadline) = conn.connecting {
                 if state == tcp::State::Established {
                     conn.connecting = None;
@@ -387,6 +391,7 @@ impl Service {
                     socket.abort();
                     conn.connecting = None;
                     conn.refused = true;
+                    conn.active = t;
                 }
             } else if let Some((reply, deadline)) = conn.opening {
                 if state == tcp::State::Established {
@@ -562,8 +567,14 @@ impl Service {
         if c.connecting.is_some() {
             return encode_count(NOT_FOUND, 0);
         }
-        c.active = uptime();
+        // Only data moved counts as activity, so a poll of a silent
+        // connection does not keep it open (review F3, #274).
         let handle = c.socket;
+        if self.sockets.get::<tcp::Socket>(handle).can_recv()
+            && let Some(c) = self.conns[at].as_mut()
+        {
+            c.active = uptime();
+        }
         let socket = self.sockets.get_mut::<tcp::Socket>(handle);
         if socket.can_recv() {
             let mut data = [0u8; WINDOW];
@@ -733,6 +744,15 @@ impl Service {
             }
             Request::TcpClose { conn } => {
                 let t = uptime();
+                // A refused connection its client never polled ends here
+                // (review F2, #274).
+                let at = usize::from(conn);
+                let refused = (self.conns.get(at).and_then(Option::as_ref))
+                    .is_some_and(|c| c.owner == port && c.refused && c.closed.is_none());
+                if refused && let Some(c) = self.conns[at].take() {
+                    self.sockets.remove(c.socket);
+                    return answer(&mut self.stats, reply, &[OK]);
+                }
                 let status = match self.conn(port, conn) {
                     Some(c) => {
                         c.closed = Some(t);

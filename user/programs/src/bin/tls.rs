@@ -66,6 +66,9 @@ const MAX_CONNS: usize = 4;
 const PER_CLIENT: usize = 2;
 /// How long a handshake may take.
 const HANDSHAKE_US: u64 = 10_000_000;
+/// A connection with no client request and no data from the server for
+/// this long is closed (tls.md, budgets; review F3, #274).
+const IDLE_US: u64 = 60_000_000;
 /// How often open connections are polled.
 const TICK_US: u64 = 10_000;
 /// How long the network and audit services may take to answer.
@@ -75,7 +78,8 @@ const SEED_US: u64 = 1_000_000;
 /// The network buffer: per connection, 8 KiB to receive, then 8 to send.
 const WINDOW: usize = 8 * 1024;
 const NET_BUFFER: usize = MAX_CONNS * 2 * WINDOW;
-/// Encrypted bytes a connection may hold for its client, and queue to send.
+/// Plaintext a connection may hold for its client, and TLS bytes it may
+/// queue to send.
 const MAX_PLAIN: usize = 32 * 1024;
 const MAX_QUEUED: usize = 32 * 1024;
 
@@ -126,6 +130,8 @@ struct Conn {
     intent: u64,
     /// TCP's end of stream was seen.
     eof: bool,
+    /// The last client request on it, or data from the server.
+    active: u64,
 }
 
 struct Service {
@@ -406,6 +412,7 @@ impl Service {
                     read: None,
                     intent,
                     eof: false,
+                    active: uptime(),
                 });
             }
             Err(e) => {
@@ -416,10 +423,13 @@ impl Service {
     }
 
     fn conn(&mut self, client: u8, conn: u8) -> Option<&mut Conn> {
-        self.conns
+        let c = self
+            .conns
             .get_mut(usize::from(conn))?
             .as_mut()
-            .filter(|c| c.client == client)
+            .filter(|c| c.client == client)?;
+        c.active = uptime();
+        Some(c)
     }
 
     fn write(&mut self, client: u8, conn: u8, offset: u32, len: u32) -> [u8; 6] {
@@ -490,7 +500,9 @@ impl Service {
             answer(reply, &count(CLOSED, 0));
         }
         if let Phase::Handshake { reply, .. } = c.phase {
-            answer(reply, &encode_opened(HANDSHAKE, 0, reason::PROTOCOL));
+            // Its client closed it first (review F4, #274).
+            let _ = self.audit(Kind::Outcome, c.intent, outcome::FAILED, b"closed");
+            answer(reply, &encode_opened(CLOSED, 0, 0));
         }
         let mut detail = Vec::with_capacity(48);
         detail.extend_from_slice(b"close out ");
@@ -519,6 +531,7 @@ impl Service {
                 .and_then(|(out, len)| net::parse_count(&out[..len]))
             {
                 Some((net::OK, 0)) => break,
+                Some((net::OK, sent)) if sent as usize > n => return false,
                 Some((net::OK, sent)) => c.session.sent(sent as usize),
                 _ => return false,
             }
@@ -544,7 +557,10 @@ impl Service {
                 .and_then(|(out, len)| net::parse_count(&out[..len]))
             {
                 Some((net::OK, 0)) => c.eof = true,
+                // More than was asked for: never trusted (review F1, #274).
+                Some((net::OK, n)) if n as usize > WINDOW => return Err(reason::TCP),
                 Some((net::OK, n)) => {
+                    c.active = uptime();
                     let mut data = vec![0u8; n as usize];
                     buf.read_bytes(at, &mut data);
                     if c.session.receive(&data).is_err() {
@@ -596,6 +612,11 @@ impl Service {
             let Some(mut c) = self.conns[i].take() else {
                 continue;
             };
+            if !matches!(c.phase, Phase::Handshake { .. }) && now > c.active + IDLE_US {
+                self.conns[i] = Some(c);
+                self.finish(i, true);
+                continue;
+            }
             if matches!(c.phase, Phase::Dead) {
                 // Only its client's `CLOSE` is left; answer a waiting read.
                 self.conns[i] = Some(c);
@@ -622,9 +643,18 @@ impl Service {
                         }
                     };
                     match why {
+                        // No record of the success, no connection (review
+                        // F5, #274).
+                        None if self
+                            .audit(Kind::Outcome, c.intent, outcome::OK, b"ok")
+                            .is_none() =>
+                        {
+                            answer(reply, &encode_opened(NO_AUDIT, 0, 0));
+                            c.phase = Phase::Dead;
+                            done = Some(true);
+                        }
                         None => {
                             c.phase = Phase::Open;
-                            let _ = self.audit(Kind::Outcome, c.intent, outcome::OK, b"ok");
                             answer(reply, &encode_opened(OK, i as u8, 0));
                         }
                         Some(r) => {

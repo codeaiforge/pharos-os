@@ -343,12 +343,15 @@ pub const AUDIT_TLS: u32 = 4;
 pub const TLS_TEST_NAME: &[u8] = b"pharos-test.local";
 /// The host's `openssl s_server`s for the `tls` kernel (#273, run by
 /// `cargo xtask`): a good certificate, an expired one, one for another
-/// name, and one from an authority that is not pinned.
-pub const TLS_SERVERS: [Dest; 4] = [
+/// name, and one from an authority that is not pinned; then a listener
+/// that accepts and never answers, so a handshake with it never ends
+/// (review F4, #274).
+pub const TLS_SERVERS: [Dest; 5] = [
     ([10, 0, 2, 2], 47_443),
     ([10, 0, 2, 2], 47_444),
     ([10, 0, 2, 2], 47_445),
     ([10, 0, 2, 2], 47_446),
+    ([10, 0, 2, 2], 47_447),
 ];
 
 const TLS_AUDITED_CAPS: [Give; 7] = [
@@ -363,7 +366,7 @@ const TLS_AUDITED_CAPS: [Give; 7] = [
 
 /// The `tls` kernel (#273, tls.md): the network, storage, and audit
 /// services, the TLS service with its audit trail, and `tlsclient`
-/// (`netclient` 6), whose destinations 0 to 3 are [`TLS_SERVERS`].
+/// (`netclient` 6), whose destinations 0 to 4 are [`TLS_SERVERS`].
 pub const TLS: &[Service] = &[
     NET,
     STORE,
@@ -396,6 +399,7 @@ pub const TLS: &[Service] = &[
             (TLS_SERVERS[1].0, TLS_SERVERS[1].1, TLS_TEST_NAME),
             (TLS_SERVERS[2].0, TLS_SERVERS[2].1, TLS_TEST_NAME),
             (TLS_SERVERS[3].0, TLS_SERVERS[3].1, TLS_TEST_NAME),
+            (TLS_SERVERS[4].0, TLS_SERVERS[4].1, TLS_TEST_NAME),
         ],
         after: &[3],
         // Its 16 KiB buffer for the request and the reply.

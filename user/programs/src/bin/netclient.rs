@@ -362,6 +362,19 @@ fn tls_round(reply: Handle) -> u64 {
         "tlsclient: closed",
         tls_call(reply, Tls::Close { conn }).is_some_and(|(r, _)| r[0] == OK),
     );
+    // CLOSE while the handshake runs (review F4, #274): destination 4
+    // never answers, so the OPEN is left waiting (a 1 ms timeout); its
+    // connection (slot 0, the first free) is closed, and the outcome
+    // recorded as `closed`.
+    let mut msg = [0u8; 8];
+    let n = tls::encode(&Tls::Open { destination: 4 }, &mut msg).unwrap_or(0);
+    let mut out = [0u8; 16];
+    let left = pharos_user::call_timeout(NET, &msg[..n], reply, &mut out, 1_000).is_err();
+    report(
+        &mut f,
+        "tlsclient: CLOSE during the handshake answers OK",
+        left && tls_call(reply, Tls::Close { conn: 0 }).is_some_and(|(r, _)| r[0] == OK),
+    );
     for (d, why, step) in [
         (
             1,
@@ -388,7 +401,7 @@ fn tls_round(reply: Handle) -> u64 {
     report(
         &mut f,
         "tlsclient: a destination not listed refused with NO_ACCESS",
-        tls_open(reply, 4).is_some_and(|(s, ..)| s == tls::NO_ACCESS),
+        tls_open(reply, 5).is_some_and(|(s, ..)| s == tls::NO_ACCESS),
     );
     f
 }
@@ -559,6 +572,22 @@ fn tcp(reply: Handle) -> u64 {
         &mut f,
         "tcper: TCP_POLL on a refused TCP_CONNECT answers REFUSED",
         refused,
+    );
+    // A refused connection its client closes without polling frees its
+    // slot (review F2, #274): five in a row, past the limit of 4.
+    let freed = (0..5).all(|_| {
+        let conn = call(Request::TcpConnect {
+            ip: GATEWAY,
+            port: 47002,
+        })
+        .and_then(|(r, _)| (r[0] == OK).then_some(r[1]));
+        pharos_user::sleep(300_000);
+        conn.is_some_and(|conn| call(Request::TcpClose { conn }).is_some_and(|(r, _)| r[0] == OK))
+    });
+    report(
+        &mut f,
+        "tcper: a refused TCP_CONNECT closed unpolled frees its slot, five times",
+        freed,
     );
     let mut v1 = [0u8; 16];
     let n = encode(&Request::TcpClose { conn }, &mut v1).unwrap_or(0);

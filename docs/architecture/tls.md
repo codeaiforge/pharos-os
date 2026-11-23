@@ -123,12 +123,12 @@ flowchart LR
 
 ### Audit
 
-- **The TLS service is audit client 4.** Before connecting it writes an `INTENT` (client, destination index and name, action `tls open`), and it connects only once that is stored; if the audit service cannot write, `OPEN` fails with `NO_AUDIT`. It writes the `OUTCOME` (ok, or `HANDSHAKE` with its reason, `NO_CLOCK`, `NO_RANDOM`) and, on close, the bytes each way. Content is never recorded.
+- **The TLS service is audit client 4.** Before connecting it writes an `INTENT` (client, destination index and name, action `tls open`), and it connects only once that is stored; if the audit service cannot write, `OPEN` fails with `NO_AUDIT`. It writes the `OUTCOME` (ok, or `HANDSHAKE` with its reason, `NO_CLOCK`, `NO_RANDOM`) and, on close, the bytes each way. Content is never recorded. *As built (review F4, F5, #274):* a `CLOSE` during the handshake records the outcome `closed` and answers the `OPEN` `CLOSED`; a success outcome that cannot be stored ends the connection with `NO_AUDIT`.
 
 ### Budgets
 
 - The TLS service's page limit covers 4 connections, the 8 attached buffers, and the roots: 4 MiB. The network service's grows by its 16 TCP sockets: 1 MiB more.
-- Every deferred reply has a timeout (TCP connect 5 s, handshake 10 s, idle 60 s), so a silent server cannot hold a client's call forever; this removes the network service's "no timeouts" limit for TCP, not for `ping`.
+- Every deferred reply has a timeout (TCP connect 5 s, handshake 10 s, idle 60 s), so a silent server cannot hold a client's call forever; this removes the network service's "no timeouts" limit for TCP, not for `ping`. *As built (review F2, F3, #274):* the TLS service closes a connection with no client request and no data from the server for 60 s, since its polls would otherwise keep the network service's idle clock running; `TCP_POLL` counts as activity only when data moves; a refused TCP connection ends on `TCP_CLOSE`, or after 10 s if neither polled nor closed.
 
 ## 4. Security
 

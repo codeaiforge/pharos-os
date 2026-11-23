@@ -192,6 +192,9 @@ pub fn make(dir: &Path) -> Result<Vec<u8>> {
 /// The running servers; stopped when dropped.
 pub struct Servers {
     children: Vec<Child>,
+    /// After the servers: a listener that never accepts. The host's TCP
+    /// completes connections to it, and nothing is ever sent.
+    _silent: Option<TcpListener>,
 }
 
 impl Drop for Servers {
@@ -204,11 +207,13 @@ impl Drop for Servers {
 }
 
 /// Starts an `s_server` for each certificate [`make`] put in `dir`, on
-/// `port` and the three after it, serving `-www` over TLS 1.3 only. Fails
+/// `port` and the three after it, serving `-www` over TLS 1.3 only, and a
+/// listener that never answers on the fifth port. Fails
 /// with the port's name if one is taken or a server does not come up.
 pub fn start(dir: &Path, port: u16) -> Result<Servers> {
     let mut servers = Servers {
         children: Vec::new(),
+        _silent: None,
     };
     for (i, (name, ..)) in SERVERS.iter().enumerate() {
         let port = port + i as u16;
@@ -245,6 +250,10 @@ pub fn start(dir: &Path, port: u16) -> Result<Servers> {
             name,
         )?;
     }
+    let silent = port + SERVERS.len() as u16;
+    servers._silent = Some(TcpListener::bind(("127.0.0.1", silent)).map_err(|e| {
+        format!("cannot listen on 127.0.0.1:{silent} for the tls test kernel: {e}")
+    })?);
     Ok(servers)
 }
 
