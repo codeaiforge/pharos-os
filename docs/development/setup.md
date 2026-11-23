@@ -75,6 +75,7 @@ Expected:
 | mtools, b2sum | M5.5 | `cargo xtask image` puts the Limine binary with the enrolled config hash into the ISO's EFI boot image (`mcopy`) and hashes every boot file (`b2sum`, coreutils; #258) | `sudo apt install mtools` |
 | sbsigntool, virt-firmware 26.10 | M5.5 | The Secure Boot boot checks and `cargo xtask release --secure-boot`: sign Limine (`sbsign`) and write the variable store (`virt-fw-vars`; #258) | `sudo apt install sbsigntool`; `pip install virt-firmware==26.10` |
 | curl, tar (with xz), cc | M2.2 | Used by `cargo xtask image` to fetch, unpack, and build the Limine host tool | usually preinstalled; `sudo apt install curl xz-utils build-essential` |
+| OpenSSL 3 (`openssl`) | M6.1 | The `tls` test kernel's test authority, certificates, and `s_server`s (#273) | usually preinstalled; `sudo apt install openssl` |
 | GDB | M2.4 | Kernel debugging via QEMU's GDB stub | `sudo apt install gdb` |
 | markdownlint-cli2 | any time | Lint Markdown (config in `.markdownlint-cli2.jsonc`) | `npx markdownlint-cli2 "**/*.md"` (requires Node.js) |
 

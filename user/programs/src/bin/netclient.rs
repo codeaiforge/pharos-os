@@ -19,6 +19,13 @@
 //!   (`CLOSED`), a destination not listed for TCP (`NO_ACCESS`), a listed
 //!   port nothing listens on (`REFUSED`), and a TCP request as version 1.
 //!
+//! - Argument 5 (#271): the TLS service's refusals that need no server.
+//! - Argument 6, the `tls` kernel (#273): an HTTPS round trip with the
+//!   host's `openssl s_server` on destination 0, and destinations 1 to 3
+//!   (expired, another name, an authority not pinned) each refused with
+//!   their reason; an index not listed is `NO_ACCESS`.
+//! - Argument 7, the `tls_norandom` kernel (#273): `OPEN` is `NO_RANDOM`.
+//!
 //! Each step prints `ok <step>` or `FAIL <step>`; the exit code is the
 //! number of failures.
 
@@ -203,6 +210,8 @@ fn main(arg: u64) -> u64 {
         }
         4 => tcp(reply),
         5 => tls_smoke(reply),
+        6 => tls_round(reply),
+        7 => tls_no_random(reply),
         3 => {
             report(
                 &mut f,
@@ -278,6 +287,119 @@ fn tls_smoke(reply: Handle) -> u64 {
         "tlser: version 2: VERSION, supported 1 to 1",
         raw(NET, reply, &[2, tls::op::OPEN, 0])
             .is_ok_and(|(r, n)| versions(&r[..n]) == Some((1, 1))),
+    );
+    f
+}
+
+/// `tls` v1 `call` on handle 2; the reply's bytes.
+fn tls_call(reply: Handle, req: pharos_proto::tls::Request<'_>) -> Option<([u8; 256], usize)> {
+    let mut msg = [0u8; 96];
+    let n = pharos_proto::tls::encode(&req, &mut msg)?;
+    raw(NET, reply, &msg[..n]).ok()
+}
+
+/// `OPEN` of destination `d`: status, connection, reason.
+fn tls_open(reply: Handle, d: u8) -> Option<(u8, u8, u8)> {
+    use pharos_proto::tls::{Request as Tls, parse_opened};
+    tls_call(reply, Tls::Open { destination: d }).and_then(|(r, n)| parse_opened(&r[..n]))
+}
+
+/// The `tls` kernel's client (argument 6, #273).
+fn tls_round(reply: Handle) -> u64 {
+    use pharos_proto::tls::{self, Request as Tls, reason};
+    let mut f = 0;
+    const LEN: u64 = 16 * 1024;
+    let buffer = mem_map(LEN).ok();
+    let attached = buffer.as_ref().is_some_and(|b| {
+        let mut msg = [0u8; 16];
+        let n = tls::encode(&Tls::Attach { len: LEN }, &mut msg).unwrap_or(0);
+        mem_share(b).is_ok_and(|m| send(NET, &msg[..n], m, READ | WRITE, 0).is_ok())
+    });
+    report(&mut f, "tlsclient: buffer attached", attached);
+    let open = tls_open(reply, 0);
+    report(
+        &mut f,
+        "tlsclient: the good server's handshake completed",
+        open.is_some_and(|(s, ..)| s == OK),
+    );
+    let (Some(buffer), Some((OK, conn, _))) = (buffer, open) else {
+        return f + 1;
+    };
+    const GET: &[u8] = b"GET / HTTP/1.0\r\n\r\n";
+    buffer.write_bytes(0, GET);
+    let count = |req: Tls<'_>| tls_call(reply, req).and_then(|(r, n)| parse_count(&r[..n]));
+    report(
+        &mut f,
+        "tlsclient: the HTTP request written",
+        count(Tls::Write {
+            conn,
+            offset: 0,
+            len: GET.len() as u32,
+        }) == Some((OK, GET.len() as u32)),
+    );
+    // The reply up to s_server's close, at most 12 KiB of it.
+    let mut got = 0u32;
+    while got < 12 * 1024 {
+        match count(Tls::Read {
+            conn,
+            offset: 1024 + got,
+            max: 12 * 1024 - got,
+        }) {
+            Some((OK, n)) if n > 0 => got += n,
+            _ => break,
+        }
+    }
+    const STATUS: &[u8] = b"HTTP/1.0 200 ok";
+    let mut head = [0u8; STATUS.len()];
+    buffer.read_bytes(1024, &mut head);
+    report(
+        &mut f,
+        "tlsclient: the HTTP reply came back over TLS",
+        got as usize > STATUS.len() && head == *STATUS,
+    );
+    report(
+        &mut f,
+        "tlsclient: closed",
+        tls_call(reply, Tls::Close { conn }).is_some_and(|(r, _)| r[0] == OK),
+    );
+    for (d, why, step) in [
+        (
+            1,
+            reason::EXPIRED,
+            "tlsclient: an expired certificate refused with EXPIRED",
+        ),
+        (
+            2,
+            reason::NAME,
+            "tlsclient: a certificate for another name refused with NAME",
+        ),
+        (
+            3,
+            reason::UNKNOWN_ISSUER,
+            "tlsclient: an authority not pinned refused with UNKNOWN_ISSUER",
+        ),
+    ] {
+        report(
+            &mut f,
+            step,
+            tls_open(reply, d) == Some((tls::HANDSHAKE, 0, why)),
+        );
+    }
+    report(
+        &mut f,
+        "tlsclient: a destination not listed refused with NO_ACCESS",
+        tls_open(reply, 4).is_some_and(|(s, ..)| s == tls::NO_ACCESS),
+    );
+    f
+}
+
+/// The `tls_norandom` kernel's client (argument 7, #273).
+fn tls_no_random(reply: Handle) -> u64 {
+    let mut f = 0;
+    report(
+        &mut f,
+        "tlsclient: OPEN without virtio-rng is NO_RANDOM",
+        tls_open(reply, 0).is_some_and(|(s, ..)| s == pharos_proto::tls::NO_RANDOM),
     );
     f
 }

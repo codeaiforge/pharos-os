@@ -26,6 +26,7 @@ mod release;
 mod secure_boot;
 mod sign;
 mod store_image;
+mod tls_server;
 
 /// Pinned Limine release (D-001). To update the pin, follow
 /// "Updating the Limine pin" in docs/architecture/boot.md.
@@ -3104,6 +3105,11 @@ const HOSTILE_SCRIPT: &[console::Step] = &[
 const HOSTILE_REFUSED: &[&str] = &["approve #2", "approve #9"];
 /// The audit service (#107): a tiny fresh store, so it fills.
 const AUDIT_TEST: &str = "audit";
+/// TLS (#273, tls.md): the HTTPS round trip and the refusals, with the
+/// host's `s_server`s and the test authority as the image's root.
+const TLS_TEST: &str = "tls";
+/// The `tls` kernel's store: the audit trail of a few connections.
+const TLS_BLOCKS: u64 = 64;
 const AUDIT_BLOCKS: u64 = 16;
 /// The knowledge service's test kernel (#143) and its fresh store.
 const KNOWLEDGE_TEST: &str = "knowledge";
@@ -3556,6 +3562,55 @@ fn permissions_audit(image: &Path) -> Result<()> {
 /// After the `agents_net` test kernel (#109): the network grants, the
 /// approval, and the revocation are recorded, and every send is an intent
 /// with its outcome (three that went out from `net-talk`, task 2).
+/// After the `tls` kernel (#273): an intent for each destination opened,
+/// each with its outcome (the good one `ok`, the others their handshake
+/// reason), and the good connection's close with bytes both ways.
+fn tls_audit(image: &Path) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    let outcome = |dest: u8| {
+        let intent = lines.iter().find(|l| {
+            l.contains(" Intent tls ")
+                && l.contains(&format!("open client 1 dest {dest} pharos-test.local"))
+        })?;
+        let of = format!(" of {} ", intent.split(' ').next().unwrap_or_default());
+        let of = format!(" Outcome{of}tls ");
+        lines.iter().find(|l| l.contains(&of))
+    };
+    for (dest, want) in [
+        (0, " ok"),
+        (1, "handshake 2"),
+        (2, "handshake 3"),
+        (3, "handshake 1"),
+    ] {
+        match outcome(dest) {
+            Some(l) if l.ends_with(want) => {}
+            other => {
+                return Err(format!(
+                    "destination {dest}: expected an intent with an outcome ending {want:?}, \
+                     got {other:?}"
+                ));
+            }
+        }
+    }
+    if lines.iter().any(|l| l.contains("dest 4")) {
+        return Err("the destination not listed has an intent recorded".into());
+    }
+    let closed = lines
+        .iter()
+        .any(|l| l.contains(" Event tls ") && l.contains("close out 18 in "));
+    if !closed {
+        return Err("no close record with the request's 18 bytes out".into());
+    }
+    println!("  audit trail: {} records; the TLS ones:", lines.len());
+    for l in lines.iter().filter(|l| l.contains(" tls ")) {
+        println!("    {l}");
+    }
+    Ok(())
+}
+
 fn agents_net_audit(image: &Path) -> Result<()> {
     let streams = store_image::audit(image)?;
     let [(_, lines)] = streams.as_slice() else {
@@ -4462,6 +4517,12 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         || slotted
     {
         kernel_modules(paths, &programs)?
+    } else if name == TLS_TEST {
+        // The test authority, made for this run, is the one pinned root.
+        let roots = tls_server::make(&out.join("tls"))?;
+        let mut files = programs.clone();
+        files.push(("system/tls/roots".into(), roots));
+        test_modules(&files)
     } else {
         test_modules(&programs)
     };
@@ -4493,6 +4554,14 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     }
     // Stopped when dropped, after the boot ends or times out.
     let _echo = echo::EchoServer::start(echo::ADDR)?;
+    let _tls = if name == TLS_TEST {
+        Some(tls_server::start(&out.join("tls"), tls_server::PORT)?)
+    } else {
+        None
+    };
+    if name == TLS_TEST {
+        store_image::fresh(&out.join(STORE_IMAGE), TLS_BLOCKS)?;
+    }
     if name == LARGE_FILE_TEST {
         let model = env::var_os(MODEL_ENV).map(PathBuf::from);
         store_image::model(&out.join(STORE_IMAGE), model.as_deref())?;
@@ -4701,6 +4770,8 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         }
         if name == BUDGETS_TEST && run.status == Some(33) {
             budgets_audit(&out.join(STORE_IMAGE))
+        } else if name == TLS_TEST && run.status == Some(33) {
+            tls_audit(&out.join(STORE_IMAGE))
         } else if let Some(want) = s1_want.as_deref().filter(|_| run.status == Some(33)) {
             s1_checks(&out.join(STORE_IMAGE), &clean_log(&run.log), want)
         } else {

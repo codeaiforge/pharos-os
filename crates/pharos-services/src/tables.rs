@@ -1,7 +1,7 @@
 //! The tables: argument 0 boot, 1 the `services` test kernel, 2 the
 //! `network` test kernel, 3 the `supervision` test kernel, 4 the
-//! `health` test kernel, 5 `aifail`, 6 `compromised`, 7 `soak`
-//! ([`table`]).
+//! `health` test kernel, 5 `aifail`, 6 `compromised`, 7 `soak`, 8 `tls`,
+//! 9 `tls_norandom` ([`table`]).
 
 use crate::rights::{GRANT, READ, RECEIVE, SEND};
 use crate::{
@@ -59,6 +59,8 @@ pub fn table(arg: u64) -> &'static [Service] {
         5 => AIFAIL,
         6 => COMPROMISED,
         7 => SOAK,
+        8 => TLS,
+        9 => TLS_NORANDOM,
         _ => &[],
     }
 }
@@ -146,6 +148,7 @@ const fn audit(store: usize) -> Service {
         tls: &[],
         after: match store {
             0 => &[0],
+            1 => &[1],
             _ => &[2],
         },
         limit: 0,
@@ -333,6 +336,115 @@ const TLS_NO_AUDIT: Service = Service {
     limit: TLS_LIMIT,
     gains: &[],
 };
+
+/// The TLS service's audit client (`pharos_proto::audit::client::TLS`).
+pub const AUDIT_TLS: u32 = 4;
+/// The name every `tls` kernel destination is checked against.
+pub const TLS_TEST_NAME: &[u8] = b"pharos-test.local";
+/// The host's `openssl s_server`s for the `tls` kernel (#273, run by
+/// `cargo xtask`): a good certificate, an expired one, one for another
+/// name, and one from an authority that is not pinned.
+pub const TLS_SERVERS: [Dest; 4] = [
+    ([10, 0, 2, 2], 47_443),
+    ([10, 0, 2, 2], 47_444),
+    ([10, 0, 2, 2], 47_445),
+    ([10, 0, 2, 2], 47_446),
+];
+
+const TLS_AUDITED_CAPS: [Give; 7] = [
+    TLS_CAPS[0],
+    TLS_CAPS[1],
+    TLS_CAPS[2],
+    TLS_CAPS[3],
+    TLS_CAPS[4],
+    TLS_CAPS[5],
+    send(Ep::Audit, AUDIT_TLS),
+];
+
+/// The `tls` kernel (#273, tls.md): the network, storage, and audit
+/// services, the TLS service with its audit trail, and `tlsclient`
+/// (`netclient` 6), whose destinations 0 to 3 are [`TLS_SERVERS`].
+pub const TLS: &[Service] = &[
+    NET,
+    STORE,
+    audit(1),
+    Service {
+        name: "tls",
+        path: b"bin/tls",
+        arg: 0,
+        kind: Kind::Daemon,
+        restart: Restart::Up(3),
+        caps: &TLS_AUDITED_CAPS,
+        net: &[],
+        tcp: &TLS_SERVERS,
+        tls: &[],
+        after: &[0, 2],
+        limit: TLS_LIMIT,
+        gains: &[],
+    },
+    Service {
+        name: "tlsclient",
+        path: b"bin/netclient",
+        arg: 6,
+        kind: Kind::OneShot,
+        restart: Restart::Never,
+        caps: &[CONSOLE, send(Ep::Tls, 1)],
+        net: &[],
+        tcp: &[],
+        tls: &[
+            (TLS_SERVERS[0].0, TLS_SERVERS[0].1, TLS_TEST_NAME),
+            (TLS_SERVERS[1].0, TLS_SERVERS[1].1, TLS_TEST_NAME),
+            (TLS_SERVERS[2].0, TLS_SERVERS[2].1, TLS_TEST_NAME),
+            (TLS_SERVERS[3].0, TLS_SERVERS[3].1, TLS_TEST_NAME),
+        ],
+        after: &[3],
+        // Its 16 KiB buffer for the request and the reply.
+        limit: 8,
+        gains: &[],
+    },
+];
+
+/// The `tls_norandom` kernel (#273): the TLS service with no virtio-rng.
+/// Its handle 2 is the console instead, so the handles after it stay where
+/// the service expects them; every `OPEN` must be `NO_RANDOM`.
+pub const TLS_NORANDOM: &[Service] = &[
+    NET,
+    Service {
+        name: "tls",
+        path: b"bin/tls",
+        arg: 0,
+        kind: Kind::Daemon,
+        restart: Restart::Up(3),
+        caps: &[
+            CONSOLE,
+            CONSOLE,
+            TLS_CAPS[2],
+            TLS_CAPS[3],
+            TLS_CAPS[4],
+            TLS_CAPS[5],
+        ],
+        net: &[],
+        tcp: &[TLS_SERVERS[0]],
+        tls: &[],
+        after: &[0],
+        limit: TLS_LIMIT,
+        gains: &[],
+    },
+    Service {
+        name: "tlsclient",
+        path: b"bin/netclient",
+        arg: 7,
+        kind: Kind::OneShot,
+        restart: Restart::Never,
+        caps: &[CONSOLE, send(Ep::Tls, 1)],
+        net: &[],
+        tcp: &[],
+        tls: &[(TLS_SERVERS[0].0, TLS_SERVERS[0].1, TLS_TEST_NAME)],
+        after: &[1],
+        limit: 0,
+        gains: &[],
+    },
+];
 
 pub const NETWORK: &[Service] = &[
     NET,

@@ -395,6 +395,8 @@ mod tests {
             ("aifail", AIFAIL),
             ("compromised", COMPROMISED),
             ("soak", SOAK),
+            ("tls", TLS),
+            ("tls_norandom", TLS_NORANDOM),
         ] {
             assert_eq!(check(table), Ok(()), "{name}");
         }
@@ -412,7 +414,7 @@ mod tests {
         assert_eq!(runtimes(BOOT), ["agents"]);
         assert_eq!(runtimes(COMPROMISED), ["agents"]);
         assert_eq!(runtimes(SOAK), ["agents"]);
-        for t in [TEST, NETWORK, SUPERVISE, HEALTH] {
+        for t in [TEST, NETWORK, SUPERVISE, HEALTH, TLS, TLS_NORANDOM] {
             assert!(runtimes(t).is_empty());
         }
     }

@@ -323,6 +323,14 @@ name = "network"
 harness = false
 
 [[test]]
+name = "tls"
+harness = false
+
+[[test]]
+name = "tls_norandom"
+harness = false
+
+[[test]]
 name = "vector_state"
 harness = false
 
