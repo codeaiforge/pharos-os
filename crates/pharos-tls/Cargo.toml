@@ -16,6 +16,14 @@ rustls = { version = "0.23.46", default-features = false }
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes"] }
 # secp256r1 key exchange and ECDSA P-256 verification (SHA-256 through sha2).
 p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa"] }
+# RSA PKCS#1 v1.5 and PSS verification, 2,048 to 4,096 bits (D-035, #282;
+# MIT or Apache-2.0, 8 added crates shared with p256's crypto-bigint, 5
+# `unsafe` sites). Verification only: no private key, so the Marvin attack
+# on decryption does not apply.
+rsa = { version = "0.10.0", default-features = false, features = ["encoding", "pkcs1v15"] }
+# ECDSA P-384 with SHA-384 verification (D-035, #282; MIT or Apache-2.0,
+# 1 added crate, no `unsafe`).
+p384 = { version = "0.14.0", default-features = false, features = ["ecdsa"] }
 # X25519 key exchange.
 x25519-dalek = { version = "3.0.0", default-features = false }
 # Ed25519 verification, already in the trusted base (pharos-image, D-028).
@@ -27,6 +35,9 @@ ed25519-compact = { version = "2.6.0", default-features = false }
 # rcgen to make the test certificates at run time.
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "crypto"] }
+# RSA keys for the test certificates (ring signs with RSA but cannot make
+# keys), generated at run time so no key is committed.
+rsa = { version = "0.10.0", default-features = false, features = ["encoding", "pkcs1v15", "std"] }
 
 [lints]
 workspace = true

@@ -219,7 +219,10 @@ struct Ca {
 
 impl Ca {
     fn new(name: &str, alg: &'static SignatureAlgorithm) -> Self {
-        let key = KeyPair::generate_for(alg).unwrap();
+        Self::with_key(name, KeyPair::generate_for(alg).unwrap())
+    }
+
+    fn with_key(name: &str, key: KeyPair) -> Self {
         let mut p = CertificateParams::new(Vec::<String>::new()).unwrap();
         p.distinguished_name.push(DnType::CommonName, name);
         p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -240,7 +243,16 @@ impl Ca {
         until: i32,
         alg: &'static SignatureAlgorithm,
     ) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
-        let key = KeyPair::generate_for(alg).unwrap();
+        self.leaf_with_key(name, from, until, KeyPair::generate_for(alg).unwrap())
+    }
+
+    fn leaf_with_key(
+        &self,
+        name: &str,
+        from: i32,
+        until: i32,
+        key: KeyPair,
+    ) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
         let mut p = CertificateParams::new(vec![String::from(name)]).unwrap();
         p.not_before = rcgen::date_time_ymd(from, 1, 1);
         p.not_after = rcgen::date_time_ymd(until, 1, 1);
@@ -380,6 +392,93 @@ fn handshake_accepts_an_ed25519_chain() {
     assert!(connect(&ca, "good.test", cfg).is_ok());
 }
 
+/// A test-only generator for RSA keys: xorshift, not a secure one.
+struct TestRng(u64);
+
+impl rsa::rand_core::TryRng for TestRng {
+    type Error = core::convert::Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(xorshift(&mut self.0) as u32)
+    }
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(xorshift(&mut self.0))
+    }
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        dst.iter_mut()
+            .for_each(|b| *b = xorshift(&mut self.0) as u8);
+        Ok(())
+    }
+}
+
+impl rsa::rand_core::TryCryptoRng for TestRng {}
+
+/// An RSA key of `bits` for rcgen, made at run time (no key is committed).
+fn rsa_key(bits: usize, seed: u64, alg: &'static SignatureAlgorithm) -> KeyPair {
+    use rsa::pkcs8::EncodePrivateKey;
+    let key = rsa::PrivateKey::new(&mut TestRng(seed), bits).unwrap();
+    let der = key.to_pkcs8_der().unwrap();
+    KeyPair::from_pkcs8_der_and_sign_algo(&PrivatePkcs8KeyDer::from(der.as_bytes()), alg).unwrap()
+}
+
+const P384: &SignatureAlgorithm = &rcgen::PKCS_ECDSA_P384_SHA384;
+
+#[test]
+fn handshakes_accept_rsa_and_p384_chains() {
+    // Certificates signed with PKCS#1 v1.5 (SHA-256, -384, -512) and
+    // P-384; the server proves its RSA key with PSS (TLS 1.3 allows no
+    // other), and its P-384 key with ECDSA SHA-384.
+    let rsa2048 = Ca::with_key("RSA CA", rsa_key(2048, 1, &rcgen::PKCS_RSA_SHA256));
+    let leaf = rsa2048.leaf_with_key(
+        "good.test",
+        2025,
+        2035,
+        rsa_key(2048, 2, &rcgen::PKCS_RSA_SHA256),
+    );
+    let (_, s) = connect(&rsa2048, "good.test", server(leaf, |_| {}, TLS13)).unwrap();
+    assert_eq!(s.server_name(), Some("good.test"));
+
+    let p384 = Ca::new("P-384 CA", P384);
+    let leaf = p384.leaf_with_key(
+        "good.test",
+        2025,
+        2035,
+        rsa_key(4096, 3, &rcgen::PKCS_RSA_SHA512),
+    );
+    assert!(connect(&p384, "good.test", server(leaf, |_| {}, TLS13)).is_ok());
+
+    let rsa4096 = Ca::with_key("RSA CA", rsa_key(4096, 4, &rcgen::PKCS_RSA_SHA384));
+    let leaf = rsa4096.leaf("good.test", 2025, 2035, P384);
+    assert!(connect(&rsa4096, "good.test", server(leaf, |_| {}, TLS13)).is_ok());
+}
+
+#[test]
+fn an_rsa_key_under_2048_bits_is_refused() {
+    // ring will not sign with one, so the verifier is asked directly: a
+    // good PKCS#1 signature by a 1,024-bit key is refused, the same by a
+    // 2,048-bit key accepted.
+    use rsa::pkcs1::EncodeRsaPublicKey;
+    use rsa::signature::{SignatureEncoding, Signer};
+    let random: &'static SharedDrbg = Box::leak(Box::new(SharedDrbg::new()));
+    let p = provider(random);
+    let (_, algs) = (p.signature_verification_algorithms.mapping.iter())
+        .find(|(s, _)| *s == rustls::SignatureScheme::RSA_PKCS1_SHA256)
+        .unwrap();
+    for (bits, ok) in [(1024, false), (2048, true)] {
+        let key = rsa::PrivateKey::new(&mut TestRng(7), bits).unwrap();
+        let public = key.to_public_key().to_pkcs1_der().unwrap();
+        let signer = rsa::pkcs1v15::SigningKey::<rsa::sha2::Sha256>::new(key);
+        let sig: rsa::pkcs1v15::Signature = signer.sign(b"message");
+        let sig = Vec::from(sig.to_bytes());
+        let got = algs[0].verify_signature(public.as_bytes(), b"message", &sig);
+        assert_eq!(got.is_ok(), ok, "{bits} bits");
+        assert!(
+            algs[0]
+                .verify_signature(public.as_bytes(), b"other", &sig)
+                .is_err()
+        );
+    }
+}
+
 #[test]
 fn an_unknown_issuer_is_refused() {
     let ca = Ca::new("Pharos Test CA", P256);
@@ -422,14 +521,7 @@ fn a_server_without_our_suite_group_or_version_is_refused() {
     assert_eq!(refused(&ca, "good.test", group), Refusal::Protocol);
     let tls12 = server(leaf(), |_| {}, &[&rustls::version::TLS12]);
     assert_eq!(refused(&ca, "good.test", tls12), Refusal::Protocol);
-    // A P-384 key: the client offers only P-256 and Ed25519 signatures
-    // (no P-384 until M6.2), so the server has nothing to sign with.
-    let p384 = server(
-        ca.leaf("good.test", 2025, 2035, &rcgen::PKCS_ECDSA_P384_SHA384),
-        |_| {},
-        TLS13,
-    );
-    assert_eq!(refused(&ca, "good.test", p384), Refusal::Protocol);
+    // A P-384 key is accepted since #282 (handshakes_accept_rsa_and_p384_chains).
 }
 
 #[test]

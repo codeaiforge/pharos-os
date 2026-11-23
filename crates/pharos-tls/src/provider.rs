@@ -1,7 +1,9 @@
 //! rustls's provider traits on RustCrypto and `pharos-crypto` (D-034 item
 //! 4): SHA-256 and HMAC from `pharos-crypto` (HKDF through rustls's
 //! `HkdfUsingHmac`), AES-128-GCM from aes-gcm, X25519 from x25519-dalek,
-//! secp256r1 and ECDSA P-256 from p256, Ed25519 from ed25519-compact.
+//! secp256r1 and ECDSA P-256 from p256, Ed25519 from ed25519-compact, and
+//! (#282, D-035) RSA PKCS#1 v1.5 and PSS from rsa and ECDSA P-384 from
+//! p384, for verification only.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -360,15 +362,164 @@ fn p256_share(random: &dyn SecureRandom) -> Result<Box<dyn ActiveKeyExchange>, E
     Err(Error::FailedToGetRandomBytes)
 }
 
-// --- Signatures: ECDSA P-256 with SHA-256 (p256), Ed25519 (ed25519-compact) ---
+// --- Signatures: ECDSA P-256 with SHA-256 (p256), Ed25519 (ed25519-compact),
+// RSA (rsa) and ECDSA P-384 with SHA-384 (p384) ---
 
 static ALGORITHMS: WebPkiSupportedAlgorithms = WebPkiSupportedAlgorithms {
-    all: &[&EcdsaP256Sha256, &Ed25519],
+    all: &[
+        &EcdsaP256Sha256,
+        &EcdsaP384Sha384,
+        &Ed25519,
+        &RSA_PKCS1_SHA256,
+        &RSA_PKCS1_SHA384,
+        &RSA_PKCS1_SHA512,
+        &RSA_PSS_SHA256,
+        &RSA_PSS_SHA384,
+        &RSA_PSS_SHA512,
+    ],
     mapping: &[
         (SignatureScheme::ECDSA_NISTP256_SHA256, &[&EcdsaP256Sha256]),
+        (SignatureScheme::ECDSA_NISTP384_SHA384, &[&EcdsaP384Sha384]),
         (SignatureScheme::ED25519, &[&Ed25519]),
+        (SignatureScheme::RSA_PSS_SHA256, &[&RSA_PSS_SHA256]),
+        (SignatureScheme::RSA_PSS_SHA384, &[&RSA_PSS_SHA384]),
+        (SignatureScheme::RSA_PSS_SHA512, &[&RSA_PSS_SHA512]),
+        (SignatureScheme::RSA_PKCS1_SHA256, &[&RSA_PKCS1_SHA256]),
+        (SignatureScheme::RSA_PKCS1_SHA384, &[&RSA_PKCS1_SHA384]),
+        (SignatureScheme::RSA_PKCS1_SHA512, &[&RSA_PKCS1_SHA512]),
     ],
 };
+
+/// RSA keys accepted, in bits of modulus (gateway.md).
+const RSA_BITS: core::ops::RangeInclusive<u32> = 2048..=4096;
+
+#[derive(Clone, Copy, Debug)]
+enum Sha {
+    S256,
+    S384,
+    S512,
+}
+
+/// An RSA signature algorithm: PKCS#1 v1.5 or PSS (salt the hash's
+/// length, as RFC 8446 and RFC 4055 require), with one hash.
+#[derive(Debug)]
+struct Rsa {
+    pss: bool,
+    sha: Sha,
+    id: AlgorithmIdentifier,
+}
+
+static RSA_PKCS1_SHA256: Rsa = Rsa {
+    pss: false,
+    sha: Sha::S256,
+    id: alg_id::RSA_PKCS1_SHA256,
+};
+static RSA_PKCS1_SHA384: Rsa = Rsa {
+    pss: false,
+    sha: Sha::S384,
+    id: alg_id::RSA_PKCS1_SHA384,
+};
+static RSA_PKCS1_SHA512: Rsa = Rsa {
+    pss: false,
+    sha: Sha::S512,
+    id: alg_id::RSA_PKCS1_SHA512,
+};
+static RSA_PSS_SHA256: Rsa = Rsa {
+    pss: true,
+    sha: Sha::S256,
+    id: alg_id::RSA_PSS_SHA256,
+};
+static RSA_PSS_SHA384: Rsa = Rsa {
+    pss: true,
+    sha: Sha::S384,
+    id: alg_id::RSA_PSS_SHA384,
+};
+static RSA_PSS_SHA512: Rsa = Rsa {
+    pss: true,
+    sha: Sha::S512,
+    id: alg_id::RSA_PSS_SHA512,
+};
+
+fn rsa_verify<D>(pss: bool, key: rsa::PublicKey, message: &[u8], signature: &[u8]) -> bool
+where
+    D: rsa::sha2::Digest
+        + rsa::pkcs1::der::oid::AssociatedOid
+        + rsa::sha2::digest::FixedOutputReset,
+{
+    use rsa::signature::Verifier;
+    if pss {
+        let sig = rsa::pss::Signature::try_from(signature);
+        sig.is_ok_and(|s| {
+            rsa::pss::VerifyingKey::<D>::new(key)
+                .verify(message, &s)
+                .is_ok()
+        })
+    } else {
+        let sig = rsa::pkcs1v15::Signature::try_from(signature);
+        sig.is_ok_and(|s| {
+            rsa::pkcs1v15::VerifyingKey::<D>::new(key)
+                .verify(message, &s)
+                .is_ok()
+        })
+    }
+}
+
+impl SignatureVerificationAlgorithm for Rsa {
+    fn verify_signature(
+        &self,
+        public_key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), InvalidSignature> {
+        use rsa::pkcs1::DecodeRsaPublicKey;
+        use rsa::traits::PublicKeyParts;
+        let key = rsa::PublicKey::from_pkcs1_der(public_key).map_err(|_| InvalidSignature)?;
+        if !RSA_BITS.contains(&key.n().bit_width()) {
+            return Err(InvalidSignature);
+        }
+        use rsa::sha2::{Sha256, Sha384, Sha512};
+        let ok = match self.sha {
+            Sha::S256 => rsa_verify::<Sha256>(self.pss, key, message, signature),
+            Sha::S384 => rsa_verify::<Sha384>(self.pss, key, message, signature),
+            Sha::S512 => rsa_verify::<Sha512>(self.pss, key, message, signature),
+        };
+        ok.then_some(()).ok_or(InvalidSignature)
+    }
+
+    fn public_key_alg_id(&self) -> AlgorithmIdentifier {
+        alg_id::RSA_ENCRYPTION
+    }
+
+    fn signature_alg_id(&self) -> AlgorithmIdentifier {
+        self.id
+    }
+}
+
+#[derive(Debug)]
+struct EcdsaP384Sha384;
+
+impl SignatureVerificationAlgorithm for EcdsaP384Sha384 {
+    fn verify_signature(
+        &self,
+        public_key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), InvalidSignature> {
+        use p384::ecdsa::signature::Verifier;
+        let key =
+            p384::ecdsa::VerifyingKey::from_sec1_bytes(public_key).map_err(|_| InvalidSignature)?;
+        let sig = p384::ecdsa::Signature::from_der(signature).map_err(|_| InvalidSignature)?;
+        key.verify(message, &sig).map_err(|_| InvalidSignature)
+    }
+
+    fn public_key_alg_id(&self) -> AlgorithmIdentifier {
+        alg_id::ECDSA_P384
+    }
+
+    fn signature_alg_id(&self) -> AlgorithmIdentifier {
+        alg_id::ECDSA_SHA384
+    }
+}
 
 #[derive(Debug)]
 struct EcdsaP256Sha256;

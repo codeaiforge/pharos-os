@@ -134,6 +134,7 @@ Clients are told apart by badge: agent slots, and control clients that `init`'s 
 | `DATA_PUT`, `DATA_GET` | agent | writes or reads one of the agent's own files (a name as agent names are, up to 64 KiB, through its buffer), kept by the runtime at `data/<agent>/<name>` in its store namespace; needs `data write` or `data read` (#105) | 10 s |
 | `ASK` | agent | asks the user, through `trust`, for a permission its policy entry lists as askable, for some milliseconds or the rest of the task: `GRANTED`, `REFUSED`, or `PENDING` (ask again); see [capabilities.md](capabilities.md) (#106) | 1 s |
 | `SEND_TO` | agent | one UDP datagram of up to 248 bytes from its buffer to a destination it holds `net` for, through the runtime's port (#109) | 1 s |
+| `REQUEST` (#282) | agent | an HTTPS request on a gateway route it holds `https` for: the path and the body from its buffer to the egress gateway, which injects the route's secret; the answer, the secret stripped, back into its buffer, with the gateway's reply ([gateway.md](gateway.md)) | 35 s |
 | `RECEIVE_FROM` | agent | the oldest datagram kept for it (only from a destination it sent to and still holds), into its buffer, with its source; `NOT_FOUND` at once if none (#109) | 1 s |
 | `TOOL` | agent | a tool call: its text in the agent's buffer (at most 1 KiB) is copied out, parsed, and checked against the agent's tools, grants, and budgets, then audited and run; `read_file` puts a granted file in the buffer, `send` sends a datagram once the user confirms that call (`PENDING` until then, `REFUSED` if not); see [tools.md](tools.md) (#126–#128) | 10 s |
 | `MESSAGE_SEND`, `MESSAGE_RECEIVE` | agent | a message of up to 1 KiB and a kind byte to an agent it holds `channel` for, queued in the runtime (8 per receiver, `BUSY` when full) and audited without its content; the oldest message waiting for the caller, with its sender, or `NOT_FOUND`; see [coordination.md](coordination.md) (#133) | 1 s |
@@ -147,7 +148,7 @@ Clients are told apart by badge: agent slots, and control clients that `init`'s 
 | `FORGET` | control | deletes an ended task's record | 10 s |
 | `INFO`, `ATTACH` | both | as D-019 | 1 s |
 
-Inference, `DATA_PUT`, `SEND_TO` (#109), `SUBMIT`, and `CANCEL` are audited first (#108): if the audit trail cannot record the intent within 2 s, the request answers `NO_AUDIT` and nothing is done ([capabilities.md](capabilities.md)). An agent's refused requests are recorded once per kind per attempt, with the attempt's total when it ends (#110).
+Inference, `DATA_PUT`, `SEND_TO` (#109), `REQUEST` (#282), `SUBMIT`, and `CANCEL` are audited first (#108): if the audit trail cannot record the intent within 2 s, the request answers `NO_AUDIT` and nothing is done ([capabilities.md](capabilities.md)). An agent's refused requests are recorded once per kind per attempt, with the attempt's total when it ends (#110).
 
 - An agent sees only its own task: the badge gives the slot, the slot the task. A request about another task answers `NO_SESSION`.
 - Everything an agent sends is checked and copied out of its buffer before use, as in the inference service. Inference output reaches the agent as data, never interpreted by the runtime.

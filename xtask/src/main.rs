@@ -144,12 +144,14 @@ COMMANDS:
                             Check SHA256SUMS.sig under the public key in FILE
                             (such as RELEASE-KEY), then every file; print the
                             boot measurement.
-    run [--bios] [--gdb] [--kernel <ELF>]
+    run [--bios] [--gdb] [--kernel <ELF>] [--secrets <FILE>]
                             Build, make the image, and boot it in QEMU with serial
                             output on this terminal. UEFI (OVMF) by default; --bios
                             uses SeaBIOS; --gdb waits for GDB on localhost:1234;
                             --kernel boots the given ELF (for example a test
-                            kernel) instead of building the kernel. The system
+                            kernel) instead of building the kernel; --secrets gives
+                            the vault the host's secrets file (D-035: one
+                            `<name> <value>` a line, checked first). The system
                             runs until QEMU is stopped (D-049); fails if the
                             kernel reports a failure.
     test [--timeout <SECS>] [--shard <N/M>] [--repeat <N>]
@@ -259,6 +261,8 @@ enum Task {
         bios: bool,
         gdb: bool,
         kernel: Option<PathBuf>,
+        /// The host's secrets file for the vault (D-035, #282).
+        secrets: Option<PathBuf>,
     },
     Test {
         timeout: Duration,
@@ -397,7 +401,7 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
             return Ok(task);
         }
         Some("run") => {
-            let (mut bios, mut gdb, mut kernel) = (false, false, None);
+            let (mut bios, mut gdb, mut kernel, mut secrets) = (false, false, None, None);
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--bios" => bios = true,
@@ -406,10 +410,19 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                         let path = args.next().ok_or("--kernel needs a path")?;
                         kernel = Some(PathBuf::from(path));
                     }
+                    "--secrets" => {
+                        let path = args.next().ok_or("--secrets needs a path")?;
+                        secrets = Some(PathBuf::from(path));
+                    }
                     other => return Err(format!("unexpected argument '{other}'")),
                 }
             }
-            return Ok(Task::Run { bios, gdb, kernel });
+            return Ok(Task::Run {
+                bios,
+                gdb,
+                kernel,
+                secrets,
+            });
         }
         Some("runner") => {
             let elf = args
@@ -915,7 +928,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 35] = [
+const USER_PROGRAMS: [&str; 36] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -951,6 +964,7 @@ const USER_PROGRAMS: [&str; 35] = [
     "dmaprobe",
     "tls",
     "vault",
+    "gateway",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -1421,7 +1435,16 @@ fn qemu_error(e: io::Error) -> String {
     }
 }
 
-fn run_qemu(paths: &Paths, bios: bool, gdb: bool, kernel: Option<PathBuf>) -> Result<()> {
+fn run_qemu(
+    paths: &Paths,
+    bios: bool,
+    gdb: bool,
+    kernel: Option<PathBuf>,
+    secrets: Option<PathBuf>,
+) -> Result<()> {
+    // Checked before anything is built; QEMU reads the file by its path,
+    // so its contents never reach a command line.
+    let secrets = secrets.map(|f| secrets_arg(&f)).transpose()?;
     let modules = modules_for(paths, &kernel)?;
     let elf = match kernel {
         Some(elf) => elf,
@@ -1453,7 +1476,8 @@ fn run_qemu(paths: &Paths, bios: bool, gdb: bool, kernel: Option<PathBuf>) -> Re
         trust.with_extension("out").display(),
         trust.with_extension("in").display()
     );
-    let args = qemu_args(&iso, &vars, OsStr::new("stdio"), bios, gdb);
+    let mut args = qemu_args(&iso, &vars, OsStr::new("stdio"), bios, gdb);
+    args.extend(secrets.into_iter().flat_map(|a| ["-fw_cfg".into(), a]));
     let status = qemu_command(without_fw_cfg(args, BOOT_CHECK_NAME))
         .status()
         .map_err(qemu_error)?;
@@ -1463,6 +1487,34 @@ fn run_qemu(paths: &Paths, bios: bool, gdb: bool, kernel: Option<PathBuf>) -> Re
         Some(QEMU_EXIT_FAILURE) => interpret_qemu_status(status.code()),
         _ => Ok(()),
     }
+}
+
+/// QEMU's `fw_cfg` argument for the host's secrets file `file`, once it
+/// parses as the vault will parse it (D-035). A refusal names the line,
+/// never its content.
+fn secrets_arg(file: &Path) -> Result<OsString> {
+    let text = fs::read(file).map_err(io_err("cannot read the secrets file", file))?;
+    match pharos_proto::vault::parse_secrets(&text) {
+        Ok(_) => {}
+        Err(0) => {
+            return Err(format!(
+                "{}: the secrets file is over {} bytes",
+                file.display(),
+                pharos_proto::vault::MAX_FILE
+            ));
+        }
+        Err(line) => {
+            return Err(format!(
+                "{}: line {line} is not `<name> <value>` (name: 1 to 32 of a-z, 0-9, -, _; \
+                 value: 1 to 1024 visible ASCII bytes; each name once; at most 16, each \
+                 line ending in a newline)",
+                file.display()
+            ));
+        }
+    }
+    let mut arg = OsString::from(format!("name={SECRETS_NAME},file="));
+    arg.push(file);
+    Ok(arg)
 }
 
 /// What a headless boot produced.
@@ -4883,7 +4935,12 @@ fn main() -> ExitCode {
                     version,
                     key,
                 } => sign::sign(&paths, &image, &out, version, key.as_deref()),
-                Task::Run { bios, gdb, kernel } => run_qemu(&paths, bios, gdb, kernel),
+                Task::Run {
+                    bios,
+                    gdb,
+                    kernel,
+                    secrets,
+                } => run_qemu(&paths, bios, gdb, kernel, secrets),
                 Task::Test {
                     timeout,
                     shard,
@@ -5310,7 +5367,8 @@ mod tests {
             Ok(Task::Run {
                 bios: false,
                 gdb: false,
-                kernel: None
+                kernel: None,
+                secrets: None,
             })
         );
         assert_eq!(
@@ -5318,7 +5376,8 @@ mod tests {
             Ok(Task::Run {
                 bios: true,
                 gdb: true,
-                kernel: None
+                kernel: None,
+                secrets: None,
             })
         );
         assert_eq!(
@@ -5326,10 +5385,45 @@ mod tests {
             Ok(Task::Run {
                 bios: false,
                 gdb: true,
-                kernel: Some(PathBuf::from("t.elf"))
+                kernel: Some(PathBuf::from("t.elf")),
+                secrets: None,
             })
         );
         assert!(parse(args(&["run", "--kernel"])).is_err());
+        assert_eq!(
+            parse(args(&["run", "--secrets", "s.txt"])),
+            Ok(Task::Run {
+                bios: false,
+                gdb: false,
+                kernel: None,
+                secrets: Some(PathBuf::from("s.txt")),
+            })
+        );
+        assert!(parse(args(&["run", "--secrets"])).is_err());
+    }
+
+    #[test]
+    fn a_secrets_file_is_checked_and_refused_by_line_only() {
+        let dir = std::env::temp_dir().join(format!("pharos-secrets-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good");
+        fs::write(&good, "api-token <TOKEN>\n").unwrap();
+        let arg = secrets_arg(&good).unwrap();
+        assert!(
+            arg.to_string_lossy()
+                .starts_with("name=opt/org.pharos/secrets,file=")
+        );
+        assert!(
+            !arg.to_string_lossy().contains("<TOKEN>"),
+            "the value is never an argument"
+        );
+        let bad = dir.join("bad");
+        fs::write(&bad, "ok v\nBad <TOKEN>\n").unwrap();
+        let err = secrets_arg(&bad).unwrap_err();
+        assert!(err.contains("line 2"), "{err}");
+        assert!(!err.contains("<TOKEN>"), "never the content: {err}");
+        assert!(secrets_arg(&dir.join("missing")).is_err());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-23 (#280), with each open question decided as recommended (section 7). It follows [D-035](../project/decision-log.md#d-035-credential-vault-and-egress-gateway) (accepted 2026-11-23) and builds on the [TLS service](tls.md).
-- **Implementation:** the vault is **implemented** (#281): the secrets file in the kernel and `secrets_read` (system call 34), `init` passing the file to the vault without reading it, the file's parser and the `vault` v1 codec (`pharos_proto::vault`, with audit client 5 and action `vault`, 25), routes in `pharos_services` with the rules the vault relies on, and the vault (`bin/vault`). It runs in the `secrets` test kernel's table only, tested there with a client in the gateway's place; no table starts it at boot yet. *As built (#281)* notes below. **Planned:** the gateway, the runtime's `REQUEST`, RSA and P-384, and `cargo xtask run --secrets` (#282); the fuzz tests (#283); the `vault` test kernel (#284).
+- **Implementation:** the vault is **implemented** (#281): the secrets file in the kernel and `secrets_read` (system call 34), `init` passing the file to the vault without reading it, the file's parser and the `vault` v1 codec (`pharos_proto::vault`, with audit client 5 and action `vault`, 25), routes in `pharos_services` with the rules the vault relies on, and the vault (`bin/vault`). The gateway is **implemented** (#282): `pharos_proto::http` (paths and patterns, the request head, the answer parser, stripping), the `gateway` v1 codec (`pharos_proto::gateway`, audit client 6 and action `https`, 26), every route rule in `pharos_services::check_routes`, the gateway's decisions in `pharos_programs::gateway` (host-tested) and the gateway (`bin/gateway`), the runtime's `REQUEST` and the `https` grant and manifest key, RSA PKCS#1 v1.5 and PSS and ECDSA P-384 in `pharos-tls`, and `cargo xtask run --secrets`. Neither runs in any table at boot yet, and the gateway and `REQUEST` are tested on the host only until the `vault` test kernel (#284). *As built* notes below. **Planned:** the fuzz tests (#283); the `vault` test kernel (#284); `--tls-roots`, once a table that boots runs the gateway (open question 3).
 
 ## 2. Context
 
@@ -138,6 +138,12 @@ Both the vault and the gateway link the table. The vault uses it to check that a
   - 44 `TIMEOUT`.
 
   A non-2xx HTTP status is not an error: it reaches the client as `http`.
+- *As built (#282):*
+  - `REQUEST` names its route by name (`[1, 1, name length, name, path_len:u16, body_len:u32]`), not by number: the runtime does not know which table `init` runs, so it cannot number routes. The gateway finds the route's number for the vault.
+  - There is no common `INVALID`: a path the pattern refuses is `BAD_REQUEST`, a body over `max_body` `TOO_LARGE`, a route the table lacks `NOT_FOUND`, a buffer too small `NO_BUFFER`. Each refusal is recorded (an event, outcome `refused`) before it is answered, or the answer is `NO_AUDIT`.
+  - The reply is always `[status, detail, http:u16, type_len:u8, answer_len:u32, stripped:u8]`: on `TLS`, `detail` is the TLS service's status and `http` its reason; on `ANSWER`, `detail` is the reason.
+  - The statuses are 40 `NO_SECRET`, 41 `TLS`, 42 `ANSWER`, 43 `NO_AUDIT`, and 44 `TIMEOUT`, as above.
+  - One request at a time: a second client waits in the endpoint's queue for up to the first's 30 s.
 - **A request, in order:**
   1. check the client may use the route, and the path and the body;
   2. record the intent;
@@ -151,6 +157,8 @@ Both the vault and the gateway link the table. The vault uses it to check that a
   10. answer.
 
   Any failure ends the request at that step, closes the connection, erases the secret, and records the outcome with its status.
+
+  *As built (#282):* stripping needs the value, which step 6 erased. So, after step 8 has parsed the answer with no secret in the gateway's memory, the gateway asks the vault for it once more, strips, and erases it again: each request is two releases in the vault's trail. The answer is written to the client's buffer only once the outcome is recorded.
 - **The request** is written by the gateway alone:
 
   ```text
@@ -183,11 +191,13 @@ Both the vault and the gateway link the table. The vault uses it to check that a
   - it holds the agent's call for at most 35 s.
 - The runtime can't tell its agents apart at the gateway: all of them are client 1. The gateway's per-client check is a second line, and the runtime's per-agent check is the one that decides between agents (as D-012 item 10 has for UDP).
 - **No model tool yet:** a `request` tool for model-written calls (tools.md) is open question 1.
+- *As built (#282):* `REQUEST` is agents operation 34: `[route name, path_len:u16, body_len:u32]`, the path and the body at the start of the agent's buffer; the reply is the gateway's, and the content type then the answer are copied to the start of the agent's buffer. The gateway is the runtime's handle 13, optional (without it every `REQUEST` is `INTERNAL`), with a 64 KiB buffer. The request's bytes are checked against the network budget before it is sent; the answer's are charged after it arrives (never refused, so the next request is). The intent records the route as detail with the `https` permission; the outcome, the gateway's status. `https` is not askable (decided: grants only). The runtime serves one request at a time, so a `REQUEST` holds every agent for up to 35 s.
 
 ### Signatures and roots
 
 - **`pharos-tls`'s provider gains** RSA PKCS#1 v1.5 and PSS with SHA-256, SHA-384, and SHA-512 for 2,048- to 4,096-bit keys (rsa 0.10), and ECDSA P-384 with SHA-384 (p384 0.14). Verification only, for certificates and for the server's `CertificateVerify`. The TLS service's client offers the matching signature schemes. Its key exchange and cipher suite are unchanged.
 - **Roots:** `cargo xtask build --tls-roots <PEM file>` writes `system/tls/roots` from a file the builder chooses, still at most 16 roots and 16 KiB. The release image's roots are open question 3.
+- *As built (#282):* the provider verifies RSA PKCS#1 v1.5 with SHA-256, -384, and -512 (certificates) and PSS with the same hashes, the salt the hash's length (TLS 1.3's `CertificateVerify`), for keys of 2,048 to 4,096 bits, and ECDSA P-384 with SHA-384. rustls offers the matching schemes from the provider. A smaller or larger RSA key fails verification. `--tls-roots` is **planned**: `cargo xtask build` builds only the kernel, and no table that boots runs the gateway yet.
 
 ### Audit
 
@@ -195,9 +205,12 @@ Both the vault and the gateway link the table. The vault uses it to check that a
 | --- | --- | --- |
 | The agent's request | runtime (client 3) | agent, task, route |
 | Intent | gateway (client 6) | client, route, method, path (the query's length only), the body's length and SHA-256 |
+| Refusal | gateway | client, the route's name as asked, the status (#282, as built) |
 | Release | vault (client 5) | route, secret's name, outcome |
 | Connection | TLS service (client 4) | as in M6.1 |
 | Outcome | gateway | status, HTTP status, answer length, `stripped` |
+
+*As built (#282):* the records are action `https` (26); the detail is at most 64 bytes, so the intent is `c<client> <route> <method> q<query length> b<body length> <the first 8 bytes of the body's SHA-256, hex> <path>`, the path last and cut to fit; the outcome is `status <s> [detail <d>] http <h> answer <n> stripped <k>`. With the second release, a request is seven or eight records.
 
 That is six or seven records a request, which fills the trail faster than UDP does. #275's rate limit covers it, and its design should count these.
 

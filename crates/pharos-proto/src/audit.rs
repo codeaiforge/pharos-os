@@ -75,6 +75,8 @@ pub mod client {
     pub const TLS: u8 = 4;
     /// The vault (#281, gateway.md).
     pub const VAULT: u8 = 5;
+    /// The egress gateway (#282, gateway.md).
+    pub const GATEWAY: u8 = 6;
 }
 
 /// What kind of record.
@@ -142,7 +144,13 @@ pub mod action {
     /// from the vault: the route's and the secret's names as detail; never
     /// the value.
     pub const VAULT: u8 = 25;
-    pub const LAST: u8 = VAULT;
+    /// An HTTPS request on a route (#282, gateway.md): the runtime's
+    /// record of an agent's `REQUEST` (the route as detail), and the
+    /// gateway's intent (route, method, lengths, the body's hash, the
+    /// path) and outcome (statuses, lengths, how many were stripped);
+    /// never a secret, a body, or an answer.
+    pub const HTTPS: u8 = 26;
+    pub const LAST: u8 = HTTPS;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -172,6 +180,7 @@ pub mod action {
             "rotate",
             "tls",
             "vault",
+            "https",
         ]
         .get(usize::from(code))
         .copied()

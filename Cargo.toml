@@ -69,6 +69,13 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.ecdsa]
 opt-level = 3
+# RSA verification and the TLS tests' RSA key generation (#282).
+[profile.dev.package.rsa]
+opt-level = 3
+[profile.dev.package.crypto-primes]
+opt-level = 3
+[profile.dev.package.p384]
+opt-level = 3
 [profile.dev.package.curve25519-dalek]
 opt-level = 3
 [profile.dev.package.x25519-dalek]

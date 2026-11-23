@@ -11,6 +11,7 @@ publish.workspace = true
 # Math functions for floating point in user space (D-016; MIT, no runtime
 # dependencies, maintained in rust-lang/compiler-builtins).
 libm = "0.2.16"
+pharos-crypto = { path = "../../crates/pharos-crypto" }
 pharos-fs = { path = "../../crates/pharos-fs" }
 # Signed images (D-028, #163): `init` verifies a slot before it mounts it.
 pharos-image = { path = "../../crates/pharos-image" }

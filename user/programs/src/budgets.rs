@@ -152,6 +152,13 @@ impl Usage {
         Ok(())
     }
 
+    /// Charges `bytes` already received (an HTTPS answer, #282): never
+    /// refused, so a later request is refused instead once over.
+    // ponytail: the group's per-minute bucket is charged on sending only.
+    pub fn received(&mut self, bytes: u64) {
+        self.net_bytes = self.net_bytes.saturating_add(bytes);
+    }
+
     /// Charges one datagram of `bytes`, or refuses with what it would
     /// exceed.
     pub fn send(

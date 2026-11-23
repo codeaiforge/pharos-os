@@ -154,6 +154,8 @@ pub struct Manifest<'a> {
     pub knowledge_write: Files<'a>,
     /// Optional (#165): `update = propose`.
     pub propose: bool,
+    /// Optional (#282): the gateway's routes it may use.
+    pub https: Files<'a>,
 }
 
 /// What the runtime's policy table allows one agent: the most it may get.
@@ -194,6 +196,9 @@ pub struct Entry {
     pub ask_knowledge: &'static [&'static [u8]],
     /// May get `update propose` (#165; not askable).
     pub propose: bool,
+    /// The egress gateway's routes it may use (#282, gateway.md; not
+    /// askable).
+    pub https: &'static [&'static [u8]],
 }
 
 /// What one attempt of an agent may use (D-022, resources.md). Each limit
@@ -297,7 +302,7 @@ pub struct Refusal {
 }
 
 /// The keys; the last six are optional.
-const KEYS: [&[u8]; 16] = [
+const KEYS: [&[u8]; 17] = [
     b"manifest",
     b"name",
     b"program",
@@ -314,6 +319,7 @@ const KEYS: [&[u8]; 16] = [
     b"knowledge_read",
     b"knowledge_write",
     b"update",
+    b"https",
 ];
 const REQUIRED: usize = 10;
 
@@ -421,6 +427,13 @@ fn channels(v: &[u8]) -> Option<Files<'_>> {
     Files::new_with(&names[..n], valid_name)
 }
 
+/// Route names (`pharos_proto::vault::valid_name`), each at most once.
+fn routes(v: &[u8]) -> Option<Files<'_>> {
+    let mut names = [&b""[..]; MAX_FILES + 1];
+    let n = list(v, &mut names)?;
+    Files::new_with(&names[..n], crate::vault::valid_name)
+}
+
 fn files(v: &[u8]) -> Option<Files<'_>> {
     let mut names = [&b""[..]; MAX_FILES + 1];
     let n = list(v, &mut names)?;
@@ -432,7 +445,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
     if text.len() > MAX_SIZE {
         return Err(whole(Why::TooLarge));
     }
-    let mut values: [Option<&[u8]>; 16] = [None; 16];
+    let mut values: [Option<&[u8]>; 17] = [None; 17];
     for (i, line) in text.split(|b| *b == b'\n').enumerate() {
         let at = |why| Refusal { line: i + 1, why };
         if !line.iter().all(|b| (b' '..=b'~').contains(b)) {
@@ -455,7 +468,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
             return Err(at(Why::RepeatedKey));
         }
     }
-    let mut v = [&b""[..]; 16];
+    let mut v = [&b""[..]; 17];
     for (k, (out, value)) in v.iter_mut().zip(values).enumerate() {
         *out = match value {
             Some(value) => value,
@@ -480,6 +493,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
         read_list,
         write_list,
         update,
+        route_list,
     ] = v;
     let bad = whole(Why::BadValue);
     if number(version, u32::MAX) != Some(VERSION) {
@@ -511,6 +525,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
             b"propose" => true,
             _ => return Err(bad),
         },
+        https: routes(route_list).ok_or(bad)?,
     };
     if m.progress_ms > m.task_ms {
         return Err(whole(Why::ProgressOverTask));
@@ -561,7 +576,8 @@ impl Manifest<'_> {
                 .all(|c| e.channels.contains(c))
             && (self.knowledge_read.as_slice().iter()).all(|k| e.knowledge_read.contains(k))
             && (self.knowledge_write.as_slice().iter()).all(|k| e.knowledge_write.contains(k))
-            && (!self.propose || e.propose);
+            && (!self.propose || e.propose)
+            && self.https.as_slice().iter().all(|r| e.https.contains(r));
         if fits { Ok(e) } else { Err(Why::OverPolicy) }
     }
 
@@ -620,6 +636,7 @@ impl Manifest<'_> {
             (b"\nchannels =", &self.channels),
             (b"\nknowledge_read =", &self.knowledge_read),
             (b"\nknowledge_write =", &self.knowledge_write),
+            (b"\nhttps =", &self.https),
         ] {
             if list.as_slice().is_empty() {
                 continue;
@@ -669,6 +686,7 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
         knowledge_write: &[b"notes"],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
     }];
 
     fn with(key: &str, value: &str) -> std::string::String {
@@ -714,6 +732,7 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
                 knowledge_read: Files::default(),
                 knowledge_write: Files::default(),
                 propose: false,
+                https: Files::default(),
             }
         );
         let text = plus("tools = send , read_file\nfiles = report.txt,a-b_c.1");
@@ -1005,6 +1024,33 @@ knowledge_read = notes, ops\nknowledge_write = notes\n",
             Err(Why::OverPolicy),
             "not in the entry"
         );
+        assert_eq!(
+            check("https = issues"),
+            Err(Why::OverPolicy),
+            "a route not listed"
+        );
+        let mut entry = TABLE[0];
+        entry.https = &[b"issues", b"search"];
+        for (line, fits) in [
+            ("https = issues", true),
+            ("https = search, issues", true),
+            ("https = other", false),
+        ] {
+            let text = plus(line);
+            let m = parse(text.as_bytes()).unwrap();
+            assert_eq!(m.within(&[entry]).is_ok(), fits, "{line}");
+            let mut out = [0u8; MAX_SIZE];
+            let n = m.encode(&mut out).unwrap();
+            assert_eq!(parse(&out[..n]), Ok(m), "{line} round trips");
+        }
+        for bad in [
+            "https = Issues",
+            "https = a.b",
+            "https = a, a",
+            "https = a b",
+        ] {
+            assert!(parse(plus(bad).as_bytes()).is_err(), "{bad}");
+        }
         let mut entry = TABLE[0];
         entry.propose = true;
         let text = plus("update = propose");

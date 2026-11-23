@@ -136,7 +136,7 @@ flowchart LR
 - **What it is trusted with:** the plaintext of its connections, and the check that the server is who the destination's name says. A bug in the check is the worst case: a client would talk to a server it did not mean to. The mitigations: webpki, rustls's name check, the name from `init` and never the client, the `tls` kernel's three refusals, and the throwaway branch that skips the name check (M6.1's validation).
 - **The network service grows** by TCP, the largest parser it runs; it was already untrusted and fuzzed, and stays so. It never sees plaintext.
 - **Peers are untrusted input:** every record, handshake message, and certificate is parsed by rustls and webpki (safe Rust, `forbid(unsafe_code)` in rustls), fuzzed on the host.
-- **Not closed:** revocation; a host that lies about the time or the randomness (trusted until M8.2); traffic analysis (sizes and timing are visible to the host and the network); one cipher suite and no RSA, so most public servers are unreachable until M6.2 (D-034).
+- **Not closed:** revocation; a host that lies about the time or the randomness (trusted until M8.2); traffic analysis (sizes and timing are visible to the host and the network); one cipher suite (D-034); RSA and P-384 signatures were added in #282 (gateway.md).
 - **The threat model** gains a "TCP and TLS (M6.1)" section with these rows, each **planned** until its issue lands.
 
 ## 5. Testing

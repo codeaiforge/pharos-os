@@ -14,7 +14,8 @@
 //! knowledge service (`SEND`, client 1; #144; optional: without it every
 //! knowledge request is `INTERNAL`), 12 the storage service, badged for
 //! namespace `system/incoming`, read-write (#165; optional: without it
-//! every `PROPOSE` is `INTERNAL`). The
+//! every `PROPOSE` is `INTERNAL`), 13 the egress gateway (`SEND`, client
+//! 1; #282; optional: without it every `REQUEST` is `INTERNAL`). The
 //! argument selects the policy table (0: boot, empty; 1: the `agents` and
 //! `agents_crash` test kernels).
 //!
@@ -90,6 +91,13 @@
 //! the first free `n`; with 4 files there it answers `OVER_LIMIT`. That is
 //! all it can do: it holds nothing on `init`, the slots, or the record,
 //! and only the user's `apply` on the trusted console applies a file.
+//!
+//! HTTPS (#282, gateway.md): `REQUEST` needs `https <route>`, counts
+//! against the attempt's network budget (the request's bytes before, the
+//! answer's after), and is audited (`https`, the route as detail) before
+//! the runtime copies the path and body into its buffer at the gateway and
+//! asks it. The gateway's answer, the secret already stripped, is copied
+//! back to the agent's buffer. The runtime never sees a secret.
 
 #![no_std]
 #![no_main]
@@ -110,6 +118,7 @@ use pharos_proto::agents::{
     VERSION, agent_slot, parse,
 };
 use pharos_proto::audit::{self, Entry as Record, Kind, action, outcome};
+use pharos_proto::gateway::{self, Answered, Request as GatewayRequest};
 use pharos_proto::infer::{self, Record as InferRecord, Request as InferRequest, Started, Tokens};
 use pharos_proto::knowledge::{self, Author, Put, Request as KnowledgeRequest, Source};
 use pharos_proto::manifest::{self, Budget, Data, Dest, Entry, Group, Verifier, Why};
@@ -140,6 +149,9 @@ const NET: Handle = 9;
 const FILES: Handle = 10;
 const KNOWLEDGE: Handle = 11;
 const INCOMING: Handle = 12;
+const GATEWAY: Handle = 13;
+/// How long the gateway may take: its own 30 s, and a margin.
+const GATEWAY_US: u64 = 35_000_000;
 /// How long the knowledge service may take to answer.
 const KNOWLEDGE_US: u64 = 10_000_000;
 /// The runtime's buffer at the storage service for granted files: the
@@ -446,6 +458,7 @@ const fn budget_entry(name: &'static [u8], budget: Budget, pages: u32) -> Entry 
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     }
 }
@@ -475,6 +488,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     Entry {
@@ -498,6 +512,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     Entry {
@@ -521,6 +536,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     Entry {
@@ -544,6 +560,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     // The `permissions` kernel's (#105).
@@ -569,6 +586,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     // Gets nothing; may ask for model 2 and data access (#106).
@@ -593,6 +611,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     // The `agents_net` kernel's (#109): gets the host echo server, may
@@ -618,6 +637,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     // The same grant as `netter`, which the user's `revoke netter` leaves.
@@ -642,6 +662,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     // The `hostile` kernel's (#110): its own files, and five models to ask
@@ -667,6 +688,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     // The `tools` kernel's (#126, #127): both tools, `report.txt` and
@@ -697,6 +719,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     // The `injection` kernel's (#129): both tools, `report.txt` with its
@@ -722,6 +745,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     // The `channels` kernel's (#133): `talker` may send to `hearer` (and
@@ -748,6 +772,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[b"hearer"],
     },
     Entry {
@@ -771,6 +796,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     Entry {
@@ -794,6 +820,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     Entry {
@@ -820,6 +847,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[b"outsider"],
     },
     // The `groups` kernel's (#134): `boss` supervises `helper` and `aide`
@@ -849,6 +877,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     Entry {
@@ -876,6 +905,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     Entry {
@@ -902,6 +932,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         // Its one channel, for the `deputy` kernel (#138).
         channels: &[b"boss"],
     },
@@ -926,6 +957,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: false,
+        https: &[],
         channels: &[],
     },
     // The `tools` kernel's too (#165): proposes its own file as an update.
@@ -950,6 +982,7 @@ const TEST: &[Entry] = &[
         knowledge_write: &[],
         ask_knowledge: &[],
         propose: true,
+        https: &[],
         channels: &[],
     },
     KNOWLEDGE_AGENTS[0],
@@ -990,6 +1023,7 @@ const KNOWLEDGE_AGENTS: [Entry; 2] = [
         knowledge_write: &[b"notes", b"ops"],
         ask_knowledge: &[b"read hr", b"write hr"],
         propose: false,
+        https: &[],
         ..knowledge_entry(b"scribe")
     },
     Entry {
@@ -1025,6 +1059,9 @@ struct Limits {
     net: manifest::Net,
     /// `update propose` (#165).
     propose: bool,
+    /// The gateway's routes it may use (#282), as the entry's names.
+    https: [&'static [u8]; manifest::MAX_FILES],
+    https_count: usize,
     /// The tools it may call and the files it gets (#126, #127), as the
     /// entry's names.
     tools: u32,
@@ -1148,6 +1185,43 @@ impl Knowledge {
             }
         }
         Err(status::INTERNAL)
+    }
+}
+
+/// The egress gateway (#282), through the runtime's buffer there.
+struct Https {
+    buffer: Mapped,
+    reply: Handle,
+    health: Health,
+}
+
+impl Https {
+    /// Attaches the buffer, once handle 13 answers `INFO` as the gateway:
+    /// without it, 13 is the runtime's own first endpoint, and a `send`
+    /// there would wait forever.
+    fn attach(&self) -> bool {
+        if GATEWAY == self.reply {
+            return false;
+        }
+        let mut out = [0u8; 256];
+        let info = [gateway::VERSION, pharos_proto::op::INFO];
+        let is_gateway = match call_timeout(GATEWAY, &info, self.reply, &mut out, 100_000) {
+            Ok(Received::Message { len, .. }) => {
+                Info::parse(&out[..len.min(256)]).is_some_and(|i| i.name == gateway::NAME)
+            }
+            _ => false,
+        };
+        if !is_gateway {
+            return false;
+        }
+        let len = self.buffer.len() as u64;
+        mem_share(&self.buffer).is_ok_and(|memory| {
+            let mut msg = [0u8; 16];
+            let sent = gateway::encode(&GatewayRequest::Attach { len }, &mut msg)
+                .is_some_and(|n| try_send_cap(GATEWAY, &msg[..n], memory, READ | WRITE, 0).is_ok());
+            let _ = delete(memory);
+            sent
+        })
     }
 }
 
@@ -1306,6 +1380,8 @@ struct Runtime {
     knowledge: Option<Knowledge>,
     /// Proposed updates (#165), if `init` gave the runtime handle 12.
     incoming: Option<Store>,
+    /// The egress gateway (#282), if `init` gave the runtime handle 13.
+    https: Option<Https>,
     /// Messages waiting for agents, by name (#133).
     mailboxes: Mailboxes,
     slots: [Option<Slot>; SLOTS],
@@ -1364,8 +1440,8 @@ fn askable(entry: &Entry, p: &Permission) -> bool {
         Permission::Net { addr, port } => entry.ask_net.contains(&(addr, port)),
         Permission::File { .. } => p.file_name().is_some_and(|f| entry.ask_files.contains(&f)),
         // Channels are not askable in M3.7 (coordination.md), nor is
-        // proposing an update (#165).
-        Permission::Channel { .. } | Permission::UpdatePropose => false,
+        // proposing an update (#165), nor a route (#282: grants only).
+        Permission::Channel { .. } | Permission::UpdatePropose | Permission::Https { .. } => false,
         // As typed after `knowledge `: `read <scope>` or `write <scope>`.
         Permission::KnowledgeRead { .. } | Permission::KnowledgeWrite { .. } => {
             p.knowledge_scope().is_some_and(|(scope, write)| {
@@ -1484,6 +1560,14 @@ fn load(e: &'static Entry, table: &'static [Entry]) -> Result<Limits, &'static [
             channel_count += 1;
         }
     }
+    let mut https = [&b""[..]; manifest::MAX_FILES];
+    let mut https_count = 0;
+    for r in m.https.as_slice() {
+        if let Some(name) = e.https.iter().find(|n| *n == r) {
+            https[https_count] = name;
+            https_count += 1;
+        }
+    }
     let scopes = |list: manifest::Files<'_>| {
         (list.as_slice().iter())
             .filter_map(|s| knowledge::scope_number(s))
@@ -1505,6 +1589,8 @@ fn load(e: &'static Entry, table: &'static [Entry]) -> Result<Limits, &'static [
         data: m.data,
         net: m.net,
         propose: m.propose,
+        https,
+        https_count,
     })
 }
 
@@ -1780,6 +1866,12 @@ impl Runtime {
         );
         if limits.propose {
             g.add(Permission::UpdatePropose, None);
+        }
+        for p in limits.https[..limits.https_count]
+            .iter()
+            .filter_map(|r| Permission::https(r))
+        {
+            g.add(p, None);
         }
         self.kept.apply(id, &mut g);
         g
@@ -2377,6 +2469,11 @@ impl Runtime {
                 self.send_datagram(i, id, &limits, addr, port, &payload, how)?;
                 Ok(done(out))
             }
+            Request::Request {
+                route,
+                path_len,
+                body_len,
+            } => self.https(i, id, &limits, route, (path_len, body_len), out),
             Request::ReceiveFrom => {
                 // Only with a destination held (M3.4 review F1): else any
                 // agent could make the runtime wait on the network service.
@@ -2936,6 +3033,86 @@ impl Runtime {
             s.peers.push((addr, port));
         }
         Ok(())
+    }
+
+    /// `REQUEST` (#282) for slot `i` on task `id`: the path and the body
+    /// at the start of its buffer to the gateway on `route`, the answer
+    /// back into its buffer. The reply is the gateway's.
+    fn https(
+        &mut self,
+        i: usize,
+        id: u32,
+        limits: &Limits,
+        route: &[u8],
+        (path_len, body_len): (u16, u32),
+        out: &mut [u8; 256],
+    ) -> Result<usize, u8> {
+        let now = uptime();
+        let p = Permission::https(route).ok_or(status::BAD_REQUEST)?;
+        let allowed = self.slots[i]
+            .as_ref()
+            .is_some_and(|s| s.grants.allows(&p, now));
+        if !allowed {
+            return Err(status::NO_ACCESS);
+        }
+        let gw = self.https.as_ref().ok_or(status::INTERNAL)?;
+        gw.health.ready()?;
+        let room = gw.buffer.len();
+        let len = usize::from(path_len) + body_len as usize;
+        let agent_buffer = self.slots[i].as_ref().and_then(|s| s.buffer.as_ref());
+        let agent_len = agent_buffer.map_or(0, Mapped::len);
+        if len > agent_len || len > room {
+            return Err(status::NO_BUFFER);
+        }
+        let mut bytes = alloc::vec![0u8; len];
+        if let Some(b) = agent_buffer {
+            b.read_bytes(0, &mut bytes);
+        }
+        let agent = limits.entry.name;
+        let budget = limits.entry.budget;
+        self.charge(i, &budget, Some(p), |u, g| {
+            u.send(&budget, g, now, len as u64)
+        })?;
+        let seq = self.intent(agent, id, action::HTTPS, Some(p), gateway::NAME, route)?;
+        let gw = self.https.as_ref().ok_or(status::INTERNAL)?;
+        gw.buffer.write_bytes(0, &bytes);
+        let req = GatewayRequest::Request {
+            route,
+            path_len,
+            body_len,
+        };
+        let mut msg = [0u8; 64];
+        let n = gateway::encode(&req, &mut msg).ok_or(status::INTERNAL)?;
+        let mut reply = [0u8; 256];
+        let answered = match gw
+            .health
+            .call(GATEWAY, &msg[..n], gw.reply, &mut reply, GATEWAY_US)
+        {
+            Ok(Received::Message { len, .. }) => Answered::parse(&reply[..len.min(256)]),
+            _ => None,
+        };
+        let a = answered.unwrap_or(Answered {
+            status: status::INTERNAL,
+            ..Answered::default()
+        });
+        let back = usize::from(a.type_len) + a.answer_len as usize;
+        let fits = a.status == gateway::OK && back <= agent_len && back <= room;
+        let mut answer = alloc::vec![0u8; if fits { back } else { 0 }];
+        gw.buffer.read_bytes(0, &mut answer);
+        let mut d = [0u8; 20];
+        let detail = [&b"status "[..], decimal(a.status.into(), &mut d)].concat();
+        self.outcome(seq, agent, id, action::HTTPS, fits, &detail);
+        if a.status == gateway::OK && !fits {
+            return Err(status::NO_BUFFER);
+        }
+        if let Some(b) = self.slots[i].as_ref().and_then(|s| s.buffer.as_ref()) {
+            b.write_bytes(0, &answer);
+        }
+        if let Some(s) = self.slots[i].as_mut() {
+            s.usage.received(back as u64);
+        }
+        out[..10].copy_from_slice(&a.encode());
+        Ok(10)
     }
 
     /// `read_file` (#127) for slot `i` on task `id`, its `file` permission
@@ -3987,6 +4164,7 @@ fn needed(req: &Request<'_>) -> Option<Permission> {
         Request::DataGet { .. } => Some(Permission::DataRead),
         Request::Propose { .. } => Some(Permission::UpdatePropose),
         Request::SendTo { addr, port, .. } => Some(Permission::Net { addr, port }),
+        Request::Request { route, .. } => Permission::https(route),
         Request::MessageSend { to, .. } => Permission::channel(to),
         Request::KnowledgeGet { scope, .. }
         | Request::KnowledgeHistory { scope, .. }
@@ -4101,6 +4279,16 @@ fn main(arg: u64) -> u64 {
             s.attach().then_some(s)
         });
     // Shared knowledge (#144): optional, as handle 11 is.
+    // The egress gateway (#282): optional, as handle 13 is; its buffer
+    // holds a request's path and body, then the answer.
+    let https = mem_map(gateway::MAX_BUFFER).ok().and_then(|buffer| {
+        let h = Https {
+            buffer,
+            reply,
+            health: Health::default(),
+        };
+        h.attach().then_some(h)
+    });
     let knowledge = mem_map(knowledge::MIN_BUFFER).ok().and_then(|buffer| {
         let k = Knowledge {
             buffer,
@@ -4139,6 +4327,7 @@ fn main(arg: u64) -> u64 {
         files,
         knowledge,
         incoming,
+        https,
         mailboxes: Mailboxes::default(),
         slots: Default::default(),
         controls: Default::default(),

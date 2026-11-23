@@ -48,6 +48,12 @@
 //! the reply is `[OK, n]`, or `OVER_LIMIT` if 4 files already wait there.
 //! A proposal does nothing else: only the user's `apply` on the trusted
 //! console applies it, and `init` checks its signature first.
+//!
+//! HTTPS (#282, gateway.md): `REQUEST` names a route the agent holds
+//! `https` for, with the path (and any query) then the body at the start
+//! of its buffer; the reply is the gateway's
+//! ([`crate::gateway::Answered`]), the content type then the answer at the
+//! start of the buffer, the route's secret stripped.
 
 use crate::{Reader, Refused, Writer, op as common, split, status};
 
@@ -95,6 +101,8 @@ pub mod op {
     pub const PROMOTE: u8 = 32;
     /// A system update (#165).
     pub const PROPOSE: u8 = 33;
+    /// An HTTPS request on a route of the egress gateway (#282).
+    pub const REQUEST: u8 = 34;
 }
 
 /// The `ASK` reply's outcome, after `OK` (#106).
@@ -363,6 +371,14 @@ pub enum Request<'a> {
     },
     /// Agent: the oldest datagram waiting for it, into its buffer.
     ReceiveFrom,
+    /// Agent: an HTTPS request on gateway route `route` (needs `https
+    /// <route>`, #282), its path the first `path_len` bytes of its buffer
+    /// and its body the next `body_len`.
+    Request {
+        route: &'a [u8],
+        path_len: u16,
+        body_len: u32,
+    },
     /// Agent: the first `len` bytes of its buffer, with `kind`, to agent
     /// `to` (needs `channel <to>`, #133).
     MessageSend {
@@ -549,6 +565,14 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                 len: r.u32()?,
             },
             op::RECEIVE_FROM => Request::ReceiveFrom,
+            op::REQUEST => {
+                let n = usize::from(r.u8()?);
+                Request::Request {
+                    route: r.take(n).filter(|n| crate::vault::valid_name(n))?,
+                    path_len: r.u16()?,
+                    body_len: r.u32()?,
+                }
+            }
             op::USAGE => Request::Usage,
             op::MESSAGE_SEND => Request::MessageSend {
                 to: name(&mut r)?,
@@ -715,6 +739,20 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.u32(len)?;
         }
         Request::ReceiveFrom => head(&mut w, op::RECEIVE_FROM)?,
+        Request::Request {
+            route,
+            path_len,
+            body_len,
+        } => {
+            if !crate::vault::valid_name(route) {
+                return None;
+            }
+            head(&mut w, op::REQUEST)?;
+            w.bytes(&[route.len() as u8])?;
+            w.bytes(route)?;
+            w.u16(path_len)?;
+            w.u32(body_len)?;
+        }
         Request::Usage => head(&mut w, op::USAGE)?,
         Request::MessageSend { to, kind, len } => {
             if len > MAX_MESSAGE {
@@ -1058,6 +1096,11 @@ mod tests {
                 len: MAX_DATAGRAM,
             },
             Request::ReceiveFrom,
+            Request::Request {
+                route: b"issues",
+                path_len: 256,
+                body_len: 60 * 1024,
+            },
             Request::Usage,
             Request::MessageSend {
                 to: &[b'l'; 32],

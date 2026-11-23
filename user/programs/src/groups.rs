@@ -152,6 +152,7 @@ mod tests {
             knowledge_write: &[],
             ask_knowledge: &[],
             propose: false,
+            https: &[],
             channels: &[],
         }
     }

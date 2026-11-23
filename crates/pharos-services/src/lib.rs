@@ -96,6 +96,9 @@ pub enum Ep {
     /// The vault's (M6.2, gateway.md): its only client, the gateway, has
     /// badge 1.
     Vault,
+    /// The egress gateway's (M6.2, gateway.md): the agent runtime is
+    /// client 1; test programs 2.
+    Gateway,
 }
 
 impl Ep {
@@ -112,6 +115,7 @@ impl Ep {
             Self::Knowledge => "knowledge",
             Self::Tls => "tls",
             Self::Vault => "vault",
+            Self::Gateway => "gateway",
         })
     }
 }
@@ -341,6 +345,65 @@ pub enum BrokenRoute {
     /// A secret's name the secrets file could not hold, a secret without
     /// a header to carry it, or a header without a secret.
     Secret,
+    /// A method the gateway does not send.
+    Method,
+    /// A path pattern that is not `/` and segments of RFC 3986's
+    /// unreserved characters or `*`, at most 128 bytes.
+    Path,
+    /// A header name that is not a token, one only the gateway writes
+    /// (`Host`, `Content-Length`, `Connection`, `Accept-Encoding`,
+    /// `Transfer-Encoding`), the secret's header among the fixed ones, or a
+    /// value that is not visible ASCII.
+    Header,
+    /// `max_body` or `max_answer` over 60 KiB, or a body on `GET` or
+    /// `DELETE`.
+    Limit,
+    /// A destination the gateway's entry does not list.
+    Dest,
+    /// No client, or one outside the gateway's badges (1 and 2).
+    Clients,
+}
+
+/// Largest body or answer on a route.
+pub const MAX_ROUTE_BYTES: u32 = 60 * 1024;
+/// The gateway's clients: the agent runtime (1) and test programs (2).
+pub const GATEWAY_CLIENTS: u8 = 2;
+
+// The route rules below mirror `pharos_proto::http` (this crate has no
+// dependencies); the gateway checks paths against them again at run time.
+
+fn token(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+fn reserved_header(name: &str) -> bool {
+    [
+        "host",
+        "content-length",
+        "connection",
+        "accept-encoding",
+        "transfer-encoding",
+    ]
+    .iter()
+    .any(|r| r.eq_ignore_ascii_case(name))
+}
+
+fn header_value(value: &str) -> bool {
+    value.bytes().all(|b| (0x20..=0x7e).contains(&b))
+        && !value.starts_with(' ')
+        && !value.ends_with(' ')
+}
+
+fn path_pattern(p: &str) -> bool {
+    let unreserved = |b: u8| b.is_ascii_alphanumeric() || b"-._~".contains(&b);
+    p.len() <= 128
+        && p.starts_with('/')
+        && p[1..]
+            .split('/')
+            .all(|s| s == "*" || (s.bytes().all(unreserved) && s != "." && s != ".."))
 }
 
 /// Whether `name` is a route's or a secret's name: 1 to 32 bytes of
@@ -352,10 +415,10 @@ pub fn valid_route_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
-/// Checks the rules the vault relies on for `routes`; the first broken
-/// one, with its route. The gateway's (methods, paths, headers) come with
-/// the gateway (#282).
-pub fn check_routes(routes: &[Route]) -> Result<(), (usize, BrokenRoute)> {
+/// Checks the rules the vault and the gateway rely on for `routes`; the
+/// first broken one, with its route. `dests` is how many TLS destinations
+/// the table's gateway entry lists (`None`: the table has no gateway).
+pub fn check_routes(routes: &[Route], dests: Option<usize>) -> Result<(), (usize, BrokenRoute)> {
     if routes.len() > MAX_ROUTES {
         return Err((MAX_ROUTES, BrokenRoute::TooMany));
     }
@@ -374,8 +437,47 @@ pub fn check_routes(routes: &[Route]) -> Result<(), (usize, BrokenRoute)> {
         if !carried {
             return fail(BrokenRoute::Secret);
         }
+        if !["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&r.method) {
+            return fail(BrokenRoute::Method);
+        }
+        if !path_pattern(r.path) {
+            return fail(BrokenRoute::Path);
+        }
+        let secret_header = (r.secret.is_some()).then_some(r.header.0);
+        let headers_ok = r.headers.iter().all(|(n, v)| {
+            token(n)
+                && !reserved_header(n)
+                && header_value(v)
+                && !secret_header.is_some_and(|s| s.eq_ignore_ascii_case(n))
+        });
+        let secret_ok = secret_header.is_none_or(|n| token(n) && !reserved_header(n))
+            && header_value(r.header.1.trim_end());
+        if !headers_ok || !secret_ok {
+            return fail(BrokenRoute::Header);
+        }
+        let bodiless = matches!(r.method, "GET" | "DELETE");
+        if r.max_body > MAX_ROUTE_BYTES
+            || r.max_answer > MAX_ROUTE_BYTES
+            || (bodiless && r.max_body != 0)
+        {
+            return fail(BrokenRoute::Limit);
+        }
+        if dests.is_some_and(|n| usize::from(r.dest) >= n) {
+            return fail(BrokenRoute::Dest);
+        }
+        if r.clients.is_empty() || r.clients.iter().any(|c| !(1..=GATEWAY_CLIENTS).contains(c)) {
+            return fail(BrokenRoute::Clients);
+        }
     }
     Ok(())
+}
+
+/// How many TLS destinations `table`'s gateway entry lists, if it has one.
+pub fn gateway_dests(table: &[Service]) -> Option<usize> {
+    table
+        .iter()
+        .find(|s| s.name == "gateway")
+        .map(|g| g.tls.len())
 }
 
 /// Checks every rule on `table`; the first broken one, with its entry.
@@ -497,7 +599,8 @@ mod tests {
     #[test]
     fn every_tables_routes_keep_the_rules() {
         for arg in 0..=10 {
-            assert_eq!(check_routes(routes(arg)), Ok(()), "table {arg}");
+            let dests = gateway_dests(table(arg));
+            assert_eq!(check_routes(routes(arg), dests), Ok(()), "table {arg}");
         }
         assert_eq!(routes(10).len(), 3);
     }
@@ -510,7 +613,7 @@ mod tests {
             f(&mut r);
             r
         };
-        let cases: [(Route, BrokenRoute); 6] = [
+        let cases: [(Route, BrokenRoute); 21] = [
             (with(|r| r.name = ""), BrokenRoute::Name),
             (with(|r| r.name = "Upper"), BrokenRoute::Name),
             (with(|r| r.secret = Some("a.b")), BrokenRoute::Secret),
@@ -520,13 +623,55 @@ mod tests {
                 with(|r| r.headers = &[("a", "1"), ("b", "2"), ("c", "3"), ("d", "4"), ("e", "5")]),
                 BrokenRoute::TooMany,
             ),
+            (with(|r| r.method = "HEAD"), BrokenRoute::Method),
+            (with(|r| r.method = "get"), BrokenRoute::Method),
+            (with(|r| r.path = "items"), BrokenRoute::Path),
+            (with(|r| r.path = "/a/../b"), BrokenRoute::Path),
+            (with(|r| r.path = "/a%20b"), BrokenRoute::Path),
+            (with(|r| r.path = "/a*"), BrokenRoute::Path),
+            (with(|r| r.headers = &[("Host", "x")]), BrokenRoute::Header),
+            (
+                with(|r| r.headers = &[("content-length", "1")]),
+                BrokenRoute::Header,
+            ),
+            (
+                with(|r| r.headers = &[("authorization", "x")]),
+                BrokenRoute::Header,
+            ),
+            (with(|r| r.headers = &[("X Y", "x")]), BrokenRoute::Header),
+            (
+                with(|r| r.headers = &[("Accept", "a\r\nX: y")]),
+                BrokenRoute::Header,
+            ),
+            (with(|r| r.header = ("Connection", "")), BrokenRoute::Header),
+            (with(|r| r.max_body = 1), BrokenRoute::Limit),
+            (
+                with(|r| {
+                    r.method = "POST";
+                    r.max_body = MAX_ROUTE_BYTES + 1;
+                }),
+                BrokenRoute::Limit,
+            ),
+            (with(|r| r.clients = &[]), BrokenRoute::Clients),
         ];
         for (route, broken) in cases {
-            assert_eq!(check_routes(&[route]), Err((0, broken)), "{route:?}");
+            assert_eq!(check_routes(&[route], None), Err((0, broken)), "{route:?}");
         }
-        assert_eq!(check_routes(&[good, good]), Err((1, BrokenRoute::Name)));
+        let post = with(|r| {
+            r.method = "POST";
+            r.max_body = MAX_ROUTE_BYTES;
+            r.headers = &[("Accept", "application/json")];
+        });
+        assert_eq!(check_routes(&[post], Some(1)), Ok(()));
+        assert_eq!(check_routes(&[good], Some(0)), Err((0, BrokenRoute::Dest)));
+        let third = with(|r| r.clients = &[3]);
+        assert_eq!(check_routes(&[third], None), Err((0, BrokenRoute::Clients)));
         assert_eq!(
-            check_routes(&[good; MAX_ROUTES + 1]),
+            check_routes(&[good, good], None),
+            Err((1, BrokenRoute::Name))
+        );
+        assert_eq!(
+            check_routes(&[good; MAX_ROUTES + 1], None),
             Err((MAX_ROUTES, BrokenRoute::TooMany))
         );
     }

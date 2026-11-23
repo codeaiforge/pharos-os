@@ -689,7 +689,7 @@ Rules for every planned milestone below: nothing moves into the kernel (each com
 
 ### M6.2 — Credential vault and egress gateway
 
-- **Objective and scope:** Agents never hold credentials. A vault holds secrets as capabilities; an egress gateway injects them at the boundary into requests an allow-list permits (endpoint, method, path). **Status: Current** (since 2026-11-23): D-035 (#279) and the design (#280) first, then the vault (#281), the gateway (#282), the fuzz targets (#283), and the `vault` test kernel (#284); the gate is #285. D-035 accepted 2026-11-23.
+- **Objective and scope:** Agents never hold credentials. A vault holds secrets as capabilities; an egress gateway injects them at the boundary into requests an allow-list permits (endpoint, method, path). **Status: Current** (since 2026-11-23): D-035 (#279) and the design (#280) first, then the vault (#281, done), the gateway (#282, done), the fuzz targets (#283), and the `vault` test kernel (#284); the gate is #285. D-035 accepted 2026-11-23.
 - **Deliverables:** Vault and gateway services; the allow-list format; rotation; every use and refusal audited, with no secret in the trail.
 - **Prerequisites:** D-035 accepted; M6.1.
 - **Acceptance criteria:** Test kernel `vault`: a granted request succeeds with its secret injected; the agent never sees the secret through its memory, the response, errors, or audit records; an endpoint, method, or path not listed is refused and audited.

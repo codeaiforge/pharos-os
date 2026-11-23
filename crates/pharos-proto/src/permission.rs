@@ -59,6 +59,12 @@ pub enum Permission {
     /// the agent's own files to `system/incoming`, where only the user's
     /// `apply` on the trusted console can make it run.
     UpdatePropose,
+    /// HTTPS requests on one route of the egress gateway (#282,
+    /// gateway.md); made with [`Permission::https`].
+    Https {
+        name: [u8; MAX_FILE],
+        len: u8,
+    },
 }
 
 /// A file name: 1 to [`MAX_FILE`] letters, digits, `-`, `_`, or `.`, not
@@ -81,6 +87,7 @@ mod kind {
     pub const KNOWLEDGE_READ: u8 = 7;
     pub const KNOWLEDGE_WRITE: u8 = 8;
     pub const UPDATE_PROPOSE: u8 = 9;
+    pub const HTTPS: u8 = 10;
 }
 
 /// A name of agent-name rules, at most [`MAX_FILE`] bytes, zero-padded.
@@ -141,6 +148,27 @@ impl Permission {
         }
     }
 
+    /// `https <route>`; `None` if `route` is not a valid route name.
+    pub fn https(route: &[u8]) -> Option<Self> {
+        if !crate::vault::valid_name(route) {
+            return None;
+        }
+        let mut name = [0u8; MAX_FILE];
+        name[..route.len()].copy_from_slice(route);
+        Some(Self::Https {
+            name,
+            len: route.len() as u8,
+        })
+    }
+
+    /// The route an `https` permission names.
+    pub fn https_route(&self) -> Option<&[u8]> {
+        match self {
+            Self::Https { name, len } => name.get(..usize::from(*len)),
+            _ => None,
+        }
+    }
+
     /// The agent a `channel` permission names.
     pub fn channel_to(&self) -> Option<&[u8]> {
         match self {
@@ -156,6 +184,7 @@ impl Permission {
             Self::Channel { .. } => Some((kind::CHANNEL, self.channel_to()?)),
             Self::KnowledgeRead { .. } => Some((kind::KNOWLEDGE_READ, self.knowledge_scope()?.0)),
             Self::KnowledgeWrite { .. } => Some((kind::KNOWLEDGE_WRITE, self.knowledge_scope()?.0)),
+            Self::Https { .. } => Some((kind::HTTPS, self.https_route()?)),
             _ => None,
         }
     }
@@ -180,6 +209,12 @@ impl Permission {
                 let n = usize::from(len);
                 n <= MAX_FILE
                     && crate::trust::valid_name(&name[..n])
+                    && name[n..].iter().all(|b| *b == 0)
+            }
+            Self::Https { name, len } => {
+                let n = usize::from(len);
+                n <= MAX_FILE
+                    && crate::vault::valid_name(&name[..n])
                     && name[n..].iter().all(|b| *b == 0)
             }
         }
@@ -209,20 +244,22 @@ impl Permission {
             Self::File { .. }
             | Self::Channel { .. }
             | Self::KnowledgeRead { .. }
-            | Self::KnowledgeWrite { .. } => return None,
+            | Self::KnowledgeWrite { .. }
+            | Self::Https { .. } => return None,
         }
         w.bytes(&b)
     }
 
     /// Reads what [`Permission::write`] wrote; unused bytes must be zero.
     pub fn read(r: &mut Reader<'_>) -> Option<Self> {
-        if let Some(k @ kind::FILE..=kind::KNOWLEDGE_WRITE) = r.peek() {
+        if let Some(k @ (kind::FILE..=kind::KNOWLEDGE_WRITE | kind::HTTPS)) = r.peek() {
             r.u8()?;
             let n = usize::from(r.u8()?);
             let name = r.take(n)?;
             return match k {
                 kind::FILE => Self::file(name),
                 kind::CHANNEL => Self::channel(name),
+                kind::HTTPS => Self::https(name),
                 _ => Self::knowledge(name, k == kind::KNOWLEDGE_WRITE),
             };
         }
@@ -243,8 +280,8 @@ impl Permission {
     }
 
     /// Parses the typed form: `model <n>`, `data read`, `data write`,
-    /// `update propose`, `net <a.b.c.d>:<port>`, `file <name>`, `channel <agent>`, or
-    /// `knowledge read <scope>` or `knowledge write <scope>`.
+    /// `update propose`, `net <a.b.c.d>:<port>`, `file <name>`, `channel <agent>`,
+    /// `knowledge read <scope>` or `knowledge write <scope>`, or `https <route>`.
     pub fn parse(words: &[&[u8]]) -> Option<Self> {
         let p = match words {
             [b"model", n] => Self::Model(u8::try_from(number(n, u32::from(MAX_MODEL))?).ok()?),
@@ -253,6 +290,7 @@ impl Permission {
             [b"update", b"propose"] => Self::UpdatePropose,
             [b"file", name] => Self::file(name)?,
             [b"channel", agent] => Self::channel(agent)?,
+            [b"https", route] => Self::https(route)?,
             [b"knowledge", b"read", scope] => Self::knowledge(scope, false)?,
             [b"knowledge", b"write", scope] => Self::knowledge(scope, true)?,
             [b"net", dest] => {
@@ -285,6 +323,9 @@ impl Permission {
             Self::Channel { .. } => w
                 .bytes(b"channel ")
                 .and_then(|()| w.bytes(self.channel_to()?)),
+            Self::Https { .. } => w
+                .bytes(b"https ")
+                .and_then(|()| w.bytes(self.https_route()?)),
             Self::KnowledgeRead { .. } | Self::KnowledgeWrite { .. } => (|| {
                 let (scope, write) = self.knowledge_scope()?;
                 w.bytes(if write {
@@ -351,7 +392,7 @@ fn decimal(w: &mut Writer<'_>, mut n: u32) -> Option<()> {
 mod tests {
     use super::*;
 
-    const ALL: [Permission; 10] = [
+    const ALL: [Permission; 11] = [
         Permission::Model(1),
         Permission::Model(MAX_MODEL),
         Permission::DataRead,
@@ -377,6 +418,10 @@ mod tests {
             len: 5,
         },
         Permission::UpdatePropose,
+        Permission::Https {
+            name: *b"issues\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+            len: 6,
+        },
     ];
 
     fn words(s: &str) -> std::vec::Vec<&[u8]> {
@@ -425,6 +470,10 @@ mod tests {
         assert_eq!(p.text(&mut t).len(), TEXT, "the longest typed form fits");
         assert!(!ALL[8].covers(&ALL[7]), "writing does not include reading");
         assert!(!ALL[7].covers(&ALL[8]));
+        assert_eq!(ALL[10].text(&mut t), b"https issues");
+        assert_eq!(Permission::https(b"issues"), Some(ALL[10]));
+        assert_eq!(ALL[10].https_route(), Some(&b"issues"[..]));
+        assert!(!Permission::channel(b"issues").unwrap().covers(&ALL[10]));
     }
 
     #[test]
@@ -463,6 +512,12 @@ mod tests {
             "knowledge read a/b",
             "knowledge read notes ops",
             "knowledge write aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "https",
+            "https Issues",
+            "https a.b",
+            "https a/b",
+            "https a b",
+            "https aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ] {
             assert_eq!(Permission::parse(&words(s)), None, "{s}");
         }
@@ -498,6 +553,9 @@ mod tests {
             b"\x08\x02a/",
             b"\x08\x21aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             b"\x09\x01a",
+            b"\x0a\x00",
+            b"\x0a\x01A",
+            b"\x0a\x02a.",
         ] {
             assert_eq!(Permission::read(&mut Reader::new(b)), None, "{b:?}");
         }

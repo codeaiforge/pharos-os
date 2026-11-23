@@ -89,6 +89,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd307490d624467aa6f74b0eabb77633d1f758a7b25f12bceb0b22e08d9726f6"
 
 [[package]]
+name = "base64ct"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+
+[[package]]
 name = "bit-vec"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -110,6 +116,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -183,6 +190,7 @@ dependencies = [
  "hybrid-array",
  "num-traits",
  "rand_core",
+ "serdect",
  "subtle",
  "zeroize",
 ]
@@ -194,6 +202,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
+ "rand_core",
+]
+
+[[package]]
+name = "crypto-primes"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3633a51a39c69ebbaa4feaa694bd83d241e4093901c84a0963b19d9bb3f0cf8f"
+dependencies = [
+ "crypto-bigint",
  "rand_core",
 ]
 
@@ -285,6 +303,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a996a108feb8b427a6e12fcf6af4aa83409b79d72c15337d7741368131ee004"
 dependencies = [
  "const-oid",
+ "pem-rfc7468",
  "zeroize",
 ]
 
@@ -318,6 +337,7 @@ dependencies = [
  "const-oid",
  "crypto-common",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -590,6 +610,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "p384"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d17b851e6b3e378ab4ecb07fa2ed23f4d15f075735f8fec9fa1e7bdce5f8301f"
+dependencies = [
+ "ecdsa",
+ "elliptic-curve",
+ "fiat-crypto",
+ "primefield",
+ "primeorder",
+ "sha2",
+]
+
+[[package]]
+name = "pem-rfc7468"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6305423e0e7738146434843d1694d621cce767262b2a86910beab705e4493d9"
+dependencies = [
+ "base64ct",
+]
+
+[[package]]
 name = "pharos-cli"
 version = "0.5.0"
 
@@ -633,6 +676,7 @@ name = "pharos-programs"
 version = "0.5.0"
 dependencies = [
  "libm",
+ "pharos-crypto",
  "pharos-fs",
  "pharos-image",
  "pharos-infer",
@@ -670,8 +714,10 @@ dependencies = [
  "aes-gcm",
  "ed25519-compact",
  "p256",
+ "p384",
  "pharos-crypto",
  "rcgen",
+ "rsa",
  "rustls",
  "x25519-dalek",
 ]
@@ -679,6 +725,26 @@ dependencies = [
 [[package]]
 name = "pharos-user"
 version = "0.5.0"
+
+[[package]]
+name = "pkcs1"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6250dd7321adbe93d12b750aee0ced159fd13e77f625edcdf1cb6f83cd99f650"
+dependencies = [
+ "der",
+ "spki",
+]
+
+[[package]]
+name = "pkcs8"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
+dependencies = [
+ "der",
+ "spki",
+]
 
 [[package]]
 name = "polyval"
@@ -784,6 +850,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsa"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23e77fd77e0dea28b3011fd62d15445b7de7959333b0276d930e03be0f755699"
+dependencies = [
+ "const-oid",
+ "crypto-bigint",
+ "crypto-common",
+ "crypto-primes",
+ "digest",
+ "hmac",
+ "pkcs1",
+ "pkcs8",
+ "rand_core",
+ "sha2",
+ "signature",
+ "spki",
+ "zeroize",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -886,6 +973,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serdect"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66cf8fedced2fcf12406bcb34223dffb92eaf34908ede12fed414c82b7f00b3e"
+dependencies = [
+ "base16ct",
+ "serde",
+]
+
+[[package]]
 name = "sha2"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -924,6 +1021,16 @@ dependencies = [
  "defmt",
  "heapless",
  "managed",
+]
+
+[[package]]
+name = "spki"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ef958a98b9d5da290cfc78946e9f3e61e1e62a18db0d92cac0b83cc161491a9"
+dependencies = [
+ "base64ct",
+ "der",
 ]
 
 [[package]]
