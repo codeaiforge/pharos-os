@@ -26,6 +26,7 @@ Each document's own Status section says what is **implemented**, **placeholder**
 - [Processes and system services](services.md) — process creation from user space, badges, notifications, `init`, supervision, manifests, configuration, and health (M2.10, M4.1–M4.6; D-015, D-026 to D-031).
 - [Networking](networking.md) — the virtio-net driver, the minimal network stack, network capabilities, and the host test endpoint (M2.10, D-015).
 - [TCP and TLS](tls.md) — smoltcp in the network service, the TLS service, its interface, the pinned roots, time, randomness, and the new trust boundary (M6.1, D-034; accepted, planned).
+- [The credential vault and the egress gateway](gateway.md) — secrets from the host at each boot, the vault, routes, the gateway's HTTP/1.1, injection and stripping, and the new trust boundary (M6.2, D-035; proposed, planned).
 
 **AI and agents**
 

@@ -139,6 +139,20 @@ Design: [tls.md](../architecture/tls.md) (accepted 2026-11-21, #269; D-034). TCP
 | A silent server holds a client or the service | Timeouts on every deferred reply (connect 5 s, handshake 10 s, idle 60 s); per-client and total connection limits |
 | **Limits** | No revocation checks; no RSA or P-384, so most public servers are unreachable until M6.2; sizes and timing visible to the host and the network |
 
+### Credential vault and egress gateway (M6.2)
+
+Design: [gateway.md](../architecture/gateway.md) (proposed 2026-11-23, #280; D-035). Every row is **planned**.
+
+| Threat | Mitigation |
+| --- | --- |
+| An agent or a model obtains a credential | Agents name routes, never secrets or headers; the secret lives in the vault and, for one request, the gateway and the TLS service; answers reach the agent with the secret stripped and no headers but the content type; never in the store or the audit trail |
+| A hostile server takes over the gateway through its answer | Own safe-Rust HTTP/1.1 parsing with limits on every field, fuzzed; no compressed answers; the secret erased before the answer is read; the gateway reaches only its routes' destinations |
+| An agent reaches an endpoint, method, or path it was not given | Compiled routes fix the destination, the method, and the path pattern (literal segments and `*`, no `%`, `.`, `..`, or empty segments); the runtime checks the agent's `https` grant, the gateway the client's; every refusal audited |
+| Header injection or request smuggling | Every header fixed by the route or written by the gateway; paths without `\r`, `\n`, space, or `%`; secret values visible ASCII only; `Content-Length` the gateway's |
+| A secret at rest is copied with the disk image or an export | None at rest: the host delivers the secrets file through `fw_cfg` at each boot; the kernel gives it only to the vault |
+| A request is made without a record, or a secret is recorded | The runtime's and the gateway's intents stored before connecting, else `NO_AUDIT`; the vault records each release by name; values never recorded |
+| **Limits** | The host holds every secret and is trusted until M8.2; a compromised gateway can use its routes' secrets toward its routes' destinations; a secret echoed back encoded (base64, hashed) is not stripped; rotation needs a restart |
+
 ### User environment and storage (M3.0)
 
 Design: [user-environment.md](../architecture/user-environment.md) and [storage.md part 8](../architecture/storage.md#8-the-writable-store-m30), from D-016 and D-017. Rows are marked implemented as their issues land (#74–#78, #80); all are reviewed at the M3.0 gate.
@@ -289,4 +303,4 @@ The zones as implemented, with the trusted base reviewed in M5.4 (`init`, the st
 - Many mitigations depend on open decisions (D-004, D-008, D-012).
 - Side channels (timing, cache) are not yet addressed.
 - Physical attacks and firmware compromise are out of scope for now.
-- D-033 (accepted 2026-11-13): in Tier 3 a foreign agent's Linux guest is contained by the host's VM configuration, so the host kernel and hypervisor join the trusted base until M8.2 (D-036, open). Phases 6–8 add new trust boundaries (TLS, the vault and gateway, the bridge, payload approval, runtime policy, the model broker, WASM, MCP); each gets its rows here when its milestone is designed.
+- D-033 (accepted 2026-11-13): in Tier 3 a foreign agent's Linux guest is contained by the host's VM configuration, so the host kernel and hypervisor join the trusted base until M8.2 (D-036, open). Phases 6–8 add new trust boundaries (TLS, the vault and gateway (rows above, planned), the bridge, payload approval, runtime policy, the model broker, WASM, MCP); each gets its rows here when its milestone is designed.
