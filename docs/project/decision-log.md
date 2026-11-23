@@ -1290,21 +1290,56 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-035: Credential vault and egress gateway
 
-- **Status:** Open
+- **Status:** Proposed (2026-11-23, #279)
 - **Needed by:** M6.2
 - **Date accepted:**
 
-**Context.** Agents must never hold credentials, yet their allowed actions need them. Secrets must be injected at the boundary into requests an allow-list permits.
+**Context.** Agents must never hold credentials, yet their allowed actions need them. Secrets must be injected at the boundary into requests an allow-list permits. What exists at M6.1 (checked 2026-11-23):
+- The kernel reads `fw_cfg` files from the host at boot: the device key (D-047) and the boot check (D-049). It derives keys from the device key with HKDF-SHA256 and gives a process only derived keys.
+- The store writes whole files, crash-consistently, with no encryption at rest (storage.md).
+- The trusted console reads lines of at most 64 printable ASCII bytes, with no hidden entry; no command takes a secret.
+- Policy entries and TLS destinations are compiled tables (`agents.rs`, `pharos_services`), changed only by a new signed root image (D-028).
+- The TLS service (tls v1) opens connections only to destinations `init` lists, for services, never for the agent runtime. It verifies ECDSA P-256 and Ed25519 signatures only.
+- No HTTP code exists in Pharos outside test literals.
 
-**Options.** Storage: sealed in `store` (keyed by M5.5's anchor key), or an external vault or HSM later. Injection: the gateway adds headers per allow-list entry. Allow-list: endpoint, method, and path per grant.
+**Options.** Measured on 2026-11-23 with a probe crate built `no_std` as in D-034; "adds" counts crates not already in `Cargo.lock`.
+
+- **Where secrets live.**
+  - (a) **Sealed in `store`** under a key derived from the device key. The sealed file sits in the store's disk image, which is copied when the store is exported or backed up; sealing needs an AEAD with a nonce that never repeats (the vault would need a random source, or AES-GCM-SIV) and a way to write the secret in; the host, which holds the device key, can unseal it. A secret entered on the trusted console would also need hidden, longer lines (API keys run past 64 bytes).
+  - (b) **Delivered by the host at each boot** as one `fw_cfg` file, as the device key is: nothing on Pharos's disk, no AEAD, no random source, no new way to type secrets. The host is already trusted with the device key and the clock (threat model, until M8.2). Rotation is a restart with a new file, not a rebuild.
+  - (c) An external vault or HSM: later (M8.2 or a deployment that asks for it).
+- **Who holds them.** (d) The gateway itself; or (e) a separate **vault** process that holds the secrets and releases one, audited, per allowed request to the gateway only, so the process that parses servers' responses holds no secret at rest.
+- **HTTP.**
+  - (f) **httparse 1.10.1** (MIT or Apache-2.0): adds 1 crate, about 4,100 lines, and **78 `unsafe` sites** (its SIMD paths), on the boundary that parses what servers send.
+  - (g) **Own HTTP/1.1 code** in safe Rust: Pharos builds every request itself from a route, so only a response parser is needed (status line, headers, `Content-Length` or chunked body).
+- **Signatures** (D-034 left these for M6.2). Public certificate chains use RSA and P-384, and RFC 8446 section 9.1 requires RSA signatures of a client.
+  - (h) **rsa 0.10.0** (MIT or Apache-2.0, Rust 1.87): adds 8 crates, about 22,400 lines, 5 `unsafe` sites, sharing crypto-bigint with p256 0.14. Its README says the line was previously vulnerable to the Marvin attack, which recovers private keys; verification uses no private key. rsa 0.9.10 would add 25 crates and 1,836 `unsafe` sites. Refused.
+  - (i) **p384 0.14.0** (MIT or Apache-2.0, Rust 1.85): adds 1 crate, about 2,100 lines, no `unsafe`.
 
 **Evaluation criteria.** No path from a secret to an agent or model input; rotation without a rebuild; every use and refusal audited without the secret; trusted-base size.
 
-**Decision.** (empty while Open)
+**Decision.** Proposed:
 
-**Consequences.** Vault and gateway services; policy entries naming credentials by handle.
+1. **Secrets come from the host at each boot** (b): one `fw_cfg` file, `opt/org.pharos/secrets`, of at most 16 named secrets and 4 KiB. The kernel reads it at boot as it reads the device key, keeps it for one process, and gives it only to the process `init` names, once; the vault parses it. Nothing is written to Pharos's disk. Rotation: replace the host's file and restart the machine. No secret, no request: a route whose secret is missing is refused.
+2. **A vault process** (e) holds the secrets in memory and answers only the gateway. It releases the one secret a route names for each request the gateway has already checked, and records each release and refusal by the route's and the secret's names, never the value.
+3. **An egress gateway process** is a TLS client and the only process that builds HTTP. A **route** is a compiled entry in `pharos_services` beside the TLS destinations: a name; a TLS destination; one method; a path pattern; the secret's name and where it goes (one header, with a fixed prefix such as `Bearer `); fixed headers; the largest body sent and answer taken. An agent's policy entry names routes; the runtime checks the grant and the gateway checks it again by badge (D-012). An agent sends a route's name, a path, and a body; it never names a host, a header, or a secret.
+4. **Paths:** the pattern is literal segments and `*`, one segment of unreserved characters. `.` and `..` segments, empty segments, percent-encoding, and a query are refused unless the route allows a query. The method, the `Host` header, `Content-Length`, and `Connection: close` are the gateway's.
+5. **Answers:** own HTTP/1.1 parsing (g), one request per connection, `Accept-Encoding: identity`; any other `Content-Encoding`, a bad length, or an over-size answer is refused. The agent gets the status, the `Content-Type`, and the body, with every occurrence of the route's secret replaced. Errors name what failed, never a value.
+6. **Audit:** the gateway records the intent (agent, route, method, path, the body's length and SHA-256) before it connects and the outcome (status, answer length, how many times the secret was stripped) after; the TLS service records its connection as today.
+7. **Signatures:** RSA (PKCS#1 v1.5 and PSS, 2048 to 4096 bits) and ECDSA P-384 verification added to `pharos-tls`'s provider (h, i), so a chain from a public CA validates. Verification only. Roots: the release image's pinned set is chosen at build time for its routes (the design, #280).
 
-**Evidence.** None yet.
+**Consequences.**
+- New services: vault and gateway (#281, #282); the kernel gains the secrets file, given once.
+- New direct dependencies: rsa and p384, with 8 transitive ones, in the TLS service's trusted base, not the kernel; recorded in NOTICE when they land.
+- The TLS service sees each request in plaintext, secret included, as it sees all plaintext; a compromised gateway can use the secrets of its routes, toward its routes' destinations only.
+- Limits carried:
+  - a restart to rotate;
+  - only exact matches stripped, so a server that encodes the secret (base64, hashing) is not caught;
+  - no secrets at rest, so none survive a host that loses its file;
+  - the host stays trusted with every secret until M8.2.
+- Sealing in the store (a) and live rotation from the trusted console stay open for when the host is no longer trusted.
+
+**Evidence.** The probe crate and the measurements above (2026-11-23): builds with `default-features = false`; added crates from `cargo metadata` against `Cargo.lock`; lines and `unsafe` sites counted as in D-034; minimums from each crate's `rust-version`; the Marvin note from rsa 0.10.0's README.
 
 ### D-036: Foreign-agent bridge
 
