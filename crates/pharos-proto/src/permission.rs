@@ -578,8 +578,9 @@ mod tests {
             let Some((len, name)) = m.split_first() else {
                 return;
             };
-            // Kinds 5 to 8 (`file`, `channel`, `knowledge`), by length.
-            let mut msg = std::vec![5 + len % 4, len % 34];
+            // Kinds 5 to 8 (`file`, `channel`, `knowledge`) and 10 (`https`,
+            // #283), by length.
+            let mut msg = std::vec![[5, 6, 7, 8, 10][usize::from(len % 5)], len % 34];
             msg.extend(name.iter().map(|b| b"./ab0_-"[usize::from(*b) % 7]));
             if let Some(p) = Permission::read(&mut Reader::new(&msg)) {
                 assert!(p.valid());
@@ -588,6 +589,7 @@ mod tests {
                         || p.channel_to().is_some_and(crate::trust::valid_name)
                         || p.knowledge_scope()
                             .is_some_and(|(s, _)| crate::trust::valid_name(s))
+                        || p.https_route().is_some_and(crate::vault::valid_name)
                 );
             }
         });

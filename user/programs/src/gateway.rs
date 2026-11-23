@@ -322,4 +322,81 @@ mod tests {
             b"status 0 http 201 answer 40 stripped 2"
         );
     }
+
+    #[test]
+    fn fuzzed_routes_agree_with_the_gateways_http() {
+        // #283: `pharos_services` checks routes with its own copy of the
+        // HTTP rules (it has no dependencies); fuzzed patterns and headers
+        // must be accepted there exactly when `pharos_proto::http` would,
+        // and a route it accepts always gives a request head.
+        use pharos_services::check_routes;
+        const ALPHABET: &[u8] = b"/a*.%-~ :\r\nHostAccept";
+        let mut x = 0x510e_527f_ade6_82d1u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut accepted = 0;
+        for _ in 0..50_000 {
+            let pick = next();
+            let mut word = |n: u64| -> &'static str {
+                let len = (next() % n) as usize;
+                let bytes: Vec<u8> = (0..len)
+                    .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize])
+                    .collect();
+                alloc::boxed::Box::leak(
+                    alloc::string::String::from_utf8(bytes)
+                        .unwrap()
+                        .into_boxed_str(),
+                )
+            };
+            let path: &'static str =
+                alloc::boxed::Box::leak([&"/"[..], word(12)].concat().into_boxed_str());
+            // Whole names half the time, so reserved ones come often.
+            const NAMES: [&str; 9] = [
+                "Host",
+                "content-length",
+                "Connection",
+                "Accept-Encoding",
+                "transfer-encoding",
+                "authorization",
+                "Accept",
+                "X-Key",
+                "",
+            ];
+            let name = if pick % 2 == 0 {
+                NAMES[(pick / 2 % 9) as usize]
+            } else {
+                word(10)
+            };
+            let value = word(10);
+            let fixed: &'static [(&str, &str)] =
+                alloc::boxed::Box::leak(alloc::boxed::Box::new([(name, value)]));
+            let route = Route {
+                path,
+                headers: fixed,
+                ..ROUTE
+            };
+            let ok = check_routes(&[route], None).is_ok();
+            let expected = http::valid_pattern(path.as_bytes())
+                && http::valid_token(name.as_bytes())
+                && !http::reserved(name)
+                && !name.eq_ignore_ascii_case(ROUTE.header.0)
+                && http::valid_value(value.as_bytes());
+            assert_eq!(ok, expected, "{path:?} {name:?}: {value:?}");
+            if ok {
+                accepted += 1;
+                let target: Vec<u8> = path
+                    .bytes()
+                    .map(|b| if b == b'*' { b'x' } else { b })
+                    .collect();
+                if http::matches(path.as_bytes(), &target, false) {
+                    assert!(request(&route, b"api.test", &target, b"Bearer v", b"").is_some());
+                }
+            }
+        }
+        assert!(accepted > 100, "only {accepted} fuzzed routes accepted");
+    }
 }

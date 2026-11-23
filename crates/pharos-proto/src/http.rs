@@ -737,4 +737,184 @@ mod tests {
         });
         assert!(parsed > 0, "no fuzzed answer parsed");
     }
+
+    fn xorshift(x: &mut u64) -> u64 {
+        *x ^= *x << 13;
+        *x ^= *x >> 7;
+        *x ^= *x << 17;
+        *x
+    }
+
+    /// A well-formed answer carrying `secret` in its body, by length,
+    /// chunked (split at random), or to the close.
+    fn answer_with(secret: &[u8], x: &mut u64) -> (Vec<u8>, Vec<u8>) {
+        let mut body = b"lead ".to_vec();
+        for _ in 0..1 + xorshift(x) % 3 {
+            body.extend_from_slice(secret);
+            body.extend_from_slice(&b"--x"[..(xorshift(x) % 4) as usize]);
+        }
+        let mut raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n".to_vec();
+        match xorshift(x) % 3 {
+            0 => {
+                raw.extend_from_slice(
+                    std::format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes(),
+                );
+                raw.extend_from_slice(&body);
+            }
+            1 => {
+                raw.extend_from_slice(b"Transfer-Encoding: chunked\r\n\r\n");
+                let mut rest = &body[..];
+                while !rest.is_empty() {
+                    let n = 1 + (xorshift(x) as usize) % rest.len();
+                    raw.extend_from_slice(std::format!("{n:x}\r\n").as_bytes());
+                    raw.extend_from_slice(&rest[..n]);
+                    raw.extend_from_slice(b"\r\n");
+                    rest = &rest[n..];
+                }
+                raw.extend_from_slice(b"0\r\n\r\n");
+            }
+            _ => {
+                raw.extend_from_slice(b"\r\n");
+                raw.extend_from_slice(&body);
+            }
+        }
+        (raw, body)
+    }
+
+    #[test]
+    fn fuzzed_mutations_of_real_answers_never_panic_or_leak_the_secret() {
+        // #283: well-formed answers by each length, then 1 to 4 bytes
+        // changed, cut, or a byte inserted; what parses is stripped, and
+        // no `prefix ‖ value` or `value` may remain.
+        const PREFIX: &[u8] = b"Bearer ";
+        const VALUE: &[u8] = b"Sk-7q2Vn";
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let (mut intact, mut parsed) = (0, 0);
+        for round in 0..60_000 {
+            let (mut raw, body) = answer_with(
+                if round % 2 == 0 {
+                    VALUE
+                } else {
+                    b"Bearer Sk-7q2Vn"
+                },
+                &mut x,
+            );
+            let mut out = [0u8; 1024];
+            if round % 4 == 0 {
+                // Unchanged: the decoded body is exactly what was sent.
+                let a = parse_answer(&raw, true, 1024, &mut out).unwrap();
+                assert_eq!(&out[..a.body_len], &body[..]);
+                intact += 1;
+            } else {
+                for _ in 0..1 + xorshift(&mut x) % 4 {
+                    let i = (xorshift(&mut x) as usize) % raw.len();
+                    match xorshift(&mut x) % 3 {
+                        0 => raw[i] = xorshift(&mut x) as u8,
+                        1 => raw.truncate(i.max(1)),
+                        _ => raw.insert(i, b"\r\n:0;"[(xorshift(&mut x) % 5) as usize]),
+                    }
+                }
+            }
+            if let Ok(a) = parse_answer(&raw, round % 3 != 0, 1024, &mut out) {
+                parsed += 1;
+                assert!(a.body_len <= 1024 && a.content_type.len() <= MAX_CONTENT_TYPE);
+                let mut clean = [0u8; 8192];
+                let (n, _) = strip(&out[..a.body_len], PREFIX, VALUE, &mut clean).unwrap();
+                assert!(!contains(&clean[..n], VALUE), "the secret survived");
+            }
+        }
+        assert!(intact > 0 && parsed > intact, "mutations never parsed");
+    }
+
+    #[test]
+    fn fuzzed_paths_that_match_keep_every_rule() {
+        // #283: targets from a path's alphabet against patterns; whatever
+        // matches has the pattern's segment count, no `.` or `..`
+        // segment, and only unreserved bytes (and `=`, `&` in a query).
+        const ALPHABET: &[u8] = b"/a.b*?=&%#~ -";
+        const PATTERNS: [&[u8]; 4] = [b"/a/*", b"/*/*/b", b"/", b"/a/~b/*"];
+        let mut matched = 0;
+        // Whole segments too, so `.`, `..`, and empty ones come often.
+        const SEGMENTS: [&[u8]; 10] = [
+            b"a", b"..", b".", b"", b"~b", b"b", b"%2e", b"a?x=1", b"#", b"a b",
+        ];
+        crate::fuzz(100_000, ALPHABET.len() as u8, |m| {
+            let mut t = std::vec![b'/'];
+            if m.len() % 2 == 0 {
+                t.extend(m.iter().take(40).map(|b| ALPHABET[usize::from(*b)]));
+            } else {
+                for (i, b) in m.iter().take(1 + m.len() % 4).enumerate() {
+                    if i > 0 {
+                        t.push(b'/');
+                    }
+                    t.extend_from_slice(SEGMENTS[usize::from(*b) % SEGMENTS.len()]);
+                }
+            }
+            for p in PATTERNS {
+                for query in [false, true] {
+                    if !matches(p, &t, query) {
+                        continue;
+                    }
+                    matched += 1;
+                    let (path, q) = match t.iter().position(|b| *b == b'?') {
+                        Some(i) => (&t[..i], Some(&t[i + 1..])),
+                        None => (&t[..], None),
+                    };
+                    assert!(query || q.is_none());
+                    let segs = path[1..].split(|b| *b == b'/');
+                    assert_eq!(segs.clone().count(), p[1..].split(|b| *b == b'/').count());
+                    for seg in segs {
+                        assert!(seg != b"." && seg != b"..");
+                        assert!(seg.iter().all(|b| unreserved(*b)));
+                    }
+                    assert!(
+                        q.is_none_or(|q| q.iter().all(|b| unreserved(*b) || b"=&".contains(b)))
+                    );
+                }
+            }
+        });
+        assert!(matched > 100, "only {matched} fuzzed paths matched");
+    }
+
+    #[test]
+    fn fuzzed_heads_have_one_request_line_and_no_injected_header() {
+        // #283: a target that matches never adds a line to the head.
+        const ALPHABET: &[u8] = b"/ab\r\n: ?=&";
+        let mut written = 0;
+        crate::fuzz(50_000, ALPHABET.len() as u8, |m| {
+            let mut t = std::vec![b'/'];
+            t.extend(
+                m.iter()
+                    .take(1 + m.len() % 6)
+                    .map(|b| ALPHABET[usize::from(*b)]),
+            );
+            if !matches(b"/*", &t, true) {
+                return;
+            }
+            let head = Head {
+                method: "GET",
+                target: &t,
+                host: b"api.test",
+                headers: &[],
+                secret: Some(("Authorization", b"Bearer v")),
+                body_len: 0,
+            };
+            let mut out = [0u8; 512];
+            let n = write_head(&head, &mut out).unwrap();
+            written += 1;
+            // The request line, Host, the secret's header, Accept-Encoding,
+            // Connection, and the blank line: six CR LF, and no other CR
+            // or LF.
+            let crlf = out[..n].windows(2).filter(|w| w == b"\r\n").count();
+            let cr = out[..n].iter().filter(|b| **b == b'\r').count();
+            let lf = out[..n].iter().filter(|b| **b == b'\n').count();
+            assert_eq!(
+                (crlf, cr, lf),
+                (6, 6, 6),
+                "{:?}",
+                std::string::String::from_utf8_lossy(&t)
+            );
+        });
+        assert!(written > 100);
+    }
 }

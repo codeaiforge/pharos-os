@@ -228,10 +228,28 @@ mod tests {
     }
 
     #[test]
-    fn fuzzed_messages_never_panic() {
-        crate::fuzz(50_000, 255, |m| {
-            let _ = parse(m);
+    fn fuzzed_messages_never_panic_and_what_parses_round_trips() {
+        // #283: half the messages start as a `REQUEST` with a short name
+        // of route characters, so the deep path is reached.
+        let mut accepted = 0;
+        crate::fuzz(100_000, 255, |m| {
             let _ = Answered::parse(m);
+            let mut msg = std::vec![VERSION, op::REQUEST, (m.len() % 6) as u8];
+            msg.extend(
+                m.iter()
+                    .map(|b| b"ab-_9Z."[usize::from(*b) % 7])
+                    .take(m.len() % 6),
+            );
+            msg.extend(m.iter().take(6));
+            for msg in [&msg[..], m] {
+                if let Ok(req) = parse(msg) {
+                    accepted += 1;
+                    let mut out = [0u8; 300];
+                    let n = encode(&req, &mut out).expect("what parses encodes");
+                    assert_eq!(&out[..n], msg, "{req:?}");
+                }
+            }
         });
+        assert!(accepted > 100, "only {accepted} fuzzed messages parsed");
     }
 }

@@ -1087,8 +1087,14 @@ knowledge_read = notes, ops\nknowledge_write = notes\n",
             let _ = parse(m);
         });
         let mut x = 0x9e37_79b9_7f4a_7c15u64;
-        for _ in 0..100_000 {
-            let mut text = S.to_vec();
+        // With an `https` line too (#283).
+        let with_https = [S, b"https = issues, search-2\n"].concat();
+        for round in 0..100_000 {
+            let mut text = if round % 2 == 0 {
+                S.to_vec()
+            } else {
+                with_https.clone()
+            };
             for _ in 0..1 + x % 4 {
                 x ^= x << 13;
                 x ^= x >> 7;
@@ -1100,6 +1106,12 @@ knowledge_read = notes, ops\nknowledge_write = notes\n",
                 assert!(valid_name(m.name) && valid_program(m.program));
                 assert!(m.attempts <= MAX_ATTEMPTS && m.progress_ms <= m.task_ms);
                 assert_eq!(m.models & 1, 0, "no model 0");
+                assert!(
+                    m.https
+                        .as_slice()
+                        .iter()
+                        .all(|r| crate::vault::valid_name(r))
+                );
                 let mut out = [0u8; MAX_SIZE];
                 let n = m.encode(&mut out).unwrap();
                 assert_eq!(parse(&out[..n]), Ok(m));

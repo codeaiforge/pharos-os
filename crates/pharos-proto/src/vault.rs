@@ -278,5 +278,30 @@ mod tests {
             }
         });
         assert!(parsed > 0, "no fuzzed file parsed");
+        // #283: a valid file with 1 to 4 bytes changed; what parses holds
+        // only valid, distinct secrets, each found by name.
+        const GOOD: &[u8] = b"github-token ghp_abc123\nkey_2 A!~z\nthird v\n";
+        let mut x = 0x6a09_e667_f3bc_c908u64;
+        let mut changed = 0;
+        for _ in 0..50_000 {
+            let mut text = GOOD.to_vec();
+            for _ in 0..1 + x % 4 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let i = (x as usize >> 8) % text.len();
+                text[i] = b"a \nA-_.~\x7f"[(x % 9) as usize];
+            }
+            if let Ok(s) = parse_secrets(&text) {
+                changed += usize::from(text != GOOD);
+                let all: std::vec::Vec<_> = s.names_values().collect();
+                for (i, (name, value)) in all.iter().enumerate() {
+                    assert!(valid_name(name) && valid_value(value));
+                    assert!(all[..i].iter().all(|(n, _)| n != name), "a name twice");
+                    assert_eq!(s.get(name), Some(*value));
+                }
+            }
+        }
+        assert!(changed > 0, "no mutated file parsed");
     }
 }
