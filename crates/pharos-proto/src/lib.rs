@@ -1,7 +1,8 @@
 //! Service interfaces (D-019): every request starts with the interface
 //! version and an operation, every reply with a status. Status codes 0–31
 //! and operations 0xF0 and up mean the same in every interface; each
-//! interface module ([`store`], [`net`], [`tls`], [`infer`], [`trust`], [`agents`], and the
+//! interface module ([`store`], [`net`], [`tls`], [`infer`], [`trust`], [`agents`], the
+//! [`bridge`] frames, and the
 //! [`manifest`] and [`tool`] text formats) defines the rest, with `parse` and
 //! `encode` shared by the service and its clients.
 //!
@@ -16,6 +17,7 @@ extern crate std;
 
 pub mod agents;
 pub mod audit;
+pub mod bridge;
 pub mod gateway;
 pub mod http;
 pub mod infer;

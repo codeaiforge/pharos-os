@@ -19,6 +19,11 @@
 //! process capabilities over [`pharos_proto::trust`]: the agent runtime's
 //! from `init`, each agent's from the runtime.
 //!
+//! A Tier 3 guest agent (#298, bridge.md) is registered with no process:
+//! its `stop` is sent to the runtime as `STOP_GUEST` (non-blocking, at most
+//! 2 s), which revokes the bridge's capability for it. If the runtime does
+//! not take it, `trust` stops the runtime, which ends every agent.
+//!
 //! Commands, one per line: `list`, `stop <agent>`, `stop group <group>` (#136), `stop all`, and
 //! `revoke <agent> <permission>` (#105), which `trust` passes to the
 //! runtime with a non-blocking send on the capability the runtime gave it
@@ -59,7 +64,7 @@
 #![no_main]
 
 use pharos_programs::output::{self, Limit};
-use pharos_programs::virtio_console::{Console, RX_BUFFER, TX_BUFFER};
+use pharos_programs::virtio_console::{Console, RX_BUFFER, Sizes, TX_BUFFER};
 use pharos_proto::knowledge::{self, Author};
 use pharos_proto::permission::Permission;
 use pharos_proto::service::{self as listing, Action, Managed, Reply, Settings, System};
@@ -194,6 +199,30 @@ impl Trust {
         }
     }
 
+    /// Stops agent `a` in `slot`: its process, or a guest's attempt
+    /// through the runtime, the runtime itself if that does not answer.
+    fn stop_agent(&mut self, slot: usize, a: &Agent) -> bool {
+        let label = &a.name[..a.len];
+        if a.process != 0 {
+            return self.stop(label, a.process);
+        }
+        let slot = slot as u8;
+        if self.tell_runtime(&agents::Request::StopGuest { slot }) {
+            self.agents[usize::from(slot)] = None;
+            self.say(&[b"stopped ", label]);
+            return true;
+        }
+        self.say(&[
+            b"stopping ",
+            label,
+            b": the runtime is not answering; stopping it",
+        ]);
+        match self.runtime {
+            Some(runtime) => self.stop(b"runtime", runtime),
+            None => false,
+        }
+    }
+
     /// Sends `req` on the channel without blocking, for at most 2 s: the
     /// runtime may be busy or hung, and `stop` must keep working.
     fn tell_runtime(&self, req: &agents::Request<'_>) -> bool {
@@ -324,7 +353,11 @@ export them first (cargo xtask store export)",
                     self.say(&[b"no agents"]);
                 }
                 for a in agents.iter().flatten() {
-                    self.status(&a.name[..a.len], a.process);
+                    if a.process == 0 {
+                        self.say(&[&a.name[..a.len], b" guest"]);
+                    } else {
+                        self.status(&a.name[..a.len], a.process);
+                    }
                 }
             }
             // Every process registered under the name: one agent may run
@@ -332,8 +365,11 @@ export them first (cargo xtask store export)",
             Command::Stop(name) => {
                 let agents = self.agents;
                 let mut found = false;
-                for a in agents.iter().flatten().filter(|a| &a.name[..a.len] == name) {
-                    self.stop(&a.name[..a.len], a.process);
+                for (slot, a) in agents.iter().enumerate() {
+                    let Some(a) = a.filter(|a| &a.name[..a.len] == name) else {
+                        continue;
+                    };
+                    self.stop_agent(slot, &a);
                     found = true;
                 }
                 if found {
@@ -348,12 +384,11 @@ export them first (cargo xtask store export)",
             Command::StopGroup(group) => {
                 let agents = self.agents;
                 let mut found = false;
-                for a in agents
-                    .iter()
-                    .flatten()
-                    .filter(|a| &a.group[..a.group_len] == group)
-                {
-                    self.stop(&a.name[..a.len], a.process);
+                for (slot, a) in agents.iter().enumerate() {
+                    let Some(a) = a.filter(|a| &a.group[..a.group_len] == group) else {
+                        continue;
+                    };
+                    self.stop_agent(slot, &a);
                     found = true;
                 }
                 if found {
@@ -376,8 +411,9 @@ export them first (cargo xtask store export)",
                 if let Some(runtime) = self.runtime {
                     running += usize::from(!self.stop(b"runtime", runtime));
                 }
+                // A guest's attempt ends with the runtime (#298).
                 let agents = self.agents;
-                for a in agents.iter().flatten() {
+                for a in agents.iter().flatten().filter(|a| a.process != 0) {
                     running += usize::from(!self.stop(&a.name[..a.len], a.process));
                 }
                 let (start, n, end) = output::stop_all(self.runtime.is_some(), running);
@@ -1160,7 +1196,10 @@ export them first (cargo xtask store export)",
                 }
                 self.say(&[b"registered runtime"]);
             }
-            Ok(Request::Register { slot, name, group }) if badge == RUNTIME && valid => {
+            // A guest agent's has no process (#298).
+            Ok(Request::Register { slot, name, group })
+                if badge == RUNTIME && (valid || cap == 0) =>
+            {
                 let mut a = Agent {
                     name: [0; MAX_NAME],
                     len: name.len(),
@@ -1326,7 +1365,7 @@ fn main(_: u64) -> u64 {
     if irq_notify(irq, SERVICE, 0).is_err() {
         return 2;
     }
-    let Ok(console) = Console::init(DEVICE, 0, BASE) else {
+    let Ok(console) = Console::init(DEVICE, 0, BASE, Sizes::TRUSTED) else {
         return 3;
     };
     let mut t = Trust {

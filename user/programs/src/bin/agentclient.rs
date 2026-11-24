@@ -192,6 +192,9 @@ fn main(arg: u64) -> u64 {
     if arg == 17 {
         return vault(c);
     }
+    if arg == 18 {
+        return guest(c);
+    }
     if arg == 2 {
         return permissions(c);
     }
@@ -589,6 +592,38 @@ fn s1(mut c: Client) -> u64 {
 /// One boot of the `agents_crash` kernel.
 /// `soaker` (#189): one task after another, each line counted by the
 /// `soak` kernel.
+/// The `channel` kernel (#298), started by `init`: one task for `guest`,
+/// the Tier 3 guest agent the bridge speaks for; its result printed.
+fn guest(c: Client) -> u64 {
+    let say = |line: &[u8]| {
+        let _ = debug_write(CONSOLE, line);
+    };
+    // Only the bridge's badge may bind a guest's slot (#298).
+    let mut out = [0u8; 256];
+    if c.call(&Request::Bind, &mut out).0 != status::NO_ACCESS {
+        say(b"FAILED channel: a control client's BIND was not refused");
+        return 1;
+    }
+    say(b"ok channel: a control client's BIND is refused");
+    let Ok(task) = c.submit(b"guest", b"hello from pharos") else {
+        say(b"FAILED channel: the guest task was not submitted");
+        return 1;
+    };
+    let Some((s, result)) = c.wait(task, 150) else {
+        say(b"FAILED channel: the guest task did not end in 150 s");
+        return 1;
+    };
+    let mut line = Vec::from(&b"channel: guest ended: "[..]);
+    line.extend_from_slice(&result[..result.len().min(200)]);
+    say(&line);
+    if s.state != State::Done || result != b"hello from the guest" {
+        say(b"FAILED channel: the guest task failed");
+        return 1;
+    }
+    say(b"ok channel: the guest's task ran through the bridge");
+    0
+}
+
 /// The `vault` kernel (#284), started by `init` (no report endpoint): one
 /// `fetcher` task, whose agent checks every request; its result or reason
 /// printed, `ok vault: <step>` for each step passed.

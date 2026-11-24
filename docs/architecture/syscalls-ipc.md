@@ -158,6 +158,7 @@ The entry stub is `arch::x86_64::syscall`; the handler is `syscall::handle`; per
 | 32 | `key_measurement` (M5.5, D-047, #256) | any `Key` handle, address of a 32-byte buffer | 0; the buffer holds the boot measurement (`pharos_crypto::measurement` over the kernel's file and each module); `NOT_FOUND` if the boot was not measured | key, `READ` |
 | 33 | `clock_real` (M6.1, D-034, #271, [tls.md](tls.md#time)) | — | the wall-clock time in Unix seconds: the firmware's date at boot (Limine's date request) plus uptime; `NOT_FOUND` if the boot gave no date at or after the build's `SOURCE_DATE_EPOCH` | none |
 | 34 | `secrets_read` (M6.2, D-035, #281, [gateway.md](gateway.md#the-secrets-file)) | `Secrets` handle, buffer address, length (0 to 4 KiB; 0 asks only the size, with no buffer) | the secrets file's size; as much of it as fits is copied to the buffer; 0 without a file. Only `init` gets the capability, for the vault | secrets, `READ` |
+| 35 | `derive` (M6.3, D-036 amended, #298, [bridge.md](bridge.md#the-slot-bind)) | handle, rights mask, badge (24 bits) | a new handle in the caller's table for a child of the capability: its rights are the parent's limited to the mask, and its badge is the parent's, or the given one if the parent has none. Revoking the parent revokes it; revoking it revokes only what was derived or passed on from it. The agent runtime uses it to mint each guest attempt's slot capability | any, `GRANT` |
 
 Error codes (`rax`):
 

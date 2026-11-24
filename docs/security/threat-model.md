@@ -155,7 +155,7 @@ Design: [gateway.md](../architecture/gateway.md) (accepted 2026-11-23, #280; D-0
 
 ### Foreign-agent bridge (M6.3)
 
-Design: [bridge.md](../architecture/bridge.md) (accepted 2026-11-24, #295; D-036). Every row is **planned** until its issue lands (#296–#300). **Tier 3 trusts the host kernel and hypervisor:** the guest's containment is the host's VM configuration, which the launch tool writes and checks through QEMU's monitor, not something Pharos enforces. M8.2 removes this.
+Design: [bridge.md](../architecture/bridge.md) (accepted 2026-11-24, #295; D-036). Each row is **planned** until its issue lands (#296–#300); the frame parsing, the per-attempt slot capability, and the bridge's holdings are **implemented** (#298) and checked end to end by the `channel` kernel, and the hostile-guest suite is **planned** (#300). **Tier 3 trusts the host kernel and hypervisor:** the guest's containment is the host's VM configuration, which the launch tool writes and checks through QEMU's monitor, not something Pharos enforces. M8.2 removes this.
 
 | Threat | Mitigation |
 | --- | --- |
@@ -164,8 +164,9 @@ Design: [bridge.md](../architecture/bridge.md) (accepted 2026-11-24, #295; D-036
 | The guest acts beyond a Tier 1 agent | Its requests are the slot's agents v1 requests: the runtime's grants, budgets, approvals, and records apply unchanged |
 | The guest reaches Pharos's firmware through the channel | OVMF takes every virtio-console as a console, so the launch tool starts the guest only after Pharos's own driver holds the device; with no client, QEMU drops the firmware's output; Pharos's QEMU runs with `-no-reboot`, so a reset ends the run (found and fixed in #297) |
 | A hostile guest takes over the bridge through its frames | Own safe-Rust frame parsing with a limit on every field, fuzzed; one request at a time; any fault ends the attempt |
-| A guest keeps acting after its attempt ends, or across attempts | The slot capability is minted per attempt and revoked at its end; a restarted bridge's `BIND` revokes the old one |
-| **Limits** | The host and both QEMUs can read and forge every frame; stopping a guest agent goes through the runtime (`CANCEL`), with `trust` stopping the runtime if it does not answer; the guest image's downloads are trusted by their pinned hashes |
+| A guest keeps acting after its attempt ends, or across attempts | The slot capability is minted per attempt (`derive`, #298) and revoked at its end; a restarted bridge's `BIND` revokes the old one; the bridge checks after each attempt that its capability fails |
+| The new `derive` system call widens a capability | It needs `GRANT`, as passing a capability on does, never adds rights, and never re-badges a badged one; revoking the child reaches only what came from it (kernel tests, #298) |
+| **Limits** | The host and both QEMUs can read and forge every frame; stopping a guest agent goes through the runtime (`STOP_GUEST`), with `trust` stopping the runtime if it does not take it in 2 s; the guest image's downloads are trusted by their pinned hashes |
 
 ### User environment and storage (M3.0)
 

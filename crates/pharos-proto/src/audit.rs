@@ -150,7 +150,12 @@ pub mod action {
     /// path) and outcome (statuses, lengths, how many were stripped);
     /// never a secret, a body, or an answer.
     pub const HTTPS: u8 = 26;
-    pub const LAST: u8 = HTTPS;
+    /// A guest attempt's slot handed to the bridge (#298, bridge.md),
+    /// from the runtime; `unbind` when it is revoked, the reason as
+    /// detail.
+    pub const BIND: u8 = 27;
+    pub const UNBIND: u8 = 28;
+    pub const LAST: u8 = UNBIND;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -181,6 +186,8 @@ pub mod action {
             "tls",
             "vault",
             "https",
+            "bind",
+            "unbind",
         ]
         .get(usize::from(code))
         .copied()

@@ -199,6 +199,9 @@ pub struct Entry {
     /// The egress gateway's routes it may use (#282, gateway.md; not
     /// askable).
     pub https: &'static [&'static [u8]],
+    /// A Tier 3 guest's entry (#298, bridge.md): the runtime starts no
+    /// program for it; its attempts wait for the bridge's `BIND`.
+    pub guest: bool,
 }
 
 /// What one attempt of an agent may use (D-022, resources.md). Each limit
@@ -687,6 +690,7 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
     }];
 
     fn with(key: &str, value: &str) -> std::string::String {

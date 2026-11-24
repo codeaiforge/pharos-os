@@ -110,6 +110,7 @@ pub mod number {
     pub const KEY_MEASUREMENT: u64 = 32;
     pub const CLOCK_REAL: u64 = 33;
     pub const SECRETS_READ: u64 = 34;
+    pub const DERIVE: u64 = 35;
 }
 
 /// Capability rights (syscalls-ipc.md, drivers.md, services.md).
@@ -565,6 +566,16 @@ pub fn process_stop(process: Handle) -> Result<u64, Error> {
 /// Removes `handle` from this process's table.
 pub fn delete(handle: Handle) -> Result<u64, Error> {
     call(number::DELETE, [handle, 0, 0, 0, 0, 0])
+}
+
+/// A new handle in this process for a child of `handle` (needs `GRANT`):
+/// at most `rights`, and `badge` if `handle` has none (#298). Revoking it
+/// reaches only what was derived or passed on from it.
+pub fn derive(handle: Handle, rights: u32, badge: u32) -> Result<Handle, Error> {
+    call(
+        number::DERIVE,
+        [handle, u64::from(rights), u64::from(badge), 0, 0, 0],
+    )
 }
 
 /// Revokes every capability derived from `handle`; returns how many.

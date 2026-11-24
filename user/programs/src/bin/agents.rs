@@ -20,7 +20,7 @@
 //! is no handle 13; without it every `REQUEST` is `INTERNAL`). The
 //! argument selects the policy table (0: boot, empty; 1: the `agents` and
 //! `agents_crash` test kernels; 2: `budgets`; 3: the `vault` kernel's
-//! `fetcher`, #284).
+//! `fetcher`, #284; 4: the `channel` kernel's `guest`, #298).
 //!
 //! Each policy entry's manifest, `agents/<name>.manifest`, is read and
 //! checked at start; an agent whose manifest is missing or refused never
@@ -101,6 +101,17 @@
 //! the runtime copies the path and body into its buffer at the gateway and
 //! asks it. The gateway's answer, the secret already stripped, is copied
 //! back to the agent's buffer. The runtime never sees a secret.
+//!
+//! Tier 3 guests (#298, bridge.md): a policy entry marked `guest` has no
+//! program. Its attempt starts as any other, registered with `trust`
+//! without a process, and waits for the bridge (badge `BRIDGE`) to `BIND`
+//! it: the reply carries a capability minted for that attempt, `SEND` on
+//! the runtime badged with its slot, through which the bridge speaks for
+//! the guest as the agent. It is recorded (`bind`) before it is given, and
+//! revoked when the attempt ends, however it ends (`unbind`, the reason
+//! as detail). A second `BIND` while one is held fails the held attempt
+//! (`bridge restarted`). `trust`'s `STOP_GUEST` ends a guest attempt as
+//! the user's `stop` ends an agent's process.
 
 #![no_std]
 #![no_main]
@@ -116,9 +127,9 @@ use pharos_programs::mailbox::{self, Mailboxes};
 use pharos_programs::tasks::{self, Begin, Files, StoreFailed, Tasks};
 use pharos_programs::tools::{self, Confirm};
 use pharos_proto::agents::{
-    self, Asked, Assigned, Begun, CHECKPOINT_AT, CONTROL, MAX_BUFFER, MAX_CHECKPOINT, MAX_INPUT,
-    MAX_RESULT, MAX_RUNNING, NAME, NO_AUDIT, NO_SESSION, Request, SLOTS, State, TaskStatus,
-    VERSION, agent_slot, parse,
+    self, Asked, Assigned, Begun, Bound, CHECKPOINT_AT, CONTROL, MAX_BUFFER, MAX_CHECKPOINT,
+    MAX_INPUT, MAX_RESULT, MAX_RUNNING, NAME, NO_AUDIT, NO_SESSION, Request, SLOTS, State,
+    TaskStatus, VERSION, agent_slot, parse,
 };
 use pharos_proto::audit::{self, Entry as Record, Kind, action, outcome};
 use pharos_proto::gateway::{self, Answered, Request as GatewayRequest};
@@ -130,12 +141,12 @@ use pharos_proto::permission::Permission;
 use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::{Info, refusal, status, tool, trust};
 use pharos_user::Limits as SpawnLimits;
-use pharos_user::rights::{READ, SEND, STOP, WAIT, WRITE};
+use pharos_user::rights::{GRANT, READ, SEND, STOP, WAIT, WRITE};
 use pharos_user::{
     Class, Grant, Handle, Mapped, Received, Status, Usage as Use, call_timeout, debug_write,
-    delete, endpoint_create, mem_map, mem_map_cap, mem_share, mem_unmap, open, process_status,
-    process_stop, process_usage, read, receive_timeout, send, sleep, spawn_with, try_send,
-    try_send_cap, uptime,
+    delete, derive, endpoint_create, mem_map, mem_map_cap, mem_share, mem_unmap, open,
+    process_status, process_stop, process_usage, read, receive_timeout, revoke, send, sleep,
+    spawn_with, try_send, try_send_cap, uptime,
 };
 
 pharos_user::entry!(main);
@@ -326,6 +337,36 @@ const HTTPS_TABLE: &[Entry] = &[Entry {
     ask_knowledge: &[],
     propose: false,
     https: &[b"items", b"echo", b"post", b"missing"],
+    guest: false,
+    channels: &[],
+}];
+
+/// The `channel` kernel's policy table (#298): `guest`, a Tier 3 guest
+/// agent, which the bridge speaks for. Its program names the guest's,
+/// which the runtime never opens.
+const GUEST_TABLE: &[Entry] = &[Entry {
+    name: b"guest",
+    program: b"guest/agent",
+    pages: 1,
+    models: 0,
+    attempts: 2,
+    progress_ms: 60_000,
+    task_ms: 120_000,
+    data: Data::None,
+    ask_models: 0,
+    ask_data: Data::None,
+    net: &[],
+    ask_net: &[],
+    budget: Budget::UNLIMITED,
+    tools: 0,
+    files: &[],
+    ask_files: &[],
+    knowledge_read: &[],
+    knowledge_write: &[],
+    ask_knowledge: &[],
+    propose: false,
+    https: &[],
+    guest: true,
     channels: &[],
 }];
 
@@ -490,6 +531,7 @@ const fn budget_entry(name: &'static [u8], budget: Budget, pages: u32) -> Entry 
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     }
 }
@@ -520,6 +562,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     Entry {
@@ -544,6 +587,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     Entry {
@@ -568,6 +612,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     Entry {
@@ -592,6 +637,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     // The `permissions` kernel's (#105).
@@ -618,6 +664,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     // Gets nothing; may ask for model 2 and data access (#106).
@@ -643,6 +690,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     // The `agents_net` kernel's (#109): gets the host echo server, may
@@ -669,6 +717,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     // The same grant as `netter`, which the user's `revoke netter` leaves.
@@ -694,6 +743,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     // The `hostile` kernel's (#110): its own files, and five models to ask
@@ -720,6 +770,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     // The `tools` kernel's (#126, #127): both tools, `report.txt` and
@@ -751,6 +802,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     // The `injection` kernel's (#129): both tools, `report.txt` with its
@@ -777,6 +829,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     // The `channels` kernel's (#133): `talker` may send to `hearer` (and
@@ -804,6 +857,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[b"hearer"],
     },
     Entry {
@@ -828,6 +882,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     Entry {
@@ -852,6 +907,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     Entry {
@@ -879,6 +935,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[b"outsider"],
     },
     // The `groups` kernel's (#134): `boss` supervises `helper` and `aide`
@@ -909,6 +966,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     Entry {
@@ -937,6 +995,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     Entry {
@@ -964,6 +1023,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         // Its one channel, for the `deputy` kernel (#138).
         channels: &[b"boss"],
     },
@@ -989,6 +1049,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: false,
         https: &[],
+        guest: false,
         channels: &[],
     },
     // The `tools` kernel's too (#165): proposes its own file as an update.
@@ -1014,6 +1075,7 @@ const TEST: &[Entry] = &[
         ask_knowledge: &[],
         propose: true,
         https: &[],
+        guest: false,
         channels: &[],
     },
     KNOWLEDGE_AGENTS[0],
@@ -1055,6 +1117,7 @@ const KNOWLEDGE_AGENTS: [Entry; 2] = [
         ask_knowledge: &[b"read hr", b"write hr"],
         propose: false,
         https: &[],
+        guest: false,
         ..knowledge_entry(b"scribe")
     },
     Entry {
@@ -1364,6 +1427,9 @@ enum Ending {
     Cancelled,
     /// Over its attempt's `cpu_ms` (D-022): a failed attempt.
     OverCpu,
+    /// A guest's bridge bound again while it held the slot (#298): a
+    /// failed attempt.
+    Lost,
 }
 
 /// A running agent process.
@@ -1399,6 +1465,10 @@ struct Slot {
     requests: u32,
     /// Its one sensitive call waiting for the user (#128).
     confirm: Option<Confirm>,
+    /// A Tier 3 guest's attempt (#298): no process (`process` is 0); the
+    /// capability minted for the bridge once bound, else 0.
+    guest: bool,
+    bound: Handle,
 }
 
 struct Runtime {
@@ -1433,6 +1503,8 @@ struct Runtime {
     infer_health: Health,
     audit_health: Health,
     net_health: Health,
+    /// The capability `BIND` passes with its reply (#298).
+    pass: Option<Handle>,
 }
 
 struct Pending {
@@ -1706,12 +1778,90 @@ impl Runtime {
     }
 
     /// Ends `slot`'s process for `why`; its notification frees the slot.
+    /// A guest's attempt, with no process, ends at once.
     fn end(&mut self, slot: usize, why: Ending) {
         self.cancel_session(slot);
-        if let Some(s) = self.slots[slot].as_mut() {
-            s.ending = Some(why);
+        let Some(s) = self.slots[slot].as_mut() else {
+            return;
+        };
+        s.ending = Some(why);
+        if s.guest {
+            self.ended(slot);
+        } else {
             let _ = process_stop(s.process);
         }
+    }
+
+    /// The user's `stop` for the guest agent in `slot` (#298), from
+    /// `trust`: as if its process had been stopped.
+    fn stop_guest(&mut self, slot: usize) {
+        if self
+            .slots
+            .get(slot)
+            .and_then(Option::as_ref)
+            .is_some_and(|s| s.guest && s.ending.is_none())
+        {
+            self.cancel_session(slot);
+            self.ended(slot);
+        }
+    }
+
+    /// `BIND` from the bridge (#298): the first guest attempt waiting for
+    /// it gets a capability minted for it, recorded before it is given.
+    /// One already held is revoked first, its attempt failed.
+    fn bind(&mut self, out: &mut [u8; 256]) -> Result<usize, u8> {
+        for i in 0..SLOTS {
+            let held = self.slots[i]
+                .as_ref()
+                .filter(|s| s.guest && s.bound != 0 && s.ending.is_none())
+                .map(|s| s.task);
+            if let Some(id) = held {
+                self.end(i, Ending::Lost);
+                self.event(id, b"bridge restarted", None);
+            }
+        }
+        let i = (0..SLOTS)
+            .find(|&i| {
+                self.slots[i]
+                    .as_ref()
+                    .is_some_and(|s| s.guest && s.bound == 0 && s.ending.is_none())
+            })
+            .ok_or(status::NOT_FOUND)?;
+        let id = self.slots[i].as_ref().map_or(0, |s| s.task);
+        let minted = mint(i).ok_or(status::INTERNAL)?;
+        if !self.bind_event(id, action::BIND, outcome::OK, b"") {
+            let _ = delete(minted);
+            return Err(NO_AUDIT);
+        }
+        if let Some(s) = self.slots[i].as_mut() {
+            s.bound = minted;
+            s.last = uptime();
+        }
+        self.pass = Some(minted);
+        Bound {
+            task: id,
+            attempt: self.attempt(id),
+        }
+        .encode(out)
+        .ok_or(status::INTERNAL)
+    }
+
+    /// A `bind` or `unbind` record for task `id`'s attempt.
+    fn bind_event(&self, id: u32, act: u8, result: u8, detail: &[u8]) -> bool {
+        let agent = self.agent_of(id);
+        self.audit(&Record {
+            kind: Kind::Event,
+            refers: 0,
+            actor: &agent,
+            task: id,
+            attempt: self.attempt(id),
+            action: act,
+            permission: None,
+            service: b"bridge",
+            outcome: result,
+            detail,
+        })
+        .is_some()
     }
 
     fn running(&self) -> usize {
@@ -1793,29 +1943,36 @@ impl Runtime {
         else {
             return;
         };
-        let process = open(ROOT, limits.entry.program).and_then(|file| {
-            let grant = Grant {
-                handle: SERVICE,
-                rights: SEND,
-                badge: slot as u32 + 1,
-            };
-            let notify = Some((SERVICE, slot as u32));
-            let agent = SpawnLimits {
-                pages: limits.pages,
-                class: Class::Agents,
-                processes: 0,
-                handles: AGENT_HANDLES,
-            };
-            let p = spawn_with(file, 0, &[grant], notify, agent);
-            let _ = delete(file);
-            p
-        });
+        // A guest has no program (#298): its attempt waits for `BIND`.
+        let guest = limits.entry.guest;
+        let process = if guest {
+            Ok(0)
+        } else {
+            open(ROOT, limits.entry.program).and_then(|file| {
+                let grant = Grant {
+                    handle: SERVICE,
+                    rights: SEND,
+                    badge: slot as u32 + 1,
+                };
+                let notify = Some((SERVICE, slot as u32));
+                let agent = SpawnLimits {
+                    pages: limits.pages,
+                    class: Class::Agents,
+                    processes: 0,
+                    handles: AGENT_HANDLES,
+                };
+                let p = spawn_with(file, 0, &[grant], notify, agent);
+                let _ = delete(file);
+                p
+            })
+        };
         let Ok(process) = process else {
             self.finish(id, State::Failed, b"spawn failed");
             self.event(id, b"failed", None);
             return;
         };
-        // `trust` holds the agent's STOP before the runtime answers it.
+        // `trust` holds the agent's STOP before the runtime answers it; a
+        // guest is registered with none, and stopped through the runtime.
         let mut msg = [0u8; 80];
         let register = trust::Request::Register {
             slot: slot as u8,
@@ -1847,6 +2004,8 @@ impl Runtime {
             held: None,
             requests: 0,
             confirm: None,
+            guest,
+            bound: 0,
         });
         // Every grant is recorded before it is given; none is given if a
         // record fails (#108).
@@ -1996,6 +2155,8 @@ impl Runtime {
     /// Slot `i`'s process ended (its notification bit).
     fn ended(&mut self, i: usize) {
         let status = match &self.slots[i] {
+            // A guest's attempt has no process: its ending says why.
+            Some(s) if s.guest => Ok(Status::Stopped),
             Some(s) => process_status(s.process),
             None => return,
         };
@@ -2007,8 +2168,27 @@ impl Runtime {
             return;
         };
         // What the attempt used, recorded as it ends (#119).
-        let cpu_ms = process_usage(s.process, Use::CpuMicros).unwrap_or(0) / 1000;
-        let _ = delete(s.process);
+        let cpu_ms = if s.guest {
+            0
+        } else {
+            let us = process_usage(s.process, Use::CpuMicros).unwrap_or(0);
+            let _ = delete(s.process);
+            us / 1000
+        };
+        // The bridge's capability for the attempt goes with it (#298).
+        if s.bound != 0 {
+            let _ = revoke(s.bound);
+            let _ = delete(s.bound);
+            let why: &[u8] = match s.ending {
+                Some(Ending::Finished) => b"attempt ended",
+                Some(Ending::Hung) => b"hung",
+                Some(Ending::Cancelled) => b"cancelled",
+                Some(Ending::OverCpu) => b"over cpu",
+                Some(Ending::Lost) => b"bridge restarted",
+                None => b"stopped",
+            };
+            self.bind_event(s.task, action::UNBIND, outcome::OK, why);
+        }
         if let Some((_, cap)) = s.held {
             let _ = delete(cap);
         }
@@ -2060,7 +2240,7 @@ impl Runtime {
         }
         match (s.ending, status) {
             (Some(Ending::Finished | Ending::Cancelled), _) => {}
-            (Some(Ending::Hung | Ending::OverCpu), _) => self.retry(id),
+            (Some(Ending::Hung | Ending::OverCpu | Ending::Lost), _) => self.retry(id),
             // Stopped, but not by the runtime: the user, on the trusted path.
             (None, Ok(Status::Stopped)) => {
                 self.finish(id, State::Cancelled, b"stopped");
@@ -2738,9 +2918,11 @@ impl Runtime {
                 }
                 asked.encode(out).ok_or(status::INTERNAL)
             }
-            Request::Revoke { .. } | Request::Answer { .. } | Request::Usage => {
-                Err(status::NO_ACCESS)
-            }
+            Request::Revoke { .. }
+            | Request::Answer { .. }
+            | Request::Usage
+            | Request::Bind
+            | Request::StopGuest { .. } => Err(status::NO_ACCESS),
             Request::Submit { .. }
             | Request::Status { .. }
             | Request::Cancel { .. }
@@ -4174,6 +4356,10 @@ impl Runtime {
                     self.revoke(name, permission);
                     Ok(done(out))
                 }
+                Request::StopGuest { slot } => {
+                    self.stop_guest(usize::from(slot));
+                    Ok(done(out))
+                }
                 Request::Answer { number, yes } => {
                     let how = if yes {
                         trust::Resolution::Granted
@@ -4183,6 +4369,10 @@ impl Runtime {
                     self.resolve(number, how);
                     Ok(done(out))
                 }
+                _ => Err(status::NO_ACCESS),
+            },
+            None if badge == agents::BRIDGE => match req {
+                Request::Bind => self.bind(out),
                 _ => Err(status::NO_ACCESS),
             },
             None => Err(status::NO_ACCESS),
@@ -4195,6 +4385,14 @@ impl Runtime {
             }
         }
     }
+}
+
+/// A capability for the bridge (#298): `SEND` on the runtime's endpoint
+/// badged with `slot`, derived in the runtime's own table, so that
+/// revoking it reaches only what was passed on from it. `GRANT` lets the
+/// runtime pass it on; the bridge's copy has `SEND` alone.
+fn mint(slot: usize) -> Option<Handle> {
+    derive(SERVICE, SEND | GRANT, slot as u32 + 1).ok()
 }
 
 /// The permission an agent request needs, if any.
@@ -4252,6 +4450,7 @@ fn main(arg: u64) -> u64 {
         1 => (TEST, TEST_GROUPS),
         2 => (BUDGETS, BUDGET_GROUPS),
         3 => (HTTPS_TABLE, &[]),
+        4 => (GUEST_TABLE, &[]),
         _ => (&[], &[]),
     };
     let Ok(reply) = endpoint_create() else {
@@ -4392,6 +4591,7 @@ fn main(arg: u64) -> u64 {
         },
         audit_health: Health::default(),
         net_health: Health::default(),
+        pass: None,
     };
     // `trust`'s way to send `REVOKE`, badged so only it is served as `trust`.
     let mut msg = [0u8; 8];
@@ -4437,8 +4637,14 @@ fn main(arg: u64) -> u64 {
                 }
                 let mut out = [0u8; 256];
                 let n = r.handle(msg, badge, &mut out);
+                // `BIND`'s capability goes with its reply; the slot keeps
+                // its own, to revoke.
+                let pass = r.pass.take();
                 if cap != 0 {
-                    let _ = try_send(cap, &out[..n]);
+                    let _ = match pass {
+                        Some(h) => try_send_cap(cap, &out[..n], h, SEND, 0),
+                        None => try_send(cap, &out[..n]),
+                    };
                     let _ = delete(cap);
                 }
             }

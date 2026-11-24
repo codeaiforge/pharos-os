@@ -153,6 +153,7 @@ mod tests {
             ask_knowledge: &[],
             propose: false,
             https: &[],
+            guest: false,
             channels: &[],
         }
     }

@@ -48,6 +48,7 @@ pub mod number {
     pub const KEY_MEASUREMENT: u64 = 32;
     pub const CLOCK_REAL: u64 = 33;
     pub const SECRETS_READ: u64 = 34;
+    pub const DERIVE: u64 = 35;
 }
 
 /// What `process_usage` reports (its second argument).
@@ -294,6 +295,15 @@ pub enum Call {
         handle: Handle,
         addr: u64,
         len: u64,
+    },
+    /// A child of `handle` in the caller's own table (#298): its rights
+    /// limited to `rights`, with `badge` if `handle` has none. Revoking
+    /// `handle` revokes it, and revoking it revokes what was passed on
+    /// from it. Needs `GRANT`, as passing `handle` on does.
+    Derive {
+        handle: Handle,
+        rights: cap::Rights,
+        badge: u32,
     },
     /// Writes the boot measurement to `addr` (any `Key` capability).
     KeyMeasurement {
@@ -557,6 +567,11 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
                 addr: args[1],
             })
         }
+        number::DERIVE => Ok(Call::Derive {
+            handle: args[0],
+            rights: args[1] as cap::Rights,
+            badge: args[2] as u32,
+        }),
         number::SECRETS_READ => {
             // A length of 0 asks only the size: no buffer to check.
             if args[2] != 0 {
@@ -1264,6 +1279,15 @@ mod kernel {
                 drop(process);
                 Ok(process::revoke(&cap) as u64)
             }
+            Call::Derive {
+                handle,
+                rights,
+                badge,
+            } => {
+                let mut caps = process.caps.lock();
+                let parent = caps.get(handle, cap::GRANT)?;
+                Ok(caps.insert(parent.derive_badged(rights, badge))?)
+            }
             Call::Open { handle, addr, len } => {
                 let parent = process.caps.lock().get(handle, cap::READ)?;
                 let Object::Filesystem(fs) = parent.object() else {
@@ -1718,7 +1742,7 @@ mod tests {
     fn rejects_bad_arguments() {
         assert_eq!(decode(99, [0; 6]), Err(Error::UnknownCall));
         assert_eq!(decode(u64::MAX, [0; 6]), Err(Error::UnknownCall));
-        assert_eq!(decode(35, [0; 6]), Err(Error::UnknownCall));
+        assert_eq!(decode(36, [0; 6]), Err(Error::UnknownCall));
         // secrets_read: at most 4 KiB, in user memory.
         assert_eq!(decode(34, [2, 0, 16, 0, 0, 0]), Err(Error::BadAddress));
         assert_eq!(
@@ -2043,6 +2067,14 @@ mod tests {
         assert_eq!(
             decode(6, [4, 0, 0, 0, 0, 0]),
             Ok(Call::Revoke { handle: 4 })
+        );
+        assert_eq!(
+            decode(35, [2, 0x10, 7, 0, 0, 0]),
+            Ok(Call::Derive {
+                handle: 2,
+                rights: 0x10,
+                badge: 7
+            })
         );
         let write = |addr, len| decode(2, [1, addr, len, 0, 0, 0]);
         assert_eq!(write(0x40_0000, 257), Err(Error::TooLarge));

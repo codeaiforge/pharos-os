@@ -1,8 +1,9 @@
 //! virtio-console over the shared virtio transport (agents.md, D-018): the
-//! trusted path's device. `VERSION_1` only (no multiport), so port 0's
-//! receive queue is queue 0 and its transmit queue queue 1. Up to 16
-//! receive buffers of 64 bytes and 16 transmit buffers of 256 bytes, each
-//! queue in one page; both interrupt on one MSI-X entry. Every used element
+//! trusted path's device, and the Tier 3 channel's (#298). `VERSION_1`
+//! only (no multiport), so port 0's receive queue is queue 0 and its
+//! transmit queue queue 1. Up to 16 receive and 16 transmit buffers, their
+//! sizes the caller's ([`Sizes`]): the trusted console's 64 and 256 bytes,
+//! the bridge's 4 KiB each; both queues interrupt on one MSI-X entry. Every used element
 //! is checked ([`check_used`]) before use. Output never blocks: when every
 //! transmit buffer is in flight, a line is refused.
 
@@ -12,11 +13,39 @@ use crate::virtio::{Queue, Transport, WRITE};
 
 /// PCI vendor and device ID of a modern virtio-console device.
 pub const VIRTIO_CONSOLE_ID: u32 = 0x1043_1af4;
-/// Bytes per receive buffer.
+/// Bytes per receive buffer of the trusted console.
 pub const RX_BUFFER: usize = 64;
-/// Bytes per transmit buffer: the longest write.
+/// Bytes per transmit buffer of the trusted console: its longest write.
 pub const TX_BUFFER: usize = 256;
 const BUFFERS: usize = 16;
+const PAGE: usize = 4096;
+
+/// Bytes per receive and per transmit buffer: each a power of two from
+/// 64 to 4096, so 16 of them fill whole pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sizes {
+    pub rx: usize,
+    pub tx: usize,
+}
+
+impl Sizes {
+    /// The trusted console's (`trust`).
+    pub const TRUSTED: Self = Self {
+        rx: RX_BUFFER,
+        tx: TX_BUFFER,
+    };
+    /// The Tier 3 channel's (the bridge, #298).
+    pub const BRIDGE: Self = Self { rx: 4096, tx: 4096 };
+
+    fn valid(size: usize) -> bool {
+        size.is_power_of_two() && (64..=PAGE).contains(&size)
+    }
+
+    /// DMA pages for 16 buffers of `size` bytes.
+    fn pages(size: usize) -> u64 {
+        (BUFFERS * size).div_ceil(PAGE) as u64
+    }
+}
 
 /// Checks a used element: `advance` (how far the used index moved) at most
 /// `outstanding` buffers, `id` one of them in a queue of `size`, `len` at
@@ -55,18 +84,25 @@ pub struct Console {
     tx_phys: u64,
     posted: [bool; BUFFERS],
     busy: [bool; BUFFERS],
+    sizes: Sizes,
 }
 
 impl Console {
     /// Resets and sets up `device`, both queues interrupting on MSI-X
-    /// entry `entry`, and posts every receive buffer. Uses user addresses
-    /// `at` to `at + 0x30_1000`. On failure the device is left `FAILED`.
-    pub fn init(device: Handle, entry: u16, at: u64) -> Result<Self, &'static str> {
+    /// entry `entry`, with buffers of `sizes`, and posts every receive
+    /// buffer. Uses user addresses `at` to `at + 0x31_0000`. On failure the
+    /// device is left `FAILED`.
+    pub fn init(device: Handle, entry: u16, at: u64, sizes: Sizes) -> Result<Self, &'static str> {
+        if !Sizes::valid(sizes.rx) || !Sizes::valid(sizes.tx) {
+            return Err("bad buffer sizes");
+        }
         let t = Transport::open(device, VIRTIO_CONSOLE_ID, 0, at)?;
         let setup = (|| {
             let (rings, phys) = dma_alloc(device, 2, at + 0x10_0000).map_err(|_| "no DMA pages")?;
-            let rx = dma_alloc(device, 1, at + 0x20_0000).map_err(|_| "no DMA pages")?;
-            let tx = dma_alloc(device, 1, at + 0x30_0000).map_err(|_| "no DMA pages")?;
+            let rx = dma_alloc(device, Sizes::pages(sizes.rx), at + 0x20_0000)
+                .map_err(|_| "no DMA pages")?;
+            let tx = dma_alloc(device, Sizes::pages(sizes.tx), at + 0x30_0000)
+                .map_err(|_| "no DMA pages")?;
             t.negotiate(0)?;
             let rxq = t.queue(
                 0,
@@ -90,6 +126,7 @@ impl Console {
                     tx_phys,
                     posted: [false; BUFFERS],
                     busy: [false; BUFFERS],
+                    sizes,
                 };
                 for i in 0..c.rx.size {
                     c.post(i);
@@ -106,14 +143,15 @@ impl Console {
     }
 
     fn post(&mut self, i: u16) {
-        let at = self.rx_phys + u64::from(i) * RX_BUFFER as u64;
-        self.rx.set(i, at, RX_BUFFER as u32, WRITE, 0);
+        let size = self.sizes.rx;
+        let at = self.rx_phys + u64::from(i) * size as u64;
+        self.rx.set(i, at, size as u32, WRITE, 0);
         self.rx.offer(i);
         self.posted[usize::from(i)] = true;
     }
 
-    /// Takes the bytes of one received buffer into `out` (at least
-    /// [`RX_BUFFER`] bytes), reposting it. `Ok(None)` if none is waiting.
+    /// Takes the bytes of one received buffer into `out` (at least the
+    /// receive size), reposting it. `Ok(None)` if none is waiting.
     pub fn recv(&mut self, out: &mut [u8]) -> Result<Option<usize>, &'static str> {
         let advance = self.rx.used_advance();
         if advance == 0 {
@@ -129,12 +167,12 @@ impl Console {
             self.rx.size,
             |i| now[i],
             len,
-            RX_BUFFER,
+            self.sizes.rx,
         )?;
         self.posted[id] = false;
         let out = out.get_mut(..n).ok_or("receive buffer too small")?;
         for (o, b) in out.iter_mut().enumerate() {
-            *b = self.rx_mem.read8(id * RX_BUFFER + o);
+            *b = self.rx_mem.read8(id * self.sizes.rx + o);
         }
         self.post(id as u16);
         self.rx.kick();
@@ -149,7 +187,8 @@ impl Console {
             let (id, len) = self.tx.take_used();
             let now = self.busy;
             // The device writes nothing into a transmit buffer.
-            let (id, _) = check_used(advance, busy, id, self.tx.size, |i| now[i], len, TX_BUFFER)?;
+            let max = self.sizes.tx;
+            let (id, _) = check_used(advance, busy, id, self.tx.size, |i| now[i], len, max)?;
             self.busy[id] = false;
             advance -= 1;
         }
@@ -166,22 +205,23 @@ impl Console {
         self.busy[..size].iter().filter(|b| !**b).count()
     }
 
-    /// Writes `bytes` (at most [`TX_BUFFER`]). Fails, without waiting, if
-    /// every transmit buffer is in flight.
+    /// Writes `bytes` (at most the transmit size). Fails, without
+    /// waiting, if every transmit buffer is in flight.
     pub fn send(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
-        if bytes.is_empty() || bytes.len() > TX_BUFFER {
+        let size = self.sizes.tx;
+        if bytes.is_empty() || bytes.len() > size {
             return Err("bad write length");
         }
         self.reclaim()?;
-        let size = usize::from(self.tx.size);
-        let i = self.busy[..size]
+        let queue = usize::from(self.tx.size);
+        let i = self.busy[..queue]
             .iter()
             .position(|b| !b)
             .ok_or("transmit queue full")?;
         for (o, &b) in bytes.iter().enumerate() {
-            self.tx_mem.write8(i * TX_BUFFER + o, b);
+            self.tx_mem.write8(i * size + o, b);
         }
-        let at = self.tx_phys + (i * TX_BUFFER) as u64;
+        let at = self.tx_phys + (i * size) as u64;
         self.tx.set(i as u16, at, bytes.len() as u32, 0, 0);
         self.busy[i] = true;
         self.tx.offer(i as u16);
@@ -193,6 +233,19 @@ impl Console {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_fill_whole_pages() {
+        assert_eq!(Sizes::pages(Sizes::TRUSTED.rx), 1);
+        assert_eq!(Sizes::pages(Sizes::TRUSTED.tx), 1);
+        assert_eq!(Sizes::pages(Sizes::BRIDGE.rx), 16);
+        for s in [Sizes::TRUSTED.rx, Sizes::TRUSTED.tx, Sizes::BRIDGE.rx] {
+            assert!(Sizes::valid(s), "{s}");
+        }
+        for s in [0, 32, 100, 8192] {
+            assert!(!Sizes::valid(s), "{s}");
+        }
+    }
 
     #[test]
     fn used_values_are_checked() {

@@ -1379,6 +1379,7 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 - New on the host: the guest image build and the launch tool's checks. There is no new host daemon.
 - The guest's containment is the host's VM configuration. Pharos's own contribution in Tier 3 is the broker, not containment, and the threat model says so.
 - A compromised host or QEMU can read and forge everything on the channel, as it can read Pharos's memory today.
+- *Amended in implementation (#298, approved by the maintainer on 2026-11-24):* the kernel gains one system call, `derive` (35). It gives a process a child of a capability it holds with `GRANT`, with no more rights and a badge only if the parent has none. The runtime needs it to mint a slot capability for each attempt and revoke it alone: `send` is a rendezvous, so the runtime could not derive one by sending it to itself. It adds no authority, since passing a capability on already derived such a child.
 
 **Evidence.**
 - The probe of option (e) above (2026-11-24, QEMU 8.2.2, this host).

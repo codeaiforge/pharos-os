@@ -54,6 +54,14 @@
 //! of its buffer; the reply is the gateway's
 //! ([`crate::gateway::Answered`]), the content type then the answer at the
 //! start of the buffer, the route's secret stripped.
+//!
+//! The Tier 3 bridge (#298, bridge.md): `BIND`, only under [`BRIDGE`],
+//! answers [`Bound`] with a capability attached, `SEND` on the runtime
+//! badged with the slot of a guest agent's attempt that was waiting, or
+//! `NOT_FOUND` when none is. The runtime revokes it when the attempt
+//! ends. `STOP_GUEST`, a plain `send` under [`TRUST`] with no reply, is
+//! the user's `stop` for a guest agent's slot: it ends the attempt as
+//! cancelled.
 
 use crate::{Reader, Refused, Writer, op as common, split, status};
 
@@ -103,6 +111,10 @@ pub mod op {
     pub const PROPOSE: u8 = 33;
     /// An HTTPS request on a route of the egress gateway (#282).
     pub const REQUEST: u8 = 34;
+    /// The bridge: a waiting guest attempt's slot (#298).
+    pub const BIND: u8 = 35;
+    /// `trust`: the user stops a guest agent (#298).
+    pub const STOP_GUEST: u8 = 36;
 }
 
 /// The `ASK` reply's outcome, after `OK` (#106).
@@ -238,6 +250,8 @@ pub const MAX_RUNNING: usize = 4;
 pub const CONTROL: u32 = 0x100;
 /// The badge on the capability the runtime gives `trust` (#105).
 pub const TRUST: u32 = 0x80;
+/// The bridge service's badge (#298), from `init`'s table.
+pub const BRIDGE: u32 = 0x81;
 /// Largest file an agent keeps with `DATA_PUT`.
 pub const MAX_DATA: u32 = 64 << 10;
 /// Most files one agent keeps, whatever its `data_kb` (D-046, #212).
@@ -475,6 +489,12 @@ pub enum Request<'a> {
     Forget {
         task: u32,
     },
+    /// The bridge: the slot of a guest attempt waiting for it (#298).
+    Bind,
+    /// `trust`: the user stops the guest agent in `slot` (#298).
+    StopGuest {
+        slot: u8,
+    },
     Attach {
         len: u64,
     },
@@ -640,6 +660,10 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             op::STATUS => Request::Status { task: r.u32()? },
             op::CANCEL => Request::Cancel { task: r.u32()? },
             op::FORGET => Request::Forget { task: r.u32()? },
+            op::BIND => Request::Bind,
+            op::STOP_GUEST => Request::StopGuest {
+                slot: r.u8().filter(|s| usize::from(*s) < SLOTS)?,
+            },
             common::ATTACH => Request::Attach { len: r.u64()? },
             common::INFO => Request::Info,
             _ => return None,
@@ -870,6 +894,11 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.u64(len)?;
         }
         Request::Info => head(&mut w, common::INFO)?,
+        Request::Bind => head(&mut w, op::BIND)?,
+        Request::StopGuest { slot } => {
+            head(&mut w, op::STOP_GUEST)?;
+            w.bytes(&[slot])?;
+        }
     }
     Some(w.len())
 }
@@ -979,6 +1008,33 @@ impl<'a> Begun<'a> {
     }
 }
 
+/// The `BIND` reply: `[OK, task u32, attempt u8]`, the slot's capability
+/// attached (#298).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bound {
+    pub task: u32,
+    pub attempt: u8,
+}
+
+impl Bound {
+    pub fn encode(&self, out: &mut [u8]) -> Option<usize> {
+        let mut w = Writer::new(out);
+        w.bytes(&[status::OK])?;
+        w.u32(self.task)?;
+        w.bytes(&[self.attempt])?;
+        Some(w.len())
+    }
+    pub fn parse(reply: &[u8]) -> Option<Self> {
+        let mut r = Reader::new(reply);
+        let ok = r.u8()? == status::OK;
+        let b = Self {
+            task: r.u32()?,
+            attempt: r.u8()?,
+        };
+        (ok && r.is_empty()).then_some(b)
+    }
+}
+
 /// The `SUBMIT` reply: `[OK, task u32]`.
 pub fn submitted(task: u32, out: &mut [u8]) -> Option<usize> {
     let mut w = Writer::new(out);
@@ -1069,6 +1125,8 @@ mod tests {
             },
             Request::Attach { len: 1 << 16 },
             Request::Info,
+            Request::Bind,
+            Request::StopGuest { slot: 15 },
             Request::DataPut {
                 name: b"notes",
                 len: MAX_DATA,
@@ -1318,6 +1376,17 @@ mod tests {
     #[test]
     fn replies_round_trip() {
         let mut out = [0u8; 32];
+        let b = Bound {
+            task: 9,
+            attempt: 3,
+        };
+        let n = b.encode(&mut out).unwrap();
+        assert_eq!(n, 6);
+        assert_eq!(Bound::parse(&out[..n]), Some(b));
+        assert_eq!(Bound::parse(&out[..n - 1]), None);
+        assert_eq!(Bound::parse(&[status::NOT_FOUND]), None);
+        // `STOP_GUEST` names a slot.
+        assert!(parse(&[VERSION, op::STOP_GUEST, SLOTS as u8]).is_err());
         let a = Assigned {
             task: 3,
             attempt: 2,

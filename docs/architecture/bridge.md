@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-24 (#295), with each open question decided as recommended (section 7). It follows [D-036](../project/decision-log.md#d-036-foreign-agent-bridge) (accepted 2026-11-24) and builds on the [agent runtime](agents.md) and the [egress gateway](gateway.md).
-- **Implementation:** the guest image is **implemented** (#296): `cargo xtask guest`, pinned by `xtask/guest.lock`, with a boot check in place of the agent (*as built* below). The channel and the launch tool are **implemented** (#297), shown end to end by the `channel` test kernel (*as built* below). **Planned:** the driver's buffer sizes as parameters (with #298), `cargo xtask run` with a guest, the channel and the launch tool (#297), the bridge service (#298), the client library (#299), and the `bridge` scenario with the hostile-guest suite (#300). The gate is #301.
+- **Implementation:** the guest image is **implemented** (#296): `cargo xtask guest`, pinned by `xtask/guest.lock`, with a boot check in place of the agent (*as built* below). The channel and the launch tool are **implemented** (#297). The bridge service, `BIND`, the frames, and the driver's buffer sizes as parameters are **implemented** (#298), with a new `derive` system call (*as built* below). The `channel` test kernel shows them end to end: a guest agent's task, bound, logged, and completed through the bridge. **Planned:** `cargo xtask run` with a guest, the client library (#299), and the `bridge` scenario with the hostile-guest suite (#300). The gate is #301.
 
 ## 2. Context
 
@@ -77,6 +77,12 @@ How the bridge holds the slot is D-036's open point. The runtime cannot spawn th
 4. **The attempt ends as any attempt does:** `COMPLETE`, `FAIL`, `CANCEL`, a revocation, or the user's `stop`. The runtime then **revokes** the minted capability, so the bridge's next send fails, and the bridge goes back to step 2. Each attempt gets a new capability, so nothing from one attempt reaches the next.
 5. **A second `BIND` while one is held** (a restarted bridge) revokes the first and ends its attempt as failed (`bridge restarted`), which counts against the task's attempts like an agent's crash.
 
+*As built (#298):*
+- **The kernel had no way to mint the capability.** `send` is a rendezvous, so the runtime cannot send itself a badged capability, and no call derived one in place. Approved by the maintainer on 2026-11-24: a new system call, `derive` (35, [syscalls-ipc.md](syscalls-ipc.md#system-calls-in-m27)). It gives the caller a child of a capability it holds with `GRANT`: never more rights, and a badge only if the parent has none. The runtime derives `SEND | GRANT` on its endpoint with the slot's badge, and passes it with `SEND` alone on `BIND`'s reply. Revoking it reaches the bridge's copy and nothing else. It is a narrow addition to D-036's design, not a new authority: passing a capability already derived a child the same way.
+- `guest: true` is a policy entry field (`pharos_proto::manifest::Entry`), compiled only. The entry's manifest is read and checked as any agent's. Its `program` names the guest's, which the runtime never opens.
+- A guest's attempt is registered with `trust` with no process. The runtime records `bind` before it replies, and `unbind`, with the reason (`attempt ended`, `hung`, `cancelled`, `stopped`, `bridge restarted`), when it revokes.
+- `trust`'s `stop <agent>` for a guest sends `STOP_GUEST` (an agents v1 request under `trust`'s badge, non-blocking for at most 2 s). It stops the runtime if that is not taken. `stop all` stops the runtime first, as before, which ends a guest's attempt with it.
+
 **Stopping a guest agent:** a guest agent has no process for `trust` to `STOP`. `trust`'s `stop <agent>` for it is sent to the runtime as `CANCEL`, which revokes. If the runtime doesn't answer within 2 s, `trust` stops the runtime, which ends every agent and leaves the bridge's capability without an endpoint. This fails closed, but the runtime is in this path, unlike a Tier 1 agent's stop (open question 1).
 
 ### The channel
@@ -84,11 +90,12 @@ How the bridge holds the slot is D-036's open point. The runtime cannot spawn th
 - **Pharos side:** a second `virtio-serial-pci` with a `virtconsole` (port 0, so the existing driver works without multiport), on `-chardev socket,id=bridge,path=<short path>,server=on,wait=off`. It comes after the trusted console in PCI order, so `trust` keeps device 0.
 - **Guest side:** one `virtio-serial-pci` with one `virtserialport,name=org.pharos.bridge` on `-chardev socket,id=bridge,path=<same path>`. Linux shows it as `/dev/virtio-ports/org.pharos.bridge`. It is not a `virtconsole`, so no getty or kernel console runs on it.
 - **The driver** takes its buffer counts and sizes as parameters (D-036). The bridge uses 16 receive buffers of 4 KiB; `trust` keeps 16 × 64 and 16 × 256.
+  - *As built (#298):* the sizes only (`virtio_console::Sizes`, each a power of two from 64 to 4,096 bytes); both users take 16 buffers. The bridge uses 4 KiB each way.
 - **The socket path** is relative to the run's directory and under Linux's 108 bytes.
 - *As built (#297):*
   - `xtask/src/bridge.rs` writes both sides. Pharos's VM gets `virtio-serial-pci,disable-legacy=on,iommu_platform=on` after all its other devices, `-chardev socket,id=bridge,path=bridge.sock,server=on,wait=off`, and `virtconsole,chardev=bridge`, plus QMP. Both QEMUs run in the run's directory, so `bridge.sock` is a short relative path; `xtask` reaches the QMP sockets through `/proc/self/fd/<dir>/`, for the same reason.
-  - **Pharos's firmware takes the channel as a console.** OVMF drives every virtio-console, so a guest connected during the firmware read its boot output (found by the `channel` kernel). It could probably also have typed into the firmware's menus; that was not tried. So the launch tool starts the guest only once Pharos has printed a line saying its own driver holds the device (`channelprobe: waiting for the guest` in the test, the bridge's ready line in #298). Until then no client is on the socket, and QEMU drops what the firmware writes. Pharos's QEMU runs with `-no-reboot`, so a reset, which would run the firmware again, ends the run instead.
-  - The `channel` kernel's probe (`bin/channelprobe`, table 12) uses the trusted console's driver unchanged: 16 receive buffers of 64 bytes. Its sizes become parameters with the bridge service (#298).
+  - **Pharos's firmware takes the channel as a console.** OVMF drives every virtio-console, so a guest connected during the firmware read its boot output (found by the `channel` kernel). It could probably also have typed into the firmware's menus; that was not tried. So the launch tool starts the guest only once Pharos has printed a line saying its own driver holds the device (`channelprobe: waiting for the guest` in #297; `bridge: ready` since #298). Until then no client is on the socket, and QEMU drops what the firmware writes. Pharos's QEMU runs with `-no-reboot`, so a reset, which would run the firmware again, ends the run instead.
+  - The `channel` kernel's probe (`bin/channelprobe`, table 12) used the trusted console's driver unchanged. The bridge service replaced it in #298, and the launch tool now waits for its `bridge: ready` line.
 
 ### Frames
 
@@ -110,6 +117,8 @@ The channel is a byte stream. The bridge frames it, and parses every frame as un
 **Operations the bridge passes:** `TASK`, `LOG`, `CHECKPOINT`, `BEGIN`, `END`, `COMPLETE`, `FAIL`, `REQUEST` (HTTPS), `DATA_PUT`, `DATA_GET`, `ASK`, and `INFO`. The bridge attaches its own buffer (`ATTACH`), since a frame cannot carry a capability. Inference, tools, messages, knowledge, and subtasks are not passed in M6.3 (open question 2). The runtime still checks each passed operation in full; the bridge's list only keeps it from parsing layouts it doesn't need.
 
 **One request at a time.** The guest waits for each `REPLY`, so the bridge needs no queue.
+
+*As built (#298):* `pharos_proto::bridge` holds the header, a byte-at-a-time `Decoder` (which finds only `HELLO` until the bridge accepts one), `parse_request`, and `reply_len`. A `REQUEST`'s buffer bytes must be exactly what its operation reads, and go where it reads them: at `CHECKPOINT_AT` for `CHECKPOINT`, otherwise at 0. A `REPLY`'s buffer bytes start at 0. `TASK` carries the input, or the input and checkpoint if there is one (`CHECKPOINT_AT` plus its length); `DATA_GET` carries the file; `REQUEST` carries the content type and the answer. Every other operation, and any refusal, carries none. The bridge sees a second request before the reply only when its bytes come in the same receive buffer as the first's end. A guest's `FAIL` ends the attempt as an agent's does. The bridge sends the guest's protocol errors and silence to the runtime as the agent's `FAIL` with the reason, so they end the task (not just the attempt) and are recorded as its failure.
 
 ### Failure
 
@@ -173,7 +182,7 @@ The guest's serial console goes to a host file (output only), for diagnostics.
 | Resynchronizing before `HELLO` | 64 KiB |
 | Guest silence during an attempt | 60 s |
 | Guest agents | 1 per bridge, 1 bridge in M6.3 |
-| Bridge memory | 256 KiB (receive buffers, its runtime buffer, one frame) |
+| Bridge memory | 256 KiB (receive buffers, its runtime buffer, one frame); as built, the transmit buffers too, in a 512 KiB limit |
 
 Budgets (tokens, network bytes, `https` requests) are the guest agent's manifest's, as for any agent.
 

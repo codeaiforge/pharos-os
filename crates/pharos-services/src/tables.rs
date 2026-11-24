@@ -880,23 +880,68 @@ pub const SECRETS: &[Service] = &[
     },
 ];
 
-/// The `channel` test kernel's table (#297, bridge.md): one probe holding
-/// the second virtio-console, the Tier 3 channel's Pharos end, which
-/// `cargo xtask` joins to the guest's port through one host socket.
-pub const CHANNEL: &[Service] = &[Service {
-    name: "channelprobe",
-    path: b"bin/channelprobe",
-    arg: 0,
-    kind: Kind::OneShot,
-    restart: Restart::Never,
-    caps: &[CONSOLE, device(VIRTIO_CONSOLE, 1)],
-    net: &[],
-    tcp: &[],
-    tls: &[],
-    after: &[],
-    limit: 0,
-    gains: &[],
-}];
+/// The bridge's badge at the runtime (`pharos_proto::agents::BRIDGE`).
+pub const AGENTS_BRIDGE: u32 = 0x81;
+
+/// The `channel` test kernel's table (#297, #298, bridge.md): the boot
+/// table's services up to `trust`, the runtime on its `guest` policy table
+/// (4), the bridge holding the second virtio-console (the Tier 3 channel's
+/// Pharos end, which `cargo xtask` joins to the guest's port through one
+/// host socket), and `guestclient`, which submits the guest agent's task.
+pub const CHANNEL: &[Service] = &channel_table(BOOT_ENTRIES);
+
+const BRIDGE_CAPS: [Give; 4] = [
+    CONSOLE,
+    device(VIRTIO_CONSOLE, 1),
+    REPORT,
+    send(Ep::Agents, AGENTS_BRIDGE),
+];
+const GUESTCLIENT_CAPS: [Give; 2] = [CONSOLE, send(Ep::Agents, AGENTS_CONTROL)];
+
+const fn channel_table(boot: [Service; 9]) -> [Service; 10] {
+    let mut runtime = boot[AGENTS];
+    runtime.arg = 4;
+    [
+        boot[0],
+        boot[1],
+        boot[2],
+        boot[3],
+        boot[4],
+        boot[5],
+        boot[6],
+        runtime,
+        Service {
+            name: "bridge",
+            path: b"bin/bridge",
+            arg: 0,
+            kind: Kind::Daemon,
+            restart: Restart::Up(3),
+            caps: &BRIDGE_CAPS,
+            net: &[],
+            tcp: &[],
+            tls: &[],
+            after: &[AGENTS],
+            // Its receive and transmit buffers, its agent buffer, and one
+            // frame (bridge.md): 512 KiB.
+            limit: 128,
+            gains: &[],
+        },
+        Service {
+            name: "guestclient",
+            path: b"bin/agentclient",
+            arg: 18,
+            kind: Kind::OneShot,
+            restart: Restart::Never,
+            caps: &GUESTCLIENT_CAPS,
+            net: &[],
+            tcp: &[],
+            tls: &[],
+            after: &[8],
+            limit: 64,
+            gains: &[],
+        },
+    ]
+}
 
 /// The gateway's audit client (`pharos_proto::audit::client::GATEWAY`).
 pub const AUDIT_GATEWAY: u32 = 6;

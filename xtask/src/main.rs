@@ -771,7 +771,9 @@ fn channel_checks(guest_log: &Path) -> Result<()> {
     for want in [
         "guest: net ['lo']",
         "guest: ports ['org.pharos.bridge']",
-        "guest: pharos said hello from pharos",
+        "guest: task input hello from pharos",
+        "guest: log status 0",
+        "guest: complete status 0",
     ] {
         if !text.lines().any(|l| l.trim_end() == want) {
             return Err(format!("the guest's log lacks '{want}'"));
@@ -1035,7 +1037,7 @@ const USER_PROGRAMS: [&str; 37] = [
     "tls",
     "vault",
     "gateway",
-    "channelprobe",
+    "bridge",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -3270,12 +3272,13 @@ const SECRETS_TEST: &str = "secrets";
 /// the TLS service, the vault, the gateway, and an agent through the
 /// runtime, against `scripts/vault-test-server.py`.
 const VAULT_TEST: &str = "vault";
-/// The Tier 3 channel between two booted VMs (#297, bridge.md): the guest
-/// image beside Pharos, one host socket between them.
+/// The Tier 3 channel between two booted VMs (#297, #298, bridge.md): the
+/// guest image beside Pharos, one host socket between them, and the guest
+/// agent's task through the bridge and the runtime.
 const CHANNEL_TEST: &str = "channel";
-/// The probe's line once it holds the channel's device: the guest starts
+/// The bridge's line once it holds the channel's device: the guest starts
 /// only then ([`bridge::start_guest`]).
-const CHANNEL_READY: &str = "channelprobe: waiting for the guest";
+const CHANNEL_READY: &str = "bridge: ready";
 /// The `fw_cfg` file with the vault's secrets (D-035; must match
 /// `pharos_kernel::key::SECRETS_FW_CFG_NAME`).
 const SECRETS_NAME: &str = "opt/org.pharos/secrets";
@@ -4788,10 +4791,18 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         || name == HOTPLUG_TEST
         || name == AIFAIL_TEST
         || name == COMPROMISED_TEST
-        || name == CHANNEL_TEST
         || slotted
     {
         kernel_modules(paths, &programs)?
+    } else if name == CHANNEL_TEST {
+        // The boot image, with the guest agent's manifest (#298).
+        let mut files = programs.clone();
+        files.extend(
+            (fs_image::TEST_MANIFESTS.iter())
+                .filter(|(path, _)| *path == "agents/guest.manifest")
+                .map(|(path, text)| (path.to_string(), text.as_bytes().to_vec())),
+        );
+        kernel_modules(paths, &files)?
     } else if name == VAULT_TEST {
         // The boot image, with the test authority as its one root and
         // `fetcher`'s manifest (#284).

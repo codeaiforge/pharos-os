@@ -244,7 +244,7 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// `channels` kernel's four (#133), the `groups` kernel's three (#134),
 /// the `knowledge_agents` kernel's two (#144), and the `poison` kernel's
 /// (#146).
-pub const TEST_MANIFESTS: [(&str, &str); 37] = [
+pub const TEST_MANIFESTS: [(&str, &str); 38] = [
     // The `vault` kernel's (#284): four routes (a list's most); `other`
     // is not asked for.
     (
@@ -252,6 +252,12 @@ pub const TEST_MANIFESTS: [(&str, &str); 37] = [
         "manifest = 1\nname = fetcher\nprogram = bin/testagent\npages = 256\nmodels =\n\
          attempts = 1\nprogress_ms = 40000\ntask_ms = 120000\ndata = none\nnet =\n\
          https = items, echo, post, missing\n",
+    ),
+    (
+        "agents/guest.manifest",
+        "# The channel kernel's Tier 3 guest agent (#298).\nmanifest = 1\nname = guest\n\
+         program = guest/agent\npages = 1\nmodels =\nattempts = 2\nprogress_ms = 60000\n\
+         task_ms = 120000\ndata = none\nnet =\n",
     ),
     (
         "agents/worker.manifest",

@@ -80,14 +80,45 @@ out = g.compile().invoke({"n": 41})
 print("guest: python", sys.version.split()[0], "langgraph", version("langgraph"), "graph", out["n"])
 print("guest: net", sorted(os.listdir("/sys/class/net")))
 print("guest: ports", sorted(os.listdir("/dev/virtio-ports")))
-# The channel (#297): a line to Pharos and its answer, within 60 s.
-import select
+# The bridge (#298): one task as the guest agent, in raw frames until the
+# client library (#299). Each frame: b"PB", version 1, kind, length u32.
+import select, struct
 port = os.open("/dev/virtio-ports/org.pharos.bridge", os.O_RDWR)
-os.write(port, b"hello from the guest\n")
-got = b""
-while not got.endswith(b"\n") and select.select([port], [], [], 60)[0]:
-    got += os.read(port, 64)
-print("guest: pharos said", got.decode(errors="replace").strip() or "nothing in 60 s")
+
+def read(n):
+    got = b""
+    while len(got) < n:
+        if not select.select([port], [], [], 120)[0]:
+            sys.exit("guest: nothing from pharos in 120 s")
+        got += os.read(port, n - len(got))
+    return got
+
+def frame():
+    magic, ver, kind, n = struct.unpack("<2sBBI", read(8))
+    return kind, read(n)
+
+def send(kind, payload):
+    os.write(port, struct.pack("<2sBBI", b"PB", 1, kind, len(payload)) + payload)
+
+def call(msg, data=b""):
+    send(2, bytes([len(msg)]) + msg + data)
+    kind, p = frame()
+    if kind != 3:
+        sys.exit("guest: pharos said error " + repr(p))
+    return p[1:1 + p[0]], p[1 + p[0]:]
+
+kind, hello = frame()
+send(1, hello)
+task, attempt = struct.unpack("<IB", hello)
+print("guest: bound task", task, "attempt", attempt)
+reply, data = call(bytes([1, 1]))
+input_len = struct.unpack("<I", reply[6:10])[0]
+print("guest: task input", data[:input_len].decode())
+reply, _ = call(bytes([1, 10]) + b"hello from the guest's log")
+print("guest: log status", reply[0])
+result = b"hello from the guest"
+reply, _ = call(bytes([1, 5]) + struct.pack("<I", len(result)), result)
+print("guest: complete status", reply[0])
 '''
 
 

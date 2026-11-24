@@ -12,15 +12,17 @@
 //! `ok <step>` or `FAIL <step>`; the exit code is the number of failures.
 //! In run 1, A revokes both grants while B maps them: B's mappings turn
 //! into zeroed private pages with the same access (#104), and B ends by
-//! writing to its read-only one (a page fault).
+//! writing to its read-only one (a page fault). A also derives a child of
+//! its grant (`derive`, #298): read-only, refused as a parent without
+//! `GRANT`, and revoked alone.
 
 #![no_std]
 #![no_main]
 
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
-    Error, Mapped, Received, debug_write, delete, mem_map, mem_map_cap, mem_share, mem_unmap,
-    receive, revoke, send, sleep,
+    Error, Mapped, Received, debug_write, delete, derive, mem_map, mem_map_cap, mem_share,
+    mem_unmap, receive, revoke, send, sleep,
 };
 
 pharos_user::entry!(main);
@@ -81,6 +83,22 @@ fn sharer(b_ends_first: bool) -> u64 {
         "A: send a writable and a read-only grant",
         send(OUT, b"rw", h, READ | WRITE, 0).is_ok() && send(OUT, b"ro", h, READ, 0).is_ok(),
     );
+    // `derive` (#298): a child in A's own table, never more than asked,
+    // passed on only with `GRANT`, and revoked alone.
+    let d = derive(h, READ, 0);
+    report(&mut f, "A: derive a read-only child", d.is_ok());
+    let d = d.unwrap_or(0);
+    report(
+        &mut f,
+        "A: a child without GRANT cannot be derived from",
+        derive(d, READ, 0) == Err(Error::MissingRight),
+    );
+    report(
+        &mut f,
+        "A: revoking the child reaches nothing else",
+        revoke(d) == Ok(0),
+    );
+    let _ = delete(d);
     let (msg, _) = next(IN);
     report(&mut f, "A: B is done", msg.starts_with(b"done"));
     report(&mut f, "A: sees B's write", holds(&buf, 100, b"from B"));
