@@ -1343,21 +1343,47 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-036: Foreign-agent bridge
 
-- **Status:** Open
+- **Status:** Proposed (2026-11-24, #294)
 - **Needed by:** M6.3
 - **Date accepted:**
 
-**Context.** Tier 3 agents run in a Linux guest with no network device and no credentials, reaching only the Pharos runtime. virtio-vsock connects a guest to its host, not to another guest: with Pharos and the Linux guest as two microVMs, every message passes through the host, and the guest's containment is the host's VM configuration. The host kernel and hypervisor are therefore in the trusted base for this design.
+**Context.** Tier 3 agents run in a Linux guest with no network device and no credentials, reaching only the Pharos runtime. virtio-vsock connects a guest to its host, not to another guest: with Pharos and the Linux guest as two microVMs, every message passes through the host, and the guest's containment is the host's VM configuration. The host kernel and hypervisor are therefore in the trusted base for this design. What exists at M6.2 (checked 2026-11-24):
+- Pharos has a virtio-console driver (`pharos_programs::virtio_console`, 225 lines over the shared virtio transport's 593) for the trusted console: one `virtio-serial-pci` device, port 0, every used element checked. Its buffer sizes are constants (16 receive buffers of 64 bytes, 16 transmit buffers of 256).
+- `cargo xtask` already builds each QEMU command line itself, the trusted console's included (`-chardev pipe` and `virtconsole`).
+- An agent's requests reach the runtime as agents v1 messages, on an endpoint badged with its slot, under its manifest's grants, budgets, approvals, and audit. Agents never hold devices.
+- CI's hosted runners give `/dev/kvm` (the matrix's `kvm` cell, D-032). This host has QEMU 8.2.2 and `/dev/vhost-vsock` (root and group `kvm` only).
 
-**Options.** (a) vsock to a relay on the host. (b) vhost-user or another host-mediated device. (c) The Linux guest nested under Pharos, which needs Pharos as a hypervisor (M8.2). (d) A shared-memory device between the guests, if the VMM supports one.
+**Options.**
+- **The channel.**
+  - (a) **vsock to a relay on the host.** Pharos needs a new virtio-vsock driver: three queues, a 44-byte packet header, credit-based flow control, and connection state, all new parsing in Pharos. The host needs a relay process that holds an `AF_VSOCK` connection to each guest and copies between them, and access to `/dev/vhost-vsock` on every host and CI runner.
+  - (b) **vhost-user**, or another host-mediated device: a host daemon implements the device backend, maps both guests' memory, and speaks the vhost-user protocol. The relay grows into a device model, in the trusted base.
+  - (c) **The guest nested under Pharos:** needs Pharos as a hypervisor (M8.2).
+  - (d) **A shared-memory device between the guests** (`ivshmem-plain`, in this QEMU): no host process. But Pharos needs an ivshmem driver and its own ring protocol in memory the guest writes concurrently, so every read must copy first, and a doorbell needs `ivshmem-server` on the host.
+  - (e) **A virtio-serial port on each VM, joined by one host unix socket:** Pharos's VM is the socket's server and the guest's VM the client, with no host process but the two QEMUs. Pharos reuses its virtio-console driver, with the buffer sizes made parameters. The guest sees one named port and no network device. The channel is a byte stream, so the Pharos side frames it. Measured 2026-11-24 on this host: two QEMU 8.2.2 processes (q35, `-nodefaults`, one `virtio-serial-pci` each, `virtconsole` and `virtserialport`, one `-chardev socket`) held the two ends of one established unix stream, with no other process in between. Linux limits a socket path to 108 bytes, so the launch tool uses a short one.
+- **The guest image.** (f) **Pinned Alpine:** the linux-virt kernel and the minirootfs, each checked against a SHA-256 in the repository, with Python and wheels pinned by hash, loaded as an initramfs so the guest has no disk. (g) Buildroot from pinned sources: most auditable, but a cold build takes tens of minutes in CI. (h) A Debian cloud image: hundreds of MB, and its cloud-init and networking would have to be removed and checked.
+- **The framework.** (i) **LangGraph**, the most common in organizations; (j) smolagents; (k) the OpenAI Agents SDK.
 
-**Evaluation criteria.** What the host must guarantee, and how it is checked (the launch tool refuses a network device or shared filesystem); relay size and parsing; why a trusted host is acceptable for v1; the path to M8.2.
+**Evaluation criteria.** What the host must guarantee, and how it is checked (the launch tool refuses a network device or shared filesystem); relay size and parsing; new code in Pharos's trusted base; why a trusted host is acceptable for v1; the path to M8.2.
 
-**Decision.** (empty while Open)
+**Decision.** Proposed:
+1. **The channel is a virtio-serial port on each VM, joined by one host unix socket** (e). There is no relay program. The host's part is the kernel's unix socket and the two QEMU processes, which D-033 already trusts.
+2. **The launch tool** (`cargo xtask`) writes both QEMU command lines itself and refuses any other configuration with a clear error. For the guest: `-nodefaults`; no `-netdev`, `-nic`, or `-net`; no `-virtfs`, virtiofs, or vhost-user device; no disk (the image is an initramfs); exactly one `virtio-serial-pci` with one `virtserialport`. After start, it asks each QEMU's monitor, which the guest cannot reach, for its PCI devices, and stops both VMs if the list differs from the expected one.
+3. **Framing:** length-prefixed, versioned frames with a fixed largest size, parsed only by the Pharos side, as untrusted input, with no `unsafe`, fuzzed. The host never parses them.
+4. **The Pharos side:** a user-space service started by `init` holds the channel's device and nothing else of the guest's. Every guest request becomes the runtime request of one agent slot under the guest agent's manifest, so it gets exactly a Tier 1 agent's grants, budgets, approvals, and audit. The guest reaches no other Pharos service. How the service holds the slot is the design's (#295).
+5. **The guest** (f): pinned Alpine as an initramfs, whose init starts the agent and nothing else. The versions and hashes are pinned in #296. The downloads are a new host-side input; their licenses go in NOTICE.
+6. **The framework:** LangGraph first (i). The client library is Python's standard library only, with LangGraph tools built on it. Until the model broker (M6.9), the agent runs with a scripted model.
+7. **A trusted host for v1:** the host is already trusted with the device key, the clock, the secrets file, and the VM configuration (D-033, D-044, D-047), so Tier 3 adds the socket and the guest's QEMU, nothing in kind. On the path to M8.2, Pharos as the hypervisor runs the guest itself and replaces the socket with its own device; the frames and the Pharos-side service stay.
 
-**Consequences.** The threat model states that Tier 3 trusts the host; Pharos's own contribution in Tier 3 is the broker, not containment.
+**Consequences.**
+- New in Pharos: the bridge service, and a second virtio-serial device handed to it, with the driver's buffer sizes made parameters. There is no new driver and no `unsafe`.
+- New on the host: the guest image build and the launch tool's checks. There is no new host daemon.
+- The guest's containment is the host's VM configuration. Pharos's own contribution in Tier 3 is the broker, not containment, and the threat model says so.
+- A compromised host or QEMU can read and forge everything on the channel, as it can read Pharos's memory today.
 
-**Evidence.** None yet.
+**Evidence.**
+- The probe of option (e) above (2026-11-24, QEMU 8.2.2, this host).
+- `qemu-system-x86_64 -device help` on the same host lists `vhost-vsock-pci`, `vhost-user-vsock-pci`, `ivshmem-plain`, and `ivshmem-doorbell` for the other options.
+- The size of the virtio-console driver above.
 
 ### D-037: Payload approval and risk routing
 
