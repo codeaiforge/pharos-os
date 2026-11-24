@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-24 (#295), with each open question decided as recommended (section 7). It follows [D-036](../project/decision-log.md#d-036-foreign-agent-bridge) (accepted 2026-11-24) and builds on the [agent runtime](agents.md) and the [egress gateway](gateway.md).
-- **Implementation:** **planned**: the guest image (#296), the channel and the launch tool (#297), the bridge service (#298), the client library (#299), and the `bridge` scenario with the hostile-guest suite (#300). The gate is #301.
+- **Implementation:** the guest image is **implemented** (#296): `cargo xtask guest`, pinned by `xtask/guest.lock`, with a boot check in place of the agent (*as built* below). **Planned:** the channel and the launch tool (#297), the bridge service (#298), the client library (#299), and the `bridge` scenario with the hostile-guest suite (#300). The gate is #301.
 
 ## 2. Context
 
@@ -128,6 +128,14 @@ Retries follow the manifest's `attempts`, as for any agent. The guest VM is not 
 - **One initramfs** (newc cpio, written by `xtask`): the guest has no disk. Its init mounts `/proc`, `/sys`, and `/dev`, loads `virtio_console`, and runs the agent with Python. Nothing else starts: no getty, network scripts, or package manager.
 - **No network configuration at all:** the kernel sees no network device; `lo` is the only interface.
 - **Licenses:** Alpine's packages and the wheels are recorded in NOTICE. They run only in the guest and never link with Pharos.
+- *As built (#296):*
+  - `scripts/guest-image.py` (Python's standard library only) does the work; `cargo xtask guest` runs it, and `cargo xtask guest lock` rewrites the lock.
+  - The lock has one line per download (`<kind> <sha256> <url>`): Alpine 3.24.4's minirootfs, `linux-virt` 6.18.65, `python3` 3.14.10 and its 16 dependencies resolved from Alpine's index, and 38 wheels from pip's resolver for LangGraph 1.2.24 (langchain-core 1.8.4, pydantic 2.14.4).
+  - The wheels are for musllinux 1.1 and 1.2, both of which Alpine's musl 1.2 runs; pydantic-core ships only 1.1. With only one tag given, pip falls back to LangGraph 0.1.
+  - `virtio_console` and `virtio_pci` are built into `linux-virt`, so the image carries only `vmlinuz-virt` and no modules. The kernel has a network stack, but the guest has no network device.
+  - Linux's devtmpfs gives a port only a number, so `/init` makes the `/dev/virtio-ports/<name>` links itself, from `/sys/class/virtio-ports`, as udev would.
+  - Until the client library and the agent land (#299), `/agent/main.py` is a boot check that prints Python's and LangGraph's versions, runs a one-node graph, and lists the network interfaces and ports.
+  - The image is 27 MiB (gzip) with 2,964 files. Two builds give the same bytes, and it boots in 5 s under KVM and 70 s under TCG, which needs `-cpu max` ([testing.md](../development/testing.md#the-tier-3-guest-image-host-296)).
 
 ### The client library
 

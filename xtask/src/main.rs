@@ -155,6 +155,15 @@ COMMANDS:
                             `<name> <value>` a line, checked first). The system
                             runs until QEMU is stopped (D-049); fails if the
                             kernel reports a failure.
+    guest                   Build the Tier 3 guest image (#296, bridge.md) in
+                            target/guest/: vmlinuz-virt and initramfs, from the
+                            pinned Alpine packages and LangGraph wheels in
+                            xtask/guest.lock, each checked against its SHA-256
+                            (downloads cached in target/guest/cache/). Two
+                            builds give the same bytes. Needs python3 and, for
+                            files not yet cached, the network.
+    guest lock              Re-resolve the pins (network) and rewrite
+                            xtask/guest.lock, for review.
     test [--timeout <SECS>] [--shard <N/M>] [--repeat <N>]
                             Boot check: build, make the image, and boot it headless
                             under UEFI and BIOS. Then kernel tests: boot every test
@@ -285,6 +294,10 @@ enum Task {
         minutes: u64,
     },
     S1,
+    /// The Tier 3 guest image (#296); `lock`: re-resolve its pins.
+    Guest {
+        lock: bool,
+    },
     FsBuild {
         dir: PathBuf,
         image: PathBuf,
@@ -453,6 +466,11 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
             }
             return Ok(Task::Soak { minutes });
         }
+        Some("guest") => match args.next().as_deref() {
+            None => Task::Guest { lock: false },
+            Some("lock") => Task::Guest { lock: true },
+            Some(other) => return Err(format!("guest takes only 'lock', got '{other}'")),
+        },
         Some("s1") => {
             if let Some(extra) = args.next() {
                 return Err(format!("unexpected argument '{extra}'"));
@@ -739,6 +757,34 @@ fn run(cmd: &mut Command, verbose: bool) -> Result<Vec<u8>> {
 }
 
 /// Extracts the hash from `sha256sum` output (`<hex>  <path>`).
+/// `cargo xtask guest [lock]`: runs `scripts/guest-image.py` (Python's
+/// standard library only, as the vault test server is).
+fn guest(paths: &Paths, lock: bool) -> Result<()> {
+    let script = paths.root.join("scripts/guest-image.py");
+    let lockfile = paths.root.join("xtask/guest.lock");
+    let out = paths.target.join("guest");
+    let mut cmd = Command::new("python3");
+    cmd.arg("-I").arg(&script);
+    if lock {
+        cmd.arg("lock").arg(&lockfile);
+    } else {
+        cmd.arg("build")
+            .arg(&lockfile)
+            .arg(out.join("cache"))
+            .arg(&out);
+    }
+    let status = cmd
+        .status()
+        .map_err(|e| format!("cannot run python3 for the guest image: {e} (install Python 3)"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the guest image was not built ({status}); see the message above"
+        ))
+    }
+}
+
 fn parse_sha256sum(output: &str) -> Result<String> {
     let hash = output.split_whitespace().next().unwrap_or_default();
     if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -5055,6 +5101,7 @@ fn main() -> ExitCode {
                 } => matrix::run(&cell, &test_args),
                 Task::Soak { minutes } => soak(&paths, minutes),
                 Task::S1 => s1(&paths),
+                Task::Guest { lock } => guest(&paths, lock),
                 Task::FsBuild { dir, image } => fs_image::build(&dir, &image),
                 Task::FsLs { image } => fs_image::ls(&image),
                 Task::StoreBuild { dir, image, blocks } => store_image::build(&dir, &image, blocks),
@@ -5172,6 +5219,15 @@ mod tests {
         assert!(sign(&["image", "sign", "a", "b"]).is_err());
         assert!(sign(&["image", "sign", "a", "b", "--version", "-1"]).is_err());
         assert_eq!(sign(&["image"]), Ok(Task::Image { kernel: None }));
+    }
+
+    #[test]
+    fn guest_parses() {
+        let p = |list: &[&str]| parse(args(list));
+        assert_eq!(p(&["guest"]), Ok(Task::Guest { lock: false }));
+        assert_eq!(p(&["guest", "lock"]), Ok(Task::Guest { lock: true }));
+        assert!(p(&["guest", "build"]).is_err());
+        assert!(p(&["guest", "lock", "x"]).is_err());
     }
 
     #[test]

@@ -387,6 +387,12 @@ python3 scripts/bench-inference.py --engine llama --model models/model.gguf \
 
 Host tests (`scripts/test_bench_inference.py`, in `check.sh` and CI): parsing of llama.cpp's timing lines in both forms (quoted from llama.cpp's documentation, not recorded here), the native JSON line and malformed ones, placeholder filling, peak memory of a process that allocates 64 MiB, a missing binary or model, a failing engine, and an end-to-end run with a stand-in engine.
 
+## The Tier 3 guest image (host, #296)
+
+`cargo xtask guest` builds the guest image ([bridge.md](../architecture/bridge.md#the-guest-image)) with `scripts/guest-image.py`. Host tests (`scripts/test_guest_image.py`, in `check.sh` and CI, no network): the cpio writer gives equal bytes for equal trees and writes every parent directory, with owners and times 0; the lock's refusals (a bad line, a missing `rootfs` or `kernel`); a cached file whose SHA-256 differs from the lock is refused and deleted; tar members, hard and symbolic links, and apk metadata (`.PKGINFO`, signatures) kept out of the image; a wheel's `.data/purelib` placed and its scripts dropped; an init with no network, getty, or package manager.
+
+Checked by hand on 2026-11-24 (QEMU 8.2.2, this host): two builds from the lock gave the same `initramfs`, and the image booted with `-nodefaults`, `-nic none`, no disk, and one `virtserialport`. Python 3.14.10 ran a LangGraph 1.2.24 graph, `lo` was the only interface, and the port was at `/dev/virtio-ports/org.pharos.bridge`. The boot took 5 s under KVM and 70 s under TCG; TCG needs `-cpu max`, since QEMU's default CPU lacks instructions the compiled wheels use (the agent dies with `SIGILL`). The QEMU boot joins CI with the `bridge` kernel (#300).
+
 ## Quality gates
 
 Run `scripts/check.sh` before every pull request. It runs these commands, the same ones as CI's `check` job, and stops at the first failure:
@@ -404,6 +410,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude pharos-kernel --exclu
 RUSTDOCFLAGS="-D warnings" cargo doc -p pharos-kernel --target x86_64-unknown-none --no-deps --locked
 python3 scripts/check-links.py
 python3 -m unittest -q scripts/test_bench_inference.py
+python3 -m unittest -q scripts/test_guest_image.py
 ```
 
 Why the split: the kernel targets bare metal (`x86_64-unknown-none`, decision D-003), so it is excluded from host checks and linted for its own target. Its target-independent logic is unit-tested on the host through the library. CI's `msrv` job also builds and tests the host crates and the kernel library on Rust 1.85. `scripts/check.sh` repeats those three commands (`cargo +1.85 build`/`test`) when Rust 1.85 is installed (`rustup toolchain install 1.85 --profile minimal`), and says it skipped them otherwise. Newer language features, such as let chains (Rust 1.88), fail only there: four M2.7 commits passed every local check yet failed CI's `msrv` job for that reason, fixed in #42.

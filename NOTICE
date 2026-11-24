@@ -23,6 +23,33 @@ in the TLS service (`crates/pharos-tls`, D-034, #271), `rustls`,
 since #282 (D-035), for RSA and P-384 verification, `rsa`, `p384`, `pkcs1`,
 `pkcs8`, `spki`, `crypto-primes`, `base64ct`, and `pem-rfc7468`.
 
+The Tier 3 guest image (#296, D-036) is not part of Pharos OS and is not
+distributed with it: `cargo xtask guest` downloads its parts from Alpine
+Linux's and PyPI's servers, as pinned by URL and SHA-256 in
+`xtask/guest.lock`, and assembles them on the builder's machine. The
+repository holds only the pins. The parts keep their own licenses:
+- Alpine Linux 3.24: the `linux-virt` kernel (GPL-2.0-only); the minirootfs:
+  alpine-baselayout, apk-tools and libapk, BusyBox, scanelf, and ssl_client
+  (GPL-2.0-only), alpine-keys, alpine-release, and musl (MIT), musl-utils (MIT
+  AND BSD-2-Clause AND GPL-2.0-or-later), ca-certificates-bundle (MPL-2.0 AND
+  MIT); and `python3` (PSF-2.0) with libbz2 (bzip2-1.0.6), libcrypto3 and
+  libssl3 (Apache-2.0), libexpat, libffi (MIT), libgcc (GPL-2.0-or-later AND
+  LGPL-2.1-or-later), libncursesw, libpanelw, ncurses-terminfo-base (X11),
+  mpdecimal (BSD-2-Clause), readline (GPL-3.0-or-later), sqlite-libs (Alpine's
+  `blessing`: public domain), xz-libs (0BSD AND public domain AND
+  LGPL-2.1-or-later AND GPL-2.0-or-later), and zlib (Zlib).
+- Python wheels: langgraph, langgraph-checkpoint, langgraph-prebuilt,
+  langgraph-sdk, langchain-core, langchain-protocol, langsmith, pydantic,
+  pydantic-core, annotated-types, typing-inspection, anyio, h11,
+  charset-normalizer, pyyaml, truststore, urllib3 (MIT); httpx, httpx2,
+  httpcore, httpcore2, idna, jsonpatch, jsonpointer, uuid-utils, websockets,
+  zstandard (BSD-3-Clause); xxhash (BSD-2-Clause); requests,
+  requests-toolbelt, tenacity, distro (Apache-2.0); packaging (Apache-2.0
+  OR BSD-2-Clause); ormsgpack, sniffio (Apache-2.0 OR MIT); orjson (MPL-2.0
+  AND (Apache-2.0 OR MIT)); certifi (MPL-2.0); typing-extensions (PSF-2.0).
+Whoever distributes a built guest image takes on these licenses'
+obligations, including the GPL's offer of source.
+
 ------------------------------------------------------------------------------
 ed25519-compact 2.6.0 (https://github.com/jedisct1/rust-ed25519-compact),
 MIT License
