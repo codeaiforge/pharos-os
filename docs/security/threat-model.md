@@ -153,6 +153,19 @@ Design: [gateway.md](../architecture/gateway.md) (accepted 2026-11-23, #280; D-0
 | A request is made without a record, or a secret is recorded | The runtime's and the gateway's intents stored before connecting, else `NO_AUDIT`; the vault records each release by name; values never recorded |
 | **Limits** | The host holds every secret and is trusted until M8.2; a compromised gateway can use its routes' secrets toward its routes' destinations; a secret echoed back encoded (base64, hashed) is not stripped; rotation needs a restart |
 
+### Foreign-agent bridge (M6.3)
+
+Design: [bridge.md](../architecture/bridge.md) (proposed 2026-11-24, #295; D-036). Every row is **planned** until its issue lands (#296–#300). **Tier 3 trusts the host kernel and hypervisor:** the guest's containment is the host's VM configuration, which the launch tool writes and checks through QEMU's monitor, not something Pharos enforces. M8.2 removes this.
+
+| Threat | Mitigation |
+| --- | --- |
+| The guest reaches the network, the host's files, or another guest | No network device, disk, or shared filesystem, and one port on one host socket: the launch tool refuses any other guest command line, and stops both VMs if QMP's `query-pci` shows any other device |
+| The guest reaches a Pharos service other than the runtime | The bridge holds only its device and, per attempt, `SEND` on the runtime badged with the guest agent's slot |
+| The guest acts beyond a Tier 1 agent | Its requests are the slot's agents v1 requests: the runtime's grants, budgets, approvals, and records apply unchanged |
+| A hostile guest takes over the bridge through its frames | Own safe-Rust frame parsing with a limit on every field, fuzzed; one request at a time; any fault ends the attempt |
+| A guest keeps acting after its attempt ends, or across attempts | The slot capability is minted per attempt and revoked at its end; a restarted bridge's `BIND` revokes the old one |
+| **Limits** | The host and both QEMUs can read and forge every frame; stopping a guest agent goes through the runtime (`CANCEL`), with `trust` stopping the runtime if it does not answer; the guest image's downloads are trusted by their pinned hashes |
+
 ### User environment and storage (M3.0)
 
 Design: [user-environment.md](../architecture/user-environment.md) and [storage.md part 8](../architecture/storage.md#8-the-writable-store-m30), from D-016 and D-017. Rows are marked implemented as their issues land (#74–#78, #80); all are reviewed at the M3.0 gate.

@@ -26,6 +26,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Changed
 
+- The foreign-agent bridge design proposed (#295, M6.3, [bridge.md](docs/architecture/bridge.md)): the bridge started by `init` with the guest's virtio-serial device, asking the runtime for the guest agent's slot (`BIND`), a capability minted per attempt and revoked at its end; length-prefixed frames carrying agents v1 messages; the launch tool's refusals and QMP checks; the Alpine initramfs and a standard-library Python client; the threat model's Tier 3 section
 - D-036 accepted (#294, M6.3): the foreign-agent bridge as a virtio-serial port on each VM joined by one host unix socket, with no relay program; a launch tool that refuses a guest with a network device, a shared filesystem, or a disk; frames parsed only by a Pharos service that speaks for the guest as one agent slot; a pinned Alpine initramfs with Python and LangGraph
 - The vault and gateway design accepted (#280, M6.2, [gateway.md](docs/architecture/gateway.md)), each open question as recommended: only the runtime's `REQUEST` in M6.2, a Python test server, no release roots, grants without confirmation per request
 - D-035 accepted (#279, M6.2): secrets delivered by the host at each boot through `fw_cfg` and held by a vault process, nothing on Pharos's disk; an egress gateway with compiled routes and its own HTTP/1.1 code, secrets stripped from answers; RSA and P-384 verification for public certificate chains, measured on a `no_std` probe

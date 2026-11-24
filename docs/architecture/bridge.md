@@ -1,0 +1,209 @@
+# The foreign-agent bridge (Tier 3)
+
+## 1. Status
+
+- **Design:** **Proposed** (2026-11-24, #295), awaiting the maintainer's approval. It follows [D-036](../project/decision-log.md#d-036-foreign-agent-bridge) (accepted 2026-11-24) and builds on the [agent runtime](agents.md) and the [egress gateway](gateway.md).
+- **Implementation:** **planned**: the guest image (#296), the channel and the launch tool (#297), the bridge service (#298), the client library (#299), and the `bridge` scenario with the hostile-guest suite (#300). The gate is #301.
+
+## 2. Context
+
+M6.3 runs an agent written for an unmodified framework (LangGraph, D-036 item 6) in a Linux guest. The guest has no network device and no credentials, and reaches nothing but the Pharos runtime. D-036 decided the parts:
+- the channel is a virtio-serial port on each VM, joined by one host unix socket, with no relay program;
+- a launch tool writes both QEMU command lines, refuses any other configuration, and checks the result through QEMU's monitor;
+- a Pharos service parses the guest's frames and speaks for it as one agent slot, under a Tier 1 agent's grants, budgets, approvals, and audit;
+- the guest is pinned Alpine as an initramfs, with a scripted model until M6.9.
+
+It left to this design how the service holds the slot, the frames, the guest image and client library, the launch tool's checks, failures, limits, and records.
+
+Facts this design relies on (checked 2026-11-24):
+
+- **An agent holds one capability:** `SEND` on the runtime's endpoint, badged with its slot. The runtime spawns its program, registers its `STOP` with `trust`, and serves its requests only after that (agents.md). The runtime checks each request against the agent's grants and budgets and records it first (`NO_AUDIT` otherwise).
+- **`spawn` passes at most 12 capabilities**, and the runtime already uses all 12 (handle 12 is the gateway or the proposals' store namespace, gateway.md). So the runtime cannot be given the guest's device to pass on.
+- **Kernel revocation** marks every capability derived from the revoked one, and each fails its next use (capabilities.md).
+- **The virtio-console driver** (`pharos_programs::virtio_console`) negotiates `VERSION_1` only, with no multiport, so it uses port 0. Its buffer sizes are constants (16 × 64 bytes in, 16 × 256 out). `init` hands devices out by ID and position (`device(VIRTIO_CONSOLE, 0)` is `trust`'s).
+- **`cargo xtask` writes each QEMU command line itself.** The trusted console is a `virtio-serial-pci` with a `virtconsole` on a pipe.
+
+## 3. Design
+
+### Overview
+
+```mermaid
+flowchart LR
+    classDef kernel fill:#1e3a5f,stroke:#0f1f33,color:#ffffff
+    classDef service fill:#eceff1,stroke:#607d8b,color:#1c262b
+    classDef untrusted fill:#ffe5cc,stroke:#e65100,color:#4a1d00
+    classDef host fill:#f3e5f5,stroke:#6a1b9a,color:#2a0a3a
+
+    subgraph guestvm["guest VM (Linux, no network, no disk)"]
+        agent["LangGraph agent<br/>+ pharos_bridge.py"]:::untrusted
+    end
+    sock["host unix socket<br/>(two QEMUs, no relay)"]:::host
+    subgraph pharos["Pharos VM"]
+        bridge["bridge service<br/>(frames, one slot)"]:::service
+        runtime["agent runtime<br/>(grants, budgets, approvals)"]:::service
+        audit["audit service"]:::service
+        gw["gateway, store, ..."]:::service
+    end
+    launch["cargo xtask<br/>(launch tool, QMP checks)"]:::host
+
+    agent -- "virtserialport" --> sock
+    sock -- "virtconsole (2nd virtio-serial)" --> bridge
+    bridge -- "agents v1, badged with the guest's slot" --> runtime
+    runtime --> audit
+    runtime --> gw
+    launch -. "writes and checks both VMs" .-> guestvm
+    launch -.-> pharos
+```
+
+The guest sees one named port. Everything it says arrives at the runtime as an agent's request from the guest agent's slot, and is checked, budgeted, approved, and recorded as any Tier 1 agent's is. The bridge holds the device and a capability for one slot at a time, nothing else.
+
+### Components
+
+| Component | Holds | Never holds |
+| --- | --- | --- |
+| Guest VM | One `virtio-serial-pci` with one `virtserialport` named `org.pharos.bridge`; its kernel and initramfs in RAM | A network device, a disk, a shared filesystem, a second port, any credential |
+| Host | The socket, both QEMUs, their monitors, the guest image | Any parse of the frames |
+| Bridge (new, started by `init`) | The second virtio-console device (`device(VIRTIO_CONSOLE, 1)`); `SEND` on the runtime under the bridge badge; while bound, `SEND` on the runtime badged with the guest agent's slot | An audit, store, network, gateway, or inference capability; any other device |
+| Agent runtime | The guest agent's policy entry and manifest, as for any agent; one new operation, `BIND` | The guest's device |
+| `trust` | As in M3.3 | Anything new |
+
+### The slot: `BIND`
+
+How the bridge holds the slot is D-036's open point. The runtime cannot spawn the bridge (it cannot hold the device), so the bridge asks for the slot:
+
+1. **The policy entry marks the agent as a guest** (`guest: true`, in a compiled table only). The runtime starts no program for it. When one of its tasks starts an attempt, the attempt waits for the bridge.
+2. **The bridge calls `BIND`** (a new agents v1 operation, accepted only under the bridge badge that `init`'s table gives it, `NO_ACCESS` from anyone else). If an attempt is waiting, the reply carries a capability: `SEND` on the runtime, badged with the guest agent's slot, minted for this attempt. Otherwise it answers `NOT_FOUND` and the bridge asks again a second later.
+3. **The bridge then speaks only through that capability.** Every guest request is an agent's request from that slot. The runtime has no new request path, so grants, budgets, approvals, refusals, and records are unchanged.
+4. **The attempt ends as any attempt does:** `COMPLETE`, `FAIL`, `CANCEL`, a revocation, or the user's `stop`. The runtime then **revokes** the minted capability, so the bridge's next send fails, and the bridge goes back to step 2. Each attempt gets a new capability, so nothing from one attempt reaches the next.
+5. **A second `BIND` while one is held** (a restarted bridge) revokes the first and ends its attempt as failed (`bridge restarted`), which counts against the task's attempts like an agent's crash.
+
+**Stopping a guest agent:** a guest agent has no process for `trust` to `STOP`. `trust`'s `stop <agent>` for it is sent to the runtime as `CANCEL`, which revokes. If the runtime doesn't answer within 2 s, `trust` stops the runtime, which ends every agent and leaves the bridge's capability without an endpoint. This fails closed, but the runtime is in this path, unlike a Tier 1 agent's stop (open question 1).
+
+### The channel
+
+- **Pharos side:** a second `virtio-serial-pci` with a `virtconsole` (port 0, so the existing driver works without multiport), on `-chardev socket,id=bridge,path=<short path>,server=on,wait=off`. It comes after the trusted console in PCI order, so `trust` keeps device 0.
+- **Guest side:** one `virtio-serial-pci` with one `virtserialport,name=org.pharos.bridge` on `-chardev socket,id=bridge,path=<same path>`. Linux shows it as `/dev/virtio-ports/org.pharos.bridge`. It is not a `virtconsole`, so no getty or kernel console runs on it.
+- **The driver** takes its buffer counts and sizes as parameters (D-036). The bridge uses 16 receive buffers of 4 KiB; `trust` keeps 16 × 64 and 16 × 256.
+- **The socket path** is relative to the run's directory and under Linux's 108 bytes.
+
+### Frames
+
+The channel is a byte stream. The bridge frames it, and parses every frame as untrusted input, in safe Rust (`pharos_proto::bridge`, host-tested and fuzzed).
+
+| Field | Size | Rule |
+| --- | --- | --- |
+| Magic | 2 | `PB` |
+| Version | 1 | 1 |
+| Kind | 1 | 1 `HELLO`, 2 `REQUEST`, 3 `REPLY`, 4 `ERROR` |
+| Length | 4, little-endian | Of the payload, at most 70,000 |
+| Payload | Length | Per kind |
+
+- **`HELLO`:** the bridge sends one when it binds: the task ID and the attempt. The guest answers with the same payload. Until it does, the bridge discards bytes up to 64 KiB looking for it (resynchronizing after a previous attempt), then fails the attempt (`guest silent`).
+- **`REQUEST`** (guest to bridge): `message length:u8`, an agents v1 agent message as an agent would send it (at most 256 bytes), then the data the operation reads from the agent's buffer (at most 68 KiB, the agent buffer's size).
+- **`REPLY`** (bridge to guest): the runtime's reply message, then the bytes the operation wrote to the buffer, which the bridge takes from the reply's length fields.
+- **`ERROR`** (bridge to guest): a status byte and a reason, then the bridge closes the attempt. It is sent for a malformed frame, a second `REQUEST` before the `REPLY`, or an operation not on the list below.
+
+**Operations the bridge passes:** `TASK`, `LOG`, `CHECKPOINT`, `BEGIN`, `END`, `COMPLETE`, `FAIL`, `REQUEST` (HTTPS), `DATA_PUT`, `DATA_GET`, `ASK`, and `INFO`. The bridge attaches its own buffer (`ATTACH`), since a frame cannot carry a capability. Inference, tools, messages, knowledge, and subtasks are not passed in M6.3 (open question 2). The runtime still checks each passed operation in full; the bridge's list only keeps it from parsing layouts it doesn't need.
+
+**One request at a time.** The guest waits for each `REPLY`, so the bridge needs no queue.
+
+### Failure
+
+Every failure ends the attempt or the request and leaves nothing open:
+
+| Event | Result |
+| --- | --- |
+| A malformed frame (magic, version, kind, length, a message over 256 bytes) | `ERROR`, the attempt fails (`guest protocol`), recorded by the runtime as the task's failure |
+| The guest sends nothing for 60 s during an attempt, outside a pending `REQUEST` | The attempt fails (`guest silent`) |
+| The guest VM stops or the socket closes | No more frames: the same as silence |
+| The bridge crashes | `init` restarts it (`Restart::Up(3)`); its `BIND` ends the old attempt (`bridge restarted`) |
+| The runtime restarts | The minted capability's endpoint is gone; the bridge's sends fail, and it goes back to `BIND`; tasks are recovered as usual |
+| An attempt ends | The capability is revoked; the guest gets `ERROR` (`attempt ended`) on its next request |
+
+Retries follow the manifest's `attempts`, as for any agent. The guest VM is not restarted by Pharos, which cannot. The launch tool restarts it when it exits, in `run`; the test kernel's runner does not.
+
+### The guest image
+
+- **Built by `cargo xtask guest`** into `target/guest/`: the Alpine `linux-virt` kernel and its `virtio_console` module, the minirootfs, the Python packages, and the LangGraph wheels. Each download is checked against a SHA-256 in `xtask/guest.lock`, and the build fails on any mismatch. The versions are pinned in #296.
+- **One initramfs** (newc cpio, written by `xtask`): the guest has no disk. Its init mounts `/proc`, `/sys`, and `/dev`, loads `virtio_console`, and runs the agent with Python. Nothing else starts: no getty, network scripts, or package manager.
+- **No network configuration at all:** the kernel sees no network device; `lo` is the only interface.
+- **Licenses:** Alpine's packages and the wheels are recorded in NOTICE. They run only in the guest and never link with Pharos.
+
+### The client library
+
+- **`pharos_bridge.py`:** Python's standard library only, one file. It opens the port, does `HELLO`, and gives `task()`, `log()`, `checkpoint()`, `request(route, path, body)`, `data_put()`, `data_get()`, `ask()`, `complete()`, and `fail()`, each building one agents v1 message.
+- **LangGraph tools** wrap `request` and `log`, so a LangGraph agent uses Pharos as tools and never sees a socket, a header, or a secret.
+- **The model:** a scripted chat model (fixed answers that call the tools) until the model broker (M6.9).
+
+### The launch tool
+
+`cargo xtask` writes both command lines. Before starting, it refuses with a clear error any guest command line that has:
+- no `-nodefaults`;
+- `-netdev`, `-nic`, or `-net` (it passes `-nic none`);
+- `-virtfs`, `-fsdev`, a `vhost-user` or `virtiofs` device, `-drive`, `-hda`, `-cdrom`, or `-blockdev`;
+- a `virtio-serial-pci` other than one, or a port other than one `virtserialport`;
+- `-device` of any other kind.
+
+After both start, it asks each QEMU's monitor (QMP on a host socket the guest cannot reach) for `query-pci`. It stops both VMs if the guest's list is not exactly the q35 chipset's own devices and the one `virtio-serial-pci`, or if Pharos's lacks the second one. These checks are host-tested on the command lines (each refusal) and run in every `bridge` boot.
+
+The guest's serial console goes to a host file (output only), for diagnostics.
+
+### Limits
+
+| Limit | Value |
+| --- | --- |
+| Frame payload | 70,000 bytes |
+| Message in a frame | 256 bytes |
+| Buffer data in a frame | 68 KiB (the agent buffer) |
+| Requests in flight | 1 |
+| Resynchronizing before `HELLO` | 64 KiB |
+| Guest silence during an attempt | 60 s |
+| Guest agents | 1 per bridge, 1 bridge in M6.3 |
+| Bridge memory | 256 KiB (receive buffers, its runtime buffer, one frame) |
+
+Budgets (tokens, network bytes, `https` requests) are the guest agent's manifest's, as for any agent.
+
+### What is recorded
+
+The bridge holds no audit capability. Everything the guest does reaches the runtime as the slot's requests, so the runtime's records are the guest's: each request's intent before it is done (`NO_AUDIT` otherwise), its refusals once per kind per attempt, and the attempt's end. The runtime adds two records: `bind` (agent, task, attempt) when it hands out the capability, and `unbind` (the reason) when it revokes it. A protocol error is the attempt's failure reason, so it is recorded too.
+
+## 4. Security
+
+- **The new trust boundary is the bridge's frame parser.** It reads bytes from a guest that runs arbitrary code. The mitigations are a small safe-Rust parser with a limit on every field, fuzzed, one request at a time, and a bridge that holds nothing but the device and one slot. A fault in the parser reaches what the guest agent's slot already reaches.
+- **The guest can do exactly what its slot is granted.** It cannot reach the network (no device), the host's files (no shared filesystem, no disk), other guests (one socket, one port), or any Pharos service but the runtime (the bridge holds no other capability).
+- **The guest's containment is the host's VM configuration**, checked by the launch tool and QMP, not enforced by Pharos. A compromised host or QEMU can read and forge every frame, as it can read Pharos's memory today. Tier 3 adds the socket and the guest's QEMU to the trusted base, nothing in kind (D-036 item 7). M8.2 removes them.
+- **The runtime gains `BIND`** and the minting and revoking of slot capabilities. A wrong `BIND` could give the bridge the wrong slot, so it is accepted from the bridge badge only and gives only the guest-marked entry's slot.
+- **A compromised bridge** can act as the guest agent, as the guest can, and read the guest's frames. It has no other capability.
+- **Stopping a guest goes through the runtime** (section 3, open question 1).
+- **The threat model** gains a "Foreign-agent bridge (M6.3)" section with these rows, each **planned** until its issue lands.
+
+## 5. Testing
+
+| Layer | Tests |
+| --- | --- |
+| Host, `pharos_proto::bridge` | Each field's refusal; `HELLO` resynchronization within and past 64 KiB; the largest frame; each passed operation's reply length |
+| Host, fuzzing (D-020 pattern) | Frames, with a fixed seed and count; none may panic or read past a frame |
+| Host, `xtask` | The launch tool refuses each guest option above, and builds the expected command lines; `guest.lock` refuses a mismatched hash |
+| Host, `pharos-programs` | `BIND`: refused from any other badge, `NOT_FOUND` with no waiting attempt, a second `BIND` revokes the first, the capability revoked at each kind of end |
+| QEMU, `bridge` (#300) | Two VMs from the launch tool, the QMP checks passing. The guest's LangGraph agent, through the bridge: a granted `REQUEST` through the gateway, a `LOG`, a checkpoint, and `COMPLETE`; each recorded in the exported trail |
+| QEMU, hostile guest (#300) | Programs in the same image that: send each malformed frame; send a second request before the reply; send an operation not passed; ask for a route, path, or permission not granted; look for a network interface, a disk, a 9p or virtiofs mount, or a second port. The runner checks each refusal in the trail and the attempt's failure reason, and Pharos stays up and binds the next attempt |
+| Mutation (#301) | A throwaway branch where the launch tool lets a network device through must fail `bridge` in CI |
+| Matrix | `bridge` in the `kvm` cell, and in the others if a TCG boot fits CI's time |
+
+## 6. Alternatives
+
+- **The runtime spawns the bridge as the guest agent's program**, with the device among its capabilities: `trust` could `STOP` it like any agent. But the runtime has no free handle for the device, and would hold a device, which agents.md rules out.
+- **A per-attempt stub agent that the bridge feeds:** stop semantics unchanged, but the stub has one capability, so the bridge's frames would need a second path through the runtime.
+- **The bridge as a control client** making requests on the guest's behalf: no minting, but a second request path into the runtime that must reproduce every slot check.
+- **The guest's own wire format** instead of agents v1 messages in frames: easier for Python, but a second protocol for the bridge to translate, and one more place for checks to drift.
+
+## 7. Open questions
+
+1. **Stopping a guest agent:** through the runtime (`CANCEL` and revocation), with `trust` stopping the runtime if it doesn't answer (recommended: no new kernel or `trust` mechanism), or also give `trust` `STOP` on the bridge, so it can cut the guest without the runtime?
+2. **Operations passed:** the list in section 3 (recommended: enough for a LangGraph agent with HTTPS tools and a scripted model), or also inference and tools now?
+3. **The guest's serial console:** to a host file (recommended: diagnostics, output only, and the host is trusted), or `-serial none` outside tests?
+4. **CI:** `bridge` in the `kvm` cell only (recommended until a TCG boot of Python and LangGraph is measured), or in every cell?
+
+## Implementation issues
+
+The guest image (#296); the channel and the launch tool (#297); the bridge service, `BIND`, and the frames (#298); the client library (#299); the `bridge` scenario and the hostile-guest suite (#300). The gate is #301.

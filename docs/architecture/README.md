@@ -27,6 +27,7 @@ Each document's own Status section says what is **implemented**, **placeholder**
 - [Networking](networking.md) — the virtio-net driver, the minimal network stack, network capabilities, and the host test endpoint (M2.10, D-015).
 - [TCP and TLS](tls.md) — smoltcp in the network service, the TLS service, its interface, the pinned roots, time, randomness, and the new trust boundary (M6.1, D-034; accepted, planned).
 - [The credential vault and the egress gateway](gateway.md) — secrets from the host at each boot, the vault, routes, the gateway's HTTP/1.1, injection and stripping, and the new trust boundary (M6.2, D-035; accepted, planned).
+- [The foreign-agent bridge](bridge.md) — a Linux guest with no network, one virtio-serial port joined by a host socket, the bridge service and `BIND`, frames, the launch tool's checks, and the guest image (M6.3, D-036; proposed, planned).
 
 **AI and agents**
 
