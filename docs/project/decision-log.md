@@ -1343,9 +1343,9 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-036: Foreign-agent bridge
 
-- **Status:** Proposed (2026-11-24, #294)
+- **Status:** Accepted (#294)
 - **Needed by:** M6.3
-- **Date accepted:**
+- **Date accepted:** 2026-11-24
 
 **Context.** Tier 3 agents run in a Linux guest with no network device and no credentials, reaching only the Pharos runtime. virtio-vsock connects a guest to its host, not to another guest: with Pharos and the Linux guest as two microVMs, every message passes through the host, and the guest's containment is the host's VM configuration. The host kernel and hypervisor are therefore in the trusted base for this design. What exists at M6.2 (checked 2026-11-24):
 - Pharos has a virtio-console driver (`pharos_programs::virtio_console`, 225 lines over the shared virtio transport's 593) for the trusted console: one `virtio-serial-pci` device, port 0, every used element checked. Its buffer sizes are constants (16 receive buffers of 64 bytes, 16 transmit buffers of 256).
@@ -1365,7 +1365,7 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 **Evaluation criteria.** What the host must guarantee, and how it is checked (the launch tool refuses a network device or shared filesystem); relay size and parsing; new code in Pharos's trusted base; why a trusted host is acceptable for v1; the path to M8.2.
 
-**Decision.** Proposed:
+**Decision.** Accepted by the maintainer on 2026-11-24, as proposed:
 1. **The channel is a virtio-serial port on each VM, joined by one host unix socket** (e). There is no relay program. The host's part is the kernel's unix socket and the two QEMU processes, which D-033 already trusts.
 2. **The launch tool** (`cargo xtask`) writes both QEMU command lines itself and refuses any other configuration with a clear error. For the guest: `-nodefaults`; no `-netdev`, `-nic`, or `-net`; no `-virtfs`, virtiofs, or vhost-user device; no disk (the image is an initramfs); exactly one `virtio-serial-pci` with one `virtserialport`. After start, it asks each QEMU's monitor, which the guest cannot reach, for its PCI devices, and stops both VMs if the list differs from the expected one.
 3. **Framing:** length-prefixed, versioned frames with a fixed largest size, parsed only by the Pharos side, as untrusted input, with no `unsafe`, fuzzed. The host never parses them.
