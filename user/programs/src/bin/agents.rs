@@ -3115,13 +3115,23 @@ impl Runtime {
         let mut msg = [0u8; 64];
         let n = gateway::encode(&req, &mut msg).ok_or(status::INTERNAL)?;
         let mut reply = [0u8; 256];
-        let answered = match gw
-            .health
-            .call(GATEWAY, &msg[..n], gw.reply, &mut reply, GATEWAY_US)
-        {
+        let ask = |reply: &mut [u8; 256]| match gw.health.call(
+            GATEWAY,
+            &msg[..n],
+            gw.reply,
+            reply,
+            GATEWAY_US,
+        ) {
             Ok(Received::Message { len, .. }) => Answered::parse(&reply[..len.min(256)]),
             _ => None,
         };
+        let mut answered = ask(&mut reply);
+        // A restarted gateway has no buffer of ours (M6.2 review): attach
+        // it again and ask once more. The path and body are still in it,
+        // as the gateway read nothing.
+        if answered.is_some_and(|a| a.status == gateway::NO_BUFFER) && gw.attach() {
+            answered = ask(&mut reply);
+        }
         let a = answered.unwrap_or(Answered {
             status: status::INTERNAL,
             ..Answered::default()

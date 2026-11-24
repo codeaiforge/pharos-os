@@ -1574,7 +1574,11 @@ mod kernel {
                 let size = file.len() as u64;
                 let done = (n > 0)
                     .then(|| sched::with_current_space(|space| space.write_user(addr, &file[..n])));
+                // The copy is freed next, so without `black_box` the
+                // optimizer may drop the zeroing as a dead store (M6.2
+                // review).
                 file.fill(0);
+                core::hint::black_box(&mut file[..]);
                 if let Some(done) = done {
                     done.ok_or(Error::BadAddress)??;
                 }

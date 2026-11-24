@@ -5,7 +5,9 @@
 //! and the kernel, which never parses it. It is text, one secret a line:
 //! `<name> <value>\n`. A name is 1 to [`MAX_NAME`] bytes of `a`–`z`,
 //! `0`–`9`, `-`, `_`; a value is 1 to [`MAX_VALUE`] bytes of visible ASCII
-//! (0x21–0x7E), so it can never break a header line. At most
+//! (0x21–0x7E), so it can never break a header line, but not `[`, `]`,
+//! `"`, or `\`, and not a part of `[secret]`, so stripping it from an
+//! answer can never leave it whole (M6.2 review). At most
 //! [`MAX_SECRETS`] secrets and [`MAX_FILE`] bytes; a name given twice, or
 //! any other fault, refuses the whole file, by line number and never by
 //! content.
@@ -63,9 +65,19 @@ pub fn valid_name(name: &[u8]) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-' || *b == b'_')
 }
 
-/// Whether `value` may be a secret: 1 to 1,024 bytes of visible ASCII.
+/// Whether `value` may be a secret: 1 to 1,024 bytes of visible ASCII,
+/// without `[`, `]`, `"`, or `\`, and not within
+/// [`http::STRIPPED`](crate::http::STRIPPED). Without brackets a value
+/// cannot overlap the `[secret]` that replaces it, so one left-to-right
+/// pass of [`crate::http::strip`] leaves no copy of it; `"` and `\`
+/// would be escaped in a JSON echo, and so not found.
 pub fn valid_value(value: &[u8]) -> bool {
-    (1..=MAX_VALUE).contains(&value.len()) && value.iter().all(|b| (0x21..=0x7e).contains(b))
+    let stripped = crate::http::STRIPPED;
+    (1..=MAX_VALUE).contains(&value.len())
+        && value
+            .iter()
+            .all(|b| (0x21..=0x7e).contains(b) && !b"[]\"\\".contains(b))
+        && !stripped.windows(value.len()).any(|w| w == value)
 }
 
 /// A parsed secrets file, borrowing it.
@@ -260,6 +272,39 @@ mod tests {
         assert_eq!(parse_released(&encode_released(OK, 300)), Some((OK, 300)));
         assert_eq!(parse_released(&[NO_SECRET]), Some((NO_SECRET, 0)));
         assert_eq!(parse_released(&[OK, 1, 0, 0]), None);
+    }
+
+    #[test]
+    fn no_valid_value_survives_stripping() {
+        // M6.2 review: `]a` in `]aa` stripped to `[secret]a`.
+        for bad in [&b"]a"[..], b"[", b"a\"b", b"a\\b", b"secret", b"cre"] {
+            assert!(!valid_value(bad), "{bad:?} accepted");
+        }
+        assert!(valid_value(b"secrets") && valid_value(b"ghp_abc123"));
+        // Short values and answers over the letters of `[secret]` and two
+        // others: no valid value is left in what is stripped.
+        const ABC: &[u8] = b"[]secrta";
+        let mut x = 0xbb67_ae85_84ca_a73bu64;
+        let mut next = |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n) as usize
+        };
+        let mut checked = 0;
+        for _ in 0..100_000 {
+            let value: std::vec::Vec<u8> = (0..1 + next(4)).map(|_| ABC[next(8)]).collect();
+            let input: std::vec::Vec<u8> = (0..next(16)).map(|_| ABC[next(8)]).collect();
+            if !valid_value(&value) {
+                continue;
+            }
+            checked += 1;
+            let mut out = [0u8; 128];
+            let (n, _) = crate::http::strip(&input, b"", &value, &mut out).unwrap();
+            let left = out[..n].windows(value.len()).any(|w| w == value);
+            assert!(!left, "{value:?} left in {:?}", &out[..n]);
+        }
+        assert!(checked > 10_000, "only {checked} valid values");
     }
 
     #[test]

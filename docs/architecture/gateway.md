@@ -68,7 +68,7 @@ An agent never names a host, a header, or a secret. It names a route it was gran
 - **One `fw_cfg` file, `opt/org.pharos/secrets`,** given by the host to each machine `cargo xtask` starts when `--secrets <file>` is passed, and by the user guide's QEMU command otherwise.
 - **Text, one secret a line:** `<name> <value>`, a single space between them, each line ending in `\n`.
   - The name is 1 to 32 bytes of `a`–`z`, `0`–`9`, `-`, `_`.
-  - The value is 1 to 1,024 bytes of visible ASCII (0x21–0x7E), so it can never break a header line.
+  - The value is 1 to 1,024 bytes of visible ASCII (0x21–0x7E), so it can never break a header line. Since the M6.2 review (F3), it may not contain `[`, `]`, `"`, or `\`, or be part of `[secret]`, so stripping it can never leave a copy, and a JSON echo cannot escape it out of sight.
   - At most 16 secrets and 4 KiB in all. A name given twice is refused.
   - Any fault refuses the whole file, and the vault reports it by line number, never by content.
 - **In the kernel:** read at boot into a 4 KiB kernel buffer, as the device key is. No file is the same as an empty one. The kernel never parses it.
@@ -76,7 +76,7 @@ An agent never names a host, a header, or a secret. It names a route it was gran
   - A new system call, `secrets_read(cap, buf)`, copies the file into the caller's buffer. It needs `READ`.
   - The kernel keeps its copy for the boot, so a restarted vault reads it again. Only a process holding the capability can, and `init` grants it to the vault alone.
 - **Rotation:** replace the host's file and restart the machine. No rebuild. A route whose secret is missing answers `NO_SECRET`.
-- *As built (#281):* `init` finds the capability after the two keys by asking only its size (a length of 0, which needs no buffer), so it never holds the secrets; a file over 4 KiB is ignored with a line on the serial console, and the vault then has none. The kernel zeroes its temporary copy after each `secrets_read`.
+- *As built (#281):* `init` finds the capability after the two keys by asking only its size (a length of 0, which needs no buffer), so it never holds the secrets; a file over 4 KiB is ignored with a line on the serial console, and the vault then has none. The kernel zeroes its temporary copy after each `secrets_read`, behind `black_box` since the M6.2 review (F4), so the optimizer cannot remove the zeroing.
 
 ### Routes
 
@@ -116,7 +116,7 @@ Both the vault and the gateway link the table. The vault uses it to check that a
 - **Its only client is the gateway** (badge 1). `RELEASE` is `[1, 1, route:u8]`. The vault checks that the route exists and names a secret it holds, then writes `prefix ‖ value` into the gateway's attached buffer. The answer is `[status, 0, len:u16]`: `OK`, `NO_SECRET`, `NOT_FOUND` (no such route), or `NO_AUDIT`.
 - **Every release and refusal is recorded** before it is answered: action `vault release`, the route's and the secret's names, and the outcome. No value is ever written.
 - `INFO` and `ATTACH` as D-019. There is no operation that lists secrets or returns one by name.
-- *As built (#281):* the gateway's buffer is at most 4 KiB; a release that would not fit is `NO_BUFFER`, recorded like the other refusals. The records are events (action `vault`, 25), outcome `ok` or `refused`, with the detail `release <route> secret <name>`, and ` status <n>` on a refusal; a route that does not exist is named by its number. The vault gets its table's number as its argument and reads that table's routes (`pharos_services::routes`).
+- *As built (#281):* the gateway's buffer is at most 4 KiB; a release that would not fit is `NO_BUFFER`, recorded like the other refusals. The records are events (action `vault`, 25), outcome `ok` or `refused`, with the detail `release <route> secret <name>`, and ` status <n>` on a refusal; a route that does not exist is named by its number. The vault gets its table's number as its argument and reads that table's routes (`pharos_services::routes`). Since the M6.2 review (F2), the detail is cut to the audit limit of 64 bytes, so long names cannot make every release `NO_AUDIT`.
 
 ### The gateway and `gateway` v1
 
@@ -144,6 +144,7 @@ Both the vault and the gateway link the table. The vault uses it to check that a
   - The reply is always `[status, detail, http:u16, type_len:u8, answer_len:u32, stripped:u8]`: on `TLS`, `detail` is the TLS service's status and `http` its reason; on `ANSWER`, `detail` is the reason.
   - The statuses are 40 `NO_SECRET`, 41 `TLS`, 42 `ANSWER`, 43 `NO_AUDIT`, and 44 `TIMEOUT`, as above.
   - One request at a time: a second client waits in the endpoint's queue for up to the first's 30 s.
+  - *Restarts (M6.2 review, F1):* the vault, the TLS service, and the gateway each restart under their policy with no buffer attached. When the vault or the TLS service answers `NO_BUFFER`, the gateway attaches its buffer there again and asks once more. The runtime does the same when the gateway answers `NO_BUFFER`. The `vault` kernel kills all three and checks that a request works afterwards.
 - **A request, in order:**
   1. check the client may use the route, and the path and the body;
   2. record the intent;

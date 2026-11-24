@@ -275,16 +275,23 @@ impl Gateway {
         }
         let mut msg = [0u8; 8];
         let n = vault::encode(&Vault::Release { route: index }, &mut msg).unwrap_or(0);
-        let mut out = [0u8; 16];
-        let got = match call_timeout(VAULT, &msg[..n], self.reply, &mut out, CALL_US) {
-            Ok(Received::Message { len, cap, .. }) => {
-                if cap != 0 {
-                    let _ = delete(cap);
+        let ask = || {
+            let mut out = [0u8; 16];
+            match call_timeout(VAULT, &msg[..n], self.reply, &mut out, CALL_US) {
+                Ok(Received::Message { len, cap, .. }) => {
+                    if cap != 0 {
+                        let _ = delete(cap);
+                    }
+                    vault::parse_released(&out[..len.min(out.len())])
                 }
-                vault::parse_released(&out[..len.min(out.len())])
+                _ => None,
             }
-            _ => None,
         };
+        let mut got = ask();
+        // A restarted vault has no buffer of ours (M6.2 review).
+        if matches!(got, Some((vault::NO_BUFFER, _))) && reattach_vault(&self.vault) {
+            got = ask();
+        }
         match got {
             Some((vault::OK, len)) if usize::from(len) <= self.vault.len() => {
                 let mut secret = vec![0u8; len.into()];
@@ -302,16 +309,26 @@ impl Gateway {
         let mut msg = [0u8; 256];
         let n = tls::encode(req, &mut msg)?;
         let left = deadline.checked_sub(uptime()).filter(|t| *t > 0)?;
-        let mut out = [0u8; 256];
-        match call_timeout(TLS, &msg[..n], self.reply, &mut out, left) {
-            Ok(Received::Message { len, cap, .. }) => {
-                if cap != 0 {
-                    let _ = delete(cap);
+        let ask = |left: u64| {
+            let mut out = [0u8; 256];
+            match call_timeout(TLS, &msg[..n], self.reply, &mut out, left) {
+                Ok(Received::Message { len, cap, .. }) => {
+                    if cap != 0 {
+                        let _ = delete(cap);
+                    }
+                    Some((out, len.min(256)))
                 }
-                Some((out, len.min(256)))
+                _ => None,
             }
-            _ => None,
+        };
+        let got = ask(left)?;
+        // A restarted TLS service has no buffer of ours (M6.2 review).
+        let buffered = matches!(req, Tls::Write { .. } | Tls::Read { .. });
+        if buffered && got.0[0] == tls::NO_BUFFER && reattach_tls(&self.tls) {
+            let left = deadline.checked_sub(uptime()).filter(|t| *t > 0)?;
+            return ask(left);
         }
+        Some(got)
     }
 
     /// Writes `bytes` through the TLS buffer, a buffer's worth at a time.
@@ -393,12 +410,31 @@ impl Gateway {
     }
 }
 
-/// Maps a buffer of `len` and attaches it at `service` with `msg`.
-fn attach(service: Handle, msg: &[u8], len: u64) -> Option<Mapped> {
-    let b = mem_map(len).ok()?;
-    let m = mem_share(&b).ok()?;
-    send(service, msg, m, READ | WRITE, 0).ok()?;
-    Some(b)
+/// Attaches `b` at `service` with `msg`. A blocking `send`: at startup
+/// `init` started the service first, and again after it answered
+/// `NO_BUFFER`, so it is receiving.
+fn share(service: Handle, msg: &[u8], b: &Mapped) -> bool {
+    let Ok(m) = mem_share(b) else {
+        return false;
+    };
+    let sent = send(service, msg, m, READ | WRITE, 0).is_ok();
+    let _ = delete(m);
+    sent
+}
+
+/// Attaches the vault buffer `b`: at startup, and after the vault restarts.
+fn reattach_vault(b: &Mapped) -> bool {
+    let mut msg = [0u8; 16];
+    let n = vault::encode(&Vault::Attach { len: VAULT_BUFFER }, &mut msg).unwrap_or(0);
+    share(VAULT, &msg[..n], b)
+}
+
+/// Attaches the TLS buffer `b`: at startup, and after the TLS service
+/// restarts.
+fn reattach_tls(b: &Mapped) -> bool {
+    let mut msg = [0u8; 16];
+    let n = tls::encode(&Tls::Attach { len: TLS_BUFFER }, &mut msg).unwrap_or(0);
+    share(TLS, &msg[..n], b)
 }
 
 fn main(arg: u64) -> u64 {
@@ -406,11 +442,8 @@ fn main(arg: u64) -> u64 {
         .iter()
         .find(|s| s.name == "gateway");
     let hosts = entry.map_or(Vec::new(), |g| g.tls.iter().map(|d| d.2).collect());
-    let mut msg = [0u8; 16];
-    let n = vault::encode(&Vault::Attach { len: VAULT_BUFFER }, &mut msg).unwrap_or(0);
-    let vault = attach(VAULT, &msg[..n], VAULT_BUFFER);
-    let n = tls::encode(&Tls::Attach { len: TLS_BUFFER }, &mut msg).unwrap_or(0);
-    let tls = attach(TLS, &msg[..n], TLS_BUFFER);
+    let vault = mem_map(VAULT_BUFFER).ok().filter(reattach_vault);
+    let tls = mem_map(TLS_BUFFER).ok().filter(reattach_tls);
     let (Some(vault), Some(tls), Ok(reply)) = (vault, tls, endpoint_create()) else {
         say(b"gateway: cannot attach its buffers");
         return 1;

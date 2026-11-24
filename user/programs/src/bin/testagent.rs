@@ -2042,6 +2042,23 @@ impl Agent {
         self.complete(b"https ok")
     }
 
+    /// `again` (the `vault` kernel, M6.2 review): after the vault, the TLS
+    /// service, or the gateway restarted, a granted `GET` still gets its
+    /// secret injected and the echo is still stripped.
+    fn https_again(&self) -> u64 {
+        let secret = pharos_services::TEST_SECRET_VALUE.as_bytes();
+        let has = |hay: &[u8], what: &[u8]| hay.windows(what.len()).any(|w| w == what);
+        let (a, got) = self.request(b"items", b"/items", b"");
+        if (a.status, a.http) != (gateway::OK, 200) || got != b"text/plainitems ok" {
+            return self.fail(b"after the restart, the granted GET was not answered");
+        }
+        let (a, got) = self.request(b"echo", b"/echo", b"");
+        if a.status != gateway::OK || !has(&got, b"[secret]") || has(&got, secret) {
+            return self.fail(b"after the restart, the echo was not stripped");
+        }
+        self.complete(b"again ok")
+    }
+
     fn net_talk(&self) -> u64 {
         const ECHO: [u8; 4] = [10, 0, 2, 2];
         let asked = Permission::Net {
@@ -2713,6 +2730,7 @@ fn main(_: u64) -> u64 {
         b"net-quiet" => a.net_quiet(),
         b"net-talk" => a.net_talk(),
         b"https" => a.https(),
+        b"again" => a.https_again(),
         b"hostile" => a.hostile(),
         b"spend" => a.spend(),
         b"glut" => a.glut(),

@@ -607,13 +607,38 @@ fn vault(c: Client) -> u64 {
     let mut line = Vec::from(&b"vault: fetcher ended: "[..]);
     line.extend_from_slice(&result);
     say(&line);
-    if s.state == State::Done && result == b"https ok" {
-        say(b"ok vault: the fetcher's requests and refusals all checked");
-        0
-    } else {
+    if s.state != State::Done || result != b"https ok" {
         say(b"FAILED vault: the fetcher task failed");
-        1
+        return 1;
     }
+    say(b"ok vault: the fetcher's requests and refusals all checked");
+    // M6.2 review: the kernel kills what each line names, `init` restarts
+    // it, and a request must still work. The kernel checks the restarts
+    // came before the task's lines.
+    for (kill, done) in [
+        (
+            &b"vault: kill vault and tls"[..],
+            &b"ok vault: after the vault and the TLS service restarted, a request works"[..],
+        ),
+        (
+            b"vault: kill gateway",
+            b"ok vault: after the gateway restarted, a request works",
+        ),
+    ] {
+        say(kill);
+        sleep(5_000_000);
+        let again = c.submit(b"fetcher", b"again").ok();
+        let ended = again.and_then(|t| c.wait(t, 60));
+        if !ended.is_some_and(|(s, r)| s.state == State::Done && r == b"again ok") {
+            let mut line = Vec::from(&b"FAILED "[..]);
+            line.extend_from_slice(kill);
+            line.extend_from_slice(b": the request after it failed");
+            say(&line);
+            return 1;
+        }
+        say(done);
+    }
+    0
 }
 
 fn soak(c: &Client) -> u64 {

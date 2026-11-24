@@ -139,6 +139,33 @@ fn cut(mut d: Vec<u8>) -> Vec<u8> {
     d
 }
 
+/// The vault's record of a release (gateway.md, Audit): `release <route
+/// or its index>[ secret <name>][ status <n>]`, cut to the audit limit, as
+/// two 32-byte names and a status would pass it and be refused, leaving
+/// every release of that route `NO_AUDIT` (M6.2 review). The end is
+/// what is cut, a refusal's status first; its outcome still says refused.
+pub fn release_detail(
+    route: Result<&[u8], u8>,
+    secret: Option<&[u8]>,
+    status: Option<u8>,
+) -> Vec<u8> {
+    let mut d = Vec::with_capacity(80);
+    d.extend_from_slice(b"release ");
+    match route {
+        Ok(name) => d.extend_from_slice(name),
+        Err(index) => number(&mut d, index.into()),
+    }
+    if let Some(name) = secret {
+        d.extend_from_slice(b" secret ");
+        d.extend_from_slice(name);
+    }
+    if let Some(s) = status {
+        d.extend_from_slice(b" status ");
+        number(&mut d, s.into());
+    }
+    cut(d)
+}
+
 /// The intent's detail: `c<client> <route> <method> q<query length>
 /// b<body length> <first 8 bytes of the body's SHA-256, in hex> <path>`,
 /// cut to the audit limit (the path last, so it is what is cut).
@@ -208,6 +235,18 @@ pub fn outcome_detail(a: &Answered) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_record_always_fits() {
+        assert_eq!(
+            release_detail(Ok(b"items"), Some(b"test-token"), None),
+            b"release items secret test-token"
+        );
+        assert_eq!(release_detail(Err(9), None, Some(7)), b"release 9 status 7");
+        let long = [b'a'; 32];
+        let d = release_detail(Ok(&long), Some(&long), Some(40));
+        assert!(d.len() <= pharos_proto::audit::MAX_DETAIL && d.starts_with(b"release aaaa"));
+    }
 
     const ROUTE: Route = Route {
         name: "issues",

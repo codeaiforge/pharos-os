@@ -131,20 +131,11 @@ impl Vault<'_> {
             _ if !self.buffer.as_ref().is_some_and(fits) => NO_BUFFER,
             _ => OK,
         };
-        let mut detail = Vec::with_capacity(80);
-        detail.extend_from_slice(b"release ");
-        match route {
-            Some(r) => detail.extend_from_slice(r.name.as_bytes()),
-            None => push_number(&mut detail, u64::from(index)),
-        }
-        if let Some(name) = secret {
-            detail.extend_from_slice(b" secret ");
-            detail.extend_from_slice(name.as_bytes());
-        }
-        if s != OK {
-            detail.extend_from_slice(b" status ");
-            push_number(&mut detail, u64::from(s));
-        }
+        let detail = pharos_programs::gateway::release_detail(
+            route.map(|r| r.name.as_bytes()).ok_or(index),
+            secret.map(str::as_bytes),
+            (s != OK).then_some(s),
+        );
         let ok = if s == OK {
             outcome::OK
         } else {
