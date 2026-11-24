@@ -62,8 +62,8 @@ poweroff -f
 """
 
 # Until the client library and the agent land (#299): a boot check that
-# LangGraph runs, and what the guest can see.
-AGENT = b'''import os, sys
+# LangGraph runs, what the guest can see, and one exchange on the channel.
+AGENT = rb'''import os, sys
 import langgraph
 from importlib.metadata import version
 from langgraph.graph import StateGraph, START, END
@@ -80,6 +80,14 @@ out = g.compile().invoke({"n": 41})
 print("guest: python", sys.version.split()[0], "langgraph", version("langgraph"), "graph", out["n"])
 print("guest: net", sorted(os.listdir("/sys/class/net")))
 print("guest: ports", sorted(os.listdir("/dev/virtio-ports")))
+# The channel (#297): a line to Pharos and its answer, within 60 s.
+import select
+port = os.open("/dev/virtio-ports/org.pharos.bridge", os.O_RDWR)
+os.write(port, b"hello from the guest\n")
+got = b""
+while not got.endswith(b"\n") and select.select([port], [], [], 60)[0]:
+    got += os.read(port, 64)
+print("guest: pharos said", got.decode(errors="replace").strip() or "nothing in 60 s")
 '''
 
 

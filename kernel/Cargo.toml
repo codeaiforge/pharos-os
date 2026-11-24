@@ -163,6 +163,10 @@ name = "preemption"
 harness = false
 
 [[test]]
+name = "channel"
+harness = false
+
+[[test]]
 name = "classes"
 harness = false
 

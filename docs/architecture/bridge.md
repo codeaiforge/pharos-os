@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-24 (#295), with each open question decided as recommended (section 7). It follows [D-036](../project/decision-log.md#d-036-foreign-agent-bridge) (accepted 2026-11-24) and builds on the [agent runtime](agents.md) and the [egress gateway](gateway.md).
-- **Implementation:** the guest image is **implemented** (#296): `cargo xtask guest`, pinned by `xtask/guest.lock`, with a boot check in place of the agent (*as built* below). **Planned:** the channel and the launch tool (#297), the bridge service (#298), the client library (#299), and the `bridge` scenario with the hostile-guest suite (#300). The gate is #301.
+- **Implementation:** the guest image is **implemented** (#296): `cargo xtask guest`, pinned by `xtask/guest.lock`, with a boot check in place of the agent (*as built* below). The channel and the launch tool are **implemented** (#297), shown end to end by the `channel` test kernel (*as built* below). **Planned:** the driver's buffer sizes as parameters (with #298), `cargo xtask run` with a guest, the channel and the launch tool (#297), the bridge service (#298), the client library (#299), and the `bridge` scenario with the hostile-guest suite (#300). The gate is #301.
 
 ## 2. Context
 
@@ -85,6 +85,10 @@ How the bridge holds the slot is D-036's open point. The runtime cannot spawn th
 - **Guest side:** one `virtio-serial-pci` with one `virtserialport,name=org.pharos.bridge` on `-chardev socket,id=bridge,path=<same path>`. Linux shows it as `/dev/virtio-ports/org.pharos.bridge`. It is not a `virtconsole`, so no getty or kernel console runs on it.
 - **The driver** takes its buffer counts and sizes as parameters (D-036). The bridge uses 16 receive buffers of 4 KiB; `trust` keeps 16 × 64 and 16 × 256.
 - **The socket path** is relative to the run's directory and under Linux's 108 bytes.
+- *As built (#297):*
+  - `xtask/src/bridge.rs` writes both sides. Pharos's VM gets `virtio-serial-pci,disable-legacy=on,iommu_platform=on` after all its other devices, `-chardev socket,id=bridge,path=bridge.sock,server=on,wait=off`, and `virtconsole,chardev=bridge`, plus QMP. Both QEMUs run in the run's directory, so `bridge.sock` is a short relative path; `xtask` reaches the QMP sockets through `/proc/self/fd/<dir>/`, for the same reason.
+  - **Pharos's firmware takes the channel as a console.** OVMF drives every virtio-console, so a guest connected during the firmware read its boot output (found by the `channel` kernel). It could probably also have typed into the firmware's menus; that was not tried. So the launch tool starts the guest only once Pharos has printed a line saying its own driver holds the device (`channelprobe: waiting for the guest` in the test, the bridge's ready line in #298). Until then no client is on the socket, and QEMU drops what the firmware writes. Pharos's QEMU runs with `-no-reboot`, so a reset, which would run the firmware again, ends the run instead.
+  - The `channel` kernel's probe (`bin/channelprobe`, table 12) uses the trusted console's driver unchanged: 16 receive buffers of 64 bytes. Its sizes become parameters with the bridge service (#298).
 
 ### Frames
 
@@ -155,6 +159,8 @@ Retries follow the manifest's `attempts`, as for any agent. The guest VM is not 
 After both start, it asks each QEMU's monitor (QMP on a host socket the guest cannot reach) for `query-pci`. It stops both VMs if the guest's list is not exactly the q35 chipset's own devices and the one `virtio-serial-pci`, or if Pharos's lacks the second one. These checks are host-tested on the command lines (each refusal) and run in every `bridge` boot.
 
 The guest's serial console goes to a host file (output only), for diagnostics.
+
+*As built (#297):* `bridge::check_guest` accepts only the options and values `bridge::guest_args` writes, each refusal naming what it found: a network device (`-netdev`, `-net`, any `-nic` but `none`), a disk (`-drive`, `-hda`, `-cdrom`, `-blockdev`, …), a shared filesystem (`-virtfs`, `-fsdev`), a device other than the channel's two (so `vhost-user-fs-pci`, `virtio-9p-pci`, and `virtio-net-pci` too), a second channel, an unlisted option, or no `-nodefaults`. The guest has 512 MiB and `-accel kvm -cpu host`, or TCG on `-cpu max`. Over QMP, the guest must show exactly `8086:29c0` (host bridge), `8086:2918` (LPC), `8086:2922` (AHCI, with no drive), `8086:2930` (SMBus), and `1af4:1043`, and `query-block` must be empty; Pharos must show two `1af4:1043`. Host tests cover each refusal and the QMP parsing.
 
 ### Limits
 

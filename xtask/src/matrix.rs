@@ -114,6 +114,11 @@ pub fn skip(cell: &Cell, kernel: &str) -> Option<&'static str> {
         "recovery" if cell.bios => Some("needs UEFI: its rounds boot with the OVMF variable store"),
         // The boot check covers the BIOS boot's firmware and memory map.
         "boot_info" if cell.bios => Some("checks that 64-bit UEFI booted it"),
+        // Two VMs; the guest's Python takes 70 s under TCG (bridge.md,
+        // decided open question 4).
+        "channel" if cell.name != "kvm" => {
+            Some("runs a guest VM beside Pharos, in the kvm cell only")
+        }
         _ => None,
     }
 }
@@ -194,5 +199,15 @@ mod tests {
         }
         assert!(skip(bios, "system").is_none());
         assert!(skip(&CELLS[0], "recovery").is_none());
+        // The channel kernel only under KVM.
+        assert!(tests.join("channel.rs").is_file());
+        for cell in &CELLS {
+            assert_eq!(
+                skip(cell, "channel").is_none(),
+                cell.name == "kvm",
+                "{}",
+                cell.name
+            );
+        }
     }
 }

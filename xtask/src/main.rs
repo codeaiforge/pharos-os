@@ -17,6 +17,7 @@ use std::process::{Child, Command, ExitCode};
 use std::time::{Duration, Instant, SystemTime};
 
 mod bench;
+mod bridge;
 mod console;
 mod echo;
 mod fs_image;
@@ -757,6 +758,28 @@ fn run(cmd: &mut Command, verbose: bool) -> Result<Vec<u8>> {
 }
 
 /// Extracts the hash from `sha256sum` output (`<hex>  <path>`).
+/// The guest's side of the `channel` kernel (#297): its serial log shows
+/// it booted, found its one port and no network interface but `lo`, and
+/// read Pharos's answer through the channel.
+fn channel_checks(guest_log: &Path) -> Result<()> {
+    let text = fs::read_to_string(guest_log)
+        .map_err(|e| format!("cannot read the guest's log {}: {e}", guest_log.display()))?;
+    println!("  guest:");
+    for line in text.lines().filter(|l| l.starts_with("guest:")) {
+        println!("    {line}");
+    }
+    for want in [
+        "guest: net ['lo']",
+        "guest: ports ['org.pharos.bridge']",
+        "guest: pharos said hello from pharos",
+    ] {
+        if !text.lines().any(|l| l.trim_end() == want) {
+            return Err(format!("the guest's log lacks '{want}'"));
+        }
+    }
+    Ok(())
+}
+
 /// `cargo xtask guest [lock]`: runs `scripts/guest-image.py` (Python's
 /// standard library only, as the vault test server is).
 fn guest(paths: &Paths, lock: bool) -> Result<()> {
@@ -975,7 +998,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 36] = [
+const USER_PROGRAMS: [&str; 37] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -1012,6 +1035,7 @@ const USER_PROGRAMS: [&str; 36] = [
     "tls",
     "vault",
     "gateway",
+    "channelprobe",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -1605,13 +1629,42 @@ fn boot_headless(
     serial.push(log);
     let mut args = qemu_args(iso, vars, &serial, bios, false);
     args.extend_from_slice(extra);
-    run_headless(args, log, timeout)
+    run_headless(args, log, timeout, None)
+}
+
+/// [`boot_headless`] with QEMU in `dir`, for paths given relative to it
+/// (the Tier 3 channel's socket, which Linux limits to 107 bytes).
+fn boot_headless_in(
+    dir: &Path,
+    iso: &Path,
+    vars: &Path,
+    log: &Path,
+    timeout: Duration,
+    extra: &[OsString],
+) -> Result<BootRun> {
+    prepare_firmware(vars, false)?;
+    console::fifos(iso.parent().unwrap_or(Path::new(".")))?;
+    let _ = fs::remove_file(log);
+    let mut serial = OsString::from("file:");
+    serial.push(log);
+    let mut args = qemu_args(iso, vars, &serial, false, false);
+    args.extend_from_slice(extra);
+    run_headless(args, log, timeout, Some(dir))
 }
 
 /// Runs QEMU with `args`, which write the serial console to `log`.
-fn run_headless(args: Vec<OsString>, log: &Path, timeout: Duration) -> Result<BootRun> {
+fn run_headless(
+    args: Vec<OsString>,
+    log: &Path,
+    timeout: Duration,
+    dir: Option<&Path>,
+) -> Result<BootRun> {
     let start = Instant::now();
-    let mut child = qemu_command(args)
+    let mut cmd = qemu_command(args);
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
+    }
+    let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .spawn()
@@ -1937,7 +1990,7 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
     serial.push(&log);
     let _ = fs::remove_file(&log);
     let args = without_iommu(qemu_args(&iso, &vars, &serial, false, false));
-    let run = run_headless(args, &log, timeout)?;
+    let run = run_headless(args, &log, timeout, None)?;
     refused("boot check (no IOMMU)", &run, &log, IOMMU_REFUSED, timeout)?;
     // #255: without the device key the boot stops, saying why.
     let log = logs.join("boot-no-key.log");
@@ -1951,7 +2004,7 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
         qemu_args(&iso, &vars, &serial, false, false),
         DEVICE_KEY_NAME,
     );
-    let run = run_headless(args, &log, timeout)?;
+    let run = run_headless(args, &log, timeout, None)?;
     refused(
         "boot check (no device key)",
         &run,
@@ -3217,6 +3270,12 @@ const SECRETS_TEST: &str = "secrets";
 /// the TLS service, the vault, the gateway, and an agent through the
 /// runtime, against `scripts/vault-test-server.py`.
 const VAULT_TEST: &str = "vault";
+/// The Tier 3 channel between two booted VMs (#297, bridge.md): the guest
+/// image beside Pharos, one host socket between them.
+const CHANNEL_TEST: &str = "channel";
+/// The probe's line once it holds the channel's device: the guest starts
+/// only then ([`bridge::start_guest`]).
+const CHANNEL_READY: &str = "channelprobe: waiting for the guest";
 /// The `fw_cfg` file with the vault's secrets (D-035; must match
 /// `pharos_kernel::key::SECRETS_FW_CFG_NAME`).
 const SECRETS_NAME: &str = "opt/org.pharos/secrets";
@@ -4729,6 +4788,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         || name == HOTPLUG_TEST
         || name == AIFAIL_TEST
         || name == COMPROMISED_TEST
+        || name == CHANNEL_TEST
         || slotted
     {
         kernel_modules(paths, &programs)?
@@ -4805,6 +4865,40 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     }
     let _vault_server = if name == VAULT_TEST {
         Some(vault_server::start(&out.join("tls"), &out.join("secrets"))?)
+    } else {
+        None
+    };
+    // The guest beside Pharos (#297): it starts once Pharos's QEMU made the
+    // socket, and both are checked over QMP while they run; a failed check
+    // stops both.
+    let guest = if name == CHANNEL_TEST {
+        guest(paths, false)?;
+        for f in [
+            bridge::SOCKET,
+            bridge::PHAROS_QMP,
+            bridge::GUEST_QMP,
+            bridge::GUEST_LOG,
+        ] {
+            let _ = fs::remove_file(out.join(f));
+        }
+        // The last run's log has the marker the launcher waits for.
+        let _ = fs::remove_file(&log);
+        extra.extend(bridge::pharos_args());
+        let kvm = matrix::current().args.contains(&"-enable-kvm");
+        let args = bridge::guest_args(
+            &paths.target.join("guest/vmlinuz-virt"),
+            &paths.target.join("guest/initramfs"),
+            kvm,
+        );
+        let (dir, pharos_log) = (out.clone(), log.clone());
+        Some(std::thread::spawn(move || {
+            let started = bridge::start_guest(&dir, &args, &pharos_log, CHANNEL_READY);
+            let checked = started.and_then(|g| bridge::check_vms(&dir).map(|()| g));
+            if checked.is_err() {
+                bridge::quit(&dir, bridge::PHAROS_QMP);
+            }
+            checked
+        }))
     } else {
         None
     };
@@ -4923,14 +5017,23 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
             again,
         )?)
     };
-    let run = boot_headless(
-        &iso,
-        &out.join("ovmf-vars.fd"),
-        &log,
-        false,
-        timeout,
-        &extra,
-    )?;
+    let run = if guest.is_some() {
+        boot_headless_in(&out, &iso, &out.join("ovmf-vars.fd"), &log, timeout, &extra)?
+    } else {
+        boot_headless(
+            &iso,
+            &out.join("ovmf-vars.fd"),
+            &log,
+            false,
+            timeout,
+            &extra,
+        )?
+    };
+    // Stopped when this ends; its log read once the boot is over.
+    let guest = guest.map(|g| {
+        g.join()
+            .map_err(|_| "the guest's launcher panicked".to_owned())?
+    });
     let typed = script.map_or(Ok(()), |s| {
         s.finish(refused).and_then(|output| {
             // The soak's would be hours of it, the serial log's lines too.
@@ -5026,6 +5129,11 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
                 &clean_log(&run.log),
                 &out.join("tls").join("vault-server.log"),
             )
+        } else if let Some(g) = &guest {
+            if let Err(e) = g {
+                return Err(e.clone());
+            }
+            channel_checks(&out.join(bridge::GUEST_LOG))
         } else if let Some(want) = s1_want.as_deref().filter(|_| run.status == Some(33)) {
             s1_checks(&out.join(STORE_IMAGE), &clean_log(&run.log), want)
         } else {

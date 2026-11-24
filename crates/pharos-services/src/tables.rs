@@ -64,6 +64,7 @@ pub fn table(arg: u64) -> &'static [Service] {
         9 => TLS_NORANDOM,
         10 => SECRETS,
         11 => VAULT,
+        12 => CHANNEL,
         _ => &[],
     }
 }
@@ -878,6 +879,24 @@ pub const SECRETS: &[Service] = &[
         gains: &[],
     },
 ];
+
+/// The `channel` test kernel's table (#297, bridge.md): one probe holding
+/// the second virtio-console, the Tier 3 channel's Pharos end, which
+/// `cargo xtask` joins to the guest's port through one host socket.
+pub const CHANNEL: &[Service] = &[Service {
+    name: "channelprobe",
+    path: b"bin/channelprobe",
+    arg: 0,
+    kind: Kind::OneShot,
+    restart: Restart::Never,
+    caps: &[CONSOLE, device(VIRTIO_CONSOLE, 1)],
+    net: &[],
+    tcp: &[],
+    tls: &[],
+    after: &[],
+    limit: 0,
+    gains: &[],
+}];
 
 /// The gateway's audit client (`pharos_proto::audit::client::GATEWAY`).
 pub const AUDIT_GATEWAY: u32 = 6;
