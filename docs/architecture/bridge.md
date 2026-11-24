@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-- **Design:** **Proposed** (2026-11-24, #295), awaiting the maintainer's approval. It follows [D-036](../project/decision-log.md#d-036-foreign-agent-bridge) (accepted 2026-11-24) and builds on the [agent runtime](agents.md) and the [egress gateway](gateway.md).
+- **Design:** **Accepted**: approved by the maintainer on 2026-11-24 (#295), with each open question decided as recommended (section 7). It follows [D-036](../project/decision-log.md#d-036-foreign-agent-bridge) (accepted 2026-11-24) and builds on the [agent runtime](agents.md) and the [egress gateway](gateway.md).
 - **Implementation:** **planned**: the guest image (#296), the channel and the launch tool (#297), the bridge service (#298), the client library (#299), and the `bridge` scenario with the hostile-guest suite (#300). The gate is #301.
 
 ## 2. Context
@@ -188,7 +188,7 @@ The bridge holds no audit capability. Everything the guest does reaches the runt
 | QEMU, `bridge` (#300) | Two VMs from the launch tool, the QMP checks passing. The guest's LangGraph agent, through the bridge: a granted `REQUEST` through the gateway, a `LOG`, a checkpoint, and `COMPLETE`; each recorded in the exported trail |
 | QEMU, hostile guest (#300) | Programs in the same image that: send each malformed frame; send a second request before the reply; send an operation not passed; ask for a route, path, or permission not granted; look for a network interface, a disk, a 9p or virtiofs mount, or a second port. The runner checks each refusal in the trail and the attempt's failure reason, and Pharos stays up and binds the next attempt |
 | Mutation (#301) | A throwaway branch where the launch tool lets a network device through must fail `bridge` in CI |
-| Matrix | `bridge` in the `kvm` cell, and in the others if a TCG boot fits CI's time |
+| Matrix | `bridge` in the `kvm` cell only (decided, open question 4) |
 
 ## 6. Alternatives
 
@@ -203,6 +203,8 @@ The bridge holds no audit capability. Everything the guest does reaches the runt
 2. **Operations passed:** the list in section 3 (recommended: enough for a LangGraph agent with HTTPS tools and a scripted model), or also inference and tools now?
 3. **The guest's serial console:** to a host file (recommended: diagnostics, output only, and the host is trusted), or `-serial none` outside tests?
 4. **CI:** `bridge` in the `kvm` cell only (recommended until a TCG boot of Python and LangGraph is measured), or in every cell?
+
+**Decided (2026-11-24, #295):** 1. a guest agent is stopped through the runtime (`CANCEL` and revocation), and `trust` stops the runtime if it does not answer; 2. the operations listed in section 3, with no inference or tools in M6.3; 3. the guest's serial console to a host file; 4. `bridge` in the `kvm` cell only.
 
 ## Implementation issues
 
