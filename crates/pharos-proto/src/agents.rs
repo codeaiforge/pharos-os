@@ -282,6 +282,25 @@ pub const MAX_KEYS: usize = 32;
 /// Largest recorded result of a keyed operation.
 pub const MAX_KEY_RESULT: usize = 64;
 
+/// How long the runtime waits for one audit record before it refuses the
+/// action (`NO_AUDIT`).
+pub const AUDIT_US: u64 = 2_000_000;
+/// How long the runtime gives a stalled service's `INFO` probe (#117).
+pub const PROBE_US: u64 = 50_000;
+/// How long the runtime gives handle 12's `INFO` before it attaches its
+/// buffer at the gateway again (#284).
+pub const GATEWAY_INFO_US: u64 = 100_000;
+/// The longest the runtime takes over one agent's `REQUEST` (#302, M6.3
+/// review R-3): the intent record, the gateway's answer, at most one
+/// attach and second try after `NO_BUFFER`, and the outcome record. Each
+/// wait may first probe its service, if it stalled before. No other
+/// operation the bridge passes waits on the gateway.
+pub const REQUEST_US: u64 = 2 * (PROBE_US + AUDIT_US)
+    + (PROBE_US + crate::gateway::WAIT_US)
+    + GATEWAY_INFO_US
+    + crate::gateway::WAIT_US;
+const _: () = assert!(REQUEST_US >= 2 * (crate::gateway::WAIT_US + AUDIT_US));
+
 /// The tasks a submitted task depends on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Deps {

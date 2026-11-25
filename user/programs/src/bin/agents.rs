@@ -109,8 +109,11 @@
 //! the runtime badged with its slot, through which the bridge speaks for
 //! the guest as the agent. It is recorded (`bind`) before it is given, and
 //! revoked when the attempt ends, however it ends (`unbind`, the reason
-//! as detail). A second `BIND` while one is held fails the held attempt
-//! (`bridge restarted`). `trust`'s `STOP_GUEST` ends a guest attempt as
+//! as detail). A reply the bridge did not take (it stopped waiting) gives
+//! it to no one: the bind is undone (`unbind`, `not taken`) and the
+//! attempt waits for the next `BIND` (#302). A second `BIND` while one is
+//! held fails the held attempt (`bridge restarted`). `trust`'s
+//! `STOP_GUEST` ends a guest attempt as
 //! the user's `stop` ends an agent's process, if it names the attempt in
 //! the slot; when a guest attempt ends, `trust` is told (`ENDED`, #304).
 
@@ -218,7 +221,7 @@ const CPU_CHECK_US: u64 = 100_000;
 /// A stalled service is asked again (`INFO`) at most this often, and
 /// given this long to answer (#117).
 const PROBE_EVERY_US: u64 = 1_000_000;
-const PROBE_US: u64 = 50_000;
+const PROBE_US: u64 = agents::PROBE_US;
 
 /// A service the runtime calls (#117, resources.md): after one call times
 /// out it is stalled, and requests that need it are answered at once
@@ -274,7 +277,7 @@ impl Health {
     }
 }
 /// How long an audit record may take before the action is refused.
-const AUDIT_US: u64 = 2_000_000;
+const AUDIT_US: u64 = agents::AUDIT_US;
 /// The runtime's buffer at the storage service: the largest task file.
 const STORE_BUFFER: u64 = 128 << 10;
 const STORE_US: u64 = 10_000_000;
@@ -1304,7 +1307,13 @@ impl Https {
         }
         let mut out = [0u8; 256];
         let info = [gateway::VERSION, pharos_proto::op::INFO];
-        let is_gateway = match call_timeout(GATEWAY, &info, self.reply, &mut out, 100_000) {
+        let is_gateway = match call_timeout(
+            GATEWAY,
+            &info,
+            self.reply,
+            &mut out,
+            agents::GATEWAY_INFO_US,
+        ) {
             Ok(Received::Message { len, .. }) => {
                 Info::parse(&out[..len.min(256)]).is_some_and(|i| i.name == gateway::NAME)
             }
@@ -1868,6 +1877,31 @@ impl Runtime {
         }
         .encode(out)
         .ok_or(status::INTERNAL)
+    }
+
+    /// `BIND`'s reply carrying `minted` was not taken (#302, M6.3 review
+    /// R-3): the bridge's wait ended first, or it sent no reply
+    /// capability. The capability never left the runtime, so it is
+    /// revoked, the slot unbound, and the attempt waits for the next
+    /// `BIND`, recorded `unbind` (`not taken`). Without this the next
+    /// `BIND` would end the attempt as `bridge restarted`, spending one of
+    /// the task's attempts on a bind no bridge held.
+    fn not_taken(&mut self, minted: Handle) {
+        let _ = revoke(minted);
+        let _ = delete(minted);
+        let found = (0..SLOTS).find(|&i| {
+            self.slots[i]
+                .as_ref()
+                .is_some_and(|s| s.guest && s.bound == minted)
+        });
+        let Some(s) = found.and_then(|i| self.slots[i].as_mut()) else {
+            return;
+        };
+        s.bound = 0;
+        s.badge = 0;
+        let id = s.task;
+        self.bind_event(id, action::UNBIND, outcome::OK, b"not taken");
+        self.event(id, b"bind not taken", None);
     }
 
     /// A `bind` or `unbind` record for task `id`'s attempt.
@@ -4713,13 +4747,22 @@ fn main(arg: u64) -> u64 {
                 let mut out = [0u8; 256];
                 let n = r.handle(msg, badge, &mut out);
                 // `BIND`'s capability goes with its reply; the slot keeps
-                // its own, to revoke.
-                let pass = r.pass.take();
+                // its own, to revoke. A reply not taken (the bridge
+                // stopped waiting) gives it to no one: the bind is undone
+                // (#302).
+                match r.pass.take() {
+                    Some(h) => {
+                        let given = cap != 0 && try_send_cap(cap, &out[..n], h, SEND, 0).is_ok();
+                        if !given {
+                            r.not_taken(h);
+                        }
+                    }
+                    None if cap != 0 => {
+                        let _ = try_send(cap, &out[..n]);
+                    }
+                    None => {}
+                }
                 if cap != 0 {
-                    let _ = match pass {
-                        Some(h) => try_send_cap(cap, &out[..n], h, SEND, 0),
-                        None => try_send(cap, &out[..n]),
-                    };
                     let _ = delete(cap);
                 }
             }

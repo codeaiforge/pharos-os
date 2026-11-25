@@ -22,7 +22,11 @@
 //! `restart`, during whose first attempt the kernel kills the runtime: the
 //! guest's next request, through the capability the killed runtime
 //! minted, is refused by the new one, and the retried attempt completes
-//! with its checkpoint and no earlier bytes in its buffer (M6.3 review). The runner checks the guest's serial log (what
+//! with its checkpoint and no earlier bytes in its buffer (M6.3 review).
+//! The bridge runs with argument 1: each `BIND` follows one whose reply no
+//! one takes, which the runtime must undo (`bind not taken`), so only
+//! `hold`'s first attempt is ended by a `BIND` (#302, M6.3 review R-3).
+//! The runner checks the guest's serial log (what
 //! it can reach: no network, disk, shared mount, or second port) and the
 //! audit trail. Runs under UEFI (D-009), in the `kvm` matrix cell only
 //! (bridge.md, decided open question 4).
@@ -207,6 +211,19 @@ fn run(t: &mut TestRun) {
     t.check(
         "every attempt bound, and its capability revoked as it ended",
         count(b"bridge: bound") == attempts && count(b"bridge: unbound") == attempts - 2,
+    );
+    // #302 (M6.3 review R-3): a BIND whose reply no one took was undone,
+    // so the next BIND got the same attempt; only the restarted bridge's
+    // ended one. Without the undo, every case's next BIND ends its
+    // attempt (`bridge restarted`) and the attempt counts above differ.
+    let ends_with = |tail: &[u8]| lines.iter().filter(|l| l.ends_with(tail)).count();
+    t.check(
+        "a BIND whose reply no one took was undone",
+        ends_with(b" bind not taken") >= 1,
+    );
+    t.check(
+        "only hold's first attempt was ended by a BIND",
+        ends_with(b" bridge restarted") == 1,
     );
     t.check(
         "every case ended as it should",

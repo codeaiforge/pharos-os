@@ -4027,8 +4027,9 @@ fn vault_audit(image: &Path, log: &str, server_log: &Path) -> Result<()> {
 /// with the bridge's reason as the task's failure; task 12 again; task 13
 /// `hold`, its first attempt ended by the restarted bridge's `BIND`; task
 /// 14 `restart`, its second attempt bound by the restarted runtime. Every
-/// attempt bound and unbound; the secret's value in neither the trail nor
-/// the console.
+/// attempt bound and unbound; the binds the bridge did not take undone
+/// (`not taken`, #302), and no attempt but `hold`'s first ended by a
+/// `BIND`; the secret's value in neither the trail nor the console.
 fn bridge_audit(image: &Path, log: &str) -> Result<()> {
     let value = pharos_services::TEST_SECRET_VALUE;
     let streams = store_image::audit(image)?;
@@ -4084,6 +4085,23 @@ fn bridge_audit(image: &Path, log: &str) -> Result<()> {
             }
             return Err(format!("the audit trail has no record like {want:?}"));
         }
+    }
+    // #302: the bridge's BINDs whose replies no one took were undone, and
+    // only hold's first attempt was ended by a BIND.
+    let unbinds = |why: &str| {
+        lines
+            .iter()
+            .filter(|l| l.contains(" Event unbind guest task ") && l.ends_with(why))
+            .count()
+    };
+    let (untaken, restarted) = (
+        unbinds(" bridge outcome 1 not taken"),
+        unbinds(" bridge restarted"),
+    );
+    if untaken == 0 || restarted != 1 {
+        return Err(format!(
+            "expected undone binds and one bridge restarted, got {untaken} and {restarted}"
+        ));
     }
     println!("  audit trail: {} records; the guest's binds:", lines.len());
     for l in lines.iter().filter(|l| l.contains("bind guest")) {

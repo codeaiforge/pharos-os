@@ -7,11 +7,14 @@
 //!   and attempt; the guest answers with the same. Until it does, the
 //!   bridge discards up to [`RESYNC`] bytes ([`Decoder`]).
 //! - `REQUEST` (guest to bridge): one agents v1 agent message (length u8,
-//!   at most [`MAX_MESSAGE`]), then the bytes the operation reads from the
-//!   agent's buffer ([`parse_request`]); only the operations in [`PASSED`].
+//!   so at most [`MAX_MESSAGE`], 255 bytes), then the bytes the operation
+//!   reads from the agent's buffer ([`parse_request`]); only the
+//!   operations in [`PASSED`].
 //! - `REPLY` (bridge to guest): the runtime's reply message (length u8),
 //!   then the bytes the operation wrote at the start of the buffer
-//!   ([`reply_len`]).
+//!   ([`reply_len`]). A reply over 255 bytes is not framed: the bridge
+//!   fails the attempt with [`REPLY_TOO_LONG`]. No passed operation's
+//!   reply comes near it.
 //! - `ERROR` (bridge to guest): a status byte and a reason; the bridge
 //!   then ends the attempt.
 //!
@@ -36,8 +39,20 @@ pub mod kind {
 pub const HEADER: usize = 8;
 /// Largest payload.
 pub const MAX_PAYLOAD: usize = 70_000;
-/// Largest agents v1 message in a frame.
-pub const MAX_MESSAGE: usize = 256;
+/// Largest agents v1 message in a frame, either way: what the length byte
+/// holds (#307, M6.3 review). The kernel carries 256 bytes, but no
+/// operation in [`PASSED`] comes near: a `LOG` or `FAIL` of
+/// [`agents::MAX_TEXT`] is 202 bytes, and the runtime's longest reply to
+/// one, `TASK`'s, is 14 (tested below).
+pub const MAX_MESSAGE: usize = u8::MAX as usize;
+/// Why the bridge fails an attempt whose reply does not fit a frame.
+pub const REPLY_TOO_LONG: &[u8] = b"bridge: reply over 255 bytes";
+/// How long the bridge waits for the runtime's reply to a guest's request
+/// (#302, M6.3 review R-3): the runtime's longest, an HTTPS `REQUEST`
+/// ([`agents::REQUEST_US`]), and a margin, so the guest is never told the
+/// attempt ended while its request goes on and takes effect.
+pub const CALL_US: u64 = agents::REQUEST_US + 5_000_000;
+const _: () = assert!(CALL_US >= agents::REQUEST_US + 2_000_000);
 /// Largest buffer data in a frame: the agent buffer.
 pub const MAX_DATA: usize = agents::MAX_BUFFER as usize;
 /// Bytes discarded looking for the guest's `HELLO` before the attempt
@@ -577,7 +592,7 @@ mod tests {
         ] {
             assert_eq!(check(&msg(&r), b"", &mut out), Err(Bad::NotPassed), "{r:?}");
         }
-        // Malformed: empty, over 256, not agents v1, cut short.
+        // Malformed: empty, over 255, not agents v1, cut short.
         assert_eq!(parse_request(&[]), Err(Bad::Message));
         assert_eq!(parse_request(&[0]), Err(Bad::Message));
         assert_eq!(parse_request(&[5, 1, 10]), Err(Bad::Message));
@@ -648,6 +663,66 @@ mod tests {
         let n = error(status::BAD_REQUEST, Bad::Kind.reason(), &mut e).unwrap();
         assert_eq!(e[0], status::BAD_REQUEST);
         assert_eq!(&e[1..n], b"guest protocol: bad kind");
+    }
+
+    /// #307 (M6.3 review): the length byte's 255 bytes, both ways, and
+    /// every passed operation's longest request and reply well inside.
+    #[test]
+    fn messages_and_replies_fit_the_length_byte() {
+        assert_eq!(MAX_MESSAGE, usize::from(u8::MAX));
+        let mut out = std::vec![0u8; MAX_PAYLOAD];
+        assert!(encode_request(&[1; MAX_MESSAGE], b"", &mut out).is_some());
+        assert_eq!(encode_request(&[1; MAX_MESSAGE + 1], b"", &mut out), None);
+        let mut head = [0u8; 1 + MAX_MESSAGE];
+        assert_eq!(reply_head(&[7; MAX_MESSAGE], &mut head), Some(256));
+        assert_eq!((head[0], head[255]), (255, 7));
+        // What the kernel carries, but no frame: the bridge fails the
+        // attempt with its own reason, not as a bad reply.
+        assert_eq!(reply_head(&[7; MAX_MESSAGE + 1], &mut head), None);
+        assert_eq!(REPLY_TOO_LONG, b"bridge: reply over 255 bytes");
+
+        let text = std::vec![b'x'; agents::MAX_TEXT];
+        for req in [
+            Request::Log { text: &text },
+            Request::Fail { reason: &text },
+        ] {
+            let n = msg(&req).len();
+            assert!(n <= MAX_MESSAGE, "{req:?} is {n} bytes");
+        }
+        let mut r = [0u8; 256];
+        let replies = [
+            Assigned {
+                task: u32::MAX,
+                attempt: u8::MAX,
+                input_len: u32::MAX,
+                checkpoint_len: u32::MAX,
+            }
+            .encode(&mut r)
+            .unwrap(),
+            gateway::Answered::default().encode().len(),
+            agents::Asked::Pending.encode(&mut r).unwrap(),
+            crate::Info {
+                name: agents::NAME,
+                low: agents::VERSION,
+                high: agents::VERSION,
+                details: &[0; 2],
+            }
+            .encode(&mut r)
+            .unwrap(),
+        ];
+        // The gateway's reply is 11 bytes since its `sent` mark (#293).
+        assert_eq!(replies, [14, 11, 2, 12]);
+        assert!(replies.iter().all(|n| *n <= MAX_MESSAGE));
+    }
+
+    /// #302 (M6.3 review R-3): the bridge waits out the runtime's longest
+    /// request, two gateway tries of 35 s and both records of 2 s, with
+    /// 5 s to spare (the compile-time asserts hold the relations).
+    #[test]
+    fn the_bridge_waits_out_the_runtimes_longest_request() {
+        assert_eq!(gateway::WAIT_US, 35_000_000);
+        assert_eq!(agents::REQUEST_US, 74_250_000);
+        assert_eq!(CALL_US, 79_250_000);
     }
 
     #[test]

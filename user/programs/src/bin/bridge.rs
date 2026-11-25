@@ -20,9 +20,17 @@
 //! capability; the bridge's next use fails, the guest gets `ERROR`
 //! (`attempt ended`), and the bridge binds again.
 //!
+//! A request waits [`bridge::CALL_US`] for the runtime, past the
+//! runtime's longest (#302). A reply over 255 bytes does not fit a frame:
+//! the attempt fails with [`bridge::REPLY_TOO_LONG`] (#307).
+//!
 //! `bridge: ready` on the console says it holds the device: until then
 //! the host keeps the guest off the socket (the firmware drives every
 //! virtio-console, bridge.md).
+//!
+//! Argument 1 (the `bridge` test kernel, #302): before each `BIND`, one
+//! more whose reply no one takes, as a bridge whose wait ended leaves. The
+//! runtime must undo that bind, so the next `BIND` gets the same attempt.
 
 #![no_std]
 #![no_main]
@@ -35,7 +43,7 @@ use pharos_programs::virtio_console::{Console, Sizes};
 use pharos_proto::agents::{self, Bound, MAX_BUFFER, Request};
 use pharos_proto::bridge::{self, Bad, Decoder, Hello, MAX_PAYLOAD, Step, kind};
 use pharos_proto::status;
-use pharos_user::rights::{READ, WRITE};
+use pharos_user::rights::{READ, SEND, WRITE};
 use pharos_user::{
     Error, Handle, Mapped, Received, call_timeout, debug_write, delete, endpoint_create,
     irq_create, irq_notify, mem_map, mem_share, receive_timeout, send, sleep, try_send, uptime,
@@ -50,9 +58,11 @@ const RUNTIME: Handle = 4;
 const BASE: u64 = 0x1000_0000;
 /// Guest silence during an attempt, outside a pending request.
 const SILENT_US: u64 = 60_000_000;
-/// A request through the runtime: the gateway's 35 s and some.
-const CALL_US: u64 = 40_000_000;
+/// A request through the runtime: past the runtime's longest (#302).
+const CALL_US: u64 = bridge::CALL_US;
 const BIND_US: u64 = 2_000_000;
+/// `init`'s argument for the late-`BIND` check (module docs).
+const LATE_BIND: u64 = 1;
 /// Between `BIND`s while none is bound.
 const IDLE_US: u64 = 1_000_000;
 /// `pass`'s answer when the runtime no longer serves the attempt.
@@ -202,7 +212,9 @@ impl Bridge {
         let mut data = alloc::vec![0u8; n];
         self.buffer.read_bytes(0, &mut data);
         let mut head = [0u8; 1 + bridge::MAX_MESSAGE];
-        let h = bridge::reply_head(reply, &mut head).ok_or(&b"bad reply"[..])?;
+        // No passed operation's reply is this long (#307): the request
+        // took effect, but its reply cannot be framed.
+        let h = bridge::reply_head(reply, &mut head).ok_or(bridge::REPLY_TOO_LONG)?;
         if !self.write(kind::REPLY, &[&head[..h], &data]) {
             return Err(b"guest silent");
         }
@@ -246,10 +258,15 @@ impl Bridge {
     }
 }
 
-/// `BIND`: a waiting guest attempt's capability, or none.
-fn bind(reply: Handle) -> Option<(Handle, Bound)> {
+/// `BIND`: a waiting guest attempt's capability, or none. With `late`,
+/// first one whose reply goes to `late`, an endpoint no one receives on,
+/// so the runtime cannot deliver it (the late-`BIND` check, module docs).
+fn bind(reply: Handle, late: Option<Handle>) -> Option<(Handle, Bound)> {
     let mut req = [0u8; 8];
     let n = agents::encode(&Request::Bind, &mut req)?;
+    if let Some(late) = late {
+        let _ = send(RUNTIME, &req[..n], late, SEND, 0);
+    }
     let mut msg = [0u8; 256];
     match call_timeout(RUNTIME, &req[..n], reply, &mut msg, BIND_US) {
         Ok(Received::Message { len, cap, .. }) if cap != 0 => {
@@ -265,12 +282,20 @@ fn bind(reply: Handle) -> Option<(Handle, Bound)> {
     }
 }
 
-fn main(_: u64) -> u64 {
+fn main(arg: u64) -> u64 {
     let Ok(irq_ep) = endpoint_create() else {
         return 1;
     };
     let Ok(reply) = endpoint_create() else {
         return 1;
+    };
+    let late = if arg == LATE_BIND {
+        let Ok(late) = endpoint_create() else {
+            return 1;
+        };
+        Some(late)
+    } else {
+        None
     };
     let Ok(irq) = irq_create(DEVICE, 0) else {
         return 2;
@@ -298,7 +323,7 @@ fn main(_: u64) -> u64 {
         return 6;
     }
     loop {
-        let Some((slot, bound)) = bind(reply) else {
+        let Some((slot, bound)) = bind(reply, late) else {
             b.discard(IDLE_US);
             continue;
         };
@@ -316,7 +341,12 @@ fn main(_: u64) -> u64 {
                 continue;
             }
             End::Guest(why) => {
-                b.error(status::BAD_REQUEST, why);
+                let code = if why == bridge::REPLY_TOO_LONG {
+                    status::INTERNAL
+                } else {
+                    status::BAD_REQUEST
+                };
+                b.error(code, why);
                 let mut msg = [0u8; 256];
                 let n = agents::encode(&Request::Fail { reason: why }, &mut msg).unwrap_or(0);
                 let req = msg[..n].to_vec();

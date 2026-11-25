@@ -146,6 +146,16 @@ class Refusals(unittest.TestCase):
         with self.assertRaises(ValueError):
             f.bridge.data_get("n" * 33)
 
+    def test_a_message_over_255_bytes_is_refused_before_sending(self):
+        # #307: a frame's message length is one byte.
+        f = Fake(b"", [reply(b"\x00")])
+        with self.assertRaisesRegex(ValueError, "2 to 255 bytes"):
+            f.bridge.call(bytes([pb.VERSION, pb.LOG]) + b"x" * 254)
+        reply_msg, _ = f.bridge.call(bytes([pb.VERSION, pb.LOG]) + b"x" * 253)
+        self.assertEqual(reply_msg, b"\x00")
+        (msg, data), = f.requests()
+        self.assertEqual((len(msg), data), (255, b""))
+
     def test_silence_raises(self):
         guest, _pharos = socket.socketpair()
         with self.assertRaises(pb.PharosError):

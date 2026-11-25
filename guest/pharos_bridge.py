@@ -9,7 +9,8 @@ any agent. The guest holds no credential; `request` names a gateway route,
 and the gateway adds the route's secret outside the guest.
 
 Frames: b"PB", version 1, kind (1 HELLO, 2 REQUEST, 3 REPLY, 4 ERROR), the
-payload's length (u32, little-endian), then the payload.
+payload's length (u32, little-endian), then the payload. A REQUEST's and a
+REPLY's message has a one-byte length, so at most 255 bytes (#307).
 """
 
 import os
@@ -20,6 +21,9 @@ PORT = "/dev/virtio-ports/org.pharos.bridge"
 
 HELLO, REQUEST, REPLY, ERROR = 1, 2, 3, 4
 MAX_PAYLOAD = 70_000
+# Largest agents v1 message in a frame: its length is one byte
+# (pharos_proto::bridge::MAX_MESSAGE, #307).
+MAX_MESSAGE = 255
 VERSION = 1  # agents v1
 # Operations (pharos_proto::agents::op).
 TASK, CHECKPOINT, COMPLETE, FAIL, LOG = 1, 2, 5, 6, 10
@@ -140,8 +144,8 @@ class Bridge:
     def call(self, msg, data=b""):
         """One agents v1 message and its buffer bytes: the reply message and
         the bytes the operation wrote. A non-OK status raises."""
-        if not 2 <= len(msg) <= 256:
-            raise ValueError("a message is 2 to 256 bytes")
+        if not 2 <= len(msg) <= MAX_MESSAGE:
+            raise ValueError(f"a message is 2 to {MAX_MESSAGE} bytes")
         self._send(REQUEST, bytes([len(msg)]) + msg + data)
         kind, p = self._frame()
         if kind == ERROR:

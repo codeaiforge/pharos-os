@@ -929,8 +929,9 @@ pub const AGENTS_BRIDGE: u32 = 0x81;
 /// gateway on the `vault` kernel's routes, table 12's), the runtime on its
 /// `guest` policy table (4) with the gateway as handle 12, the bridge
 /// holding the second virtio-console (the Tier 3 channel's Pharos end,
-/// which `cargo xtask` joins to the guest's port through one host socket),
-/// and `guestclient`, which runs the guest agent's tasks.
+/// which `cargo xtask` joins to the guest's port through one host socket)
+/// with argument 1, so each `BIND` follows one whose reply no one takes
+/// (#302), and `guestclient`, which runs the guest agent's tasks.
 pub const BRIDGE: &[Service] = &bridge_table(BOOT_ENTRIES);
 
 const BRIDGE_CAPS: [Give; 4] = [
@@ -962,7 +963,8 @@ const fn bridge_table(boot: [Service; 9]) -> [Service; 13] {
         Service {
             name: "bridge",
             path: b"bin/bridge",
-            arg: 0,
+            // Each `BIND` after one whose reply no one takes (#302).
+            arg: 1,
             kind: Kind::Daemon,
             restart: Restart::Up(3),
             caps: &BRIDGE_CAPS,
