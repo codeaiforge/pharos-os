@@ -54,6 +54,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Fixed
 
+- `derive` (system call 35) cut its badge to 24 bits, so `0x0100_0000` became unbadged, where `send` refuses a badge over the mask (#306, M6.3 review R-8, [syscalls-ipc.md](docs/architecture/syscalls-ipc.md)): it is now `TOO_LARGE`, in the host-tested decode; every caller's badge is within 24 bits
 - `pharos_proto::http` accepted `Transfer-Encoding: chunked` on an `HTTP/1.0` answer, which RFC 9112 section 6.1 says is faulty framing (#292, M6.2 review R-10, [gateway.md](docs/architecture/gateway.md)): it is now `MALFORMED`, a case in the malformed-answers test
 - A gateway or vault request that did not parse was answered but not recorded, though gateway.md says every refusal is (#291, M6.2 review R-9): both now record it (`malformed c<badge> bad` or `version`), 4 at once and then one every 10 s, the others counted in the next record (`pharos_programs::gateway::malformed_detail`, host-tested). The `secrets` kernel's `vaulter` sends ten and the runner finds the burst of 4
 - The gateway's intent record could lose the path, and part of the body's hash, to its 64-byte limit with a long route name, so it did not always identify the target (#290, M6.2 review R-8, [gateway.md](docs/architecture/gateway.md)): it is now `c<client> <method> <body length> <hash> <route><path>`, the hash over the whole target (the query included) and the body, so everything but the path fits with any route name; the query length is gone, covered by the hash. Host test of the longest case

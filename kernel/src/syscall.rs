@@ -567,11 +567,18 @@ pub fn decode(number: u64, args: [u64; 6]) -> Result<Call, Error> {
                 addr: args[1],
             })
         }
-        number::DERIVE => Ok(Call::Derive {
-            handle: args[0],
-            rights: args[1] as cap::Rights,
-            badge: args[2] as u32,
-        }),
+        number::DERIVE => {
+            // As `send` does (#306): a badge past 24 bits is refused, not
+            // cut to its low bits (which could make it 0, unbadged).
+            if args[2] > u64::from(cap::BADGE_MASK) {
+                return Err(Error::TooLarge);
+            }
+            Ok(Call::Derive {
+                handle: args[0],
+                rights: args[1] as cap::Rights,
+                badge: args[2] as u32,
+            })
+        }
         number::SECRETS_READ => {
             // A length of 0 asks only the size: no buffer to check.
             if args[2] != 0 {
@@ -2076,6 +2083,23 @@ mod tests {
                 badge: 7
             })
         );
+        // #306: the largest badge is taken; one past 24 bits is refused,
+        // not cut to 0 (unbadged) or to its low bits.
+        assert_eq!(
+            decode(35, [2, 0x10, 0xff_ffff, 0, 0, 0]),
+            Ok(Call::Derive {
+                handle: 2,
+                rights: 0x10,
+                badge: 0xff_ffff
+            })
+        );
+        for badge in [0x100_0000, 0x100_0007, 1 << 32, u64::MAX] {
+            assert_eq!(
+                decode(35, [2, 0x10, badge, 0, 0, 0]),
+                Err(Error::TooLarge),
+                "badge {badge:#x}"
+            );
+        }
         let write = |addr, len| decode(2, [1, addr, len, 0, 0, 0]);
         assert_eq!(write(0x40_0000, 257), Err(Error::TooLarge));
         assert_eq!(write(0x40_0000, u64::MAX), Err(Error::TooLarge));
