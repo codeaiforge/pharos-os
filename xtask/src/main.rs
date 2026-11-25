@@ -1057,7 +1057,7 @@ fn disk_image() -> Vec<u8> {
 type Module = (&'static str, Vec<u8>);
 
 /// User programs in `user/programs/src/bin/` (drivers.md).
-const USER_PROGRAMS: [&str; 37] = [
+const USER_PROGRAMS: [&str; 38] = [
     "hello",
     "devprobe",
     "irqprobe",
@@ -1095,6 +1095,7 @@ const USER_PROGRAMS: [&str; 37] = [
     "vault",
     "gateway",
     "bridge",
+    "proxy",
 ];
 
 /// A file for a filesystem image: its path and contents.
@@ -3839,8 +3840,27 @@ fn tls_audit(image: &Path) -> Result<()> {
             }
         }
     }
-    if lines.iter().any(|l| l.contains("dest 5")) {
+    if lines.iter().any(|l| l.contains("dest 7")) {
         return Err("the destination not listed has an intent recorded".into());
+    }
+    // Through `proxy` (#277): destination 6's TCP error (F1); destination
+    // 5's intent stored and its success refused, so no outcome (F5).
+    match outcome(6) {
+        Some(l) if l.ends_with("handshake 6") => {}
+        other => {
+            return Err(format!(
+                "destination 6: expected handshake 6, got {other:?}"
+            ));
+        }
+    }
+    let dest5 = lines
+        .iter()
+        .any(|l| l.contains(" Intent tls ") && l.contains("dest 5 "));
+    if !dest5 || outcome(5).is_some() {
+        return Err(format!(
+            "destination 5: expected an intent and no outcome, got intent {dest5}, outcome {:?}",
+            outcome(5)
+        ));
     }
     // The burst of 16 (#275), one a second earned while the kernel runs,
     // and the one earned back; without the limit, 5 + 32 + 1 = 38.

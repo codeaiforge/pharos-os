@@ -24,7 +24,7 @@ use pharos_kernel::{fs, ipc, kprintln, mm, pci, process, sched, storage, time};
 pharos_kernel::test_kernel!(run);
 
 /// Client steps that must pass.
-const STEPS: [&str; 11] = [
+const STEPS: [&str; 14] = [
     "tlsclient: buffer attached",
     "tlsclient: the good server's handshake completed",
     "tlsclient: the HTTP request written",
@@ -35,6 +35,9 @@ const STEPS: [&str; 11] = [
     "tlsclient: a certificate for another name refused with NAME",
     "tlsclient: an authority not pinned refused with UNKNOWN_ISSUER",
     "tlsclient: a destination not listed refused with NO_ACCESS",
+    "tlsclient: a TCP_POLL count over the window is a TCP error (review F1)",
+    "tlsclient: a success whose outcome is not stored is NO_AUDIT (review F5)",
+    "tlsclient: a connection idle past the limit is closed (review F3)",
     "tlsclient: a loop of OPENs refused with OVER_LIMIT, then one earned back",
 ];
 
@@ -82,8 +85,8 @@ fn run(t: &mut TestRun) {
 
     let summary = ipc::poll(&report, Duration::from_secs(30));
     t.check(
-        "every service and client succeeded: 5 ready, 0 failed",
-        summary.is_some_and(|m| m.bytes() == [5, 0, 0, 0]),
+        "every service and client succeeded: 6 ready, 0 failed",
+        summary.is_some_and(|m| m.bytes() == [6, 0, 0, 0]),
     );
     let lines: Vec<Vec<u8>> = process::debug_output()
         .into_iter()

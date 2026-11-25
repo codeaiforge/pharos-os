@@ -378,24 +378,63 @@ const TLS_AUDITED_CAPS: [Give; 7] = [
     send(Ep::Audit, AUDIT_TLS),
 ];
 
+/// The destination `proxy` fakes, so its `TCP_POLL` counts are its own
+/// (#277): nothing listens there.
+pub const TLS_ROGUE: Dest = ([10, 0, 2, 2], 47_448);
+/// The TLS service's idle limit in the `tls` kernel, in seconds (its
+/// argument; #277): 60 elsewhere.
+pub const TLS_TEST_IDLE: u64 = 3;
+
 /// The `tls` kernel (#273, tls.md): the network, storage, and audit
-/// services, the TLS service with its audit trail, and `tlsclient`
-/// (`netclient` 6), whose destinations 0 to 4 are [`TLS_SERVERS`].
+/// services, `proxy` in front of the network and audit services (#277),
+/// the TLS service with its audit trail through it and a 3 s idle limit,
+/// and `tlsclient` (`netclient` 6), whose destinations 0 to 4 are
+/// [`TLS_SERVERS`], 5 the good server again (its success is refused by
+/// `proxy`), and 6 [`TLS_ROGUE`].
 pub const TLS: &[Service] = &[
     NET,
     STORE,
     audit(1),
     Service {
-        name: "tls",
-        path: b"bin/tls",
+        name: "proxy",
+        path: b"bin/proxy",
         arg: 0,
         kind: Kind::Daemon,
-        restart: Restart::Up(3),
-        caps: &TLS_AUDITED_CAPS,
+        restart: Restart::Never,
+        caps: &[
+            CONSOLE,
+            receive(Ep::Proxy),
+            REPORT,
+            send(Ep::Net, TLS_NET_PORT),
+            send(Ep::Audit, AUDIT_TLS),
+        ],
         net: &[],
         tcp: &TLS_SERVERS,
         tls: &[],
         after: &[0, 2],
+        // Its copy of the TLS service's 64 KiB network buffer, and that one.
+        limit: 64,
+        gains: &[],
+    },
+    Service {
+        name: "tls",
+        path: b"bin/tls",
+        arg: TLS_TEST_IDLE,
+        kind: Kind::Daemon,
+        restart: Restart::Up(3),
+        caps: &[
+            TLS_CAPS[0],
+            TLS_CAPS[1],
+            TLS_CAPS[2],
+            TLS_CAPS[3],
+            TLS_CAPS[4],
+            send(Ep::Proxy, 1),
+            send(Ep::Proxy, 2),
+        ],
+        net: &[],
+        tcp: &[],
+        tls: &[],
+        after: &[3],
         limit: TLS_LIMIT,
         gains: &[],
     },
@@ -414,8 +453,10 @@ pub const TLS: &[Service] = &[
             (TLS_SERVERS[2].0, TLS_SERVERS[2].1, TLS_TEST_NAME),
             (TLS_SERVERS[3].0, TLS_SERVERS[3].1, TLS_TEST_NAME),
             (TLS_SERVERS[4].0, TLS_SERVERS[4].1, TLS_TEST_NAME),
+            (TLS_SERVERS[0].0, TLS_SERVERS[0].1, TLS_TEST_NAME),
+            (TLS_ROGUE.0, TLS_ROGUE.1, TLS_TEST_NAME),
         ],
-        after: &[3],
+        after: &[4],
         // Its 16 KiB buffer for the request and the reply.
         limit: 8,
         gains: &[],

@@ -73,7 +73,8 @@ const OPEN_EVERY_US: u64 = 1_000_000;
 /// How long a handshake may take.
 const HANDSHAKE_US: u64 = 10_000_000;
 /// A connection with no client request and no data from the server for
-/// this long is closed (tls.md, budgets; review F3, #274).
+/// this long is closed (tls.md, budgets; review F3, #274); a nonzero
+/// argument sets it in seconds instead (the `tls` kernel's 3, #277).
 const IDLE_US: u64 = 60_000_000;
 /// How often open connections are polled.
 const TICK_US: u64 = 10_000;
@@ -158,6 +159,7 @@ struct Service {
     conns: [Option<Conn>; MAX_CONNS],
     net_buffer: Option<Mapped>,
     reply: Handle,
+    idle_us: u64,
 }
 
 fn say(msg: &[u8]) {
@@ -632,7 +634,7 @@ impl Service {
             let Some(mut c) = self.conns[i].take() else {
                 continue;
             };
-            if !matches!(c.phase, Phase::Handshake { .. }) && now > c.active + IDLE_US {
+            if !matches!(c.phase, Phase::Handshake { .. }) && now > c.active + self.idle_us {
                 self.conns[i] = Some(c);
                 self.finish(i, true);
                 continue;
@@ -728,7 +730,7 @@ fn push_number(out: &mut Vec<u8>, mut n: u64) {
     out.extend_from_slice(&digits[i..]);
 }
 
-fn main(_: u64) -> u64 {
+fn main(arg: u64) -> u64 {
     let rng = match Rng::init(RNG_DEVICE, BASE) {
         Ok(r) => Some(r),
         Err(why) => {
@@ -765,6 +767,10 @@ fn main(_: u64) -> u64 {
         conns: Default::default(),
         net_buffer,
         reply,
+        idle_us: match arg {
+            0 => IDLE_US,
+            s => s.saturating_mul(1_000_000),
+        },
     };
     if send(REPORT, b"ready", 0, 0, 0).is_err() {
         return 1;

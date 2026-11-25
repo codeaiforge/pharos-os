@@ -214,6 +214,7 @@ struct Init {
     tls: Handle,
     vault: Handle,
     gateway: Handle,
+    proxy: Handle,
     devices: [(Handle, u32); 8],
     device_count: usize,
     state: [State; MAX_SERVICES],
@@ -311,6 +312,7 @@ impl Init {
                 Ep::Tls => self.tls,
                 Ep::Vault => self.vault,
                 Ep::Gateway => self.gateway,
+                Ep::Proxy => self.proxy,
             },
             // Per entry, in `grant`.
             Object::Arrived(_) => return None,
@@ -2234,7 +2236,7 @@ fn mode_word(mode: Mode) -> &'static [u8] {
 fn main(arg: u64) -> u64 {
     let (table_number, kernel_mode, copy) = pharos_programs::system::split_arg(arg);
     let table = pharos_services::table(table_number);
-    let mut handles = [0; 12];
+    let mut handles = [0; 13];
     for h in handles.iter_mut() {
         match endpoint_create() {
             Ok(e) => *h = e,
@@ -2257,6 +2259,7 @@ fn main(arg: u64) -> u64 {
         tls,
         vault,
         gateway,
+        proxy,
     ] = handles;
     let (devices, device_count) = devices();
     let mut init = Init {
@@ -2273,6 +2276,7 @@ fn main(arg: u64) -> u64 {
         tls,
         vault,
         gateway,
+        proxy,
         devices,
         device_count,
         state: [State::Pending; MAX_SERVICES],

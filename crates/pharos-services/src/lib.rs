@@ -99,6 +99,10 @@ pub enum Ep {
     /// The egress gateway's (M6.2, gateway.md): the agent runtime is
     /// client 1; test programs 2.
     Gateway,
+    /// A test table's proxy in front of the TLS service's network and
+    /// audit services (#277): the TLS service's network requests have
+    /// badge 1, its audit requests badge 2.
+    Proxy,
 }
 
 impl Ep {
@@ -116,6 +120,7 @@ impl Ep {
             Self::Tls => "tls",
             Self::Vault => "vault",
             Self::Gateway => "gateway",
+            Self::Proxy => "proxy",
         })
     }
 }

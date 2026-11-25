@@ -312,6 +312,19 @@ fn tls_open(reply: Handle, d: u8) -> Option<(u8, u8, u8)> {
     tls_call(reply, Tls::Open { destination: d }).and_then(|(r, n)| parse_opened(&r[..n]))
 }
 
+/// [`tls_open`], waiting at most `micros`: a service that died answers
+/// nothing (#277).
+fn tls_open_within(reply: Handle, d: u8, micros: u64) -> Option<(u8, u8, u8)> {
+    use pharos_proto::tls::{Request as Tls, encode, parse_opened};
+    let mut msg = [0u8; 8];
+    let n = encode(&Tls::Open { destination: d }, &mut msg)?;
+    let mut out = [0u8; 16];
+    match pharos_user::call_timeout(NET, &msg[..n], reply, &mut out, micros) {
+        Ok(pharos_user::Received::Message { len, .. }) => parse_opened(&out[..len.min(16)]),
+        _ => None,
+    }
+}
+
 /// The `tls` kernel's client (argument 6, #273).
 fn tls_round(reply: Handle) -> u64 {
     use pharos_proto::tls::{self, Request as Tls, reason};
@@ -409,7 +422,46 @@ fn tls_round(reply: Handle) -> u64 {
     report(
         &mut f,
         "tlsclient: a destination not listed refused with NO_ACCESS",
-        tls_open(reply, 5).is_some_and(|(s, ..)| s == tls::NO_ACCESS),
+        tls_open(reply, 7).is_some_and(|(s, ..)| s == tls::NO_ACCESS),
+    );
+    // The M6.1 review's fixes (#277), through `proxy`: destination 6's
+    // TCP_POLL counts are u32::MAX (F1), and destination 5's success
+    // outcome is refused (F5). Both are answered, so the service lived.
+    report(
+        &mut f,
+        "tlsclient: a TCP_POLL count over the window is a TCP error (review F1)",
+        tls_open_within(reply, 6, 5_000_000) == Some((tls::HANDSHAKE, 0, reason::TCP)),
+    );
+    report(
+        &mut f,
+        "tlsclient: a success whose outcome is not stored is NO_AUDIT (review F5)",
+        tls_open(reply, 5).is_some_and(|(s, ..)| s == tls::NO_AUDIT),
+    );
+    // F3: the table's idle limit is 3 s; the closed connection's READ is
+    // answered CLOSED, where an open one would wait for data.
+    let idle = tls_open(reply, 0).and_then(|(s, conn, _)| (s == OK).then_some(conn));
+    pharos_user::sleep(4_500_000);
+    let read = idle.and_then(|conn| {
+        let mut msg = [0u8; 16];
+        let n = tls::encode(
+            &Tls::Read {
+                conn,
+                offset: 0,
+                max: 16,
+            },
+            &mut msg,
+        )?;
+        let mut out = [0u8; 16];
+        let len = match pharos_user::call_timeout(NET, &msg[..n], reply, &mut out, 2_000_000) {
+            Ok(pharos_user::Received::Message { len, .. }) => len.min(out.len()),
+            _ => return None,
+        };
+        parse_count(&out[..len])
+    });
+    report(
+        &mut f,
+        "tlsclient: a connection idle past the limit is closed (review F3)",
+        read.is_some_and(|(s, _)| s == tls::CLOSED),
     );
     // A loop of OPENs (#275): past the burst, refused with OVER_LIMIT and
     // nothing recorded (the runner counts the intents); a second later,
