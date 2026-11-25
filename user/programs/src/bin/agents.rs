@@ -1466,9 +1466,11 @@ struct Slot {
     /// Its one sensitive call waiting for the user (#128).
     confirm: Option<Confirm>,
     /// A Tier 3 guest's attempt (#298): no process (`process` is 0); the
-    /// capability minted for the bridge once bound, else 0.
+    /// capability minted for the bridge once bound, else 0, and its badge
+    /// (`agents::guest_badge`, #301), the only one this attempt answers.
     guest: bool,
     bound: Handle,
+    badge: u32,
 }
 
 struct Runtime {
@@ -1806,6 +1808,23 @@ impl Runtime {
         }
     }
 
+    /// The slot a request's `badge` speaks for: an agent process's slot
+    /// badge for its process's slot, never a guest's; a guest attempt's
+    /// badge only for the slot holding that attempt bound (#301, M6.3
+    /// review). A request queued before its attempt ended, or sent through
+    /// a capability an earlier runtime minted, names no slot.
+    fn slot_of(&self, badge: u32) -> Option<usize> {
+        if agents::is_guest(badge) {
+            return (0..SLOTS).find(|&i| {
+                self.slots[i]
+                    .as_ref()
+                    .is_some_and(|s| s.guest && s.bound != 0 && s.badge == badge)
+            });
+        }
+        let i = agent_slot(badge)?;
+        (!self.slots[i].as_ref().is_some_and(|s| s.guest)).then_some(i)
+    }
+
     /// `BIND` from the bridge (#298): the first guest attempt waiting for
     /// it gets a capability minted for it, recorded before it is given.
     /// One already held is revoked first, its attempt failed.
@@ -1828,13 +1847,15 @@ impl Runtime {
             })
             .ok_or(status::NOT_FOUND)?;
         let id = self.slots[i].as_ref().map_or(0, |s| s.task);
-        let minted = mint(i).ok_or(status::INTERNAL)?;
+        let badge = agents::guest_badge(id, self.attempt(id));
+        let minted = mint(badge).ok_or(status::INTERNAL)?;
         if !self.bind_event(id, action::BIND, outcome::OK, b"") {
             let _ = delete(minted);
             return Err(NO_AUDIT);
         }
         if let Some(s) = self.slots[i].as_mut() {
             s.bound = minted;
+            s.badge = badge;
             s.last = uptime();
         }
         self.pass = Some(minted);
@@ -2006,6 +2027,7 @@ impl Runtime {
             confirm: None,
             guest,
             bound: 0,
+            badge: 0,
         });
         // Every grant is recorded before it is given; none is given if a
         // record fails (#108).
@@ -2342,11 +2364,11 @@ impl Runtime {
             .flatten();
         let _ = delete(memory);
         let Some(m) = mapped else { return };
-        if let Some(s) = agent_slot(badge).and_then(|i| self.slots[i].as_mut()) {
+        if let Some(s) = self.slot_of(badge).and_then(|i| self.slots[i].as_mut()) {
             if let Some(old) = s.buffer.replace(m) {
                 unmap(old);
             }
-        } else if badge >= CONTROL {
+        } else if badge >= CONTROL && !agents::is_guest(badge) {
             let at = self
                 .controls
                 .iter()
@@ -4264,7 +4286,7 @@ impl Runtime {
     /// request is held with its reply capability `cap` and served later
     /// ([`Runtime::serve_held`]); one more while one is held is `BUSY`.
     fn admit(&mut self, badge: u32, msg: &[u8], cap: Handle) -> bool {
-        let Some(i) = agent_slot(badge) else {
+        let Some(i) = self.slot_of(badge) else {
             return true;
         };
         let Some(rate) = self.rate(i) else {
@@ -4325,13 +4347,13 @@ impl Runtime {
         let req = match parse(msg) {
             Ok(req) => req,
             Err(refused) => {
-                if let Some(i) = agent_slot(badge) {
+                if let Some(i) = self.slot_of(badge) {
                     self.note(i, refusal::MALFORMED, None);
                 }
                 return refusal(refused, VERSION, out);
             }
         };
-        let result = match agent_slot(badge) {
+        let result = match self.slot_of(badge) {
             Some(i) => {
                 let result = self.agent(i, req, out);
                 // `TOOL`, `SUBTASK`, and `KNOWLEDGE_PUT` record their own
@@ -4356,6 +4378,9 @@ impl Runtime {
                 }
                 result
             }
+            // An attempt that is over, or a capability from a runtime
+            // before this one (#301): the bridge ends what it holds.
+            None if agents::is_guest(badge) => Err(NO_SESSION),
             None if badge >= CONTROL => self.control(badge, req, out),
             None if badge == agents::TRUST => match req {
                 Request::Usage => {
@@ -4398,11 +4423,12 @@ impl Runtime {
 }
 
 /// A capability for the bridge (#298): `SEND` on the runtime's endpoint
-/// badged with `slot`, derived in the runtime's own table, so that
-/// revoking it reaches only what was passed on from it. `GRANT` lets the
-/// runtime pass it on; the bridge's copy has `SEND` alone.
-fn mint(slot: usize) -> Option<Handle> {
-    derive(SERVICE, SEND | GRANT, slot as u32 + 1).ok()
+/// with the attempt's `badge` (`agents::guest_badge`, #301), derived in
+/// the runtime's own table, so that revoking it reaches only what was
+/// passed on from it. `GRANT` lets the runtime pass it on; the bridge's
+/// copy has `SEND` alone.
+fn mint(badge: u32) -> Option<Handle> {
+    derive(SERVICE, SEND | GRANT, badge).ok()
 }
 
 /// The permission an agent request needs, if any.

@@ -18,8 +18,15 @@ case its task's input names:
   of bytes that are none, ending the task with the bridge's `ERROR`;
 - `again`: completes, so Pharos still binds after the hostile cases;
 - `hold`: on its first attempt, logs and waits (the test kernel then kills
-  the bridge, whose restart ends the attempt); completes on its second.
+  the bridge, whose restart ends the attempt); completes on its second;
+- `restart`: on its first attempt, makes a request, checkpoints, and logs;
+  the test kernel then kills the runtime, and the guest's next request,
+  through the capability the killed runtime minted, must be refused. On
+  its second attempt, its checkpoint is back and the buffer between its
+  input and the checkpoint is zero.
 """
+
+import time
 
 import os
 import socket
@@ -184,6 +191,28 @@ def hostile(name):
         return f"no error frame: {e.reason}"
 
 
+def restart(task):
+    if task.attempt == 1:
+        bridge.request("items", "/items")
+        bridge.checkpoint(b"before")
+        bridge.log("restart holding")
+        time.sleep(5)
+        try:
+            bridge.log("stale")
+        except PharosError as e:
+            return f"stale request refused, status {e.status}"
+        return "stale request served"
+    # The raw TASK reply: the input, zeros, then the checkpoint.
+    _, data = bridge.call(bytes([pb.VERSION, pb.TASK]))
+    gap = data[len(task.input) : pb.CHECKPOINT_AT]
+    clean = task.checkpoint == b"before" and len(gap) > 0 and not any(gap)
+    if clean:
+        bridge.complete("restarted ok")
+    else:
+        bridge.fail("restart: the checkpoint or the gap is wrong")
+    return f"checkpoint {task.checkpoint!r}, gap zero {clean}"
+
+
 while True:
     try:
         task_id, attempt = bridge.hello()
@@ -193,6 +222,9 @@ while True:
         say("task input", case)
         if case in HOSTILE:
             say(f"case {case}: {hostile(case)}")
+            continue
+        if case == "restart":
+            say(f"case restart: {restart(task)}")
             continue
         if case == "hold" and task.attempt == 1:
             bridge.log("holding")

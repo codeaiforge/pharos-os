@@ -252,6 +252,9 @@ pub const CONTROL: u32 = 0x100;
 pub const TRUST: u32 = 0x80;
 /// The bridge service's badge (#298), from `init`'s table.
 pub const BRIDGE: u32 = 0x81;
+/// The first badge of a guest attempt's capability (#301, M6.3 review):
+/// [`guest_badge`]. Not a control client's, though above [`CONTROL`].
+pub const GUEST: u32 = 0x80_0000;
 /// Largest file an agent keeps with `DATA_PUT`.
 pub const MAX_DATA: u32 = 64 << 10;
 /// Most files one agent keeps, whatever its `data_kb` (D-046, #212).
@@ -310,6 +313,23 @@ pub fn agent_slot(badge: u32) -> Option<usize> {
     (1..=SLOTS as u32)
         .contains(&badge)
         .then(|| badge as usize - 1)
+}
+
+/// The badge of the capability minted for a guest's attempt (#301, M6.3
+/// review): its task's low 15 bits and the attempt, so it names that
+/// attempt, not the slot. Attempts are stored and grow at each start, so
+/// no later attempt, even after the runtime restarts, gets a badge an
+/// earlier one had, until task IDs pass 32,768 more. A request under it is
+/// served only while that attempt is bound: one queued before the attempt
+/// ended, or sent through a capability a restarted runtime never minted
+/// (revocation cannot reach it), is refused.
+pub fn guest_badge(task: u32, attempt: u8) -> u32 {
+    GUEST | (task & 0x7fff) << 8 | u32::from(attempt)
+}
+
+/// True for a guest attempt's badge ([`guest_badge`]).
+pub fn is_guest(badge: u32) -> bool {
+    badge & GUEST != 0
 }
 
 /// Text for `LOG` and `FAIL`: 1 to [`MAX_TEXT`] printable ASCII bytes.
@@ -1485,5 +1505,19 @@ mod tests {
         assert_eq!(agent_slot(16), Some(15));
         assert_eq!(agent_slot(17), None);
         assert_eq!(agent_slot(CONTROL), None);
+    }
+
+    #[test]
+    fn guest_badges_name_attempts() {
+        let b = guest_badge(7, 2);
+        assert!(is_guest(b) && b <= 0xff_ffff, "within the kernel's 24 bits");
+        assert_ne!(b, guest_badge(7, 3));
+        assert_ne!(b, guest_badge(8, 2));
+        assert_eq!(guest_badge(0x8007, 2), b, "task IDs wrap at 32,768");
+        assert_eq!(guest_badge(0x7fff, 255), 0xff_ffff);
+        assert_eq!(agent_slot(b), None);
+        for badge in [0, 1, 16, TRUST, BRIDGE, CONTROL, CONTROL + 0xff] {
+            assert!(!is_guest(badge));
+        }
     }
 }

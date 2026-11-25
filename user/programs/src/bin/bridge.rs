@@ -55,6 +55,8 @@ const CALL_US: u64 = 40_000_000;
 const BIND_US: u64 = 2_000_000;
 /// Between `BIND`s while none is bound.
 const IDLE_US: u64 = 1_000_000;
+/// `pass`'s answer when the runtime no longer serves the attempt.
+const REFUSED: &[u8] = b"refused by the runtime";
 /// A frame to the guest: how long its transmit buffers may stay full.
 const WRITE_US: u64 = 10_000_000;
 
@@ -77,6 +79,9 @@ struct Bridge {
 enum End {
     /// The runtime ended it (or the guest's `COMPLETE` or `FAIL` did).
     Ended,
+    /// The runtime answered `NO_SESSION`: it serves this attempt no more,
+    /// though its capability may not be revoked (a restarted runtime).
+    Refused,
     /// The guest broke the protocol or went silent: `FAIL` with this.
     Guest(&'static [u8]),
 }
@@ -149,6 +154,7 @@ impl Bridge {
                     match self.request(slot, len) {
                         Ok(true) => deadline = uptime() + SILENT_US,
                         Ok(false) => return End::Ended,
+                        Err(REFUSED) => return End::Refused,
                         Err(why) => return End::Guest(why),
                     }
                 }
@@ -186,6 +192,12 @@ impl Bridge {
             return Ok(false);
         };
         let reply = &reply[..len.min(256)];
+        // The runtime no longer serves this attempt's badge: it ended, or
+        // the runtime restarted and never minted it (#301, M6.3 review).
+        if reply == [agents::NO_SESSION] {
+            self.error(status::CANCELLED, b"attempt ended");
+            return Err(REFUSED);
+        }
         let n = bridge::reply_len(&call.req, reply).min(self.buffer.len());
         let mut data = alloc::vec![0u8; n];
         self.buffer.read_bytes(0, &mut data);
@@ -216,8 +228,12 @@ impl Bridge {
         }
     }
 
-    /// Attaches the buffer through the attempt's capability.
+    /// Attaches the buffer through the attempt's capability, zeroed first,
+    /// so no earlier attempt's bytes reach this one in a reply's gaps
+    /// (#301, M6.3 review: `TASK`'s between its input and checkpoint).
     fn attach(&self, slot: Handle) -> bool {
+        self.buffer
+            .write_bytes(0, &alloc::vec![0u8; self.buffer.len()]);
         let mut msg = [0u8; 16];
         let Some(n) = agents::encode(&Request::Attach { len: MAX_BUFFER }, &mut msg) else {
             return false;
@@ -291,13 +307,22 @@ fn main(_: u64) -> u64 {
             let _ = delete(slot);
             continue;
         }
-        if let End::Guest(why) = b.attempt(slot, bound) {
-            b.error(status::BAD_REQUEST, why);
-            let mut msg = [0u8; 256];
-            let n = agents::encode(&Request::Fail { reason: why }, &mut msg).unwrap_or(0);
-            let req = msg[..n].to_vec();
-            let _ = call_timeout(slot, &req, reply, &mut msg, CALL_US);
-            say(b"bridge: attempt failed");
+        match b.attempt(slot, bound) {
+            End::Ended => {}
+            End::Refused => {
+                // Nothing to probe: the runtime answers it no more (#301).
+                say(b"bridge: refused by the runtime");
+                let _ = delete(slot);
+                continue;
+            }
+            End::Guest(why) => {
+                b.error(status::BAD_REQUEST, why);
+                let mut msg = [0u8; 256];
+                let n = agents::encode(&Request::Fail { reason: why }, &mut msg).unwrap_or(0);
+                let req = msg[..n].to_vec();
+                let _ = call_timeout(slot, &req, reply, &mut msg, CALL_US);
+                say(b"bridge: attempt failed");
+            }
         }
         // The runtime revoked the attempt's capability as it ended it.
         if try_send(slot, b"x") == Err(Error::Revoked) {

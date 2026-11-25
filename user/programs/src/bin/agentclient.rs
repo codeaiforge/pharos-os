@@ -597,8 +597,9 @@ fn s1(mut c: Client) -> u64 {
 /// `guest`, the Tier 3 guest agent the bridge speaks for, per case the
 /// guest runs (its input names it), each after the last ended. `agent`,
 /// `refusals`, and `again` must complete; each hostile case must fail
-/// with the bridge's reason; `hold` must complete on its second attempt,
-/// after the kernel killed the bridge during its first. `ok bridge:
+/// with the bridge's reason; `hold` and `restart` must complete on their
+/// second attempt, after the kernel killed the bridge, then the runtime,
+/// during their first. `ok bridge:
 /// <case>` for each as wanted.
 /// How long after `flood` the next case waits.
 const FLOOD_US: u64 = 3_000_000;
@@ -614,7 +615,7 @@ fn guest(c: Client) -> u64 {
         return 1;
     }
     say(b"ok bridge: a control client's BIND is refused");
-    let cases: [(&[u8], State, &[u8]); 13] = [
+    let cases: [(&[u8], State, &[u8]); 14] = [
         (b"agent", State::Done, b"hello from the guest"),
         (b"refusals", State::Done, b"refusals ok"),
         (b"magic", State::Failed, b"guest protocol: bad magic"),
@@ -636,6 +637,7 @@ fn guest(c: Client) -> u64 {
         (b"flood", State::Failed, b"guest protocol: bad magic"),
         (b"again", State::Done, b"again ok"),
         (b"hold", State::Done, b"held ok"),
+        (b"restart", State::Done, b"restarted ok"),
     ];
     let mut failed = 0;
     for (case, state, want) in cases {
@@ -648,7 +650,11 @@ fn guest(c: Client) -> u64 {
         }
         say(&line);
         // `hold`'s first attempt ends with the bridge (#300).
-        let attempts = if case == b"hold" { 2 } else { 1 };
+        let attempts = if case == b"hold" || case == b"restart" {
+            2
+        } else {
+            1
+        };
         let ok =
             ended.is_some_and(|(s, r)| s.state == state && s.attempts == attempts && r == want);
         let mut line = Vec::from(if ok {

@@ -789,6 +789,8 @@ fn bridge_checks(guest_log: &Path) -> Result<()> {
         "guest: completed again ok",
         "guest: case hold: holding attempt 1",
         "guest: completed held ok",
+        "guest: case restart: stale request refused, status 8",
+        "guest: case restart: checkpoint b'before', gap zero True",
     ]
     .map(String::from)
     .to_vec();
@@ -3928,7 +3930,8 @@ fn vault_audit(image: &Path, log: &str, server_log: &Path) -> Result<()> {
 /// Task 1 the LangGraph agent's granted request, through the gateway; task
 /// 2 its refusals; tasks 3 to 11 the hostile cases, each attempt unbound
 /// with the bridge's reason as the task's failure; task 12 again; task 13
-/// `hold`, its first attempt ended by the restarted bridge's `BIND`. Every
+/// `hold`, its first attempt ended by the restarted bridge's `BIND`; task
+/// 14 `restart`, its second attempt bound by the restarted runtime. Every
 /// attempt bound and unbound; the secret's value in neither the trail nor
 /// the console.
 fn bridge_audit(image: &Path, log: &str) -> Result<()> {
@@ -3962,6 +3965,11 @@ fn bridge_audit(image: &Path, log: &str) -> Result<()> {
     want.push(" client 3 Event unbind guest task 13/1  bridge outcome 1 bridge restarted".into());
     want.push(" client 3 Event bind guest task 13/2  bridge outcome 1 ".into());
     want.push(" client 3 Event unbind guest task 13/2  bridge outcome 1 attempt ended".into());
+    // Task 14: the runtime killed during its first attempt; the new one
+    // bound the second (no unbind for the first: its runtime was gone).
+    want.push(" client 3 Event bind guest task 14/1  bridge outcome 1 ".into());
+    want.push(" client 3 Event bind guest task 14/2  bridge outcome 1 ".into());
+    want.push(" client 3 Event unbind guest task 14/2  bridge outcome 1 attempt ended".into());
     for task in [1, 2, 12] {
         want.push(format!(
             " client 3 Event unbind guest task {task}/1  bridge outcome 1 attempt ended"

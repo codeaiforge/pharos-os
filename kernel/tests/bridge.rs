@@ -18,7 +18,11 @@
 //! which must fail its task with the bridge's reason; then one more task,
 //! so Pharos still binds; then `hold`, during whose first attempt the
 //! kernel kills the bridge: `init` restarts it, its `BIND` ends that
-//! attempt (`bridge restarted`), and the second attempt completes. The runner checks the guest's serial log (what
+//! attempt (`bridge restarted`), and the second attempt completes; then
+//! `restart`, during whose first attempt the kernel kills the runtime: the
+//! guest's next request, through the capability the killed runtime
+//! minted, is refused by the new one, and the retried attempt completes
+//! with its checkpoint and no earlier bytes in its buffer (M6.3 review). The runner checks the guest's serial log (what
 //! it can reach: no network, disk, shared mount, or second port) and the
 //! audit trail. Runs under UEFI (D-009), in the `kvm` matrix cell only
 //! (bridge.md, decided open question 4).
@@ -105,7 +109,9 @@ fn run(t: &mut TestRun) {
     let mut seen = 0;
     let mut lost = false;
     let mut killed = false;
-    // Each new line kept; the bridge killed once `hold` says it holds.
+    let mut runtime_killed = false;
+    // Each new line kept; the bridge killed once `hold` says it holds, the
+    // runtime once `restart` does.
     let mut keep = |lines: &mut Vec<Vec<u8>>| {
         let (now, new) = process::debug_output_since(seen);
         seen = now;
@@ -115,7 +121,12 @@ fn run(t: &mut TestRun) {
         };
         for (_, line) in new {
             if line == b"agents: guest: holding" && !killed {
-                killed = bridge(init).is_some_and(|b| process::kill(b, KILLED));
+                let bridge = child(init, &[pharos_services::AGENTS_BRIDGE]);
+                killed = bridge.is_some_and(|b| process::kill(b, KILLED));
+            }
+            if line == b"agents: guest: restart holding" && !runtime_killed {
+                let runtime = child(init, RUNTIME_BADGES);
+                runtime_killed = runtime.is_some_and(|r| process::kill(r, KILLED));
             }
             lines.push(line);
         }
@@ -134,6 +145,10 @@ fn run(t: &mut TestRun) {
     keep(&mut lines);
     t.check("no console line was lost", !lost);
     t.check("the bridge was found and killed during hold", killed);
+    t.check(
+        "the runtime was found and killed during restart",
+        runtime_killed,
+    );
     for line in &lines {
         kprintln!("  {}", core::str::from_utf8(line).unwrap_or("?"));
     }
@@ -175,12 +190,23 @@ fn run(t: &mut TestRun) {
         "the restarted bridge bound hold's second attempt, which completed",
         case("hold") && count(b"init: bridge ready") >= 2,
     );
+    // #301 (M6.3 review R-1, R-2): the request through the capability
+    // the killed runtime minted reaches no attempt of the new one.
+    t.check(
+        "after the runtime restarted, a request through its capability is refused",
+        !has(b"agents: guest: stale") && case("restart") && count(b"init: agents ready") >= 2,
+    );
+    t.check(
+        "the bridge ended the attempt the restarted runtime refused",
+        count(b"bridge: refused by the runtime") == 1,
+    );
     // One bind and one revocation per attempt, but the killed bridge's
-    // last, which its successor's BIND ended.
-    let attempts = HOSTILE.len() + 5;
+    // last, which its successor's BIND ended, and the killed runtime's,
+    // which the next refused.
+    let attempts = HOSTILE.len() + 7;
     t.check(
         "every attempt bound, and its capability revoked as it ended",
-        count(b"bridge: bound") == attempts && count(b"bridge: unbound") == attempts - 1,
+        count(b"bridge: bound") == attempts && count(b"bridge: unbound") == attempts - 2,
     );
     t.check(
         "every case ended as it should",
@@ -201,20 +227,29 @@ fn run(t: &mut TestRun) {
 /// The vector a killed service's end reports.
 const KILLED: u64 = 13;
 
-/// The one live child of `init` holding `SEND` on the runtime under the
-/// bridge's badge: the bridge. None if not exactly one.
-fn bridge(init: TaskId) -> Option<TaskId> {
+/// What only the runtime holds in the `bridge` table: its audit badge,
+/// its badge at `trust`, and badge 1 at the inference service and the
+/// gateway.
+const RUNTIME_BADGES: &[u32] = &[
+    pharos_services::AUDIT_RUNTIME,
+    pharos_services::TRUST_RUNTIME_BADGE,
+    1,
+];
+
+/// The one live child of `init` holding an endpoint with each of
+/// `badges`: the bridge for `AGENTS_BRIDGE`, the runtime for
+/// [`RUNTIME_BADGES`]. None if not exactly one.
+fn child(init: TaskId, badges: &[u32]) -> Option<TaskId> {
     let found: Vec<TaskId> = (process::ids().into_iter())
         .filter(|&id| {
             process::by_id(id).is_some_and(|p| {
                 let mut caps = p.caps.lock();
-                p.parent == Some(init)
-                    && (1..=MAX_HANDLES as u64).any(|h| {
-                        caps.get(h, 0).is_ok_and(|c| {
-                            matches!(c.object(), Object::Endpoint(_))
-                                && c.badge() == pharos_services::AGENTS_BRIDGE
-                        })
-                    })
+                let held: Vec<u32> = (1..=MAX_HANDLES as u64)
+                    .filter_map(|h| caps.get(h, 0).ok())
+                    .filter(|c| matches!(c.object(), Object::Endpoint(_)))
+                    .map(|c| c.badge())
+                    .collect();
+                p.parent == Some(init) && badges.iter().all(|b| held.contains(b))
             })
         })
         .collect();
