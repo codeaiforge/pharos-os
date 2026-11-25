@@ -191,31 +191,29 @@ pub fn release_detail(
     cut(d)
 }
 
-/// The intent's detail: `c<client> <route> <method> q<query length>
-/// b<body length> <first 8 bytes of the body's SHA-256, in hex> <path>`,
-/// cut to the audit limit (the path last, so it is what is cut).
+/// The intent's detail: `c<client> <method> <body length> <hash> <route><path>`,
+/// where the hash is the first 8 bytes of SHA-256 over the whole target
+/// (path and query), a zero byte, and the body, in hex. Everything before
+/// the route fits in the audit limit with any route name (#290, M6.2
+/// review R-8), so the stored intent always identifies the target and the
+/// body; only the path, last, is cut. A route name has no `/`, and a path
+/// starts with one.
 pub fn intent_detail(client: u8, route: &Route, target: &[u8], body: &[u8]) -> Vec<u8> {
-    let (path, query) = match target.iter().position(|b| *b == b'?') {
-        Some(i) => (&target[..i], target.len() - i - 1),
-        None => (target, 0),
-    };
+    let path = target.split(|b| *b == b'?').next().unwrap_or(target);
     let mut d = Vec::with_capacity(128);
     d.push(b'c');
     number(&mut d, client.into());
     d.push(b' ');
-    d.extend_from_slice(route.name.as_bytes());
-    d.push(b' ');
     d.extend_from_slice(route.method.as_bytes());
-    d.extend_from_slice(b" q");
-    number(&mut d, query as u64);
-    d.extend_from_slice(b" b");
+    d.push(b' ');
     number(&mut d, body.len() as u64);
     d.push(b' ');
-    let hash = pharos_crypto::sha256(&[body]);
+    let hash = pharos_crypto::sha256(&[target, &[0], body]);
     for b in &hash[..8] {
         d.extend_from_slice(&[hex(b >> 4), hex(b & 15)]);
     }
     d.push(b' ');
+    d.extend_from_slice(route.name.as_bytes());
     d.extend_from_slice(path);
     cut(d)
 }
@@ -374,12 +372,27 @@ mod tests {
     fn details_name_no_secret_and_fit_the_trail() {
         let d = intent_detail(1, &ROUTE, b"/repos/pharos/issues", b"{\"title\":\"x\"}");
         let text = core::str::from_utf8(&d).unwrap();
-        assert!(text.starts_with("c1 issues POST q0 b13 "), "{text}");
-        assert!(text.ends_with(" /repos/pharos/issues"), "{text}");
+        assert!(text.starts_with("c1 POST 13 "), "{text}");
+        assert!(text.ends_with(" issues/repos/pharos/issues"), "{text}");
+        // The longest route name, method, and body length (#290): the hash
+        // is whole, and only the path is cut.
+        let name: &'static str = std::string::String::leak("n".repeat(32));
+        let worst = Route {
+            name,
+            method: "PATCH",
+            ..ROUTE
+        };
         let long = [b"/repos/".as_slice(), &[b'a'; 200], b"/issues?q=1"].concat();
-        let d = intent_detail(1, &ROUTE, &long, b"");
+        let body = std::vec![b'x'; 60 * 1024];
+        let d = intent_detail(2, &worst, &long, &body);
         assert_eq!(d.len(), pharos_proto::audit::MAX_DETAIL);
-        assert!(core::str::from_utf8(&d).unwrap().contains(" q3 "));
+        let hash = pharos_crypto::sha256(&[&long, &[0], &body]);
+        let hex: std::string::String = hash[..8].iter().map(|b| std::format!("{b:02x}")).collect();
+        let want = std::format!("c2 PATCH 61440 {hex} {name}");
+        assert_eq!(core::str::from_utf8(&d).unwrap(), want, "fits exactly");
+        // Targets differing only past the cut, or in the query, differ.
+        let other = [&long[..long.len() - 1], b"2"].concat();
+        assert_ne!(intent_detail(2, &worst, &other, &body), d);
         assert_eq!(
             refusal_detail(2, b"issues", NO_ACCESS),
             b"c2 issues status 3"

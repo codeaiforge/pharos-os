@@ -3961,8 +3961,8 @@ fn vault_audit(image: &Path, log: &str, server_log: &Path) -> Result<()> {
         " client 3 Event refuse fetcher task 1/1 https other ",
         // The gateway's intents, refusals, and outcomes.
         " client 6 Intent https ",
-        "gateway outcome 0 c1 items GET q0 b0 e3b0c44298fc1c14 /items",
-        "gateway outcome 0 c1 post POST q0 b7 ",
+        "gateway outcome 0 c1 GET 0 40005c451ac19049 items/items",
+        "gateway outcome 0 c1 POST 7 d4426ce15bb7f90a post/items",
         // The echoed header, stripped once.
         "status 0 http 200 answer 18 stripped 1",
         "c1 items status 1",
@@ -4017,7 +4017,7 @@ fn bridge_audit(image: &Path, log: &str) -> Result<()> {
     let mut want: Vec<String> = [
         // Task 1: the granted request, through the gateway and the vault.
         " client 3 Intent https guest task 1/1 https items gateway outcome 0 items",
-        "gateway outcome 0 c1 items GET q0 b0 e3b0c44298fc1c14 /items",
+        "gateway outcome 0 c1 GET 0 40005c451ac19049 items/items",
         "vault outcome 1 release items secret test-token",
         "gateway outcome 1 status 0 http 200 answer 8 stripped 0",
         // Task 2: a route not granted, a path refused, a route asked for.

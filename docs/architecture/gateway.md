@@ -213,7 +213,7 @@ Both the vault and the gateway link the table. The vault uses it to check that a
 | Connection | TLS service (client 4) | as in M6.1 |
 | Outcome | gateway | status, HTTP status, answer length, `stripped` |
 
-*As built (#282):* the records are action `https` (26); the detail is at most 64 bytes, so the intent is `c<client> <route> <method> q<query length> b<body length> <the first 8 bytes of the body's SHA-256, hex> <path>`, the path last and cut to fit; the outcome is `status <s> [detail <d>] http <h> answer <n> stripped <k>`. With the second release, a request is seven or eight records.
+*As built (#282):* the records are action `https` (26); the detail is at most 64 bytes, so the intent is `c<client> <route> <method> q<query length> b<body length> <the first 8 bytes of the body's SHA-256, hex> <path>`, the path last and cut to fit (*since #290, M6.2 review R-8:* `c<client> <method> <body length> <hash> <route><path>`, the hash the first 8 bytes of SHA-256 over the whole target, a zero byte, and the body; everything before the route fits with any route name, so a long path or a long first segment can no longer push out what identifies the target, and only the path is cut); the outcome is `status <s> [detail <d>] http <h> answer <n> stripped <k>`. With the second release, a request is seven or eight records.
 
 That is six or seven records a request, which fills the trail faster than UDP does. #275's rate limit covers it, and its design should count these.
 
