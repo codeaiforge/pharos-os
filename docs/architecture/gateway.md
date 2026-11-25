@@ -177,7 +177,7 @@ Both the vault and the gateway link the table. The vault uses it to check that a
   ```
 
 - **The answer** is parsed by the gateway's own HTTP/1.1 code (safe Rust, `pharos_proto::http`):
-  - **Status line:** `HTTP/1.1` or `HTTP/1.0`, a three-digit status, and a reason that is not interpreted.
+  - **Status line:** `HTTP/1.1` or `HTTP/1.0`, a three-digit status, and a reason that is not interpreted. *Since #292 (M6.2 review R-10):* an `HTTP/1.0` answer with `Transfer-Encoding` is `MALFORMED`, as RFC 9112 section 6.1 says such framing is faulty.
   - **Headers:** at most 8 KiB and 64 of them, names as RFC 9110 tokens, no obsolete line folding. A bare `\n` or a `\r` without `\n` is malformed.
   - **The headers that count:** `Content-Type` (at most 64 bytes, passed on); `Content-Length` or `Transfer-Encoding: chunked`, but not both, and no other transfer coding; `Content-Encoding`.
   - **No length:** the body runs to the server's `close_notify`. A connection that ends without one is reason 5.

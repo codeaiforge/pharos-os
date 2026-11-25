@@ -256,7 +256,12 @@ pub fn parse_answer<'a>(
             }
             length = Some(parse_decimal(value).ok_or(MALFORMED)?);
         } else if name.eq_ignore_ascii_case(b"transfer-encoding") {
-            if chunked || !value.eq_ignore_ascii_case(b"chunked") {
+            // HTTP/1.0 has no transfer codings: RFC 9112 section 6.1 says
+            // such framing is faulty (#292, M6.2 review R-10).
+            if chunked
+                || !value.eq_ignore_ascii_case(b"chunked")
+                || status_line.starts_with(b"HTTP/1.0 ")
+            {
                 return Err(MALFORMED);
             }
             chunked = true;
@@ -591,7 +596,7 @@ mod tests {
     #[test]
     fn each_malformed_answer_is_refused_with_its_reason() {
         use reason::*;
-        let cases: [(&[u8], u8); 22] = [
+        let cases: [(&[u8], u8); 23] = [
             (b"HTTP/1.1 100 Continue\r\n\r\n", INFORMATIONAL),
             (
                 b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n",
@@ -602,6 +607,10 @@ mod tests {
                 MALFORMED,
             ),
             (b"HTTP/1.1 200 OK\r\nContent-Length: -1\r\n\r\n", MALFORMED),
+            (
+                b"HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n",
+                MALFORMED,
+            ),
             (b"HTTP/1.1 200 OK\r\nContent-Length: 1 2\r\n\r\n", MALFORMED),
             (
                 b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
