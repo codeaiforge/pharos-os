@@ -138,7 +138,7 @@ Retries follow the manifest's `attempts`, as for any agent. The guest VM is not 
 
 ### The guest image
 
-- **Built by `cargo xtask guest`** into `target/guest/`: the Alpine `linux-virt` kernel and its `virtio_console` module, the minirootfs, the Python packages, and the LangGraph wheels. Each download is checked against a SHA-256 in `xtask/guest.lock`, and the build fails on any mismatch. The versions are pinned in #296.
+- **Built by `cargo xtask guest`** into `target/guest/`: the Alpine `linux-virt` kernel and its `virtio_console` module, the minirootfs, the Python packages, and the LangGraph wheels. Each download is checked against a SHA-256 in `xtask/guest.lock`, and the build fails on any mismatch. The versions are pinned in #296. The build records the image's own SHA-256 in `image.sha256`, which the launch tool checks (#305).
 - **One initramfs** (newc cpio, written by `xtask`): the guest has no disk. Its init mounts `/proc`, `/sys`, and `/dev`, loads `virtio_console`, and runs the agent with Python. Nothing else starts: no getty, network scripts, or package manager.
 - **No network configuration at all:** the kernel sees no network device; `lo` is the only interface.
 - **Licenses:** Alpine's packages and the wheels are recorded in NOTICE. They run only in the guest and never link with Pharos.
@@ -172,6 +172,13 @@ After both start, it asks each QEMU's monitor (QMP on a host socket the guest ca
 The guest's serial console goes to a host file (output only), for diagnostics.
 
 *As built (#297):* `bridge::check_guest` accepts only the options and values `bridge::guest_args` writes, each refusal naming what it found: a network device (`-netdev`, `-net`, any `-nic` but `none`), a disk (`-drive`, `-hda`, `-cdrom`, `-blockdev`, …), a shared filesystem (`-virtfs`, `-fsdev`), a device other than the channel's two (so `vhost-user-fs-pci`, `virtio-9p-pci`, and `virtio-net-pci` too), a second channel, an unlisted option, or no `-nodefaults`. The guest has 512 MiB and `-accel kvm -cpu host`, or TCG on `-cpu max`. Over QMP, the guest must show exactly `8086:29c0` (host bridge), `8086:2918` (LPC), `8086:2922` (AHCI, with no drive), `8086:2930` (SMBus), and `1af4:1043`, and `query-block` must be empty; Pharos must show two `1af4:1043`. Host tests cover each refusal and the QMP parsing.
+
+*As built (#305, review R-7):* before #305 the check took any value for `-cpu`, `-m`, `-kernel`, `-initrd`, and `-append`, any `file:` serial and `unix:` QMP socket, each as many times as given, and did not require `-no-user-config`. Now every value must be the one `bridge::guest_args` writes:
+- `-accel kvm -cpu host` or `-accel tcg -cpu max`, not a mix;
+- `-m 512M`, `-append "console=ttyS0 quiet panic=-1"`, `-serial file:guest-serial.log`, and `-qmp unix:guest-qmp.sock,server=on,wait=off`;
+- `-kernel` and `-initrd` the image's `vmlinuz-virt` and `initramfs` in `target/guest/`.
+
+Each option but `-device` and `-chardev` must appear exactly once (`-serial is given more than once`), each one the tool writes must be there (`no -kernel, which the launch tool always writes`), and so must `-no-user-config`. `scripts/guest-image.py` now writes `image.sha256` beside the image, last, with both files' SHA-256 in `sha256sum`'s format. Before starting the guest, `bridge::check_image` hashes both files and refuses one that differs (`refusing the guest's image: … has SHA-256 …, not the … its build recorded`), or a record that is missing or not exactly those two lines. The record sits beside the image, so it catches a stale or changed file, not a host user who can rewrite both. The files are hashed before QEMU opens them, so a change in between is not caught. None of these options added a network device, disk, shared filesystem, or second channel, which were already refused. Host tests cover each refusal, and one checks the command line `cargo xtask` builds for the `bridge` kernel.
 
 ### Limits
 
@@ -208,7 +215,7 @@ The bridge holds no audit capability. Everything the guest does reaches the runt
 | --- | --- |
 | Host, `pharos_proto::bridge` | Each field's refusal; `HELLO` resynchronization within and past 64 KiB; the largest frame; each passed operation's reply length |
 | Host, fuzzing (D-020 pattern) | Frames, with a fixed seed and count; none may panic or read past a frame |
-| Host, `xtask` | The launch tool refuses each guest option above, and builds the expected command lines; `guest.lock` refuses a mismatched hash |
+| Host, `xtask` | The launch tool refuses each guest option above, and builds the expected command lines; `guest.lock` refuses a mismatched hash; the launch refuses an image file whose hash differs from `image.sha256` (#305) |
 | Host, `pharos-programs` | `BIND`: refused from any other badge, `NOT_FOUND` with no waiting attempt, a second `BIND` revokes the first, the capability revoked at each kind of end |
 | QEMU, `bridge` (#300) | Two VMs from the launch tool, the QMP checks passing. The guest's LangGraph agent, through the bridge: a granted `REQUEST` through the gateway, a `LOG`, a checkpoint, and `COMPLETE`; each recorded in the exported trail |
 | QEMU, hostile guest (#300) | Programs in the same image that: send each malformed frame; send a second request before the reply; send an operation not passed; ask for a route, path, or permission not granted; look for a network interface, a disk, a 9p or virtiofs mount, or a second port. The runner checks each refusal in the trail and the attempt's failure reason, and Pharos stays up and binds the next attempt |

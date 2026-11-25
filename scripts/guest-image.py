@@ -13,8 +13,9 @@ nothing else. Python's standard library only; run by `cargo xtask guest`.
   guest-image.py build <lockfile> <cache dir> <out dir>
       Downloads what the cache lacks, checks every file against its SHA-256
       in the lock (any mismatch fails the build), and writes `vmlinuz-virt`
-      and `initramfs` (newc cpio, gzip) to the out dir. Two builds from the
-      same lock give the same bytes: entries sorted, owners 0, times 0.
+      and `initramfs` (newc cpio, gzip) to the out dir, then `image.sha256`,
+      their hashes in sha256sum's format. Two builds from the same lock give
+      the same bytes: entries sorted, owners 0, times 0.
 """
 
 import gzip
@@ -42,6 +43,8 @@ REQUIREMENTS = ["langgraph==1.2.24"]
 PACKAGES = ["python3"]
 KINDS = ("rootfs", "kernel", "apk", "wheel")
 KERNEL = "boot/vmlinuz-virt"
+# The built files' SHA-256, beside them; `cargo xtask` checks it at launch.
+HASHES = "image.sha256"
 SITE = f"usr/lib/python{PYTHON}/site-packages/"
 
 # PID 1. No openrc, getty, network scripts, or package manager runs: the
@@ -274,12 +277,20 @@ def build(lockfile, cache, out):
     tree["agent/main.py"] = (0o100644, (GUEST / "main.py").read_bytes())
     tree[SITE + "pharos_bridge.py"] = (0o100644, (GUEST / "pharos_bridge.py").read_bytes())
     image = gzip.compress(cpio(tree), compresslevel=6, mtime=0)
-    out = pathlib.Path(out)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "vmlinuz-virt").write_bytes(kernel)
-    (out / "initramfs").write_bytes(image)
+    write_image(out, kernel, image)
     print(f"guest-image: vmlinuz-virt {sha256(kernel)}")
     print(f"guest-image: initramfs {sha256(image)} ({len(image) >> 20} MiB, {len(tree)} files)")
+
+
+def write_image(out, kernel, image):
+    """Writes the two files and `image.sha256`, their hashes in sha256sum's
+    format, last. The launch tool refuses a file whose hash differs (#305)."""
+    out = pathlib.Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / HASHES).unlink(missing_ok=True)
+    (out / "vmlinuz-virt").write_bytes(kernel)
+    (out / "initramfs").write_bytes(image)
+    (out / HASHES).write_text(f"{sha256(kernel)}  vmlinuz-virt\n{sha256(image)}  initramfs\n")
 
 
 if __name__ == "__main__":

@@ -825,7 +825,7 @@ const BRIDGE_HOSTILE: [(&str, &str); 9] = [
 fn guest(paths: &Paths, lock: bool) -> Result<()> {
     let script = paths.root.join("scripts/guest-image.py");
     let lockfile = paths.root.join("xtask/guest.lock");
-    let out = paths.target.join("guest");
+    let out = guest_image(paths);
     let mut cmd = Command::new("python3");
     cmd.arg("-I").arg(&script);
     if lock {
@@ -846,6 +846,11 @@ fn guest(paths: &Paths, lock: bool) -> Result<()> {
             "the guest image was not built ({status}); see the message above"
         ))
     }
+}
+
+/// The guest image's directory: [`guest`] writes it, the launch reads it.
+fn guest_image(paths: &Paths) -> PathBuf {
+    paths.target.join("guest")
 }
 
 fn parse_sha256sum(output: &str) -> Result<String> {
@@ -5091,14 +5096,11 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         let _ = fs::remove_file(&log);
         extra.extend(bridge::pharos_args());
         let kvm = matrix::current().args.contains(&"-enable-kvm");
-        let args = bridge::guest_args(
-            &paths.target.join("guest/vmlinuz-virt"),
-            &paths.target.join("guest/initramfs"),
-            kvm,
-        );
+        let image = guest_image(paths);
+        let args = bridge::guest_args(&image, kvm);
         let (dir, pharos_log) = (out.clone(), log.clone());
         Some(std::thread::spawn(move || {
-            let started = bridge::start_guest(&dir, &args, &pharos_log, BRIDGE_READY);
+            let started = bridge::start_guest(&dir, &image, &args, &pharos_log, BRIDGE_READY);
             let checked = started.and_then(|g| bridge::check_vms(&dir).map(|()| g));
             if checked.is_err() {
                 bridge::quit(&dir, bridge::PHAROS_QMP);
@@ -5545,6 +5547,15 @@ mod tests {
         assert!(sign(&["image", "sign", "a", "b"]).is_err());
         assert!(sign(&["image", "sign", "a", "b", "--version", "-1"]).is_err());
         assert_eq!(sign(&["image"]), Ok(Task::Image { kernel: None }));
+    }
+
+    #[test]
+    fn the_bridge_launch_writes_a_guest_line_its_check_passes() {
+        for kvm in [true, false] {
+            let image = guest_image(&Paths::new());
+            let args = bridge::guest_args(&image, kvm);
+            assert_eq!(bridge::check_guest(&args, &image), Ok(()));
+        }
     }
 
     #[test]

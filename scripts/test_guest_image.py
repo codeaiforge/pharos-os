@@ -111,6 +111,17 @@ class Fetch(unittest.TestCase):
             self.assertEqual(guest.get(("apk", want, "https://example.invalid/f.apk"), cache), b"pinned")
 
 
+class Image(unittest.TestCase):
+    def test_the_hashes_are_recorded_beside_the_image(self):
+        with tempfile.TemporaryDirectory() as out:
+            (pathlib.Path(out) / guest.HASHES).write_text("stale\n")
+            guest.write_image(out, b"kernel", b"initrd")
+            k, i = (hashlib.sha256(b).hexdigest() for b in (b"kernel", b"initrd"))
+            self.assertEqual((pathlib.Path(out) / guest.HASHES).read_text(),
+                             f"{k}  vmlinuz-virt\n{i}  initramfs\n")
+            self.assertEqual((pathlib.Path(out) / "initramfs").read_bytes(), b"initrd")
+
+
 class Unpack(unittest.TestCase):
     def test_tar_files_links_and_apk_metadata(self):
         tree = {}
