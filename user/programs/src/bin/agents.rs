@@ -20,7 +20,7 @@
 //! is no handle 13; without it every `REQUEST` is `INTERNAL`). The
 //! argument selects the policy table (0: boot, empty; 1: the `agents` and
 //! `agents_crash` test kernels; 2: `budgets`; 3: the `vault` kernel's
-//! `fetcher`, #284; 4: the `channel` kernel's `guest`, #298).
+//! `fetcher`, #284; 4: the `bridge` kernel's `guest`, #298, #300).
 //!
 //! Each policy entry's manifest, `agents/<name>.manifest`, is read and
 //! checked at start; an agent whose manifest is missing or refused never
@@ -341,9 +341,9 @@ const HTTPS_TABLE: &[Entry] = &[Entry {
     channels: &[],
 }];
 
-/// The `channel` kernel's policy table (#298): `guest`, a Tier 3 guest
-/// agent, which the bridge speaks for. Its program names the guest's,
-/// which the runtime never opens.
+/// The `bridge` kernel's policy table (#298, #300): `guest`, a Tier 3
+/// guest agent, which the bridge speaks for, granted the `items` route.
+/// Its program names the guest's, which the runtime never opens.
 const GUEST_TABLE: &[Entry] = &[Entry {
     name: b"guest",
     program: b"guest/agent",
@@ -365,7 +365,7 @@ const GUEST_TABLE: &[Entry] = &[Entry {
     knowledge_write: &[],
     ask_knowledge: &[],
     propose: false,
-    https: &[],
+    https: &[b"items"],
     guest: true,
     channels: &[],
 }];
@@ -2179,8 +2179,18 @@ impl Runtime {
         if s.bound != 0 {
             let _ = revoke(s.bound);
             let _ = delete(s.bound);
+            // A failed task's reason, the guest's or the bridge's for it (a
+            // protocol error), is the record's (#300).
+            let failed = (self.tasks.find(s.task).map(|t| &self.tasks.list[t]))
+                .filter(|t| t.state == State::Failed)
+                .map(|t| {
+                    let mut why = Vec::from(&b"failed: "[..]);
+                    why.extend_from_slice(&t.result);
+                    why.truncate(audit::MAX_DETAIL);
+                    why
+                });
             let why: &[u8] = match s.ending {
-                Some(Ending::Finished) => b"attempt ended",
+                Some(Ending::Finished) => failed.as_deref().unwrap_or(b"attempt ended"),
                 Some(Ending::Hung) => b"hung",
                 Some(Ending::Cancelled) => b"cancelled",
                 Some(Ending::OverCpu) => b"over cpu",

@@ -758,30 +758,64 @@ fn run(cmd: &mut Command, verbose: bool) -> Result<Vec<u8>> {
 }
 
 /// Extracts the hash from `sha256sum` output (`<hex>  <path>`).
-/// The guest's side of the `channel` kernel (#297): its serial log shows
-/// it booted, found its one port and no network interface but `lo`, and
-/// read Pharos's answer through the channel.
-fn channel_checks(guest_log: &Path) -> Result<()> {
+/// The guest's side of the `bridge` kernel (#297, #300): its serial log
+/// shows it booted and found nothing to reach but its one port (no network
+/// interface but `lo`, no disk, no shared mount, one virtio device, no
+/// route to the host), ran the LangGraph agent through the bridge, and got
+/// the bridge's `ERROR` for each hostile frame.
+fn bridge_checks(guest_log: &Path) -> Result<()> {
     let text = fs::read_to_string(guest_log)
         .map_err(|e| format!("cannot read the guest's log {}: {e}", guest_log.display()))?;
     println!("  guest:");
     for line in text.lines().filter(|l| l.starts_with("guest:")) {
         println!("    {line}");
     }
-    for want in [
+    let mut want: Vec<String> = [
         "guest: net ['lo']",
+        "guest: disks []",
+        "guest: shared mounts []",
+        "guest: virtio devices 1",
         "guest: ports ['org.pharos.bridge']",
-        "guest: task input hello from pharos",
+        "guest: connect 10.0.2.2: unreachable 101",
         "guest: tool pharos_log: logged",
-        "guest: tool pharos_https: refused, status 3",
+        "guest: tool pharos_https: 200 items ok",
+        "guest: checkpointed",
         "guest: completed hello from the guest",
-    ] {
+        "guest: refused a route not granted: status 3",
+        "guest: refused a path the route refuses: status 1",
+        "guest: refused data not granted: status 3",
+        "guest: asked for a route not granted: refused",
+        "guest: completed refusals ok",
+        "guest: completed again ok",
+        "guest: case hold: holding attempt 1",
+        "guest: completed held ok",
+    ]
+    .map(String::from)
+    .to_vec();
+    for (case, reason) in BRIDGE_HOSTILE {
+        want.push(format!("guest: case {case}: error 1 {reason}"));
+    }
+    for want in want {
         if !text.lines().any(|l| l.trim_end() == want) {
             return Err(format!("the guest's log lacks '{want}'"));
         }
     }
     Ok(())
 }
+
+/// The `bridge` kernel's hostile cases and the reason the bridge gives
+/// each (`pharos_proto::bridge::Bad`).
+const BRIDGE_HOSTILE: [(&str, &str); 9] = [
+    ("magic", "guest protocol: bad magic"),
+    ("version", "guest protocol: bad version"),
+    ("kind", "guest protocol: bad kind"),
+    ("length", "guest protocol: bad length"),
+    ("message", "guest protocol: bad message"),
+    ("data", "guest protocol: bad buffer data"),
+    ("notpassed", "guest protocol: operation not passed"),
+    ("early", "guest protocol: request before reply"),
+    ("flood", "guest protocol: bad magic"),
+];
 
 /// `cargo xtask guest [lock]`: runs `scripts/guest-image.py` (Python's
 /// standard library only, as the vault test server is).
@@ -3273,13 +3307,14 @@ const SECRETS_TEST: &str = "secrets";
 /// the TLS service, the vault, the gateway, and an agent through the
 /// runtime, against `scripts/vault-test-server.py`.
 const VAULT_TEST: &str = "vault";
-/// The Tier 3 channel between two booted VMs (#297, #298, bridge.md): the
-/// guest image beside Pharos, one host socket between them, and the guest
-/// agent's task through the bridge and the runtime.
-const CHANNEL_TEST: &str = "channel";
+/// The Tier 3 bridge between two booted VMs, and the hostile-guest suite
+/// (#297, #298, #300, bridge.md): the guest image beside Pharos, one host
+/// socket between them, and the guest agent's tasks through the bridge, the
+/// runtime, and the gateway (set up as for `vault`).
+const BRIDGE_TEST: &str = "bridge";
 /// The bridge's line once it holds the channel's device: the guest starts
 /// only then ([`bridge::start_guest`]).
-const CHANNEL_READY: &str = "bridge: ready";
+const BRIDGE_READY: &str = "bridge: ready";
 /// The `fw_cfg` file with the vault's secrets (D-035; must match
 /// `pharos_kernel::key::SECRETS_FW_CFG_NAME`).
 const SECRETS_NAME: &str = "opt/org.pharos/secrets";
@@ -3884,6 +3919,70 @@ fn vault_audit(image: &Path, log: &str, server_log: &Path) -> Result<()> {
     }
     println!("  audit trail: {} records; the gateway's:", lines.len());
     for l in lines.iter().filter(|l| l.contains(" client 6 ")) {
+        println!("    {l}");
+    }
+    Ok(())
+}
+
+/// After the `bridge` kernel (#300): the guest agent's tasks in the trail.
+/// Task 1 the LangGraph agent's granted request, through the gateway; task
+/// 2 its refusals; tasks 3 to 11 the hostile cases, each attempt unbound
+/// with the bridge's reason as the task's failure; task 12 again; task 13
+/// `hold`, its first attempt ended by the restarted bridge's `BIND`. Every
+/// attempt bound and unbound; the secret's value in neither the trail nor
+/// the console.
+fn bridge_audit(image: &Path, log: &str) -> Result<()> {
+    let value = pharos_services::TEST_SECRET_VALUE;
+    let streams = store_image::audit(image)?;
+    let lines: Vec<&String> = streams.iter().flat_map(|(_, l)| l).collect();
+    if lines.iter().any(|l| l.contains(value)) || log.contains(value) {
+        return Err("the test secret's value reached the audit trail or the console".into());
+    }
+    let mut want: Vec<String> = [
+        // Task 1: the granted request, through the gateway and the vault.
+        " client 3 Intent https guest task 1/1 https items gateway outcome 0 items",
+        "gateway outcome 0 c1 items GET q0 b0 e3b0c44298fc1c14 /items",
+        "vault outcome 1 release items secret test-token",
+        "gateway outcome 1 status 0 http 200 answer 8 stripped 0",
+        // Task 2: a route not granted, a path refused, a route asked for.
+        " client 3 Event refuse guest task 2/1 https other  outcome 2 no grant",
+        "gateway outcome 2 c1 items status 1",
+        " client 3 Event refuse guest task 2/1 https other  outcome 2 not askable",
+        " client 3 Event refuse guest task 2/1   outcome 2 3 requests refused",
+    ]
+    .map(String::from)
+    .to_vec();
+    for task in 1..=13 {
+        want.push(format!(
+            " client 3 Event bind guest task {task}/1  bridge outcome 1 "
+        ));
+    }
+    // Task 13: the bridge killed during its first attempt; the restarted
+    // bridge's BIND ended it, and bound the second.
+    want.push(" client 3 Event unbind guest task 13/1  bridge outcome 1 bridge restarted".into());
+    want.push(" client 3 Event bind guest task 13/2  bridge outcome 1 ".into());
+    want.push(" client 3 Event unbind guest task 13/2  bridge outcome 1 attempt ended".into());
+    for task in [1, 2, 12] {
+        want.push(format!(
+            " client 3 Event unbind guest task {task}/1  bridge outcome 1 attempt ended"
+        ));
+    }
+    for (task, (_, reason)) in (3..).zip(BRIDGE_HOSTILE) {
+        want.push(format!(
+            " client 3 Event unbind guest task {task}/1  bridge outcome 1 failed: {reason}"
+        ));
+    }
+    for want in want {
+        if !lines.iter().any(|l| l.contains(&want)) {
+            println!("  audit trail:");
+            for l in &lines {
+                println!("    {l}");
+            }
+            return Err(format!("the audit trail has no record like {want:?}"));
+        }
+    }
+    println!("  audit trail: {} records; the guest's binds:", lines.len());
+    for l in lines.iter().filter(|l| l.contains("bind guest")) {
         println!("    {l}");
     }
     Ok(())
@@ -4795,9 +4894,14 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         || slotted
     {
         kernel_modules(paths, &programs)?
-    } else if name == CHANNEL_TEST {
-        // The boot image, with the guest agent's manifest (#298).
+    } else if name == BRIDGE_TEST {
+        // The boot image, with the test authority as its one root and the
+        // guest agent's manifest (#298, #300).
         let mut files = programs.clone();
+        files.push((
+            "system/tls/roots".into(),
+            tls_server::make(&out.join("tls"))?,
+        ));
         files.extend(
             (fs_image::TEST_MANIFESTS.iter())
                 .filter(|(path, _)| *path == "agents/guest.manifest")
@@ -4863,7 +4967,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     if name == TLS_TEST || name == SECRETS_TEST {
         store_image::fresh(&out.join(STORE_IMAGE), TLS_BLOCKS)?;
     }
-    if name == SECRETS_TEST || name == VAULT_TEST {
+    if name == SECRETS_TEST || name == VAULT_TEST || name == BRIDGE_TEST {
         let file = out.join("secrets");
         let text = format!(
             "{} {}\n",
@@ -4875,7 +4979,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         arg.push(&file);
         extra.extend(["-fw_cfg".into(), arg]);
     }
-    let _vault_server = if name == VAULT_TEST {
+    let _vault_server = if name == VAULT_TEST || name == BRIDGE_TEST {
         Some(vault_server::start(&out.join("tls"), &out.join("secrets"))?)
     } else {
         None
@@ -4883,7 +4987,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     // The guest beside Pharos (#297): it starts once Pharos's QEMU made the
     // socket, and both are checked over QMP while they run; a failed check
     // stops both.
-    let guest = if name == CHANNEL_TEST {
+    let guest = if name == BRIDGE_TEST {
         guest(paths, false)?;
         for f in [
             bridge::SOCKET,
@@ -4904,7 +5008,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         );
         let (dir, pharos_log) = (out.clone(), log.clone());
         Some(std::thread::spawn(move || {
-            let started = bridge::start_guest(&dir, &args, &pharos_log, CHANNEL_READY);
+            let started = bridge::start_guest(&dir, &args, &pharos_log, BRIDGE_READY);
             let checked = started.and_then(|g| bridge::check_vms(&dir).map(|()| g));
             if checked.is_err() {
                 bridge::quit(&dir, bridge::PHAROS_QMP);
@@ -5145,7 +5249,11 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
             if let Err(e) = g {
                 return Err(e.clone());
             }
-            channel_checks(&out.join(bridge::GUEST_LOG))
+            bridge_checks(&out.join(bridge::GUEST_LOG))?;
+            if run.status == Some(QEMU_EXIT_SUCCESS) {
+                bridge_audit(&out.join(STORE_IMAGE), &clean_log(&run.log))?;
+            }
+            Ok(())
         } else if let Some(want) = s1_want.as_deref().filter(|_| run.status == Some(33)) {
             s1_checks(&out.join(STORE_IMAGE), &clean_log(&run.log), want)
         } else {

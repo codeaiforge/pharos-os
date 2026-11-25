@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-24 (#295), with each open question decided as recommended (section 7). It follows [D-036](../project/decision-log.md#d-036-foreign-agent-bridge) (accepted 2026-11-24) and builds on the [agent runtime](agents.md) and the [egress gateway](gateway.md).
-- **Implementation:** the guest image is **implemented** (#296): `cargo xtask guest`, pinned by `xtask/guest.lock`, with a boot check in place of the agent (*as built* below). The channel and the launch tool are **implemented** (#297). The bridge service, `BIND`, the frames, and the driver's buffer sizes as parameters are **implemented** (#298), with a new `derive` system call (*as built* below). The `channel` test kernel shows them end to end: a guest agent's task, bound, logged, and completed through the bridge. The client library and the LangGraph agent are **implemented** (#299). **Planned:** `cargo xtask run` with a guest, and the `bridge` scenario with the hostile-guest suite (#300). The gate is #301.
+- **Implementation:** the guest image is **implemented** (#296): `cargo xtask guest`, pinned by `xtask/guest.lock`, with a boot check in place of the agent (*as built* below). The channel and the launch tool are **implemented** (#297). The bridge service, `BIND`, the frames, and the driver's buffer sizes as parameters are **implemented** (#298), with a new `derive` system call (*as built* below). The `channel` test kernel shows them end to end: a guest agent's task, bound, logged, and completed through the bridge. The client library and the LangGraph agent are **implemented** (#299). The `bridge` scenario and the hostile-guest suite are **implemented** (#300): the `bridge` test kernel, which replaced `channel`, in CI under KVM (*as built* in section 5). **Planned:** `cargo xtask run` with a guest. The gate is #301.
 
 ## 2. Context
 
@@ -214,6 +214,15 @@ The bridge holds no audit capability. Everything the guest does reaches the runt
 | Mutation (#301) | A throwaway branch where the launch tool lets a network device through must fail `bridge` in CI |
 | Matrix | `bridge` in the `kvm` cell only (decided, open question 4) |
 
+*As built (#300):*
+- **One kernel, `bridge`,** replaced `channel`. Table 12 is the `vault` table's services up to the runtime (the TLS service, the vault, and the gateway on the `vault` kernel's routes), then the runtime on its `guest` table (`guest`, granted `https items`), the bridge, and `guestclient`. The runner sets it up as for `vault`: the test authority, the secret through `fw_cfg`, and the HTTPS test server.
+- **The hostile programs are cases of one guest program.** `guest/main.py` loops: it binds, takes its task, and runs the case the task's input names. `guestclient` runs one task per case, in order: `agent`, `refusals`, nine hostile cases, `again`, then `hold`. A protocol error fails the task, not just the attempt, so each hostile case needs its own task.
+- **What the guest can reach** is checked from inside it before any attempt: only `lo`, no block device with a device behind it, no 9p, virtiofs, NFS, CIFS, or FUSE mount, one virtio device, one port, and `ENETUNREACH` for a connection to the host. The image has no virtio-net driver either (`virtio_net` is a module, and the image carries none). So a network device past both host checks shows as a second virtio device, not as an interface (mutation-checked).
+- **The trail** has the agent's granted request (the runtime's, the gateway's, and the vault's records), each refusal, a `bind` per attempt, and an `unbind` per attempt. Since #300, the `unbind` of an attempt whose task failed carries the reason (`failed: guest protocol: bad magic`), so a protocol error is in the trail, not only in the task's result.
+- **A flood:** 1 MiB of bytes that are no frame fails the attempt at its first header (`bad magic`). While nothing is bound, the bridge drops the rest as it comes. Before #300 it dropped one pass of its receive buffers a second, so the remainder failed the next attempt (`guest silent`); the `flood` case found this. A guest that keeps flooding still fails its own next attempts (the 64 KiB resynchronization limit), which is the design. `guestclient` waits 3 s after `flood`, as a guest that stopped.
+- **A second `BIND`:** during `hold`'s first attempt, the kernel kills the bridge. `init` restarts it, and its `BIND` ends that attempt (`unbind ... bridge restarted`); the second attempt is bound and completes. `NOT_FOUND` is what the bridge gets between tasks; no check reads it directly.
+- **In CI**, share 1 of the QEMU job opens `/dev/kvm` and runs `bridge` (`PHAROS_CELL=kvm`); the other shares skip it, as every cell but `kvm` does.
+
 ## 6. Alternatives
 
 - **The runtime spawns the bridge as the guest agent's program**, with the device among its capabilities: `trust` could `STOP` it like any agent. But the runtime has no free handle for the device, and would hold a device, which agents.md rules out.
@@ -232,4 +241,4 @@ The bridge holds no audit capability. Everything the guest does reaches the runt
 
 ## Implementation issues
 
-The guest image (#296); the channel and the launch tool (#297); the bridge service, `BIND`, and the frames (#298); the client library (#299); the `bridge` scenario and the hostile-guest suite (#300). The gate is #301.
+The guest image (#296); the channel and the launch tool (#297); the bridge service, `BIND`, and the frames (#298); the client library (#299); the `bridge` scenario and the hostile-guest suite (#300), all implemented. The gate is #301.

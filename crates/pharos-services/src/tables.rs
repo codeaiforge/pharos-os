@@ -1,8 +1,8 @@
 //! The tables: argument 0 boot, 1 the `services` test kernel, 2 the
 //! `network` test kernel, 3 the `supervision` test kernel, 4 the
 //! `health` test kernel, 5 `aifail`, 6 `compromised`, 7 `soak`, 8 `tls`,
-//! 9 `tls_norandom`, 10 `secrets`, 11 `vault` ([`table`]); each table's routes
-//! ([`routes`]).
+//! 9 `tls_norandom`, 10 `secrets`, 11 `vault`, 12 `bridge` ([`table`]); each table's
+//! routes ([`routes`]).
 
 use crate::rights::{GRANT, READ, RECEIVE, SEND};
 use crate::{
@@ -64,7 +64,7 @@ pub fn table(arg: u64) -> &'static [Service] {
         9 => TLS_NORANDOM,
         10 => SECRETS,
         11 => VAULT,
-        12 => CHANNEL,
+        12 => BRIDGE,
         _ => &[],
     }
 }
@@ -74,7 +74,7 @@ pub fn table(arg: u64) -> &'static [Service] {
 pub fn routes(arg: u64) -> &'static [Route] {
     match arg {
         10 => &SECRETS_ROUTES,
-        11 => &VAULT_ROUTES,
+        11 | 12 => &VAULT_ROUTES,
         _ => &[],
     }
 }
@@ -883,12 +883,14 @@ pub const SECRETS: &[Service] = &[
 /// The bridge's badge at the runtime (`pharos_proto::agents::BRIDGE`).
 pub const AGENTS_BRIDGE: u32 = 0x81;
 
-/// The `channel` test kernel's table (#297, #298, bridge.md): the boot
-/// table's services up to `trust`, the runtime on its `guest` policy table
-/// (4), the bridge holding the second virtio-console (the Tier 3 channel's
-/// Pharos end, which `cargo xtask` joins to the guest's port through one
-/// host socket), and `guestclient`, which submits the guest agent's task.
-pub const CHANNEL: &[Service] = &channel_table(BOOT_ENTRIES);
+/// The `bridge` test kernel's table (#300, bridge.md): the `vault`
+/// table's services up to the runtime (the TLS service, the vault, and the
+/// gateway on the `vault` kernel's routes, table 12's), the runtime on its
+/// `guest` policy table (4) with the gateway as handle 12, the bridge
+/// holding the second virtio-console (the Tier 3 channel's Pharos end,
+/// which `cargo xtask` joins to the guest's port through one host socket),
+/// and `guestclient`, which runs the guest agent's tasks.
+pub const BRIDGE: &[Service] = &bridge_table(BOOT_ENTRIES);
 
 const BRIDGE_CAPS: [Give; 4] = [
     CONSOLE,
@@ -898,17 +900,23 @@ const BRIDGE_CAPS: [Give; 4] = [
 ];
 const GUESTCLIENT_CAPS: [Give; 2] = [CONSOLE, send(Ep::Agents, AGENTS_CONTROL)];
 
-const fn channel_table(boot: [Service; 9]) -> [Service; 10] {
-    let mut runtime = boot[AGENTS];
+const fn bridge_table(boot: [Service; 9]) -> [Service; 13] {
+    let v = vault_table(boot);
+    let (mut vault, mut gateway, mut runtime) = (v[8], v[9], v[10]);
+    vault.arg = 12;
+    gateway.arg = 12;
     runtime.arg = 4;
     [
-        boot[0],
-        boot[1],
-        boot[2],
-        boot[3],
-        boot[4],
-        boot[5],
-        boot[6],
+        v[0],
+        v[1],
+        v[2],
+        v[3],
+        v[4],
+        v[5],
+        v[6],
+        v[7],
+        vault,
+        gateway,
         runtime,
         Service {
             name: "bridge",
@@ -920,7 +928,7 @@ const fn channel_table(boot: [Service; 9]) -> [Service; 10] {
             net: &[],
             tcp: &[],
             tls: &[],
-            after: &[AGENTS],
+            after: &[10],
             // Its receive and transmit buffers, its agent buffer, and one
             // frame (bridge.md): 512 KiB.
             limit: 128,
@@ -936,7 +944,7 @@ const fn channel_table(boot: [Service; 9]) -> [Service; 10] {
             net: &[],
             tcp: &[],
             tls: &[],
-            after: &[8],
+            after: &[11],
             limit: 64,
             gains: &[],
         },

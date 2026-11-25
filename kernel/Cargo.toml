@@ -163,7 +163,7 @@ name = "preemption"
 harness = false
 
 [[test]]
-name = "channel"
+name = "bridge"
 harness = false
 
 [[test]]

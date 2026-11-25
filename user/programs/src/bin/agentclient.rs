@@ -31,7 +31,8 @@
 //! 10 s until stopped, printing `soak: task <n> done` or `soak: task <n>
 //! FAILED`, and forgets each (`FORGET`) once read. Argument 16: the `s1` kernel
 //! (#190): an `s1` task, its result printed in hexadecimal. Argument 17:
-//! `fetcher` in the `vault` table (#284), started by `init`.
+//! `fetcher` in the `vault` table (#284), started by `init`. Argument 18:
+//! `guest` in the `bridge` table (#298, #300), started by `init`.
 
 #![no_std]
 #![no_main]
@@ -592,8 +593,16 @@ fn s1(mut c: Client) -> u64 {
 /// One boot of the `agents_crash` kernel.
 /// `soaker` (#189): one task after another, each line counted by the
 /// `soak` kernel.
-/// The `channel` kernel (#298), started by `init`: one task for `guest`,
-/// the Tier 3 guest agent the bridge speaks for; its result printed.
+/// The `bridge` kernel (#298, #300), started by `init`: one task for
+/// `guest`, the Tier 3 guest agent the bridge speaks for, per case the
+/// guest runs (its input names it), each after the last ended. `agent`,
+/// `refusals`, and `again` must complete; each hostile case must fail
+/// with the bridge's reason; `hold` must complete on its second attempt,
+/// after the kernel killed the bridge during its first. `ok bridge:
+/// <case>` for each as wanted.
+/// How long after `flood` the next case waits.
+const FLOOD_US: u64 = 3_000_000;
+
 fn guest(c: Client) -> u64 {
     let say = |line: &[u8]| {
         let _ = debug_write(CONSOLE, line);
@@ -601,27 +610,65 @@ fn guest(c: Client) -> u64 {
     // Only the bridge's badge may bind a guest's slot (#298).
     let mut out = [0u8; 256];
     if c.call(&Request::Bind, &mut out).0 != status::NO_ACCESS {
-        say(b"FAILED channel: a control client's BIND was not refused");
+        say(b"FAILED bridge: a control client's BIND was not refused");
         return 1;
     }
-    say(b"ok channel: a control client's BIND is refused");
-    let Ok(task) = c.submit(b"guest", b"hello from pharos") else {
-        say(b"FAILED channel: the guest task was not submitted");
-        return 1;
-    };
-    let Some((s, result)) = c.wait(task, 150) else {
-        say(b"FAILED channel: the guest task did not end in 150 s");
-        return 1;
-    };
-    let mut line = Vec::from(&b"channel: guest ended: "[..]);
-    line.extend_from_slice(&result[..result.len().min(200)]);
-    say(&line);
-    if s.state != State::Done || result != b"hello from the guest" {
-        say(b"FAILED channel: the guest task failed");
-        return 1;
+    say(b"ok bridge: a control client's BIND is refused");
+    let cases: [(&[u8], State, &[u8]); 13] = [
+        (b"agent", State::Done, b"hello from the guest"),
+        (b"refusals", State::Done, b"refusals ok"),
+        (b"magic", State::Failed, b"guest protocol: bad magic"),
+        (b"version", State::Failed, b"guest protocol: bad version"),
+        (b"kind", State::Failed, b"guest protocol: bad kind"),
+        (b"length", State::Failed, b"guest protocol: bad length"),
+        (b"message", State::Failed, b"guest protocol: bad message"),
+        (b"data", State::Failed, b"guest protocol: bad buffer data"),
+        (
+            b"notpassed",
+            State::Failed,
+            b"guest protocol: operation not passed",
+        ),
+        (
+            b"early",
+            State::Failed,
+            b"guest protocol: request before reply",
+        ),
+        (b"flood", State::Failed, b"guest protocol: bad magic"),
+        (b"again", State::Done, b"again ok"),
+        (b"hold", State::Done, b"held ok"),
+    ];
+    let mut failed = 0;
+    for (case, state, want) in cases {
+        let ended = c.submit(b"guest", case).ok().and_then(|t| c.wait(t, 150));
+        let mut line = Vec::from(&b"bridge: "[..]);
+        line.extend_from_slice(case);
+        line.extend_from_slice(b" ended: ");
+        if let Some((_, result)) = &ended {
+            line.extend_from_slice(&result[..result.len().min(200)]);
+        }
+        say(&line);
+        // `hold`'s first attempt ends with the bridge (#300).
+        let attempts = if case == b"hold" { 2 } else { 1 };
+        let ok =
+            ended.is_some_and(|(s, r)| s.state == state && s.attempts == attempts && r == want);
+        let mut line = Vec::from(if ok {
+            &b"ok bridge: "[..]
+        } else {
+            b"FAILED bridge: "
+        });
+        line.extend_from_slice(case);
+        say(&line);
+        failed += u64::from(!ok);
+        if case == b"flood" {
+            // The rest of the flood reaches the bridge after its attempt;
+            // it discards it while nothing is bound (bridge.md).
+            sleep(FLOOD_US);
+        }
     }
-    say(b"ok channel: the guest's task ran through the bridge");
-    0
+    if failed == 0 {
+        say(b"ok bridge: every case ended as it should");
+    }
+    failed
 }
 
 /// The `vault` kernel (#284), started by `init` (no report endpoint): one

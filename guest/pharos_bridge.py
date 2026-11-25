@@ -25,7 +25,8 @@ VERSION = 1  # agents v1
 TASK, CHECKPOINT, COMPLETE, FAIL, LOG = 1, 2, 5, 6, 10
 DATA_PUT, DATA_GET, ASK, HTTPS = 11, 12, 13, 34
 INFO = 0xF0
-OK = 0
+# Statuses (pharos_proto::status).
+OK, BAD_REQUEST, NO_ACCESS = 0, 1, 3
 CHECKPOINT_AT = 4096
 MAX_TEXT = 200
 # Permission kinds on the wire (pharos_proto::permission::kind).
@@ -114,9 +115,11 @@ class Bridge:
     def _send(self, kind, payload):
         if len(payload) > MAX_PAYLOAD:
             raise ValueError("frame too large")
-        data = struct.pack("<2sBBI", b"PB", 1, kind, len(payload)) + payload
+        self._write(struct.pack("<2sBBI", b"PB", 1, kind, len(payload)) + payload)
+
+    def _write(self, data):
         while data:
-            data = data[os.write(self.fd, data):]
+            data = data[os.write(self.fd, data) :]
 
     def hello(self):
         """Waits for the bridge's HELLO and answers it: the task and attempt

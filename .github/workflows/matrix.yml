@@ -139,7 +139,7 @@ jobs:
           echo "PHAROS_MODEL=$f" >> "$GITHUB_ENV"
 
       # The Tier 3 guest image's downloads (#296), pinned by SHA-256 in
-      # xtask/guest.lock, for the channel kernel in the kvm cell (#297);
+      # xtask/guest.lock, for the bridge kernel in the kvm cell (#297, #300);
       # the runner builds the image from them.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: matrix.cell == 'kvm' && matrix.pass == 'once'

@@ -592,7 +592,7 @@ mod tests {
             ("tls_norandom", TLS_NORANDOM),
             ("secrets", SECRETS),
             ("vault", VAULT),
-            ("channel", CHANNEL),
+            ("bridge", BRIDGE),
         ] {
             assert_eq!(check(table), Ok(()), "{name}");
         }
@@ -606,6 +606,8 @@ mod tests {
         }
         assert_eq!(routes(10).len(), 3);
         assert_eq!(routes(11).len(), 5);
+        assert_eq!(routes(12).len(), 5);
+        assert_eq!(gateway_dests(BRIDGE), Some(1));
         assert_eq!(gateway_dests(VAULT), Some(1));
     }
 

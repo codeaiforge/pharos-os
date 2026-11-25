@@ -203,6 +203,34 @@ jobs:
       - name: Boot check and test kernels
         run: cargo xtask test --shard ${{ matrix.shard }}/4
 
+      # The Tier 3 bridge (M6.3, #300): the `bridge` kernel runs a guest VM
+      # beside Pharos under KVM only (bridge.md, decided open question 4),
+      # so the shares above skip it and share 1 runs it here. It needs
+      # read-write /dev/kvm; without it this step fails (infrastructure).
+      - name: KVM access
+        if: matrix.shard == 1
+        run: |
+          test -e /dev/kvm || { echo "this runner has no /dev/kvm"; exit 1; }
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      # The guest image's downloads (#296), pinned by SHA-256 in
+      # xtask/guest.lock; the runner builds the image from them. Same
+      # action and SHA as above.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: matrix.shard == 1
+        with:
+          path: target/guest/cache
+          key: guest-${{ hashFiles('xtask/guest.lock') }}
+
+      - name: Tier 3 bridge under KVM
+        if: matrix.shard == 1
+        env:
+          PHAROS_CELL: kvm
+        run: cargo test -p pharos-kernel --target x86_64-unknown-none --test bridge --locked
+
       # D-009, D-047 item 5 (#259): two release builds give the same
       # SHA256SUMS (the ISO, disk.img, store.img, and the boot measurement).
       # The log keeps it, to compare with the maintainer's local build.

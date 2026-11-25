@@ -255,9 +255,9 @@ pub const TEST_MANIFESTS: [(&str, &str); 38] = [
     ),
     (
         "agents/guest.manifest",
-        "# The channel kernel's Tier 3 guest agent (#298).\nmanifest = 1\nname = guest\n\
+        "# The bridge kernel's Tier 3 guest agent (#298, #300).\nmanifest = 1\nname = guest\n\
          program = guest/agent\npages = 1\nmodels =\nattempts = 2\nprogress_ms = 60000\n\
-         task_ms = 120000\ndata = none\nnet =\n",
+         task_ms = 120000\ndata = none\nnet =\nhttps = items\n",
     ),
     (
         "agents/worker.manifest",

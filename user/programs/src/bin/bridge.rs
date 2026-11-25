@@ -8,7 +8,8 @@
 //! bridge (`pharos_proto::agents::BRIDGE`), which only `BIND` is served
 //! under.
 //!
-//! It asks the runtime to `BIND` once a second. A bound attempt's
+//! It asks the runtime to `BIND` once a second, dropping what the guest
+//! sends in between. A bound attempt's
 //! capability is `SEND` on the runtime with the guest agent's slot badge:
 //! the bridge attaches its buffer through it, sends the guest `HELLO`,
 //! and turns each `REQUEST` frame ([`pharos_proto::bridge`]) into that
@@ -52,6 +53,8 @@ const SILENT_US: u64 = 60_000_000;
 /// A request through the runtime: the gateway's 35 s and some.
 const CALL_US: u64 = 40_000_000;
 const BIND_US: u64 = 2_000_000;
+/// Between `BIND`s while none is bound.
+const IDLE_US: u64 = 1_000_000;
 /// A frame to the guest: how long its transmit buffers may stay full.
 const WRITE_US: u64 = 10_000_000;
 
@@ -197,6 +200,22 @@ impl Bridge {
         Ok(!ended)
     }
 
+    /// Nothing bound: for `us`, what the guest says is no attempt's, and
+    /// is dropped as it comes (a flood is drained at the device's pace,
+    /// #300), so the next attempt's `HELLO` is not behind it.
+    fn discard(&mut self, us: u64) {
+        let until = uptime() + us;
+        loop {
+            while let Ok(Some(_)) = self.console.recv(&mut self.chunk) {}
+            let now = uptime();
+            if now >= until {
+                return;
+            }
+            let mut msg = [0u8; 16];
+            let _ = receive_timeout(self.irq_ep, &mut msg, until - now);
+        }
+    }
+
     /// Attaches the buffer through the attempt's capability.
     fn attach(&self, slot: Handle) -> bool {
         let mut msg = [0u8; 16];
@@ -264,9 +283,7 @@ fn main(_: u64) -> u64 {
     }
     loop {
         let Some((slot, bound)) = bind(reply) else {
-            // Nothing bound: what the guest says now is no attempt's.
-            while let Ok(Some(_)) = b.console.recv(&mut b.chunk) {}
-            sleep(1_000_000);
+            b.discard(IDLE_US);
             continue;
         };
         say(b"bridge: bound");

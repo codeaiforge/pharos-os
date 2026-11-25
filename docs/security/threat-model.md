@@ -155,7 +155,7 @@ Design: [gateway.md](../architecture/gateway.md) (accepted 2026-11-23, #280; D-0
 
 ### Foreign-agent bridge (M6.3)
 
-Design: [bridge.md](../architecture/bridge.md) (accepted 2026-11-24, #295; D-036). Each row is **planned** until its issue lands (#296–#300); the frame parsing, the per-attempt slot capability, and the bridge's holdings are **implemented** (#298) and checked end to end by the `channel` kernel, and the hostile-guest suite is **planned** (#300). **Tier 3 trusts the host kernel and hypervisor:** the guest's containment is the host's VM configuration, which the launch tool writes and checks through QEMU's monitor, not something Pharos enforces. M8.2 removes this.
+Design: [bridge.md](../architecture/bridge.md) (accepted 2026-11-24, #295; D-036). Each row is **implemented** (#296–#300) and checked end to end by the `bridge` kernel, under KVM in CI (#300): the guest's own checks of what it can reach, each malformed, oversized, and flooding frame refused with the attempt failed and recorded, its refusals recorded, a restarted bridge ending the old attempt, and Pharos binding the next. The M6.3 review is #301. **Tier 3 trusts the host kernel and hypervisor:** the guest's containment is the host's VM configuration, which the launch tool writes and checks through QEMU's monitor, not something Pharos enforces. M8.2 removes this.
 
 | Threat | Mitigation |
 | --- | --- |
