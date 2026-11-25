@@ -27,6 +27,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use pharos_programs::gateway::{self as logic, Wiped};
+use pharos_programs::output::Limit;
 use pharos_proto::audit::{self, Entry, Kind, action, outcome};
 use pharos_proto::gateway::{
     self, ANSWER, Answered, MAX_BUFFER, NAME, NO_ACCESS, NO_AUDIT, NO_BUFFER, OK, Request, TAIL_US,
@@ -88,6 +89,8 @@ struct Gateway {
     vault: Mapped,
     tls: Mapped,
     reply: Handle,
+    /// Malformed requests recorded (#291).
+    malformed: Limit,
 }
 
 impl Gateway {
@@ -98,6 +101,11 @@ impl Gateway {
                 if cap != 0 {
                     let n = refusal(why, VERSION, out);
                     answer(cap, &out[..n]);
+                }
+                // Recorded, at a rate (#291): a flood cannot fill the trail.
+                if self.malformed.admit(uptime()) {
+                    let d = logic::malformed_detail(badge, why, self.malformed.take_dropped());
+                    let _ = self.audit(Kind::Event, 0, outcome::REFUSED, &d);
                 }
                 return;
             }
@@ -479,6 +487,7 @@ fn main(arg: u64) -> u64 {
         vault,
         tls,
         reply,
+        malformed: Limit::rate(logic::MALFORMED_BURST, logic::MALFORMED_EVERY_US),
     };
     if send(REPORT, b"ready", 0, 0, 0).is_err() {
         return 1;

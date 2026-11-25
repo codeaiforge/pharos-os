@@ -3919,10 +3919,19 @@ fn secrets_audit(image: &Path, log: &str) -> Result<()> {
         "vault outcome 2 release open status 40",
         "vault outcome 2 release 9 status 7",
         "vault outcome 2 release with-secret secret test-token status 3",
+        "vault outcome 2 malformed c1 bad",
+        "vault outcome 2 malformed c1 version",
     ] {
         if !ours.iter().any(|l| l.ends_with(want)) {
             return Err(format!("the audit trail has no record like {want:?}"));
         }
+    }
+    // Ten malformed requests in well under 10 s: the burst of 4 (#291).
+    let malformed = ours.iter().filter(|l| l.contains(" malformed c")).count();
+    if malformed != 4 {
+        return Err(format!(
+            "expected 4 malformed-request records, got {malformed}"
+        ));
     }
     println!("  audit trail: {} records; the vault's:", lines.len());
     for l in lines.iter().filter(|l| l.contains(" vault ")) {

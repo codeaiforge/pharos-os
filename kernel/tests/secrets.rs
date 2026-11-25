@@ -22,7 +22,7 @@ use pharos_kernel::{fs, ipc, kprintln, mm, pci, process, sched, storage, time};
 pharos_kernel::test_kernel!(run);
 
 /// Client steps that must pass, and the vault's own line.
-const STEPS: [&str; 9] = [
+const STEPS: [&str; 10] = [
     "vaulter: a release before ATTACH is NO_BUFFER",
     "vaulter: buffer attached",
     "vaulter: route 0's prefix and secret are released",
@@ -32,6 +32,7 @@ const STEPS: [&str; 9] = [
     "vaulter: another client's release is NO_ACCESS",
     "vaulter: secrets_read without the capability is refused",
     "vaulter: INFO names vault, version 1",
+    "vaulter: ten malformed requests are each answered",
 ];
 
 fn run(t: &mut TestRun) {

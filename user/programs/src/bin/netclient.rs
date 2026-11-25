@@ -574,6 +574,22 @@ fn vaulter(reply: Handle) -> u64 {
             Info::parse(&r[..n]).is_some_and(|i| i.name == vault::NAME && i.low == 1)
         }),
     );
+    // Malformed requests (#291): each answered; the runner finds the
+    // vault's burst of 4 recorded, not 10.
+    let answered = (0..10).all(|i| {
+        let msg: &[u8] = if i % 2 == 0 { &[1] } else { &[9, 1, 0] };
+        let want = if i % 2 == 0 {
+            pharos_proto::status::BAD_REQUEST
+        } else {
+            pharos_proto::status::VERSION
+        };
+        raw(NET, reply, msg).is_ok_and(|(r, n)| n >= 1 && r[0] == want)
+    });
+    report(
+        &mut f,
+        "vaulter: ten malformed requests are each answered",
+        answered,
+    );
     f
 }
 

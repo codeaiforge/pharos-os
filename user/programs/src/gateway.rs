@@ -222,6 +222,30 @@ fn hex(n: u8) -> u8 {
     b"0123456789abcdef"[usize::from(n)]
 }
 
+/// Malformed requests the gateway and the vault each record at once, then
+/// one every [`MALFORMED_EVERY_US`] (#291, M6.2 review R-9); the others
+/// are counted in the next record.
+pub const MALFORMED_BURST: u64 = 4;
+pub const MALFORMED_EVERY_US: u64 = 10_000_000;
+
+/// The detail of a malformed request's record: the client's badge, why
+/// (`bad` or `version`), and how many were not recorded since the last.
+pub fn malformed_detail(badge: u32, why: pharos_proto::Refused, unrecorded: u64) -> Vec<u8> {
+    let mut d = Vec::with_capacity(48);
+    d.extend_from_slice(b"malformed c");
+    number(&mut d, badge.into());
+    d.extend_from_slice(match why {
+        pharos_proto::Refused::Bad => b" bad",
+        pharos_proto::Refused::Version => b" version",
+    });
+    if unrecorded > 0 {
+        d.extend_from_slice(b" +");
+        number(&mut d, unrecorded);
+        d.extend_from_slice(b" unrecorded");
+    }
+    d
+}
+
 /// A refusal's detail, before anything was sent: the client, the route's
 /// name as asked (a valid route name, whether or not the table has it),
 /// and the status.
@@ -365,6 +389,20 @@ mod tests {
         assert_eq!(
             parse(big, true, &ROUTE).err(),
             Some(http::reason::TOO_LARGE)
+        );
+    }
+
+    #[test]
+    fn a_malformed_requests_record_says_who_why_and_how_many_more() {
+        use pharos_proto::Refused;
+        assert_eq!(malformed_detail(1, Refused::Bad, 0), b"malformed c1 bad");
+        assert_eq!(
+            malformed_detail(4_294_967_295, Refused::Version, 18_446_744_073_709_551_615),
+            b"malformed c4294967295 version +18446744073709551615 unrecorded"
+        );
+        assert!(
+            malformed_detail(u32::MAX, Refused::Version, u64::MAX).len()
+                <= pharos_proto::audit::MAX_DETAIL
         );
     }
 

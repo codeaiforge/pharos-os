@@ -22,6 +22,8 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use pharos_programs::gateway;
+use pharos_programs::output::Limit;
 use pharos_proto::audit::{self, Entry, Kind, action, outcome};
 use pharos_proto::vault::{
     self, MAX_BUFFER, MAX_FILE, NAME, NO_ACCESS, NO_AUDIT, NO_BUFFER, NO_SECRET, NOT_FOUND, OK,
@@ -31,7 +33,7 @@ use pharos_proto::{Info, refusal, status};
 use pharos_services::Route;
 use pharos_user::{
     Handle, Mapped, Received, call_timeout, debug_write, delete, endpoint_create, mem_map_cap,
-    mem_unmap, receive, secrets_read, send, try_send,
+    mem_unmap, receive, secrets_read, send, try_send, uptime,
 };
 
 pharos_user::entry!(main);
@@ -59,6 +61,8 @@ struct Vault<'a> {
     routes: &'static [Route],
     buffer: Option<Mapped>,
     reply: Handle,
+    /// Malformed requests recorded (#291).
+    malformed: Limit,
 }
 
 impl Vault<'_> {
@@ -69,6 +73,11 @@ impl Vault<'_> {
                 if cap != 0 {
                     let n = refusal(why, VERSION, out);
                     answer(cap, &out[..n]);
+                }
+                // Recorded, at a rate (#291): a flood cannot fill the trail.
+                if self.malformed.admit(uptime()) {
+                    let d = gateway::malformed_detail(badge, why, self.malformed.take_dropped());
+                    let _ = self.audit(outcome::REFUSED, &d);
                 }
                 return;
             }
@@ -229,6 +238,7 @@ fn main(arg: u64) -> u64 {
         routes: pharos_services::routes(arg),
         buffer: None,
         reply,
+        malformed: Limit::rate(gateway::MALFORMED_BURST, gateway::MALFORMED_EVERY_US),
     };
     if send(REPORT, b"ready", 0, 0, 0).is_err() {
         return 1;
