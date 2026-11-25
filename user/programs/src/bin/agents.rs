@@ -165,8 +165,8 @@ const KNOWLEDGE: Handle = 11;
 const INCOMING: Handle = 12;
 /// The gateway, when handle 12 answers `INFO` as one (#284).
 const GATEWAY: Handle = INCOMING;
-/// How long the gateway may take: its own 30 s, and a margin.
-const GATEWAY_US: u64 = 35_000_000;
+/// How long the gateway may take: its own 30 s, and a margin (#289).
+const GATEWAY_US: u64 = pharos_proto::gateway::WAIT_US;
 /// How long the knowledge service may take to answer.
 const KNOWLEDGE_US: u64 = 10_000_000;
 /// The runtime's buffer at the storage service for granted files: the

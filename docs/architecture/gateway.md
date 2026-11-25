@@ -221,7 +221,7 @@ That is six or seven records a request, which fills the trail faster than UDP do
 
 - The vault: 64 KiB pages (16 secrets of at most 1 KiB, and its buffer).
 - The gateway: one request at a time per client, 2 clients, 2 requests in all. It uses the TLS service's 2 connections for a client, one at a time, plus 2 × 64 KiB of buffers and 64 KiB for an answer in parsing: 512 KiB.
-- Timeouts: the route's whole request is 30 s, within which the TLS service's own handshake (10 s) and idle (60 s, shortened to the remaining time) apply; the runtime's `REQUEST` gives up at 35 s.
+- Timeouts: the route's whole request is 30 s, within which the TLS service's own handshake (10 s) and idle (60 s, shortened to the remaining time) apply; the runtime's `REQUEST` gives up at 35 s. *As built (#289, M6.2 review R-6, R-1):* the 30 s now bound every step from when the gateway takes the request, the intent and outcome records included: the TLS exchange ends 5 s early (`TAIL_US`), room for the close, the second release (two tries), and the outcome, 1 s each; past 30 s the gateway writes nothing into the client's buffer and answers `TIMEOUT`. The runtime waits `pharos_proto::gateway::WAIT_US` (35 s), the order checked at compile time, so it gives up only on a gateway not answering at all. **Limit:** the bound runs from when the gateway takes the request, so a request queued behind another client's (test programs only; the runtime makes one at a time) can still be answered after the runtime gave up. A restarted gateway attaches its buffers with `try_send_cap`, retried for at most 1 s each, so a vault or TLS service that is not receiving no longer keeps it from reporting ready.
 
 ## 4. Security
 

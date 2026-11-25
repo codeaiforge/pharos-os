@@ -29,8 +29,8 @@ use alloc::vec::Vec;
 use pharos_programs::gateway::{self as logic, Wiped};
 use pharos_proto::audit::{self, Entry, Kind, action, outcome};
 use pharos_proto::gateway::{
-    self, ANSWER, Answered, MAX_BUFFER, NAME, NO_ACCESS, NO_AUDIT, NO_BUFFER, OK, Request, TIMEOUT,
-    TIMEOUT_US, TLS as TLS_FAILED, VERSION,
+    self, ANSWER, Answered, MAX_BUFFER, NAME, NO_ACCESS, NO_AUDIT, NO_BUFFER, OK, Request, TAIL_US,
+    TIMEOUT, TIMEOUT_US, TLS as TLS_FAILED, VERSION,
 };
 use pharos_proto::http::reason;
 use pharos_proto::net::parse_count;
@@ -41,7 +41,7 @@ use pharos_services::Route;
 use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
     Handle, Mapped, Received, call_timeout, debug_write, delete, endpoint_create, mem_map,
-    mem_map_cap, mem_share, mem_unmap, receive, send, try_send, uptime,
+    mem_map_cap, mem_share, mem_unmap, receive, send, sleep, try_send, try_send_cap, uptime,
 };
 
 pharos_user::entry!(main);
@@ -173,11 +173,14 @@ impl Gateway {
                 return self.refused(s, &d);
             }
         };
+        // Every step fits in TIMEOUT_US from here: the exchange ends
+        // TAIL_US early, for the steps after it (#289).
+        let start = uptime();
         let detail = logic::intent_detail(client, r, &target, &body);
         let Some(seq) = self.audit(Kind::Intent, 0, outcome::NONE, &detail) else {
             return failed(NO_AUDIT, 0, 0);
         };
-        let deadline = uptime() + TIMEOUT_US;
+        let deadline = start + TIMEOUT_US - TAIL_US;
         let (a, bytes) = match self.exchange(index, r, &target, &body, room, deadline) {
             Ok((bytes, a)) => (a, Some(bytes)),
             Err(a) => (a, None),
@@ -192,6 +195,11 @@ impl Gateway {
             .is_none()
         {
             return failed(NO_AUDIT, 0, 0);
+        }
+        // Past its bound the client may have given up and reused its buffer:
+        // nothing is written and the answer is TIMEOUT (#289).
+        if uptime() >= start + TIMEOUT_US {
+            return failed(TIMEOUT, 0, 0);
         }
         // Written only once the outcome is recorded: else nothing reaches
         // the client.
@@ -419,14 +427,21 @@ impl Gateway {
     }
 }
 
-/// Attaches `b` at `service` with `msg`. A blocking `send`: at startup
-/// `init` started the service first, and again after it answered
-/// `NO_BUFFER`, so it is receiving.
+/// Attaches `b` at `service` with `msg`, trying for at most [`CALL_US`]:
+/// a service that is not receiving (busy, or restarting) must not keep a
+/// restarted gateway from reporting ready (#289, M6.2 review R-1).
 fn share(service: Handle, msg: &[u8], b: &Mapped) -> bool {
     let Ok(m) = mem_share(b) else {
         return false;
     };
-    let sent = send(service, msg, m, READ | WRITE, 0).is_ok();
+    let end = uptime() + CALL_US;
+    let sent = loop {
+        match try_send_cap(service, msg, m, READ | WRITE, 0) {
+            Ok(_) => break true,
+            Err(pharos_user::Error::WouldBlock) if uptime() < end => sleep(1_000),
+            Err(_) => break false,
+        }
+    };
     let _ = delete(m);
     sent
 }

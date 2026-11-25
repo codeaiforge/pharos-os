@@ -49,8 +49,19 @@ pub const TIMEOUT: u8 = status::OWN + 12;
 
 /// Largest buffer a client may attach.
 pub const MAX_BUFFER: u64 = 64 * 1024;
-/// How long one request may take, end to end.
+/// How long one request may take, end to end, from when the gateway takes
+/// it: past this the gateway neither writes an answer nor replies (#289).
 pub const TIMEOUT_US: u64 = 30_000_000;
+/// The gateway's TLS exchange ends this long before [`TIMEOUT_US`], room
+/// for what follows it: the close, the second release (two tries), and
+/// the outcome record, 1 s each (#289, M6.2 review R-6).
+pub const TAIL_US: u64 = 5_000_000;
+/// How long the runtime waits for a request: the gateway's whole bound and
+/// a margin, so the runtime never gives up on a request that then takes
+/// effect, unless the gateway was not answering at all.
+pub const WAIT_US: u64 = TIMEOUT_US + 5_000_000;
+const _: () = assert!(TAIL_US >= 4 * crate::vault::RELEASE_US);
+const _: () = assert!(WAIT_US >= TIMEOUT_US + 2_000_000);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request<'a> {
