@@ -3810,6 +3810,14 @@ fn tls_audit(image: &Path) -> Result<()> {
     if lines.iter().any(|l| l.contains("dest 5")) {
         return Err("the destination not listed has an intent recorded".into());
     }
+    // The burst of 16 (#275), one a second earned while the kernel runs,
+    // and the one earned back; without the limit, 5 + 32 + 1 = 38.
+    let intents = lines.iter().filter(|l| l.contains(" Intent tls ")).count();
+    if !(17..=24).contains(&intents) {
+        return Err(format!(
+            "expected 17 to 24 TLS intents (a burst of 16, then one a second), got {intents}"
+        ));
+    }
     let closed = lines
         .iter()
         .any(|l| l.contains(" Event tls ") && l.contains("close out 18 in "));

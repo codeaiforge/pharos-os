@@ -411,6 +411,25 @@ fn tls_round(reply: Handle) -> u64 {
         "tlsclient: a destination not listed refused with NO_ACCESS",
         tls_open(reply, 5).is_some_and(|(s, ..)| s == tls::NO_ACCESS),
     );
+    // A loop of OPENs (#275): past the burst, refused with OVER_LIMIT and
+    // nothing recorded (the runner counts the intents); a second later,
+    // one more is earned.
+    let mut handshakes = 0;
+    let limited = (0..32).any(|_| match tls_open(reply, 1) {
+        Some((tls::HANDSHAKE, ..)) => {
+            handshakes += 1;
+            false
+        }
+        other => other.is_some_and(|(s, ..)| s == tls::OVER_LIMIT),
+    });
+    pharos_user::sleep(1_100_000);
+    report(
+        &mut f,
+        "tlsclient: a loop of OPENs refused with OVER_LIMIT, then one earned back",
+        limited
+            && handshakes < 32
+            && tls_open(reply, 1) == Some((tls::HANDSHAKE, 0, reason::EXPIRED)),
+    );
     f
 }
 

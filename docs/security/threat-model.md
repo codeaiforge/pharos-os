@@ -136,6 +136,7 @@ Design: [tls.md](../architecture/tls.md) (accepted 2026-11-21, #269; D-034). TCP
 | A reset or wrong clock makes an expired certificate look valid | Limine's date at boot with a floor at the build's `SOURCE_DATE_EPOCH`; no date, no handshake. **Limit:** the host sets the clock and is trusted until M8.2 |
 | Predictable randomness breaks key exchange | HMAC-DRBG seeded from virtio-rng, mixed with RDSEED where present, reseeded; no seed, no handshake. **Limit:** the host supplies virtio-rng and is trusted until M8.2 |
 | A connection is made without a record | `INTENT` stored before connecting, else `NO_AUDIT`; `OUTCOME` and byte counts after; content never recorded |
+| A client fills the audit trail with `OPEN`s, so every audited action fails | **Implemented (#275):** each client's `OPEN`s that write an intent are limited to a burst of 16, then one a second; one over is `OVER_LIMIT` and writes nothing (`tls` test kernel, mutation-checked). **Limit:** this slows filling the trail, it does not prevent it; the trail warns at 80% and 95% (#217) |
 | A silent server holds a client or the service | Timeouts on every deferred reply (connect 5 s, handshake 10 s, idle 60 s); per-client and total connection limits |
 | **Limits** | No revocation checks; no RSA or P-384, so most public servers are unreachable until M6.2; sizes and timing visible to the host and the network |
 

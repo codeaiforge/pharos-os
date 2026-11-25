@@ -50,6 +50,8 @@ pub const EVERY_US: u64 = 50_000;
 /// told once how many were not shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limit {
+    burst: u64,
+    every_us: u64,
     tokens: u64,
     at: u64,
     dropped: u64,
@@ -63,8 +65,16 @@ impl Default for Limit {
 
 impl Limit {
     pub const fn new() -> Self {
+        Self::rate(BURST, EVERY_US)
+    }
+
+    /// `burst` at once, then one per `every_us` (the TLS service's
+    /// `OPEN`s, #275). `every_us` must not be 0.
+    pub const fn rate(burst: u64, every_us: u64) -> Self {
         Self {
-            tokens: BURST,
+            burst,
+            every_us,
+            tokens: burst,
             at: 0,
             dropped: 0,
         }
@@ -73,11 +83,11 @@ impl Limit {
     /// Whether a line may be shown at `now` (microseconds since boot); one
     /// that may not is counted as not shown.
     pub fn admit(&mut self, now: u64) -> bool {
-        let earned = now.saturating_sub(self.at) / EVERY_US;
+        let earned = now.saturating_sub(self.at) / self.every_us;
         if earned > 0 {
-            self.tokens = self.tokens.saturating_add(earned).min(BURST);
+            self.tokens = self.tokens.saturating_add(earned).min(self.burst);
             // At most `now - at`: no overflow, and time is never banked.
-            self.at += earned * EVERY_US;
+            self.at += earned * self.every_us;
         }
         if self.tokens == 0 {
             self.skip();
@@ -181,5 +191,15 @@ mod tests {
         assert_eq!(l.take_dropped(), 1);
         // Time going back (`uptime` failing gives 0) earns nothing.
         assert!(!l.admit(0));
+    }
+
+    #[test]
+    fn a_rate_of_its_own() {
+        let mut l = Limit::rate(3, 1_000_000);
+        let t = 10_000_000;
+        assert_eq!((0..10).filter(|_| l.admit(t)).count(), 3);
+        assert!(!l.admit(t + 999_999));
+        assert!(l.admit(t + 1_000_000), "one a second");
+        assert!(!l.admit(t + 1_000_000));
     }
 }

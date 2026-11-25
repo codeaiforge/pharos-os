@@ -28,6 +28,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use pharos_programs::output::Limit;
 use pharos_programs::virtio_rng::Rng;
 use pharos_proto::audit::{self, Entry, Kind, action, outcome};
 use pharos_proto::net::{self, Request as NetRequest};
@@ -64,6 +65,11 @@ const ROOTS: &[u8] = b"system/tls/roots";
 /// Connections in all, and per client (tls.md).
 const MAX_CONNS: usize = 4;
 const PER_CLIENT: usize = 2;
+/// `OPEN`s a client may make at once that reach the audit trail, then one
+/// a second (#275): each writes 2 or 3 records, so one client cannot fill
+/// the trail faster than that. A refused one writes nothing.
+const OPEN_BURST: u64 = 16;
+const OPEN_EVERY_US: u64 = 1_000_000;
 /// How long a handshake may take.
 const HANDSHAKE_US: u64 = 10_000_000;
 /// A connection with no client request and no data from the server for
@@ -101,10 +107,21 @@ struct Dest {
     name: Vec<u8>,
 }
 
-#[derive(Default)]
 struct Client {
     dests: [Option<Dest>; MAX_DESTINATIONS as usize],
     buffer: Option<Mapped>,
+    /// The `OPEN`s that write an intent (#275).
+    opens: Limit,
+}
+
+impl Default for Client {
+    fn default() -> Self {
+        Self {
+            dests: Default::default(),
+            buffer: None,
+            opens: Limit::rate(OPEN_BURST, OPEN_EVERY_US),
+        }
+    }
 }
 
 enum Phase {
@@ -380,6 +397,9 @@ impl Service {
         let Some(config) = self.config.clone() else {
             return refuse(status::INTERNAL, 0);
         };
+        if !self.clients[usize::from(client - 1)].opens.admit(uptime()) {
+            return refuse(OVER_LIMIT, 0);
+        }
         let mut detail = Vec::with_capacity(64);
         detail.extend_from_slice(b"open client ");
         detail.push(b'0' + client);
