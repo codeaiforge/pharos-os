@@ -36,10 +36,11 @@ const LIMINE_VERSION: &str = "12.9.4";
 const LIMINE_SHA256: &str = "9880cc04681262214db9b824ed8a5c55296955027d8caa9f55ab52a6dd85d6a0";
 const LIMINE_ARCHIVE: &str = "limine-binary.tar.xz";
 
-/// Default timestamp for every file in the ISO, so builds are byte-identical.
-/// Overridable through the standard `SOURCE_DATE_EPOCH` variable, which the
-/// kernel's builds inherit: the kernel's clock floor (`time::DATE_FLOOR`)
-/// reads it, with this same default.
+/// Timestamp for every file in the ISO, so builds are byte-identical, and
+/// the kernel's clock floor (`time::DATE_FLOOR`), which every kernel build
+/// here is given (#276): the standard `SOURCE_DATE_EPOCH` variable, else
+/// the source commit's time, else this, which is also the kernel's own
+/// default for a build outside `cargo xtask`.
 const DEFAULT_SOURCE_DATE_EPOCH: u64 = 1_761_436_800;
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
@@ -877,8 +878,26 @@ fn source_date_epoch() -> Result<u64> {
         Ok(value) => value
             .parse()
             .map_err(|_| format!("SOURCE_DATE_EPOCH must be a number of seconds, got {value:?}")),
-        Err(_) => Ok(DEFAULT_SOURCE_DATE_EPOCH),
+        Err(_) => Ok(commit_time().unwrap_or(DEFAULT_SOURCE_DATE_EPOCH)),
     }
+}
+
+/// The source commit's time in Unix seconds (`git log -1 --format=%ct`);
+/// none outside a Git checkout.
+fn commit_time() -> Option<u64> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?;
+    let out = Command::new("git")
+        .current_dir(root)
+        .args(["log", "-1", "--format=%ct"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    String::from_utf8(out.stdout).ok()?.trim().parse().ok()
+}
+
+/// The kernel's boot line naming its clock floor (`kernel/src/main.rs`).
+fn floor_line(epoch: u64) -> String {
+    format!("floor {epoch})")
 }
 
 fn io_err(action: &str, path: &Path) -> impl FnOnce(io::Error) -> String {
@@ -993,6 +1012,7 @@ fn build(paths: &Paths) -> Result<()> {
     run(
         Command::new(cargo)
             .current_dir(&paths.root)
+            .env("SOURCE_DATE_EPOCH", source_date_epoch()?.to_string())
             // Replaces `.cargo/config.toml`'s flags for the target, so
             // they are repeated here (#261).
             .env(
@@ -1941,6 +1961,7 @@ fn test(paths: &Paths, timeout: Duration, part: Option<(usize, usize)>, repeat: 
             .current_dir(&paths.root)
             .env(TEST_TIMEOUT_ENV, timeout.as_secs().to_string())
             .env(TEST_REPEAT_ENV, repeat.to_string())
+            .env("SOURCE_DATE_EPOCH", source_date_epoch()?.to_string())
             // Every kernel runs even after one fails, so a run shows all failures.
             .args([
                 "test",
@@ -1983,7 +2004,16 @@ fn boot_check(paths: &Paths, timeout: Duration) -> Result<()> {
         let vars = logs.join(format!("boot-{name}-ovmf-vars.fd"));
         let run = boot_headless(&iso, &vars, &log, bios, timeout, &[])?;
         let label = format!("boot check ({name})");
-        match evaluate_boot(&run, BOOT_MARKER, timeout) {
+        // The kernel's clock floor is the build's epoch (#276).
+        let floor = floor_line(source_date_epoch()?);
+        let result = evaluate_boot(&run, BOOT_MARKER, timeout).and_then(|()| {
+            run.log
+                .lines()
+                .any(|l| l.contains("  date:") && l.trim_end_matches('\r').ends_with(&floor))
+                .then_some(())
+                .ok_or_else(|| format!("the kernel's date line does not end with {floor:?}"))
+        });
+        match result {
             Ok(()) => println!("{label}: PASS in {:.1} s", run.elapsed.as_secs_f32()),
             Err(reason) => {
                 failures += 1;
@@ -2534,6 +2564,7 @@ fn soak(paths: &Paths, minutes: u64) -> Result<()> {
         Command::new(cargo)
             .current_dir(&paths.root)
             .env(SOAK_MINUTES_ENV, minutes.to_string())
+            .env("SOURCE_DATE_EPOCH", source_date_epoch()?.to_string())
             .args(["test", "--locked", "--package", KERNEL_PACKAGE])
             .args(["--target", KERNEL_TARGET, "--test", SOAK_TEST]),
         true,
@@ -2560,6 +2591,7 @@ fn s1(paths: &Paths) -> Result<()> {
     run(
         Command::new(cargo)
             .current_dir(&paths.root)
+            .env("SOURCE_DATE_EPOCH", source_date_epoch()?.to_string())
             .args(["test", "--locked", "--package", KERNEL_PACKAGE])
             .args(["--target", KERNEL_TARGET, "--test", S1_TEST]),
         true,
@@ -5436,6 +5468,14 @@ mod tests {
     fn the_kernel_clock_floor_defaults_to_the_build_date() {
         assert_eq!(super::DEFAULT_SOURCE_DATE_EPOCH, 1_761_436_800);
         assert!(include_str!("../../kernel/src/time.rs").contains("None => 1_761_436_800,"));
+        // The commit's time, in this checkout (#276).
+        let t = super::commit_time().expect("a Git checkout");
+        assert!(t > super::DEFAULT_SOURCE_DATE_EPOCH);
+        // The line the boot check looks for is the one the kernel prints.
+        let main = include_str!("../../kernel/src/main.rs");
+        assert!(main.contains("(Unix seconds; floor {floor})"));
+        assert!(main.contains("before the floor {floor}: TLS refuses"));
+        assert_eq!(super::floor_line(7), "floor 7)");
     }
 
     use super::*;

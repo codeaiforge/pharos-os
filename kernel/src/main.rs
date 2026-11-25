@@ -80,10 +80,13 @@ extern "C" fn kernel_main() -> ! {
         kprintln!("  firmware:   {}", firmware_name(firmware.firmware_type));
     }
     let date = requests::DATE_AT_BOOT.get(&boot).map(|d| d.timestamp);
+    // The floor is the build's `SOURCE_DATE_EPOCH`; the boot check reads it (#276).
+    let floor = pharos_kernel::time::DATE_FLOOR;
     if pharos_kernel::time::set_boot_date(date) {
-        kprintln!("  date:       {} (Unix seconds)", date.unwrap_or(0));
+        let date = date.unwrap_or(0);
+        kprintln!("  date:       {date} (Unix seconds; floor {floor})");
     } else {
-        kprintln!("  date:       none at or after the build's; TLS refuses (NO_CLOCK)");
+        kprintln!("  date:       none, or one before the floor {floor}: TLS refuses (NO_CLOCK)");
     }
     let entry = kmain as *const () as usize;
     kprintln!("  entry:      {entry:#x}");

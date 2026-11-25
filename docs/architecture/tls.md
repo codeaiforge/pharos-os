@@ -112,7 +112,7 @@ flowchart LR
 ### Time
 
 - **The kernel asks Limine for the date at boot** and keeps it. A new system call, `clock_real` (no capability; it gives no authority and is as coarse as one second), returns that date plus `uptime()` in seconds.
-- **The floor:** a date before the build's `SOURCE_DATE_EPOCH` (built into the kernel) is treated as no date, so a reset RTC (1970 or 2000) cannot make an expired certificate look valid. With no date, `clock_real` returns `NO_CLOCK`, and every `OPEN` fails with `NO_CLOCK`.
+- **The floor:** a date before the build's `SOURCE_DATE_EPOCH` (built into the kernel) is treated as no date, so a reset RTC (1970 or 2000) cannot make an expired certificate look valid. With no date, `clock_real` returns `NO_CLOCK`, and every `OPEN` fails with `NO_CLOCK`. *As built (#276, review R-6):* `cargo xtask` gives every kernel build its `SOURCE_DATE_EPOCH`: the variable if set, else the source commit's time, else 2025-10-26 (also the kernel's own default for a build outside `cargo xtask`). The boot log's date line names the floor, and the boot check requires it to be that epoch. Before #276 no build set it, so every floor was 2025-10-26.
 - **The clock's owner is the host**, as is everything QEMU emulates. A host that sets `-rtc base=` in the past can make an expired certificate pass; the host is trusted until M8.2.
 
 ### Randomness

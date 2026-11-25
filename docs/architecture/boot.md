@@ -62,7 +62,7 @@ EFI/BOOT/BOOTX64.EFI            Limine UEFI application
 
 Test-kernel images (`cargo xtask runner`, and `image`/`run --kernel`) carry the test modules instead of `root`: `pattern` and `odd`, with contents the test kernels know. The kernel records the modules before bootloader memory is reclaimed, since Limine's module list lives there ([storage.md](storage.md)).
 
-Built with `xorriso -as mkisofs` (BIOS and EFI El Torito entries, protective MBR), then `limine bios-install`. File timestamps are set to a fixed `SOURCE_DATE_EPOCH` before `xorriso` runs, so images are byte-identical across builds.
+Built with `xorriso -as mkisofs` (BIOS and EFI El Torito entries, protective MBR), then `limine bios-install`. File timestamps are set to a fixed `SOURCE_DATE_EPOCH` before `xorriso` runs, so images are byte-identical across builds: the variable if set, else the source commit's time (since #276; before, a fixed 2025-10-26), which is also the kernel's clock floor ([tls.md](tls.md#time)).
 
 ### Build tool (`xtask`)
 
