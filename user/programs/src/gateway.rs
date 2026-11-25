@@ -141,6 +141,8 @@ pub fn strip(p: &Parsed, prefix: &[u8], value: &[u8], room: usize) -> Option<(Ve
             type_len: ctype.len() as u8,
             answer_len: n as u32,
             stripped: u8::try_from(stripped).unwrap_or(u8::MAX),
+            // An answer was read: the request reached the server.
+            sent: true,
         },
     ))
 }
@@ -260,12 +262,17 @@ pub fn refusal_detail(client: u8, route: &[u8], status: u8) -> Vec<u8> {
     cut(d)
 }
 
-/// The outcome's detail: `status <s> [detail <d>] http <h> answer <n>
-/// stripped <k>`.
+/// The outcome's detail: `status <s> [sent] [detail <d>] http <h> answer
+/// <n> stripped <k>`. `sent` marks a request the server may have acted on,
+/// whatever the status (#293, M6.2 review R-11); it comes early, so the
+/// cut to the audit limit never drops it.
 pub fn outcome_detail(a: &Answered) -> Vec<u8> {
     let mut d = Vec::with_capacity(64);
     d.extend_from_slice(b"status ");
     number(&mut d, a.status.into());
+    if a.sent {
+        d.extend_from_slice(b" sent");
+    }
     if a.detail != 0 {
         d.extend_from_slice(b" detail ");
         number(&mut d, a.detail.into());
@@ -277,6 +284,18 @@ pub fn outcome_detail(a: &Answered) -> Vec<u8> {
     d.extend_from_slice(b" stripped ");
     number(&mut d, a.stripped.into());
     cut(d)
+}
+
+/// The runtime's outcome detail for a gateway request (#293): `status <s>
+/// [sent]`, the gateway's status and its `sent` mark.
+pub fn runtime_outcome_detail(a: &Answered) -> Vec<u8> {
+    let mut d = Vec::with_capacity(16);
+    d.extend_from_slice(b"status ");
+    number(&mut d, a.status.into());
+    if a.sent {
+        d.extend_from_slice(b" sent");
+    }
+    d
 }
 
 #[cfg(test)]
@@ -441,12 +460,49 @@ mod tests {
             http: 201,
             answer_len: 40,
             stripped: 2,
+            sent: true,
             ..Answered::default()
         };
         assert_eq!(
             outcome_detail(&a),
-            b"status 0 http 201 answer 40 stripped 2"
+            b"status 0 sent http 201 answer 40 stripped 2"
         );
+        assert_eq!(runtime_outcome_detail(&a), b"status 0 sent");
+        // #293: the server acted (`post` created an item) but the answer
+        // was refused, the outcome failed: the mark says it was sent.
+        let gzip = Answered {
+            status: pharos_proto::gateway::ANSWER,
+            detail: http::reason::ENCODED,
+            sent: true,
+            ..Answered::default()
+        };
+        assert_eq!(
+            outcome_detail(&gzip),
+            b"status 42 sent detail 3 http 0 answer 0 stripped 0"
+        );
+        assert_eq!(runtime_outcome_detail(&gzip), b"status 42 sent");
+        let unsent = Answered {
+            status: pharos_proto::gateway::NO_SECRET,
+            ..Answered::default()
+        };
+        assert_eq!(
+            outcome_detail(&unsent),
+            b"status 40 http 0 answer 0 stripped 0"
+        );
+        assert_eq!(runtime_outcome_detail(&unsent), b"status 40");
+        // Every field at its widest: cut, but the mark kept.
+        let widest = Answered {
+            status: u8::MAX,
+            detail: u8::MAX,
+            http: u16::MAX,
+            type_len: u8::MAX,
+            answer_len: u32::MAX,
+            stripped: u8::MAX,
+            sent: true,
+        };
+        let d = outcome_detail(&widest);
+        assert_eq!(d.len(), pharos_proto::audit::MAX_DETAIL);
+        assert!(d.starts_with(b"status 255 sent detail 255"));
     }
 
     #[test]

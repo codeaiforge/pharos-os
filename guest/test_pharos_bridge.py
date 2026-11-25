@@ -91,7 +91,7 @@ class Operations(unittest.TestCase):
         )
 
     def test_https_request_and_answer(self):
-        answered = struct.pack("<BBHBIB", 0, 0, 200, 4, 2, 1)
+        answered = struct.pack("<BBHBIBB", 0, 0, 200, 4, 2, 1, 1)
         f = Fake(b"", [reply(answered, b"text{}")])
         a = f.bridge.request("items", "/items", b"x")
         self.assertEqual((a.http, a.content_type, a.body, a.stripped), (200, "text", b"{}", 1))
@@ -115,6 +115,17 @@ class Refusals(unittest.TestCase):
         with self.assertRaises(pb.PharosError) as e:
             f.bridge.log("x")
         self.assertEqual(e.exception.status, 3)
+
+    def test_a_failed_https_request_says_whether_it_was_sent(self):
+        # #293: the answer was refused (42) after the request was written.
+        failed = struct.pack("<BBHBIBB", 42, 3, 0, 0, 0, 0, 1)
+        f = Fake(b"", [reply(failed), reply(b"\x03")])
+        with self.assertRaises(pb.PharosError) as e:
+            f.bridge.request("post", "/items", b"{}")
+        self.assertEqual((e.exception.status, e.exception.sent), (42, True))
+        with self.assertRaises(pb.PharosError) as e:
+            f.bridge.request("other", "/items")
+        self.assertEqual((e.exception.status, e.exception.sent), (3, False))
 
     def test_the_bridges_error_raises_with_its_reason(self):
         f = Fake(b"", [frame(pb.ERROR, b"\x08attempt ended")])

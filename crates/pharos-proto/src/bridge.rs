@@ -62,6 +62,23 @@ pub const PASSED: [u8; 12] = [
     crate::op::INFO,
 ];
 
+/// Whether the runtime serves operation `op` under `badge` (#303, M6.3
+/// review R-5). Every operation for any badge but a guest attempt's
+/// ([`agents::is_guest`]); for a guest's, only those in [`PASSED`], and
+/// `ATTACH` only while the slot has no buffer (`attached` false): the
+/// bridge's own, at the attempt's start. The bridge checks [`PASSED`] too
+/// ([`parse_request`]); the runtime checks again, so a compromised bridge
+/// reaches no more than a guest may.
+pub fn runtime_serves(badge: u32, op: u8, attached: bool) -> bool {
+    if !agents::is_guest(badge) {
+        return true;
+    }
+    if op == crate::op::ATTACH {
+        return !attached;
+    }
+    PASSED.contains(&op)
+}
+
 /// Why a frame was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bad {
@@ -369,6 +386,42 @@ mod tests {
         let mut out = [0u8; 256];
         let n = agents::encode(req, &mut out).unwrap();
         out[..n].to_vec()
+    }
+
+    #[test]
+    fn the_runtime_serves_a_guest_only_what_the_bridge_passes() {
+        let guest = agents::guest_badge(7, 1);
+        for o in 0..=u8::MAX {
+            // An agent process's badge, a control badge: not limited here.
+            for badge in [1, agents::SLOTS as u32, agents::CONTROL] {
+                assert!(runtime_serves(badge, o, true), "{badge} {o}");
+            }
+            if o != crate::op::ATTACH {
+                assert_eq!(runtime_serves(guest, o, false), PASSED.contains(&o), "{o}");
+                assert_eq!(runtime_serves(guest, o, true), PASSED.contains(&o), "{o}");
+            }
+        }
+        // What a compromised bridge could otherwise send (M6.3 review R-5).
+        for o in [
+            op::INFER,
+            op::TOOL,
+            op::SUBTASK,
+            op::SEND_TO,
+            op::MESSAGE_SEND,
+            op::KNOWLEDGE_PUT,
+            op::KNOWLEDGE_GET,
+            op::KNOWLEDGE_HISTORY,
+            op::KNOWLEDGE_QUERY,
+            op::PROPOSE,
+            op::BIND,
+            op::STOP_GUEST,
+        ] {
+            assert!(!runtime_serves(guest, o, false), "{o}");
+        }
+        // The bridge's one ATTACH, then no second.
+        assert!(runtime_serves(guest, crate::op::ATTACH, false));
+        assert!(!runtime_serves(guest, crate::op::ATTACH, true));
+        assert!(runtime_serves(guest, op::REQUEST, true));
     }
 
     #[test]

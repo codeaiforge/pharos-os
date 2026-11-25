@@ -11,8 +11,9 @@
 //! `[1, REQUEST, name length, route name, path length (u16), body length
 //! (u32)]`, `[1, INFO]`.
 //! A `REQUEST` reply is `[status, detail, http (u16), type length,
-//! answer length (u32), stripped]`; a refusal before the request is sent
-//! is a bare status.
+//! answer length (u32), stripped, sent]`; a refusal before the request is
+//! sent is a bare status. `sent` is 1 once the request may have reached
+//! the server, whatever the status (#293, M6.2 review R-11).
 
 use crate::{Reader, Refused, Writer, op as common, status};
 
@@ -137,17 +138,26 @@ pub struct Answered {
     pub answer_len: u32,
     /// How many times the secret was replaced by `[secret]`.
     pub stripped: u8,
+    /// The gateway began writing the request: the server may have acted
+    /// on it, even when the status says the answer failed (#293).
+    pub sent: bool,
 }
 
 impl Answered {
-    pub fn encode(&self) -> [u8; 10] {
-        let mut out = [0u8; 10];
+    /// A full reply's length. Version 1 grew from 10 bytes to 11 with
+    /// `sent` (#293): the gateway, the runtime, and the guest library all
+    /// build from this tree, so none speaks the older length.
+    pub const LEN: usize = 11;
+
+    pub fn encode(&self) -> [u8; Self::LEN] {
+        let mut out = [0u8; Self::LEN];
         out[0] = self.status;
         out[1] = self.detail;
         out[2..4].copy_from_slice(&self.http.to_le_bytes());
         out[4] = self.type_len;
         out[5..9].copy_from_slice(&self.answer_len.to_le_bytes());
         out[9] = self.stripped;
+        out[10] = self.sent.into();
         out
     }
 
@@ -167,6 +177,11 @@ impl Answered {
             type_len: r.u8()?,
             answer_len: r.u32()?,
             stripped: r.u8()?,
+            sent: match r.u8()? {
+                0 => false,
+                1 => true,
+                _ => return None,
+            },
         };
         r.is_empty().then_some(a)
     }
@@ -220,12 +235,26 @@ mod tests {
             type_len: 16,
             answer_len: 40_000,
             stripped: 2,
+            sent: true,
         };
+        assert_eq!(a.encode()[10], 1);
         assert_eq!(Answered::parse(&a.encode()), Some(a));
-        assert_eq!(Answered::parse(&a.encode()[..9]), None);
+        let unsent = Answered { sent: false, ..a };
+        assert_eq!(unsent.encode()[10], 0);
+        assert_eq!(Answered::parse(&unsent.encode()), Some(unsent));
+        for cut in 2..Answered::LEN {
+            assert_eq!(Answered::parse(&a.encode()[..cut]), None, "cut at {cut}");
+        }
+        let mut bad = a.encode();
+        bad[10] = 2;
+        assert_eq!(Answered::parse(&bad), None, "sent is 0 or 1");
         assert_eq!(
-            Answered::parse(&[NO_SECRET]).map(|a| a.status),
-            Some(NO_SECRET)
+            Answered::parse(&[a.encode().as_slice(), &[0]].concat()),
+            None
+        );
+        assert_eq!(
+            Answered::parse(&[NO_SECRET]).map(|a| (a.status, a.sent)),
+            Some((NO_SECRET, false))
         );
         assert_eq!(Answered::parse(&[]), None);
     }

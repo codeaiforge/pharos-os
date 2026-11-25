@@ -189,9 +189,18 @@ impl Gateway {
             return failed(NO_AUDIT, 0, 0);
         };
         let deadline = start + TIMEOUT_US - TAIL_US;
-        let (a, bytes) = match self.exchange(index, r, &target, &body, room, deadline) {
-            Ok((bytes, a)) => (a, Some(bytes)),
-            Err(a) => (a, None),
+        // Set once the request may have reached the server: every answer
+        // from here says so, a failure too (#293, M6.2 review R-11).
+        let mut sent = false;
+        let (mut a, bytes) =
+            match self.exchange(index, r, &target, &body, room, deadline, &mut sent) {
+                Ok((bytes, a)) => (a, Some(bytes)),
+                Err(a) => (a, None),
+            };
+        a.sent = sent;
+        let marked = |status| Answered {
+            sent,
+            ..failed(status, 0, 0)
         };
         let ok = if a.status == OK {
             outcome::OK
@@ -202,12 +211,12 @@ impl Gateway {
             .audit(Kind::Outcome, seq, ok, &logic::outcome_detail(&a))
             .is_none()
         {
-            return failed(NO_AUDIT, 0, 0);
+            return marked(NO_AUDIT);
         }
         // Past its bound the client may have given up and reused its buffer:
         // nothing is written and the answer is TIMEOUT (#289).
         if uptime() >= start + TIMEOUT_US {
-            return failed(TIMEOUT, 0, 0);
+            return marked(TIMEOUT);
         }
         // Written only once the outcome is recorded: else nothing reaches
         // the client.
@@ -225,7 +234,9 @@ impl Gateway {
         }
     }
 
-    /// Everything between the intent and the outcome.
+    /// Everything between the intent and the outcome. `sent` is set just
+    /// before the request's first byte goes to the TLS service.
+    #[allow(clippy::too_many_arguments)]
     fn exchange(
         &mut self,
         index: u8,
@@ -234,6 +245,7 @@ impl Gateway {
         body: &[u8],
         room: usize,
         deadline: u64,
+        sent: &mut bool,
     ) -> Result<(Vec<u8>, Answered), Answered> {
         let host = self.hosts.get(usize::from(r.dest)).copied();
         let host = host.ok_or(failed(TLS_FAILED, tls::NO_ACCESS, 0))?;
@@ -262,12 +274,13 @@ impl Gateway {
         logic::erase(&mut secret);
         let result = match request {
             Some(mut bytes) => {
-                let sent = self.write(conn, &bytes, deadline);
+                *sent = true;
+                let written = self.write(conn, &bytes, deadline);
                 logic::erase(&mut bytes);
                 // The TLS buffer held the head too.
                 self.tls
                     .write_bytes(0, &vec![0u8; bytes.len().min(self.tls.len())]);
-                sent.and_then(|()| self.read(conn, r, deadline))
+                written.and_then(|()| self.read(conn, r, deadline))
             }
             None => Err(failed(ANSWER, reason::TOO_LARGE, 0)),
         };

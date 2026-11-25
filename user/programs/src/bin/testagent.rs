@@ -1971,6 +1971,10 @@ impl Agent {
         if (a.status, a.http) != (gateway::OK, 200) || got != b"text/plainitems ok" {
             return self.fail(b"the granted GET was not answered 200 items ok");
         }
+        // An answer read was sent; a refusal below was not (#293).
+        if !a.sent {
+            return self.fail(b"the answered GET is not marked sent");
+        }
         let (a, got) = self.request(b"echo", b"/echo", b"");
         if a.status != gateway::OK
             || a.stripped == 0
@@ -2032,6 +2036,9 @@ impl Agent {
             let (a, _) = self.request(route, path, body);
             if a.status != want {
                 return self.fail(&[&b"not refused: "[..], what].concat());
+            }
+            if a.sent {
+                return self.fail(&[&b"marked sent: "[..], what].concat());
             }
         }
         let mut all = alloc::vec![0u8; self.buffer.len()];

@@ -133,6 +133,7 @@ use pharos_proto::agents::{
     TaskStatus, VERSION, agent_slot, parse,
 };
 use pharos_proto::audit::{self, Entry as Record, Kind, action, outcome};
+use pharos_proto::bridge;
 use pharos_proto::gateway::{self, Answered, Request as GatewayRequest};
 use pharos_proto::infer::{self, Record as InferRecord, Request as InferRequest, Started, Tokens};
 use pharos_proto::knowledge::{self, Author, Put, Request as KnowledgeRequest, Source};
@@ -208,6 +209,9 @@ mod refusal {
     pub const OVER_SUBTASKS: u32 = 32768;
     /// Knowledge puts past the attempt's `knowledge` (#144).
     pub const OVER_KNOWLEDGE: u32 = 65536;
+    /// A guest attempt's operation the bridge does not pass, or a second
+    /// `ATTACH` (#303, M6.3 review R-5).
+    pub const NOT_PASSED: u32 = 131_072;
 }
 /// How often the runtime reads a running agent's CPU time, at most.
 const CPU_CHECK_US: u64 = 100_000;
@@ -2373,7 +2377,16 @@ impl Runtime {
             .flatten();
         let _ = delete(memory);
         let Some(m) = mapped else { return };
-        if let Some(s) = self.slot_of(badge).and_then(|i| self.slots[i].as_mut()) {
+        let slot = self.slot_of(badge);
+        // A guest attempt's buffer is the bridge's one `ATTACH` (#303).
+        let attached =
+            slot.is_some_and(|i| self.slots[i].as_ref().is_some_and(|s| s.buffer.is_some()));
+        if let Some(i) =
+            slot.filter(|_| !bridge::runtime_serves(badge, pharos_proto::op::ATTACH, attached))
+        {
+            unmap(m);
+            self.note(i, refusal::NOT_PASSED, None);
+        } else if let Some(s) = slot.and_then(|i| self.slots[i].as_mut()) {
             if let Some(old) = s.buffer.replace(m) {
                 unmap(old);
             }
@@ -3363,8 +3376,9 @@ impl Runtime {
         let fits = a.status == gateway::OK && back <= agent_len && back <= room;
         let mut answer = alloc::vec![0u8; if fits { back } else { 0 }];
         gw.buffer.read_bytes(0, &mut answer);
-        let mut d = [0u8; 20];
-        let detail = [&b"status "[..], decimal(a.status.into(), &mut d)].concat();
+        // `status <s> [sent]`: a request the server may have acted on is
+        // marked, its answer failed or not (#293, M6.2 review R-11).
+        let detail = pharos_programs::gateway::runtime_outcome_detail(&a);
         self.outcome(seq, agent, id, action::HTTPS, fits, &detail);
         if a.status == gateway::OK && !fits {
             return Err(status::NO_BUFFER);
@@ -3375,8 +3389,8 @@ impl Runtime {
         if let Some(s) = self.slots[i].as_mut() {
             s.usage.received(back as u64);
         }
-        out[..10].copy_from_slice(&a.encode());
-        Ok(10)
+        out[..Answered::LEN].copy_from_slice(&a.encode());
+        Ok(Answered::LEN)
     }
 
     /// `read_file` (#127) for slot `i` on task `id`, its `file` permission
@@ -3579,6 +3593,7 @@ impl Runtime {
             refusal::OVER_MESSAGES => b"over messages",
             refusal::OVER_SUBTASKS => b"over subtasks",
             refusal::OVER_KNOWLEDGE => b"over knowledge",
+            refusal::NOT_PASSED => b"not passed",
             _ => b"not in group",
         };
         let agent = self.agent_of(task);
@@ -4362,7 +4377,18 @@ impl Runtime {
                 return refusal(refused, VERSION, out);
             }
         };
+        // A guest attempt gets only what the bridge passes, checked here
+        // too: a compromised bridge reaches no more (#303, M6.3 review R-5).
+        let op = msg.get(1).copied().unwrap_or(0);
+        let passed = |i: usize| {
+            let attached = self.slots[i].as_ref().is_some_and(|s| s.buffer.is_some());
+            bridge::runtime_serves(badge, op, attached)
+        };
         let result = match self.slot_of(badge) {
+            Some(i) if !passed(i) => {
+                self.note(i, refusal::NOT_PASSED, None);
+                Err(status::NO_ACCESS)
+            }
             Some(i) => {
                 let result = self.agent(i, req, out);
                 // `TOOL`, `SUBTASK`, and `KNOWLEDGE_PUT` record their own

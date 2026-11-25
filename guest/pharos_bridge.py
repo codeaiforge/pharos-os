@@ -37,12 +37,16 @@ GRANTED, REFUSED, PENDING = 0, 1, 2
 
 class PharosError(Exception):
     """A refused request (`status`, the agents v1 status code), or the
-    bridge's ERROR frame (`status` its code, `reason` its text)."""
+    bridge's ERROR frame (`status` its code, `reason` its text). `reply`
+    is the refusing reply; `sent`, for a failed HTTPS request, whether it
+    may have reached the server, so retrying could act twice (#293)."""
 
-    def __init__(self, status, reason=""):
+    def __init__(self, status, reason="", reply=b""):
         super().__init__(f"pharos: status {status} {reason}".strip())
         self.status = status
         self.reason = reason
+        self.reply = reply
+        self.sent = False
 
 
 def _text(text):
@@ -74,7 +78,8 @@ class Task:
 
 class Answer:
     """A gateway answer: the HTTP status, content type, body, and how many
-    times the route's secret was found and replaced (`[secret]`)."""
+    times the route's secret was found and replaced (`[secret]`). An answer
+    was always sent; a failure says whether (`PharosError.sent`, #293)."""
 
     def __init__(self, http, content_type, body, stripped):
         self.http = http
@@ -145,7 +150,7 @@ class Bridge:
             raise PharosError(None, "a bad reply from pharos")
         reply, out = p[1 : 1 + p[0]], p[1 + p[0] :]
         if not reply or reply[0] != OK:
-            raise PharosError(reply[0] if reply else None)
+            raise PharosError(reply[0] if reply else None, reply=bytes(reply))
         return reply, out
 
     # --- operations -----------------------------------------------------
@@ -167,10 +172,14 @@ class Bridge:
         body = body.encode() if isinstance(body, str) else body
         name = _name(route)
         msg = bytes([VERSION, HTTPS]) + name + struct.pack("<HI", len(path), len(body))
-        reply, data = self.call(msg, path + body)
-        if len(reply) != 10:
+        try:
+            reply, data = self.call(msg, path + body)
+        except PharosError as e:
+            e.sent = len(e.reply) == 11 and e.reply[10] == 1
+            raise
+        if len(reply) != 11:
             raise PharosError(None, "a bad gateway reply")
-        _, _, http, type_len, answer_len, stripped = struct.unpack("<BBHBIB", reply)
+        _, _, http, type_len, answer_len, stripped, _ = struct.unpack("<BBHBIBB", reply)
         kind = data[:type_len].decode(errors="replace")
         return Answer(http, kind, data[type_len : type_len + answer_len], stripped)
 

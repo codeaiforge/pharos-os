@@ -3982,13 +3982,16 @@ fn vault_audit(image: &Path, log: &str, server_log: &Path) -> Result<()> {
         " client 6 Intent https ",
         "gateway outcome 0 c1 GET 0 40005c451ac19049 items/items",
         "gateway outcome 0 c1 POST 7 d4426ce15bb7f90a post/items",
-        // The echoed header, stripped once.
-        "status 0 http 200 answer 18 stripped 1",
+        // The echoed header, stripped once. Each answer read was sent; a
+        // refusal at the release was not (#293).
+        "status 0 sent http 200 answer 18 stripped 1",
         "c1 items status 1",
         "c1 items status 5",
-        "status 0 http 200 answer 8 stripped 0",
-        "status 0 http 201 ",
+        "status 0 sent http 200 answer 8 stripped 0",
+        "status 0 sent http 201 ",
         "status 40 http 0 answer 0 stripped 0",
+        // The runtime's outcome carries the gateway's mark (#293).
+        " https fetcher task 1/1   outcome 1 status 0 sent",
         // The vault's releases, twice for each request (send, then strip).
         "vault outcome 1 release items secret test-token",
         "vault outcome 1 release echo secret test-token",
@@ -4038,7 +4041,8 @@ fn bridge_audit(image: &Path, log: &str) -> Result<()> {
         " client 3 Intent https guest task 1/1 https items gateway outcome 0 items",
         "gateway outcome 0 c1 GET 0 40005c451ac19049 items/items",
         "vault outcome 1 release items secret test-token",
-        "gateway outcome 1 status 0 http 200 answer 8 stripped 0",
+        "gateway outcome 1 status 0 sent http 200 answer 8 stripped 0",
+        " https guest task 1/1   outcome 1 status 0 sent",
         // Task 2: a route not granted, a path refused, a route asked for.
         " client 3 Event refuse guest task 2/1 https other  outcome 2 no grant",
         "gateway outcome 2 c1 items status 1",
