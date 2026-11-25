@@ -332,6 +332,11 @@ pub enum Broken {
     /// A daemon without exactly one [`REPORT`], or a one-shot with one, or
     /// [`Badge::Own`] anywhere else.
     Report,
+    /// A vault and a gateway with different arguments: each reads its
+    /// routes by its own (`routes(arg)`), and the gateway asks for a
+    /// route by index, so the vault would release one route's secret
+    /// into another's request (#288, M6.2 review R-5).
+    Routes,
     /// A driver entry ([`Object::Arrived`]) that is not a daemon, is
     /// protected, is in another entry's `after`, has more than one
     /// `Arrived`, or is in a table of 32 entries ([`SLOT_BIT`]).
@@ -575,7 +580,23 @@ pub fn check(table: &[Service]) -> Result<(), (usize, Broken)> {
             }
         }
     }
+    let route_args =
+        (table.iter().enumerate()).filter(|(_, s)| matches!(s.name, "vault" | "gateway"));
+    if let Some((j, _)) = route_args
+        .clone()
+        .find(|(_, s)| route_args.clone().any(|(_, t)| t.arg != s.arg))
+    {
+        return Err((j, Broken::Routes));
+    }
     Ok(())
+}
+
+/// The argument `table`'s vault and gateway share, if it has either: the
+/// route table they both read ([`check`] refuses two).
+pub fn route_table(table: &[Service]) -> Option<u64> {
+    (table.iter())
+        .find(|s| matches!(s.name, "vault" | "gateway"))
+        .map(|s| s.arg)
 }
 
 #[cfg(test)]
@@ -601,6 +622,23 @@ mod tests {
         ] {
             assert_eq!(check(table), Ok(()), "{name}");
         }
+    }
+
+    #[test]
+    fn a_vault_and_gateway_read_their_own_tables_routes() {
+        // Each table's vault and gateway name the table itself (#288).
+        for n in 0..=12 {
+            let t = table(n);
+            assert!(route_table(t).is_none_or(|a| a == n), "table {n}");
+        }
+        assert_eq!(route_table(VAULT), Some(11));
+        assert_eq!(route_table(TLS), None);
+        // A gateway reading another table's routes than its vault's.
+        let mut t = std::vec::Vec::from(VAULT);
+        let g = t.iter().position(|s| s.name == "gateway").unwrap();
+        t[g].arg = 10;
+        let v = t.iter().position(|s| s.name == "vault").unwrap();
+        assert_eq!(check(&t), Err((v.min(g), Broken::Routes)));
     }
 
     #[test]
