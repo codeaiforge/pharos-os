@@ -61,7 +61,8 @@
 //! `NOT_FOUND` when none is. The runtime revokes it when the attempt
 //! ends. `STOP_GUEST`, a plain `send` under [`TRUST`] with no reply, is
 //! the user's `stop` for a guest agent's slot: it ends the attempt as
-//! cancelled.
+//! cancelled. It names the attempt (task and attempt, as `trust` was told
+//! at `REGISTER`; #304), and does nothing if another holds the slot.
 
 use crate::{Reader, Refused, Writer, op as common, split, status};
 
@@ -511,9 +512,12 @@ pub enum Request<'a> {
     },
     /// The bridge: the slot of a guest attempt waiting for it (#298).
     Bind,
-    /// `trust`: the user stops the guest agent in `slot` (#298).
+    /// `trust`: the user stops the guest agent's attempt `attempt` of
+    /// task `task` in `slot` (#298, #304).
     StopGuest {
         slot: u8,
+        task: u32,
+        attempt: u8,
     },
     Attach {
         len: u64,
@@ -683,6 +687,8 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             op::BIND => Request::Bind,
             op::STOP_GUEST => Request::StopGuest {
                 slot: r.u8().filter(|s| usize::from(*s) < SLOTS)?,
+                task: r.u32()?,
+                attempt: r.u8()?,
             },
             common::ATTACH => Request::Attach { len: r.u64()? },
             common::INFO => Request::Info,
@@ -915,9 +921,15 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
         }
         Request::Info => head(&mut w, common::INFO)?,
         Request::Bind => head(&mut w, op::BIND)?,
-        Request::StopGuest { slot } => {
+        Request::StopGuest {
+            slot,
+            task,
+            attempt,
+        } => {
             head(&mut w, op::STOP_GUEST)?;
             w.bytes(&[slot])?;
+            w.u32(task)?;
+            w.bytes(&[attempt])?;
         }
     }
     Some(w.len())
@@ -1146,7 +1158,11 @@ mod tests {
             Request::Attach { len: 1 << 16 },
             Request::Info,
             Request::Bind,
-            Request::StopGuest { slot: 15 },
+            Request::StopGuest {
+                slot: 15,
+                task: u32::MAX,
+                attempt: 3,
+            },
             Request::DataPut {
                 name: b"notes",
                 len: MAX_DATA,
@@ -1405,8 +1421,17 @@ mod tests {
         assert_eq!(Bound::parse(&out[..n]), Some(b));
         assert_eq!(Bound::parse(&out[..n - 1]), None);
         assert_eq!(Bound::parse(&[status::NOT_FOUND]), None);
-        // `STOP_GUEST` names a slot.
-        assert!(parse(&[VERSION, op::STOP_GUEST, SLOTS as u8]).is_err());
+        // `STOP_GUEST` names a slot, and the attempt in it (#304).
+        assert!(parse(&[VERSION, op::STOP_GUEST, SLOTS as u8, 9, 0, 0, 0, 3]).is_err());
+        assert!(parse(&[VERSION, op::STOP_GUEST, 0]).is_err(), "no attempt");
+        assert_eq!(
+            parse(&[VERSION, op::STOP_GUEST, 2, 9, 0, 0, 0, 3]),
+            Ok(Request::StopGuest {
+                slot: 2,
+                task: 9,
+                attempt: 3,
+            })
+        );
         let a = Assigned {
             task: 3,
             attempt: 2,

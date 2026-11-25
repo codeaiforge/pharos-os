@@ -3074,8 +3074,12 @@ const TRUST_SCRIPT: &[console::Step] = &[
     ("trust: ready", ""),
     ("registered runtime", ""),
     ("registered worker", "list\n"),
+    // #304: the guest whose attempt is not known to have ended.
+    ("visitor guest", ""),
     ("worker running", "stop worker\n"),
-    ("stopped worker", "status please\n"),
+    // The guest whose attempt ended is not there to stop.
+    ("stopped worker", "stop gone\n"),
+    ("no agent gone", "status please\n"),
     ("commands: list", "list\n"),
     // The runtime still runs (hung) after both its agents named `worker`
     // were stopped.
@@ -3092,8 +3096,9 @@ const TRUST_SCRIPT: &[console::Step] = &[
     ("approve #1: the runtime ended", "yes 1\n"),
     ("no request #1", ""),
 ];
-/// The impostor the kernel registers under `init`'s badge must be dropped.
-const TRUST_REFUSED: &[&str] = &["impostor"];
+/// The impostor the kernel registers under `init`'s badge must be dropped,
+/// and the guest whose attempt ended neither listed nor stopped (#304).
+const TRUST_REFUSED: &[&str] = &["impostor", "gone guest", "stopped gone"];
 /// Agent permissions revoked on the trusted console (#105): the
 /// `inference` test's store, for model 2.
 const PERMISSIONS_TEST: &str = "permissions";

@@ -5,8 +5,10 @@
 //! else is asked of the service:
 //! - `RUNTIME` `[version, op]`, from `init` only: the agent runtime;
 //! - `REGISTER` `[version, op, slot, name length, name, group length,
-//!   group]`, from the runtime only: an agent and its policy entry's group
-//!   (empty for none; #136), before the runtime grants it anything.
+//!   group, task (4), attempt]`, from the runtime only: an agent and its
+//!   policy entry's group (empty for none; #136), before the runtime
+//!   grants it anything, and the attempt it runs (#304). A Tier 3 guest's
+//!   carries no capability (#298).
 //!
 //! And from the runtime only (#105):
 //! - `CHANNEL` `[version, op]`, carrying `SEND` on the runtime's endpoint
@@ -24,7 +26,10 @@
 //!   tool, address (4), port (2), bytes (2)]` (#128, tools.md): ask the
 //!   user to confirm one call of a sensitive tool; `trust` writes the
 //!   prompt from these fields, never from agent or model text, and the
-//!   answer and `RESOLVED` work as for `APPROVE`.
+//!   answer and `RESOLVED` work as for `APPROVE`;
+//! - `ENDED` `[version, op, slot, task (4), attempt]` (#304): the guest
+//!   attempt registered in `slot` ended. `trust` drops the registration
+//!   only if it names that attempt.
 //!
 //! And from `init` only:
 //! - `SERVICE` (#151): a service event or the system's state;
@@ -86,6 +91,8 @@ pub mod op {
     pub const SERVICE: u8 = 10;
     /// An incoming image offered or refused, from `init` (#165).
     pub const OFFER: u8 = 11;
+    /// A guest attempt ended, from the runtime (#304).
+    pub const ENDED: u8 = 12;
 }
 
 /// What happened to a service, or to the system (#151, D-026).
@@ -354,6 +361,16 @@ pub enum Request<'a> {
         name: &'a [u8],
         /// Its policy entry's group, or empty (#136).
         group: &'a [u8],
+        /// The task and attempt it runs (#304): what `STOP_GUEST` and
+        /// `ENDED` name for a guest.
+        task: u32,
+        attempt: u8,
+    },
+    /// The guest attempt in `slot` ended (#304).
+    Ended {
+        slot: u8,
+        task: u32,
+        attempt: u8,
     },
     Channel,
     Approve {
@@ -449,7 +466,20 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             let name = r.take(len).filter(|n| valid_name(n))?;
             let len = usize::from(r.u8()?);
             let group = r.take(len).filter(|g| g.is_empty() || valid_name(g))?;
-            Some(Request::Register { slot, name, group })
+            Some(Request::Register {
+                slot,
+                name,
+                group,
+                task: r.u32()?,
+                attempt: r.u8()?,
+            })
+        })(),
+        op::ENDED => (|| {
+            Some(Request::Ended {
+                slot: r.u8().filter(|s| *s < SLOTS)?,
+                task: r.u32()?,
+                attempt: r.u8()?,
+            })
         })(),
         op::CHANNEL => Some(Request::Channel),
         op::APPROVE => (|| {
@@ -578,7 +608,13 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
     let mut w = Writer::new(out);
     match *req {
         Request::Runtime => w.bytes(&[VERSION, op::RUNTIME])?,
-        Request::Register { slot, name, group } => {
+        Request::Register {
+            slot,
+            name,
+            group,
+            task,
+            attempt,
+        } => {
             if slot >= SLOTS || !valid_name(name) || !(group.is_empty() || valid_name(group)) {
                 return None;
             }
@@ -586,6 +622,20 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.bytes(name)?;
             w.bytes(&[group.len() as u8])?;
             w.bytes(group)?;
+            w.u32(task)?;
+            w.bytes(&[attempt])?;
+        }
+        Request::Ended {
+            slot,
+            task,
+            attempt,
+        } => {
+            if slot >= SLOTS {
+                return None;
+            }
+            w.bytes(&[VERSION, op::ENDED, slot])?;
+            w.u32(task)?;
+            w.bytes(&[attempt])?;
         }
         Request::Channel => w.bytes(&[VERSION, op::CHANNEL])?,
         Request::Approve {
@@ -988,11 +1038,25 @@ mod tests {
                 slot: 0,
                 name: b"summarize",
                 group: b"",
+                task: 0,
+                attempt: 0,
             },
             Request::Register {
                 slot: SLOTS - 1,
                 name: &long,
                 group: &long,
+                task: u32::MAX,
+                attempt: u8::MAX,
+            },
+            Request::Ended {
+                slot: 3,
+                task: 7,
+                attempt: 2,
+            },
+            Request::Ended {
+                slot: SLOTS - 1,
+                task: u32::MAX,
+                attempt: u8::MAX,
             },
             Request::Channel,
             Request::Used {
@@ -1218,6 +1282,7 @@ mod tests {
             m.extend_from_slice(name);
             m.push(group.len() as u8);
             m.extend_from_slice(group);
+            m.extend_from_slice(&[7, 0, 0, 0, 1]);
             m
         };
         let reg = |slot: u8, name: &[u8]| reg_in(slot, name, b"");
@@ -1237,6 +1302,30 @@ mod tests {
             Err(Refused::Bad),
             "no group length"
         );
+        assert_eq!(
+            parse(&reg(0, b"a")),
+            Ok(Request::Register {
+                slot: 0,
+                name: b"a",
+                group: b"",
+                task: 7,
+                attempt: 1,
+            }),
+            "the attempt after the group (#304)"
+        );
+        let r = reg(0, b"a");
+        assert_eq!(parse(&r[..r.len() - 1]), Err(Refused::Bad), "no attempt");
+        assert_eq!(
+            parse(&[VERSION, op::ENDED, SLOTS, 7, 0, 0, 0, 1]),
+            Err(Refused::Bad),
+            "ENDED for slot 16"
+        );
+        let ended = Request::Ended {
+            slot: SLOTS,
+            task: 7,
+            attempt: 1,
+        };
+        assert_eq!(encode(&ended, &mut [0; 80]), None);
         assert_eq!(parse(&reg(SLOTS, b"a")), Err(Refused::Bad), "slot 16");
         assert_eq!(parse(&reg(0, b"")), Err(Refused::Bad), "empty name");
         assert_eq!(parse(&reg(0, &[b'a'; 33])), Err(Refused::Bad), "long name");
@@ -1250,19 +1339,26 @@ mod tests {
             slot: 0,
             name: b"x y",
             group: b"",
+            task: 0,
+            attempt: 0,
         };
         assert_eq!(encode(&bad, &mut [0; 80]), None);
         let bad = Request::Register {
             slot: 0,
             name: b"x",
             group: b"x\n",
+            task: 0,
+            attempt: 0,
         };
         assert_eq!(encode(&bad, &mut [0; 80]), None);
         crate::fuzz(100_000, 6, |m| {
             let mut v = [0u8; 302];
             v[0] = VERSION;
             v[1..1 + m.len()].copy_from_slice(m);
-            if let Ok(Request::Register { name, slot, group }) = parse(&v[..1 + m.len()]) {
+            if let Ok(Request::Register {
+                name, slot, group, ..
+            }) = parse(&v[..1 + m.len()])
+            {
                 assert!(valid_name(name) && slot < SLOTS);
                 assert!(group.is_empty() || valid_name(group));
             }

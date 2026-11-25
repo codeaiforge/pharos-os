@@ -256,6 +256,8 @@ fn hostile(arg: u64) -> u64 {
                 slot: 0,
                 name: b"rogue",
                 group: b"",
+                task: 0,
+                attempt: 0,
             },
             &mut msg,
         ) {

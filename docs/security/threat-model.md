@@ -167,7 +167,7 @@ Design: [bridge.md](../architecture/bridge.md) (accepted 2026-11-24, #295; D-036
 | A hostile guest takes over the bridge through its frames | Own safe-Rust frame parsing with a limit on every field, fuzzed; one request at a time; any fault ends the attempt |
 | A guest keeps acting after its attempt ends, or across attempts | The capability is minted per attempt (`derive`, #298) and revoked at its end; a restarted bridge's `BIND` revokes the old one. Its badge names the attempt (`agents::guest_badge`, #301): the runtime serves it only while that attempt is bound, so neither a request queued before the end nor a capability a restarted runtime never minted reaches another attempt or agent (M6.3 review F1, F2). The bridge zeroes its buffer at each attach (F3) |
 | The new `derive` system call widens a capability | It needs `GRANT`, as passing a capability on does, never adds rights, and never re-badges a badged one; revoking the child reaches only what came from it (kernel tests, #298) |
-| **Limits** | The host and both QEMUs can read and forge every frame; stopping a guest agent goes through the runtime (`STOP_GUEST`), with `trust` stopping the runtime if it does not take it in 2 s; the guest image's downloads are trusted by their pinned hashes |
+| **Limits** | The host and both QEMUs can read and forge every frame; stopping a guest agent goes through the runtime (`STOP_GUEST`, naming the attempt since #304), with `trust` stopping the runtime if it does not take it in 2 s; a killed runtime sends no `ENDED`, so `trust` lists its guest's attempt until the slot is registered again (#304); the guest image's downloads are trusted by their pinned hashes |
 
 ### User environment and storage (M3.0)
 

@@ -111,7 +111,8 @@
 //! revoked when the attempt ends, however it ends (`unbind`, the reason
 //! as detail). A second `BIND` while one is held fails the held attempt
 //! (`bridge restarted`). `trust`'s `STOP_GUEST` ends a guest attempt as
-//! the user's `stop` ends an agent's process.
+//! the user's `stop` ends an agent's process, if it names the attempt in
+//! the slot; when a guest attempt ends, `trust` is told (`ENDED`, #304).
 
 #![no_std]
 #![no_main]
@@ -1795,14 +1796,12 @@ impl Runtime {
     }
 
     /// The user's `stop` for the guest agent in `slot` (#298), from
-    /// `trust`: as if its process had been stopped.
-    fn stop_guest(&mut self, slot: usize) {
-        if self
-            .slots
-            .get(slot)
-            .and_then(Option::as_ref)
-            .is_some_and(|s| s.guest && s.ending.is_none())
-        {
+    /// `trust`: as if its process had been stopped. Only the attempt
+    /// `trust` names (#304): not one that took the slot since.
+    fn stop_guest(&mut self, slot: usize, task: u32, attempt: u8) {
+        let named = (self.slots.get(slot).and_then(Option::as_ref))
+            .is_some_and(|s| s.guest && s.ending.is_none() && s.task == task);
+        if named && self.attempt(task) == attempt {
             self.cancel_session(slot);
             self.ended(slot);
         }
@@ -1999,6 +1998,8 @@ impl Runtime {
             slot: slot as u8,
             name: limits.entry.name,
             group: limits.entry.budget.group,
+            task: id,
+            attempt: self.attempt(id),
         };
         let registered = trust::encode(&register, &mut msg)
             .is_some_and(|n| send(TRUST, &msg[..n], process, STOP | WAIT, 0).is_ok());
@@ -2189,6 +2190,14 @@ impl Runtime {
         let Some(s) = self.slots[i].take() else {
             return;
         };
+        // `trust` lists and stops a guest's attempt only while it runs (#304).
+        if s.guest {
+            tell_trust(&trust::Request::Ended {
+                slot: i as u8,
+                task: s.task,
+                attempt: self.attempt(s.task),
+            });
+        }
         // What the attempt used, recorded as it ends (#119).
         let cpu_ms = if s.guest {
             0
@@ -4391,8 +4400,12 @@ impl Runtime {
                     self.revoke(name, permission);
                     Ok(done(out))
                 }
-                Request::StopGuest { slot } => {
-                    self.stop_guest(usize::from(slot));
+                Request::StopGuest {
+                    slot,
+                    task,
+                    attempt,
+                } => {
+                    self.stop_guest(usize::from(slot), task, attempt);
                     Ok(done(out))
                 }
                 Request::Answer { number, yes } => {

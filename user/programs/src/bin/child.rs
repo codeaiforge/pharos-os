@@ -157,6 +157,8 @@ fn main(arg: u64) -> u64 {
                     slot,
                     name: b"worker",
                     group: b"",
+                    task: 0,
+                    attempt: 0,
                 };
                 let Some(n) = trust::encode(&register, &mut msg) else {
                     return 2;

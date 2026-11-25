@@ -5,9 +5,11 @@
 //! `trust` as `worker`, and then spins: a hung runtime. The kernel waits
 //! for both registrations, then registers that process as
 //! the runtime under `init`'s badge, and sends an impostor agent under the
-//! wrong badge, which `trust` must drop. `cargo xtask runner` types on the
-//! trusted console (`TRUST_SCRIPT`): `list`, `stop worker`, a bad command,
-//! `list`, `stop all`. The kernel checks both agents end while the runtime
+//! wrong badge, which `trust` must drop, and two guests with no process
+//! (#304): `gone`, whose attempt then ends (`ENDED`), and `visitor`, told
+//! only of an earlier attempt's end. `cargo xtask runner` types on the
+//! trusted console (`TRUST_SCRIPT`): `list` (`visitor`, not `gone`), `stop
+//! worker`, `stop gone` (no agent), a bad command, `list`, `stop all`. The kernel checks both agents end while the runtime
 //! spins, then the runtime ends, and what each process holds. Last, an
 //! approval left open ends with a new runtime's `CHANNEL` (#206). Runs
 //! under UEFI (D-009).
@@ -42,6 +44,7 @@ const RUNTIME_OP: u8 = 1;
 const REGISTER_OP: u8 = 2;
 const CHANNEL_OP: u8 = 3;
 const APPROVE_OP: u8 = 5;
+const ENDED_OP: u8 = 12;
 /// `pharos_proto::permission`: the kind of `model <n>`.
 const MODEL: u8 = 1;
 const INIT_BADGE: u32 = 0;
@@ -60,6 +63,41 @@ fn send(to: &Endpoint, bytes: &[u8], cap: Arc<Capability>, badge: u32) {
             badge,
         },
     );
+}
+
+/// Sends `bytes` to `trust` from the kernel with `badge` and no
+/// capability, as the runtime registers a guest (#298).
+fn send_bare(to: &Endpoint, bytes: &[u8], badge: u32) {
+    let mut data = [0u8; MAX_MESSAGE];
+    data[..bytes.len()].copy_from_slice(bytes);
+    ipc::send(
+        to,
+        Message {
+            data,
+            len: bytes.len(),
+            cap: None,
+            badge,
+        },
+    );
+}
+
+/// A guest's `REGISTER` (no process; #298, #304): `name` in `slot`, for
+/// attempt `attempt` of task `task`.
+fn guest(slot: u8, name: &[u8], task: u32, attempt: u8) -> Vec<u8> {
+    let mut m = vec![VERSION, REGISTER_OP, slot, name.len() as u8];
+    m.extend_from_slice(name);
+    m.push(0);
+    m.extend_from_slice(&task.to_le_bytes());
+    m.push(attempt);
+    m
+}
+
+/// The runtime's `ENDED` for a guest attempt (#304).
+fn ended(slot: u8, task: u32, attempt: u8) -> Vec<u8> {
+    let mut m = vec![VERSION, ENDED_OP, slot];
+    m.extend_from_slice(&task.to_le_bytes());
+    m.push(attempt);
+    m
 }
 
 /// How the process behind `record` ended, waiting up to `secs` seconds.
@@ -200,6 +238,13 @@ fn run(t: &mut TestRun) {
     let mut impostor = vec![VERSION, REGISTER_OP, 1, 8];
     impostor.extend_from_slice(b"impostor");
     send(&endpoint, &impostor, process(), INIT_BADGE);
+    // #304: two guests, with no process. `gone`'s attempt ends, so `trust`
+    // must not list it, and `stop gone` must find no agent; `visitor` is
+    // told an earlier attempt of its task ended, so it stays listed.
+    send_bare(&endpoint, &guest(2, b"gone", 7, 1), RUNTIME_BADGE);
+    send_bare(&endpoint, &guest(3, b"visitor", 8, 2), RUNTIME_BADGE);
+    send_bare(&endpoint, &ended(3, 8, 1), RUNTIME_BADGE);
+    send_bare(&endpoint, &ended(2, 7, 1), RUNTIME_BADGE);
     send(&endpoint, &[VERSION, RUNTIME_OP], process(), INIT_BADGE);
     t.check(
         "the runtime holds no device, and no console",

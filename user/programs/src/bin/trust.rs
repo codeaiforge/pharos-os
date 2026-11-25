@@ -23,6 +23,10 @@
 //! its `stop` is sent to the runtime as `STOP_GUEST` (non-blocking, at most
 //! 2 s), which revokes the bridge's capability for it. If the runtime does
 //! not take it, `trust` stops the runtime, which ends every agent.
+//! `STOP_GUEST` names the attempt registered (#304), and the runtime's
+//! `ENDED` for that attempt drops the registration, as `stop all` drops
+//! every guest's once the runtime is stopped: an ended attempt is not
+//! listed or stopped.
 //!
 //! Commands, one per line: `list`, `stop <agent>`, `stop group <group>` (#136), `stop all`, and
 //! `revoke <agent> <permission>` (#105), which `trust` passes to the
@@ -98,8 +102,8 @@ verify <scope> <key> <version> <hash>";
 const HELP_SYSTEM: &[u8] = b"commands: services, health, config, start <service>, \
 restart <service>, stop service <service>, system, safe, recovery, update, apply <n>, discard <n>, rollback";
 
-/// A registered agent: its name, its group (#136), and its process
-/// capability (`STOP`, `WAIT`).
+/// A registered agent: its name, its group (#136), its process
+/// capability (`STOP`, `WAIT`; 0 for a guest), and the attempt (#304).
 #[derive(Clone, Copy)]
 struct Agent {
     name: [u8; MAX_NAME],
@@ -107,6 +111,8 @@ struct Agent {
     group: [u8; MAX_NAME],
     group_len: usize,
     process: Handle,
+    task: u32,
+    attempt: u8,
 }
 
 struct Trust {
@@ -207,7 +213,12 @@ impl Trust {
             return self.stop(label, a.process);
         }
         let slot = slot as u8;
-        if self.tell_runtime(&agents::Request::StopGuest { slot }) {
+        let stop = agents::Request::StopGuest {
+            slot,
+            task: a.task,
+            attempt: a.attempt,
+        };
+        if self.tell_runtime(&stop) {
             self.agents[usize::from(slot)] = None;
             self.say(&[b"stopped ", label]);
             return true;
@@ -220,6 +231,17 @@ impl Trust {
         match self.runtime {
             Some(runtime) => self.stop(b"runtime", runtime),
             None => false,
+        }
+    }
+
+    /// Forgets every guest's registration once the runtime is stopped: its
+    /// attempt ended with it (#304). (Not when `init` registers a new
+    /// runtime, whose own guest may already be registered.)
+    fn drop_guests(&mut self) {
+        for entry in &mut self.agents {
+            if entry.is_some_and(|a| a.process == 0) {
+                *entry = None;
+            }
         }
     }
 
@@ -409,7 +431,11 @@ export them first (cargo xtask store export)",
                 }
                 let mut running = 0;
                 if let Some(runtime) = self.runtime {
-                    running += usize::from(!self.stop(b"runtime", runtime));
+                    let stopped = self.stop(b"runtime", runtime);
+                    running += usize::from(!stopped);
+                    if stopped {
+                        self.drop_guests();
+                    }
                 }
                 // A guest's attempt ends with the runtime (#298).
                 let agents = self.agents;
@@ -1197,15 +1223,21 @@ export them first (cargo xtask store export)",
                 self.say(&[b"registered runtime"]);
             }
             // A guest agent's has no process (#298).
-            Ok(Request::Register { slot, name, group })
-                if badge == RUNTIME && (valid || cap == 0) =>
-            {
+            Ok(Request::Register {
+                slot,
+                name,
+                group,
+                task,
+                attempt,
+            }) if badge == RUNTIME && (valid || cap == 0) => {
                 let mut a = Agent {
                     name: [0; MAX_NAME],
                     len: name.len(),
                     group: [0; MAX_NAME],
                     group_len: group.len(),
                     process: cap,
+                    task,
+                    attempt,
                 };
                 a.name[..name.len()].copy_from_slice(name);
                 a.group[..group.len()].copy_from_slice(group);
@@ -1213,6 +1245,21 @@ export them first (cargo xtask store export)",
                     let _ = delete(old.process);
                 }
                 self.say(&[b"registered ", name]);
+            }
+            // Only the guest attempt it names (#304): a late `ENDED` never
+            // drops the slot's next registration.
+            Ok(Request::Ended {
+                slot,
+                task,
+                attempt,
+            }) if badge == RUNTIME => {
+                let entry = &mut self.agents[usize::from(slot)];
+                if entry.is_some_and(|a| a.process == 0 && a.task == task && a.attempt == attempt) {
+                    *entry = None;
+                }
+                if cap != 0 {
+                    let _ = delete(cap);
+                }
             }
             _ => {
                 if cap != 0 {
