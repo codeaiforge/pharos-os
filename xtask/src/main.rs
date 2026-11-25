@@ -3862,12 +3862,25 @@ fn tls_audit(image: &Path) -> Result<()> {
             outcome(5)
         ));
     }
-    // The burst of 16 (#275), one a second earned while the kernel runs,
-    // and the one earned back; without the limit, 5 + 32 + 1 = 38.
-    let intents = lines.iter().filter(|l| l.contains(" Intent tls ")).count();
-    if !(17..=24).contains(&intents) {
+    // The burst of 16 (#275), then one a second: at most 16, one more for
+    // each second the intents span, and one for a second boundary. At
+    // least 17: the loop spent the burst, and one was earned back. Without
+    // the limit every OPEN that reaches the trail is recorded: 41.
+    let intents: Vec<f64> = lines
+        .iter()
+        .filter(|l| l.contains(" Intent tls "))
+        .filter_map(|l| l.split_whitespace().nth(1)?.parse().ok())
+        .collect();
+    let span = intents
+        .last()
+        .zip(intents.first())
+        .map_or(0.0, |(b, a)| b - a);
+    let most = 16 + span.ceil() as usize + 1;
+    if !(17..=most).contains(&intents.len()) {
         return Err(format!(
-            "expected 17 to 24 TLS intents (a burst of 16, then one a second), got {intents}"
+            "expected 17 to {most} TLS intents (a burst of 16, then one a second over \
+             {span:.1} s), got {}",
+            intents.len()
         ));
     }
     let closed = lines
