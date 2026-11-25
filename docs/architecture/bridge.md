@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-24 (#295), with each open question decided as recommended (section 7). It follows [D-036](../project/decision-log.md#d-036-foreign-agent-bridge) (accepted 2026-11-24) and builds on the [agent runtime](agents.md) and the [egress gateway](gateway.md).
-- **Implementation:** the guest image is **implemented** (#296): `cargo xtask guest`, pinned by `xtask/guest.lock`, with a boot check in place of the agent (*as built* below). The channel and the launch tool are **implemented** (#297). The bridge service, `BIND`, the frames, and the driver's buffer sizes as parameters are **implemented** (#298), with a new `derive` system call (*as built* below). The `channel` test kernel shows them end to end: a guest agent's task, bound, logged, and completed through the bridge. The client library and the LangGraph agent are **implemented** (#299). The `bridge` scenario and the hostile-guest suite are **implemented** (#300): the `bridge` test kernel, which replaced `channel`, in CI under KVM (*as built* in section 5). **Planned:** `cargo xtask run` with a guest. The gate is #301.
+- **Implementation:** the guest image is **implemented** (#296): `cargo xtask guest`, pinned by `xtask/guest.lock`, with a boot check in place of the agent (*as built* below). The channel and the launch tool are **implemented** (#297). The bridge service, `BIND`, the frames, and the driver's buffer sizes as parameters are **implemented** (#298), with a new `derive` system call (*as built* below). The `channel` test kernel shows them end to end: a guest agent's task, bound, logged, and completed through the bridge. The client library and the LangGraph agent are **implemented** (#299). The `bridge` scenario and the hostile-guest suite are **implemented** (#300): the `bridge` test kernel, which replaced `channel`, in CI under KVM (*as built* in section 5). **Planned:** `cargo xtask run` with a guest. The M6.3 gate passed on 2026-11-25 (#301), with its [security review](../security/review-m6.3-bridge.md).
 
 ## 2. Context
 
@@ -243,4 +243,4 @@ The bridge holds no audit capability. Everything the guest does reaches the runt
 
 ## Implementation issues
 
-The guest image (#296); the channel and the launch tool (#297); the bridge service, `BIND`, and the frames (#298); the client library (#299); the `bridge` scenario and the hostile-guest suite (#300), all implemented. The gate is #301.
+The guest image (#296); the channel and the launch tool (#297); the bridge service, `BIND`, and the frames (#298); the client library (#299); the `bridge` scenario and the hostile-guest suite (#300), all implemented. The gate (#301) passed on 2026-11-25.
