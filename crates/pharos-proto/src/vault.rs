@@ -47,6 +47,15 @@ pub const NO_AUDIT: u8 = status::OWN + 11;
 
 /// Most secrets in the file.
 pub const MAX_SECRETS: usize = 16;
+
+/// How long the gateway waits for a `RELEASE` (gateway.md; #287).
+pub const RELEASE_US: u64 = 1_000_000;
+/// How long the vault waits for the audit service before it writes the
+/// secret: well inside [`RELEASE_US`], so a vault slowed by the trail
+/// answers `NO_AUDIT` before the gateway stops waiting, rather than
+/// writing the secret after it has (#287, M6.2 review R-3).
+pub const AUDIT_US: u64 = 500_000;
+const _: () = assert!(2 * AUDIT_US <= RELEASE_US);
 /// Largest file (the kernel's limit too).
 pub const MAX_FILE: usize = 4096;
 /// Longest secret name.

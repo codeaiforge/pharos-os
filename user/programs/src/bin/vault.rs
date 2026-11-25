@@ -43,8 +43,6 @@ const SECRETS: Handle = 4;
 const AUDIT: Handle = 5;
 /// The gateway's badge, the vault's only client.
 const GATEWAY: u32 = 1;
-/// How long the audit service may take to answer.
-const CALL_US: u64 = 1_000_000;
 
 fn say(msg: &[u8]) {
     let _ = debug_write(CONSOLE, msg);
@@ -173,7 +171,7 @@ impl Vault<'_> {
             return false;
         };
         let mut out = [0u8; 256];
-        match call_timeout(AUDIT, &msg[..n], self.reply, &mut out, CALL_US) {
+        match call_timeout(AUDIT, &msg[..n], self.reply, &mut out, vault::AUDIT_US) {
             Ok(Received::Message { len, cap, .. }) => {
                 if cap != 0 {
                     let _ = delete(cap);

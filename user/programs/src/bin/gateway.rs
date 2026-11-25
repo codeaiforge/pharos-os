@@ -277,7 +277,7 @@ impl Gateway {
         let n = vault::encode(&Vault::Release { route: index }, &mut msg).unwrap_or(0);
         let ask = || {
             let mut out = [0u8; 16];
-            match call_timeout(VAULT, &msg[..n], self.reply, &mut out, CALL_US) {
+            match call_timeout(VAULT, &msg[..n], self.reply, &mut out, vault::RELEASE_US) {
                 Ok(Received::Message { len, cap, .. }) => {
                     if cap != 0 {
                         let _ = delete(cap);
@@ -287,21 +287,28 @@ impl Gateway {
                 _ => None,
             }
         };
+        // The whole buffer is cleared before and after every release, on a
+        // timeout too: a vault that answered after an earlier wait ran out
+        // wrote a secret here, and a shorter release clears only its own
+        // length (#287, M6.2 review R-3).
+        let clear = || self.vault.write_bytes(0, &vec![0u8; self.vault.len()]);
+        clear();
         let mut got = ask();
         // A restarted vault has no buffer of ours (M6.2 review).
         if matches!(got, Some((vault::NO_BUFFER, _))) && reattach_vault(&self.vault) {
             got = ask();
         }
-        match got {
+        let secret = match got {
             Some((vault::OK, len)) if usize::from(len) <= self.vault.len() => {
                 let mut secret = vec![0u8; len.into()];
                 self.vault.read_bytes(0, &mut secret);
-                self.vault.write_bytes(0, &vec![0u8; len.into()]);
                 Ok(secret)
             }
             Some((s, _)) if s != vault::OK => Err(failed(s, 0, 0)),
             _ => Err(failed(status::INTERNAL, 0, 0)),
-        }
+        };
+        clear();
+        secret
     }
 
     /// One call to the TLS service within the deadline.
