@@ -83,6 +83,9 @@ jobs:
       - name: Test the guest image builder
         run: python3 -m unittest -q scripts/test_guest_image.py
 
+      - name: Test the guest client library
+        run: python3 -m unittest -q guest/test_pharos_bridge.py
+
   msrv:
     name: minimum supported Rust (1.91)
     runs-on: ubuntu-latest

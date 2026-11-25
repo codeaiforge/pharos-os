@@ -772,8 +772,9 @@ fn channel_checks(guest_log: &Path) -> Result<()> {
         "guest: net ['lo']",
         "guest: ports ['org.pharos.bridge']",
         "guest: task input hello from pharos",
-        "guest: log status 0",
-        "guest: complete status 0",
+        "guest: tool pharos_log: logged",
+        "guest: tool pharos_https: refused, status 3",
+        "guest: completed hello from the guest",
     ] {
         if !text.lines().any(|l| l.trim_end() == want) {
             return Err(format!("the guest's log lacks '{want}'"));

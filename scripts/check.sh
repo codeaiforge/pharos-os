@@ -26,6 +26,7 @@ run env RUSTDOCFLAGS="-D warnings" cargo doc -p pharos-kernel --target x86_64-un
 run python3 scripts/check-links.py
 run python3 -m unittest -q scripts/test_bench_inference.py
 run python3 -m unittest -q scripts/test_guest_image.py
+run python3 -m unittest -q guest/test_pharos_bridge.py
 
 # The CI `msrv` job: the same host builds and tests on the minimum supported
 # Rust. Runs only if that toolchain is installed (rustup toolchain install

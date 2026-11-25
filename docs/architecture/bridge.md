@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-24 (#295), with each open question decided as recommended (section 7). It follows [D-036](../project/decision-log.md#d-036-foreign-agent-bridge) (accepted 2026-11-24) and builds on the [agent runtime](agents.md) and the [egress gateway](gateway.md).
-- **Implementation:** the guest image is **implemented** (#296): `cargo xtask guest`, pinned by `xtask/guest.lock`, with a boot check in place of the agent (*as built* below). The channel and the launch tool are **implemented** (#297). The bridge service, `BIND`, the frames, and the driver's buffer sizes as parameters are **implemented** (#298), with a new `derive` system call (*as built* below). The `channel` test kernel shows them end to end: a guest agent's task, bound, logged, and completed through the bridge. **Planned:** `cargo xtask run` with a guest, the client library (#299), and the `bridge` scenario with the hostile-guest suite (#300). The gate is #301.
+- **Implementation:** the guest image is **implemented** (#296): `cargo xtask guest`, pinned by `xtask/guest.lock`, with a boot check in place of the agent (*as built* below). The channel and the launch tool are **implemented** (#297). The bridge service, `BIND`, the frames, and the driver's buffer sizes as parameters are **implemented** (#298), with a new `derive` system call (*as built* below). The `channel` test kernel shows them end to end: a guest agent's task, bound, logged, and completed through the bridge. The client library and the LangGraph agent are **implemented** (#299). **Planned:** `cargo xtask run` with a guest, and the `bridge` scenario with the hostile-guest suite (#300). The gate is #301.
 
 ## 2. Context
 
@@ -155,6 +155,7 @@ Retries follow the manifest's `attempts`, as for any agent. The guest VM is not 
 - **`pharos_bridge.py`:** Python's standard library only, one file. It opens the port, does `HELLO`, and gives `task()`, `log()`, `checkpoint()`, `request(route, path, body)`, `data_put()`, `data_get()`, `ask()`, `complete()`, and `fail()`, each building one agents v1 message.
 - **LangGraph tools** wrap `request` and `log`, so a LangGraph agent uses Pharos as tools and never sees a socket, a header, or a secret.
 - **The model:** a scripted chat model (fixed answers that call the tools) until the model broker (M6.9).
+- *As built (#299):* `guest/pharos_bridge.py` goes in the image's site-packages (`python3 -I` puts no script directory on the path), and `guest/main.py` is `/agent/main.py`. `scripts/guest-image.py` copies both from the repository. A refused status, and the bridge's `ERROR` frame, raise `PharosError` with the status and reason. Text and names are checked before anything is sent, and each wait for Pharos is bounded (120 s). `ask` takes a permission's wire form (`https_permission(route)` builds one). `BEGIN` and `END` are passed by the bridge but have no function yet. The agent is a LangGraph `StateGraph` with `ToolNode` and `tools_condition`: tools `pharos_log` and `pharos_https`, and a scripted model function that answers by its own turn count (a log call, an HTTPS call, then the result) in place of a chat model class.
 
 ### The launch tool
 
