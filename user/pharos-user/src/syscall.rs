@@ -237,6 +237,20 @@ impl Mapped {
     }
 
     /// Copies `bytes` to `offset` (8 bytes at a time where aligned).
+    /// [`Mapped::read_bytes`], then zeroes those bytes, so a secret read
+    /// out of a shared or DMA page does not stay there (#278). The writes
+    /// are volatile, so they are never removed as dead stores.
+    pub fn take_bytes(&self, offset: usize, buf: &mut [u8]) {
+        self.read_bytes(offset, buf);
+        let zero = [0u8; 64];
+        let mut i = 0;
+        while i < buf.len() {
+            let n = (buf.len() - i).min(zero.len());
+            self.write_bytes(offset + i, &zero[..n]);
+            i += n;
+        }
+    }
+
     pub fn write_bytes(&self, offset: usize, bytes: &[u8]) {
         let mut i = 0;
         while i < bytes.len() {

@@ -846,6 +846,16 @@ mod tests {
         assert_eq!(m.read8(2), 0, "bytes before are untouched");
         let past = std::panic::catch_unwind(|| m.write_bytes(4090, &[0; 7]));
         assert!(past.is_err(), "past the end");
+        // Taken bytes are read out, then gone from the page (#278).
+        let seed: Vec<u8> = (1..=200).collect();
+        m.write_bytes(100, &seed);
+        let mut taken = [0u8; 150];
+        m.take_bytes(100, &mut taken);
+        assert_eq!(taken[..], seed[..150]);
+        let mut left = [0u8; 200];
+        m.read_bytes(100, &mut left);
+        assert!(left[..150].iter().all(|&b| b == 0), "taken bytes cleared");
+        assert_eq!(left[150..], seed[150..], "the rest untouched");
     }
 
     #[test]

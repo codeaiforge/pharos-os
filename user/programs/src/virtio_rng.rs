@@ -83,9 +83,8 @@ impl Rng {
                 }
                 sleep(1);
             };
-            for (i, b) in out[got..got + n].iter_mut().enumerate() {
-                *b = self.mem.read8(i);
-            }
+            // Copied out and cleared: the seed leaves the page (#278).
+            self.mem.take_bytes(0, &mut out[got..got + n]);
             got += n;
         }
         Ok(())
