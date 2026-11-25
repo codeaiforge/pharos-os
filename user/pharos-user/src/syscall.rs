@@ -252,11 +252,11 @@ impl Mapped {
     }
 
     pub fn write_bytes(&self, offset: usize, bytes: &[u8]) {
+        let mut word = [0u8; 8];
         let mut i = 0;
         while i < bytes.len() {
             let at = offset + i;
             if at.is_multiple_of(8) && bytes.len() - i >= 8 {
-                let mut word = [0u8; 8];
                 word.copy_from_slice(&bytes[i..i + 8]);
                 self.write64(at, u64::from_le_bytes(word));
                 i += 8;
@@ -265,6 +265,10 @@ impl Mapped {
                 i += 1;
             }
         }
+        // The last word copied may be a secret (#286); registers are not
+        // under this code's control.
+        word.fill(0);
+        core::hint::black_box(&word);
     }
 
     fn at(&self, offset: usize, size: usize) -> usize {

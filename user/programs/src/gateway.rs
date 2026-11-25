@@ -69,12 +69,37 @@ pub fn erase(bytes: &mut [u8]) {
     core::hint::black_box(bytes);
 }
 
+/// [`erase`] over the whole allocation, spare capacity too: what a
+/// `truncate` left there is gone as well (#286).
+pub fn erase_vec(v: &mut Vec<u8>) {
+    v.resize(v.capacity(), 0);
+    erase(v);
+}
+
+/// Bytes that may hold a server's echo of the secret (the raw answer,
+/// #286): erased, capacity and all, when dropped, on every path.
+pub struct Wiped(pub Vec<u8>);
+
+impl Drop for Wiped {
+    fn drop(&mut self) {
+        erase_vec(&mut self.0);
+    }
+}
+
 /// A parsed answer, before stripping: no secret is in the gateway's
-/// memory while it is made.
+/// memory while it is made. A server's echo of it may be, so both parts
+/// are erased when dropped (#286).
 pub struct Parsed {
     pub http: u16,
     pub content_type: Vec<u8>,
     pub body: Vec<u8>,
+}
+
+impl Drop for Parsed {
+    fn drop(&mut self) {
+        erase_vec(&mut self.content_type);
+        erase_vec(&mut self.body);
+    }
 }
 
 /// Parses the raw answer (`complete` if the server sent `close_notify`)
@@ -235,6 +260,17 @@ pub fn outcome_detail(a: &Answered) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn erase_vec_clears_what_truncate_left() {
+        // As `parse` leaves a body: written to its limit, then cut (#286).
+        let mut v = vec![0xaa_u8; 64];
+        v.truncate(10);
+        let cap = v.capacity();
+        erase_vec(&mut v);
+        assert_eq!(v.len(), cap, "the spare capacity is erased too");
+        assert!(v.iter().all(|&b| b == 0));
+    }
 
     #[test]
     fn a_release_record_always_fits() {

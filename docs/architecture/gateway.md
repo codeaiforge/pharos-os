@@ -159,7 +159,7 @@ Both the vault and the gateway link the table. The vault uses it to check that a
 
   Any failure ends the request at that step, closes the connection, erases the secret, and records the outcome with its status.
 
-  *As built (#282):* stripping needs the value, which step 6 erased. So, after step 8 has parsed the answer with no secret in the gateway's memory, the gateway asks the vault for it once more, strips, and erases it again: each request is two releases in the vault's trail. The answer is written to the client's buffer only once the outcome is recorded.
+  *As built (#282):* stripping needs the value, which step 6 erased. So, after step 8 has parsed the answer with no secret in the gateway's memory, the gateway asks the vault for it once more, strips, and erases it again: each request is two releases in the vault's trail. The answer is written to the client's buffer only once the outcome is recorded. *As built (#286, M6.2 review R-2):* "no secret in the gateway's memory" holds only for the secret the vault released; a server that echoes it puts it in the answer. So the raw answer is reserved to its limit (no copies left as it grows) and erased when dropped, on every path (`Wiped`); the parsed body and content type are erased when dropped, spare capacity included (`Parsed`); each chunk is cleared from the shared TLS buffer as it is read (`Mapped::take_bytes`); and `Mapped::write_bytes` clears its last 8-byte word. Erasure is best effort: registers, and copies the TLS service and rustls make, are outside the gateway.
 - **The request** is written by the gateway alone:
 
   ```text

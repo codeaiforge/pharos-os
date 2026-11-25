@@ -26,7 +26,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use pharos_programs::gateway as logic;
+use pharos_programs::gateway::{self as logic, Wiped};
 use pharos_proto::audit::{self, Entry, Kind, action, outcome};
 use pharos_proto::gateway::{
     self, ANSWER, Answered, MAX_BUFFER, NAME, NO_ACCESS, NO_AUDIT, NO_BUFFER, OK, Request, TIMEOUT,
@@ -257,7 +257,7 @@ impl Gateway {
         };
         let _ = self.call_tls(&Tls::Close { conn }, deadline.max(uptime() + CALL_US));
         let (raw, complete) = result?;
-        let parsed = logic::parse(&raw, complete, r).map_err(|why| failed(ANSWER, why, 0))?;
+        let parsed = logic::parse(&raw.0, complete, r).map_err(|why| failed(ANSWER, why, 0))?;
         // The secret again, only to strip it from what was parsed.
         let mut secret = self.release(index, r)?;
         let prefix = r.header.1.as_bytes();
@@ -351,11 +351,13 @@ impl Gateway {
     }
 
     /// The answer, to the server's close; whether it sent `close_notify`.
-    fn read(&self, conn: u8, r: &Route, deadline: u64) -> Result<(Vec<u8>, bool), Answered> {
+    fn read(&self, conn: u8, r: &Route, deadline: u64) -> Result<(Wiped, bool), Answered> {
         // ponytail: room for the head, the body, and chunk sizes; a
         // chunked answer of many tiny chunks may be refused as too large.
         let limit = pharos_proto::http::MAX_HEAD + r.max_answer as usize + 4096;
-        let mut raw = Vec::new();
+        // Reserved to its limit, so growing never leaves a copy behind; it
+        // and the TLS buffer may hold an echo of the secret (#286).
+        let mut raw = Wiped(Vec::with_capacity(limit));
         loop {
             let req = Tls::Read {
                 conn,
@@ -367,12 +369,12 @@ impl Gateway {
                 Some((tls::OK, 0)) => return Ok((raw, true)),
                 Some((tls::CLOSED, _)) => return Ok((raw, false)),
                 Some((tls::OK, n)) if n as usize <= self.tls.len() => {
-                    let at = raw.len();
+                    let at = raw.0.len();
                     if at + n as usize > limit {
                         return Err(failed(ANSWER, reason::TOO_LARGE, 0));
                     }
-                    raw.resize(at + n as usize, 0);
-                    self.tls.read_bytes(0, &mut raw[at..]);
+                    raw.0.resize(at + n as usize, 0);
+                    self.tls.take_bytes(0, &mut raw.0[at..]);
                 }
                 Some((s, _)) => return Err(failed(TLS_FAILED, s, 0)),
                 None => return Err(failed(TLS_FAILED, status::INTERNAL, 0)),
