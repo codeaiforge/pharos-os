@@ -24,6 +24,7 @@ mod fs_image;
 mod matrix;
 mod recovery;
 mod release;
+mod resolve;
 mod secure_boot;
 mod sign;
 mod store_image;
@@ -210,7 +211,7 @@ COMMANDS:
                             administrator (identity.md, #310): reads the
                             passphrase twice from the terminal, without echo,
                             and writes only its salt and hash.
-    store audit <IMAGE> [--key <FILE>] [--archive <DIR>]
+    store audit <IMAGE> [--key <FILE>] [--archive <DIR>] [--resolve]
                             Check every audit stream (log/<boot>) in a store: each
                             record's CRC-32 and SHA-256 chain, its format, and
                             consecutive sequence numbers from a boot record; then
@@ -220,6 +221,9 @@ COMMANDS:
                             and print the audit public key (D-047). With
                             --archive <DIR> (an export), also check that export
                             and that a rotate record in the image names it (D-048).
+                            With --resolve, print each record's actor resolved
+                            from the trail alone (person, agent and its owner, or
+                            service) and fail if one does not resolve (#312).
     store export <IMAGE> <DIR> --key <FILE>
                             With the VM stopped: check every audit stream against
                             its signed head, copy the streams and heads into
@@ -331,6 +335,9 @@ enum Task {
         /// An export directory a `rotate` record in the image must name
         /// (D-048, #217).
         archive: Option<PathBuf>,
+        /// Print each record's resolved actor; fail on one that does not
+        /// resolve (#312).
+        resolve: bool,
     },
     StoreExport {
         image: PathBuf,
@@ -610,8 +617,12 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
             }
             Some("audit") => {
                 let image = args.next().ok_or("store audit needs an image path")?;
-                let (mut key, mut archive) = (None, None);
+                let (mut key, mut archive, mut resolve) = (None, None, false);
                 while let Some(option) = args.next() {
+                    if option == "--resolve" && !resolve {
+                        resolve = true;
+                        continue;
+                    }
                     let slot = match option.as_str() {
                         "--key" if key.is_none() => &mut key,
                         "--archive" if archive.is_none() => &mut archive,
@@ -624,6 +635,7 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
                     image: PathBuf::from(image),
                     key,
                     archive,
+                    resolve,
                 }
             }
             Some("export") => {
@@ -3902,6 +3914,29 @@ fn event_checks(
     Ok(())
 }
 
+/// After a passing kernel (#312): every record of its store's audit
+/// trail resolves to an actor from the trail alone, as `store audit
+/// --resolve` does. A store with no trail, or none to mount, has none.
+fn resolve_check(image: &Path) -> Result<()> {
+    let Ok(streams) = store_image::audit_fields(image) else {
+        return Ok(());
+    };
+    let mut actors = resolve::Resolver::new();
+    let mut count = 0;
+    for (name, records) in &streams {
+        for (line, fields) in records {
+            actors
+                .resolve(fields)
+                .map_err(|why| format!("{name}: {line}: does not resolve: {why}"))?;
+            count += 1;
+        }
+    }
+    if count > 0 {
+        println!("  audit: all {count} records resolve to an actor");
+    }
+    Ok(())
+}
+
 /// How many records end with `want`, and how many of them come right
 /// after one that does too (a copy sent again, review F2).
 fn records_and_copies(records: &[String], want: &str) -> (usize, usize) {
@@ -5547,6 +5582,11 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
             Ok(())
         }
     });
+    // Every record of a passing kernel's trail resolves to an actor (#312).
+    let typed = typed.and_then(|()| match run.status {
+        Some(QEMU_EXIT_SUCCESS) => resolve_check(&out.join(STORE_IMAGE)),
+        _ => Ok(()),
+    });
     let booted = evaluate_boot(&run, TESTS_MARKER, timeout);
     // Both failed: the console's failure (with its output) explains the
     // kernel's, so it is shown too.
@@ -5626,12 +5666,25 @@ fn main() -> ExitCode {
                     image,
                     key,
                     archive,
-                } => store_image::audit(&image).and_then(|streams| {
-                    for (name, lines) in streams {
-                        println!("{name}: {} records", lines.len());
-                        for line in lines {
-                            println!("  {line}");
+                    resolve,
+                } => store_image::audit_fields(&image).and_then(|streams| {
+                    let mut actors = resolve.then(resolve::Resolver::new);
+                    let mut unresolved = 0;
+                    for (name, records) in streams {
+                        println!("{name}: {} records", records.len());
+                        for (line, fields) in records {
+                            match actors.as_mut().map(|r| r.resolve(&fields)) {
+                                None => println!("  {line}"),
+                                Some(Ok(who)) => println!("  {line} => {who}"),
+                                Some(Err(why)) => {
+                                    unresolved += 1;
+                                    println!("  {line} => UNRESOLVED: {why}");
+                                }
+                            }
                         }
+                    }
+                    if unresolved > 0 {
+                        return Err(format!("{unresolved} records do not resolve to an actor"));
                     }
                     let public = match &key {
                         Some(key) => Some(sign::anchor_public(&sign::read_device_key(key)?)),
@@ -5993,6 +6046,7 @@ mod tests {
                 image: PathBuf::from("s.img"),
                 key: None,
                 archive: None,
+                resolve: false,
             })
         );
         assert_eq!(
@@ -6001,6 +6055,7 @@ mod tests {
                 image: PathBuf::from("s.img"),
                 key: Some(PathBuf::from("d.key")),
                 archive: None,
+                resolve: false,
             })
         );
         assert_eq!(
@@ -6017,8 +6072,19 @@ mod tests {
                 image: PathBuf::from("s.img"),
                 key: Some(PathBuf::from("d.key")),
                 archive: Some(PathBuf::from("x")),
+                resolve: false,
             })
         );
+        assert_eq!(
+            parse(args(&["store", "audit", "s.img", "--resolve"])),
+            Ok(Task::StoreAudit {
+                image: PathBuf::from("s.img"),
+                key: None,
+                archive: None,
+                resolve: true,
+            })
+        );
+        assert!(parse(args(&["store", "audit", "s.img", "--resolve", "--resolve"])).is_err());
         assert!(
             parse(args(&[
                 "store", "audit", "s.img", "--key", "a", "--key", "b"

@@ -171,6 +171,18 @@ pub fn ls(image: &Path) -> Result<()> {
 /// service's `boot` event. Returns each stream's name and its records as
 /// text lines, or the first problem.
 pub fn audit(image: &Path) -> Result<Vec<(String, Vec<String>)>> {
+    Ok(audit_fields(image)?
+        .into_iter()
+        .map(|(name, records)| (name, records.into_iter().map(|(l, _)| l).collect()))
+        .collect())
+}
+
+/// Each stream's name and its records, each printed and as resolution
+/// reads it.
+pub type Streams = Vec<(String, Vec<(String, crate::resolve::Fields)>)>;
+
+/// [`audit`], with what actor resolution reads of each record (#312).
+pub fn audit_fields(image: &Path) -> Result<Streams> {
     use pharos_proto::audit::{Kind as RecordKind, Record, action, client};
     let mut store =
         Store::mount(FileDevice::open(image)?).map_err(|e| format!("{}: {e}", image.display()))?;
@@ -197,30 +209,41 @@ pub fn audit(image: &Path) -> Result<Vec<(String, Vec<String>)>> {
                     problem.get_or_insert(format!("record {n}: a boot record only comes first"));
                 }
                 let e = r.entry;
+                let fields = crate::resolve::Fields {
+                    client: r.client,
+                    action: e.action,
+                    actor: String::from_utf8_lossy(e.actor).into_owned(),
+                    task: e.task,
+                    outcome: e.outcome,
+                    detail: String::from_utf8_lossy(e.detail).into_owned(),
+                };
                 let mut t = [0u8; pharos_proto::permission::TEXT];
                 let permission = e
                     .permission
                     .map(|p| String::from_utf8_lossy(p.text(&mut t)).into_owned())
                     .unwrap_or_default();
-                lines.push(format!(
-                    "#{} {:.3} s client {} {:?}{} {} {} task {}/{} {} {} outcome {} {}",
-                    r.sequence,
-                    r.time as f64 / 1e6,
-                    r.client,
-                    e.kind,
-                    if e.refers != 0 {
-                        format!(" of #{}", e.refers)
-                    } else {
-                        String::new()
-                    },
-                    action::name(e.action),
-                    String::from_utf8_lossy(e.actor),
-                    e.task,
-                    e.attempt,
-                    permission,
-                    String::from_utf8_lossy(e.service),
-                    e.outcome,
-                    String::from_utf8_lossy(e.detail),
+                lines.push((
+                    format!(
+                        "#{} {:.3} s client {} {:?}{} {} {} task {}/{} {} {} outcome {} {}",
+                        r.sequence,
+                        r.time as f64 / 1e6,
+                        r.client,
+                        e.kind,
+                        if e.refers != 0 {
+                            format!(" of #{}", e.refers)
+                        } else {
+                            String::new()
+                        },
+                        action::name(e.action),
+                        String::from_utf8_lossy(e.actor),
+                        e.task,
+                        e.attempt,
+                        permission,
+                        String::from_utf8_lossy(e.service),
+                        e.outcome,
+                        String::from_utf8_lossy(e.detail),
+                    ),
+                    fields,
                 ));
             })
             .map_err(|e| format!("{name}: {e}"))?;

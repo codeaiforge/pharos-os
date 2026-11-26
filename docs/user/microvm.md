@@ -155,6 +155,8 @@ cargo xtask store audit store.img --key device.key
 
 It checks every stream's records, chain, and signed head, prints the records, then `audit key <hex>`, which must be the key `trust` showed, and each stream's boot measurement. A trail rewritten on the disk, even with its chain recomputed, fails, because its head's signature no longer matches.
 
+*Unreleased (#312, M6.5):* add `--resolve` to print after each record who did it, from the trail alone: `person alice`, `agent fetcher (owner alice)`, `service tls`, `init`, `the console, no one logged in`, or `the console, before identities` (records from before M6.5, actor `user`). It fails if a record does not resolve.
+
 **As it fills:** at 80% and 95% of the space the trail may use, `trust` says `audit: the trail is <n>% full; export it on the host (cargo xtask store export), then audit rotate <code>`. When it is full, actions that need a record are refused; records are never dropped to make room (D-048).
 
 **Exporting and rotating:**
