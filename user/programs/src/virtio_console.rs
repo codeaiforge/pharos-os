@@ -171,9 +171,8 @@ impl Console {
         )?;
         self.posted[id] = false;
         let out = out.get_mut(..n).ok_or("receive buffer too small")?;
-        for (o, b) in out.iter_mut().enumerate() {
-            *b = self.rx_mem.read8(id * self.sizes.rx + o);
-        }
+        // Copied out and cleared: a typed passphrase leaves the page (#310).
+        self.rx_mem.take_bytes(id * self.sizes.rx, out);
         self.post(id as u16);
         self.rx.kick();
         Ok(Some(n))

@@ -9,6 +9,7 @@ pub mod fp;
 pub mod gateway;
 pub mod grants;
 pub mod groups;
+pub mod identity;
 pub mod knowledge;
 pub mod mailbox;
 pub mod manage;

@@ -113,6 +113,8 @@ A boot that did not work ends with `PHAROS: boot failed: <reason>`, and QEMU sto
 
 ## 5. The trusted console
 
+*Unreleased (#310, M6.5; not in v0.5):* the console answers only `login <name>`, the stops (`stop all`, `stop <agent>`, `stop group <group>`, `stop service <service>`), and `help` until someone logs in. Before the first boot, seed the store with its first administrator: `cargo xtask identity first <name> --store store.img` asks for the passphrase twice; then type `login <name>` and the passphrase on the console. See [identity.md](../architecture/identity.md).
+
 The trusted console is the only place where you approve or stop what agents do; no agent can read or write it (D-018). In a second terminal:
 
 ```sh

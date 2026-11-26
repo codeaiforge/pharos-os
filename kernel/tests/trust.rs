@@ -26,7 +26,7 @@ use core::time::Duration;
 
 use pharos_kernel::arch::x86_64::{apic, gdt, idt};
 use pharos_kernel::cap::{
-    CONFIG, Capability, IRQ, MAP, MAX_HANDLES, Object, READ, RECEIVE, SEND, STOP, WAIT,
+    CONFIG, Capability, IRQ, MAP, MAX_HANDLES, Object, READ, RECEIVE, SEND, STOP, WAIT, WRITE,
 };
 use pharos_kernel::device::DeviceHandle;
 use pharos_kernel::ipc::{self, Endpoint, Message};
@@ -161,12 +161,49 @@ fn run(t: &mut TestRun) {
         return;
     };
     let (endpoint, report) = (Endpoint::new(), Endpoint::new());
+    // The storage service on the store disk, for `trust`'s people (#310):
+    // the runner seeds the test person its script logs in as.
+    let store = Endpoint::new();
+    let blk = pci::devices()
+        .into_iter()
+        .filter(|d| (d.vendor, d.device) == (0x1af4, 0x1042))
+        .nth(1)
+        .and_then(DeviceHandle::grant);
+    let Some(blk) = blk else {
+        t.check("the store disk is granted", false);
+        return;
+    };
+    let store_caps = vec![
+        Capability::new(Object::DebugConsole, WRITE),
+        Capability::new(Object::Device(blk), MAP | CONFIG | IRQ),
+        Capability::new(Object::Endpoint(store.clone()), RECEIVE),
+        Capability::new(Object::Endpoint(report.clone()), SEND),
+    ];
+    let stored = process::spawn_elf_limited(&programs, b"bin/store", 0, store_caps, 4096);
+    t.check(
+        "the storage service started and reported ready",
+        stored.is_ok()
+            && ipc::poll(&report, Duration::from_secs(10)).is_some_and(|m| m.bytes() == b"ready"),
+    );
+    // Handles 4 and 5 (the audit and knowledge services) hold nothing
+    // this kernel runs: no rights, so a call fails at once.
+    let none = || Capability::new(Object::Endpoint(Endpoint::new()), 0);
     let caps = vec![
         Capability::new(Object::Device(device), MAP | CONFIG | IRQ),
         Capability::new(Object::Endpoint(endpoint.clone()), RECEIVE),
         Capability::new(Object::Endpoint(report.clone()), SEND),
+        none(),
+        none(),
+        Capability::new(Object::Endpoint(store), SEND)
+            .derive_badged(SEND, pharos_services::IDENTITY_STORE),
     ];
-    let trust = process::spawn_elf(&programs, b"bin/trust", 0, caps);
+    let trust = process::spawn_elf_limited(
+        &programs,
+        b"bin/trust",
+        0,
+        caps,
+        u64::from(pharos_services::TRUST_LIMIT),
+    );
     t.check("trust started", trust.is_ok());
     let ready = ipc::poll(&report, Duration::from_secs(10));
     t.check(

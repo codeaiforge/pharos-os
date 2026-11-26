@@ -19,6 +19,16 @@
 //! process capabilities over [`pharos_proto::trust`]: the agent runtime's
 //! from `init`, each agent's from the runtime.
 //!
+//! People (#310, identity.md): handle 6 is the store's `identity`
+//! namespace (`SEND`, read-write), which only `trust` holds. The console
+//! answers only `login <name>`, the stops, and `help` until someone logs
+//! in with their passphrase; the following records name that person
+//! (`console` with no one logged in). A refused login is recorded and the
+//! next waits 1 s, doubling to 60 s; 15 minutes without a typed line end
+//! the session. A passphrase is a console line of its own, hashed and
+//! then wiped from every buffer it passed through; it is never shown or
+//! recorded.
+//!
 //! A Tier 3 guest agent (#298, bridge.md) is registered with no process:
 //! its `stop` is sent to the runtime as `STOP_GUEST` (non-blocking, at most
 //! 2 s), which revokes the bridge's capability for it. If the runtime does
@@ -67,20 +77,27 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use pharos_programs::identity::{self as people, Added, Removed, Session};
 use pharos_programs::output::{self, Limit};
+use pharos_programs::tasks::{Files, StoreFailed};
 use pharos_programs::virtio_console::{Console, RX_BUFFER, Sizes, TX_BUFFER};
+use pharos_proto::identity::{self as identity, ITERATIONS, MAX_PASSPHRASE, Person};
 use pharos_proto::knowledge::{self, Author};
 use pharos_proto::permission::Permission;
 use pharos_proto::service::{self as listing, Action, Managed, Reply, Settings, System};
+use pharos_proto::store::{self, Request as StoreRequest, Status as StoreStatus};
 use pharos_proto::trust::{
     self, Command, Event, INIT, Line, Lines, MAX_NAME, MAX_NAMES, Names, Outcome, RUNTIME, Request,
     SLOTS, parse,
 };
 use pharos_proto::{agents, audit, status};
+use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
-    Handle, Received, Status, Usage as Use, call_timeout, delete, endpoint_create, irq_create,
-    irq_notify, process_status, process_stop, process_usage, receive, send, sleep, try_send,
-    uptime,
+    Handle, Mapped, Received, Status, Usage as Use, call_timeout, clock_real, delete,
+    endpoint_create, irq_create, irq_notify, mem_map, mem_share, process_status, process_stop,
+    process_usage, receive_timeout, send, sleep, try_send, uptime,
 };
 
 pharos_user::entry!(main);
@@ -90,11 +107,21 @@ const SERVICE: Handle = 2;
 const REPORT: Handle = 3;
 const AUDIT: Handle = 4;
 const KNOWLEDGE: Handle = 5;
+/// The store's `identity` namespace (#310).
+const IDENTITY: Handle = 6;
+/// Its buffer: one person file.
+const ID_BUFFER: u64 = 4096;
+const STORE_US: u64 = 2_000_000;
 // Its waits, shared with `init`, which outlasts each (M4.6 review F1).
 use pharos_proto::trust::{AUDIT_US, INIT_US, KNOWLEDGE_US, RUNTIME_SEND_US, STOP_WAIT_US};
 const BASE: u64 = 0x1000_0000;
 /// Transmit buffers the runtime's lines never take (#228).
 const RESERVED: usize = 4;
+/// Logged out, only these answer (#310).
+const HELP_LOGIN: &[u8] =
+    b"commands: login <name>, stop all, stop <agent>, stop group <group>, stop service <service>, help";
+const HELP_PEOPLE: &[u8] = b"commands: logout, whoami, people, person add <name> [<roles>], \
+person roles <name> <roles>, person passphrase <name>, person remove <name>";
 /// Two lines: one console line holds at most 256 bytes.
 const HELP: &[u8] = b"commands: list, stop <agent>, stop group <group>, stop all, \
 revoke <agent> <permission>, yes <n>, no <n>, audit, audit rotate <code>, usage, \
@@ -131,6 +158,209 @@ struct Trust {
     limit: Limit,
     /// Whether the line being said is one of them.
     limited: bool,
+    /// The `identity` namespace, if the store answered (#310).
+    people: Option<IdStore>,
+    session: Session,
+    /// What the next line is, if it is a passphrase.
+    prompt: Prompt,
+}
+
+/// A line that is a passphrase, not a command (#310).
+enum Prompt {
+    None,
+    Login(Name),
+    /// A new passphrase for `name` (with `roles` for `person add`), once,
+    /// then again.
+    New {
+        name: Name,
+        roles: Option<Name64>,
+        first: Option<Name64>,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct Name {
+    b: [u8; MAX_NAME],
+    len: usize,
+}
+
+impl Name {
+    fn new(s: &[u8]) -> Self {
+        let mut b = [0u8; MAX_NAME];
+        let len = s.len().min(MAX_NAME);
+        b[..len].copy_from_slice(&s[..len]);
+        Self { b, len }
+    }
+    fn get(&self) -> &[u8] {
+        &self.b[..self.len]
+    }
+}
+
+/// A console line's bytes (roles, or a passphrase, wiped after use).
+#[derive(Clone, Copy)]
+struct Name64 {
+    b: [u8; MAX_PASSPHRASE],
+    len: usize,
+}
+
+impl Name64 {
+    fn new(s: &[u8]) -> Self {
+        let mut b = [0u8; MAX_PASSPHRASE];
+        let len = s.len().min(MAX_PASSPHRASE);
+        b[..len].copy_from_slice(&s[..len]);
+        Self { b, len }
+    }
+    fn get(&self) -> &[u8] {
+        &self.b[..self.len]
+    }
+    fn wipe(&mut self) {
+        self.b.fill(0);
+        core::hint::black_box(&self.b);
+    }
+}
+
+/// `trust`'s store client for the `identity` namespace (#310).
+struct IdStore {
+    buffer: Mapped,
+    reply: Handle,
+}
+
+impl IdStore {
+    /// The client, or the step that failed.
+    fn open() -> Result<Self, &'static [u8]> {
+        let s = Self {
+            buffer: mem_map(ID_BUFFER).map_err(|_| &b"no buffer"[..])?,
+            reply: endpoint_create().map_err(|_| &b"no endpoint"[..])?,
+        };
+        if !s.attach() {
+            return Err(b"its buffer was not taken");
+        }
+        // The store answers only a capability it was given.
+        let mut out = [0u8; 256];
+        match s.call(&StoreRequest::Buffer, &mut out) {
+            Ok(StoreStatus::Ok) => Ok(s),
+            Ok(_) => Err(b"it refused the buffer"),
+            Err(_) => Err(b"no answer"),
+        }
+    }
+
+    fn attach(&self) -> bool {
+        mem_share(&self.buffer).is_ok_and(|memory| {
+            let mut msg = [0u8; 16];
+            let sent = store::encode(&StoreRequest::Attach { len: ID_BUFFER }, &mut msg)
+                .is_some_and(|n| send(IDENTITY, &msg[..n], memory, READ | WRITE, 0).is_ok());
+            let _ = delete(memory);
+            sent
+        })
+    }
+
+    fn call(
+        &self,
+        req: &StoreRequest<'_>,
+        out: &mut [u8; 256],
+    ) -> Result<StoreStatus, StoreFailed> {
+        let mut msg = [0u8; 256];
+        let n = store::encode(req, &mut msg).ok_or(StoreFailed)?;
+        match call_timeout(IDENTITY, &msg[..n], self.reply, out, STORE_US) {
+            Ok(Received::Message { len, cap, .. }) if len >= 1 => {
+                if cap != 0 {
+                    let _ = delete(cap);
+                }
+                Ok(StoreStatus::from_code(out[0]))
+            }
+            _ => Err(StoreFailed),
+        }
+    }
+
+    /// A request that uses the buffer, attaching it again once if a
+    /// restarted store has none of ours.
+    fn buffered(
+        &self,
+        req: &StoreRequest<'_>,
+        out: &mut [u8; 256],
+    ) -> Result<StoreStatus, StoreFailed> {
+        match self.call(req, out)? {
+            StoreStatus::NoBuffer if self.attach() => self.call(req, out),
+            s => Ok(s),
+        }
+    }
+}
+
+fn u64_at(b: &[u8], at: usize) -> u64 {
+    let mut v = [0u8; 8];
+    v.copy_from_slice(&b[at..at + 8]);
+    u64::from_le_bytes(v)
+}
+
+impl Files for IdStore {
+    fn write(&mut self, path: &[u8], bytes: &[u8]) -> Result<(), StoreFailed> {
+        if bytes.len() > self.buffer.len() {
+            return Err(StoreFailed);
+        }
+        self.buffer.write_bytes(0, bytes);
+        let req = StoreRequest::Write {
+            path,
+            len: bytes.len() as u64,
+            at: 0,
+        };
+        match self.buffered(&req, &mut [0; 256])? {
+            StoreStatus::Ok => Ok(()),
+            _ => Err(StoreFailed),
+        }
+    }
+
+    fn read(&mut self, path: &[u8]) -> Result<Option<alloc::vec::Vec<u8>>, StoreFailed> {
+        let mut out = [0u8; 256];
+        match self.call(&StoreRequest::Stat { path }, &mut out)? {
+            StoreStatus::NotFound => return Ok(None),
+            StoreStatus::Ok => {}
+            _ => return Err(StoreFailed),
+        }
+        let len = u64_at(&out, 2);
+        if len > self.buffer.len() as u64 {
+            return Err(StoreFailed);
+        }
+        let req = StoreRequest::Read {
+            path,
+            offset: 0,
+            len,
+            at: 0,
+        };
+        if self.buffered(&req, &mut out)? != StoreStatus::Ok || u64_at(&out, 1) != len {
+            return Err(StoreFailed);
+        }
+        let mut bytes = alloc::vec![0u8; len as usize];
+        self.buffer.take_bytes(0, &mut bytes);
+        Ok(Some(bytes))
+    }
+
+    fn delete(&mut self, path: &[u8]) -> Result<(), StoreFailed> {
+        match self.call(&StoreRequest::Delete { path }, &mut [0; 256])? {
+            StoreStatus::Ok | StoreStatus::NotFound => Ok(()),
+            _ => Err(StoreFailed),
+        }
+    }
+
+    fn list(&mut self, prefix: &[u8]) -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, StoreFailed> {
+        let mut names = alloc::vec::Vec::new();
+        loop {
+            let mut out = [0u8; 256];
+            let start = names.len() as u32;
+            if self.call(&StoreRequest::List { prefix, start }, &mut out)? != StoreStatus::Ok {
+                return Err(StoreFailed);
+            }
+            let (count, more) = (out[1], out[2]);
+            let mut at = 3;
+            for _ in 0..count {
+                let n = usize::from(*out.get(at).ok_or(StoreFailed)?);
+                names.push(out.get(at + 1..at + 1 + n).ok_or(StoreFailed)?.to_vec());
+                at += 1 + n;
+            }
+            if more == 0 || count == 0 {
+                return Ok(names);
+            }
+        }
+    }
 }
 
 impl Trust {
@@ -261,18 +491,23 @@ impl Trust {
         false
     }
 
-    /// Records a user command (best effort, at most 1 s).
+    /// Records a user command (best effort, at most 1 s), as the person
+    /// logged in (`console` with no one, #310).
     fn record(&self, act: u8, permission: Option<Permission>, detail: &[u8]) {
+        self.record_as(act, permission, audit::outcome::OK, detail);
+    }
+
+    fn record_as(&self, act: u8, permission: Option<Permission>, outcome: u8, detail: &[u8]) {
         let entry = audit::Entry {
             kind: audit::Kind::Event,
             refers: 0,
-            actor: b"user",
+            actor: self.session.person().unwrap_or(b"console"),
             task: 0,
             attempt: 0,
             action: act,
             permission,
             service: b"trust",
-            outcome: audit::outcome::OK,
+            outcome,
             detail,
         };
         let mut msg = [0u8; 256];
@@ -365,7 +600,20 @@ export them first (cargo xtask store export)",
     }
 
     fn command(&mut self, line: &[u8]) {
-        match trust::command(line) {
+        let c = trust::command(line);
+        // Logged out, only `login`, `stop all`, and `help` (#310).
+        if self.session.person().is_none() && !people::allowed_logged_out(&c) {
+            return self.say(&[b"log in first: login <name>"]);
+        }
+        match c {
+            Command::Login(name) => self.login(name),
+            Command::Logout => self.logout(false),
+            Command::Whoami => self.whoami(),
+            Command::People => self.list_people(),
+            Command::PersonAdd(name, roles) => self.person_add(name, roles),
+            Command::PersonRoles(name, roles) => self.person_roles(name, roles),
+            Command::PersonPassphrase(name) => self.person_passphrase(name),
+            Command::PersonRemove(name) => self.person_remove(name),
             Command::List => {
                 if let Some(runtime) = self.runtime {
                     self.status(b"runtime", runtime);
@@ -505,12 +753,282 @@ export them first (cargo xtask store export)",
                 version,
                 prefix,
             } => self.verify(scope, key, version, prefix),
+            Command::Help if self.session.person().is_none() => self.say(&[HELP_LOGIN]),
             Command::Help => {
                 self.say(&[HELP]);
                 self.say(&[HELP_SYSTEM]);
+                self.say(&[HELP_PEOPLE]);
             }
             Command::Manage(action, name) => self.manage(action, name),
         }
+    }
+
+    /// `login <name>`: the next line is the passphrase, unless a refusal's
+    /// wait is still running (#310). A login ends any session first.
+    fn login(&mut self, name: &[u8]) {
+        let wait = self.session.wait(uptime());
+        if wait > 0 {
+            let mut d = [0u8; 20];
+            return self.say(&[
+                b"login: wait ",
+                decimal(wait.div_ceil(1_000_000), &mut d),
+                b" s",
+            ]);
+        }
+        if self.session.person().is_some() {
+            self.logout(false);
+        }
+        self.prompt = Prompt::Login(Name::new(name));
+        self.say(&[b"passphrase:"]);
+    }
+
+    /// Ends the session, `idle` if it ran out.
+    fn logout(&mut self, idle: bool) {
+        let Some(name) = self.session.person().map(Name::new) else {
+            return;
+        };
+        let detail: &[&[u8]] = if idle {
+            &[b"logout ", name.get(), b" idle"]
+        } else {
+            &[b"logout ", name.get()]
+        };
+        let mut d = [0u8; 64];
+        let n = join(detail, &mut d);
+        self.record(audit::action::LOGOUT, None, &d[..n]);
+        self.session.end();
+        self.say(&[
+            b"logged out ",
+            name.get(),
+            if idle { b" (idle)" } else { b"" },
+        ]);
+    }
+
+    fn whoami(&mut self) {
+        let Some(name) = self.session.person().map(Name::new) else {
+            return;
+        };
+        let p = self
+            .people
+            .as_mut()
+            .and_then(|f| people::read(f, name.get()).ok().flatten());
+        let mut roles = [0u8; 264];
+        let n = p.map_or(0, |p| roles_text(&p, &mut roles));
+        self.say(&[
+            name.get(),
+            b" roles ",
+            if n == 0 { b"none" } else { &roles[..n] },
+        ]);
+    }
+
+    fn list_people(&mut self) {
+        let Some(f) = self.people.as_mut() else {
+            return self.say(&[b"people: the store is not answering"]);
+        };
+        let Ok(names) = people::names(f) else {
+            return self.say(&[b"people: the store is not answering"]);
+        };
+        if names.is_empty() {
+            return self.say(&[b"no people"]);
+        }
+        for name in names {
+            let p = self
+                .people
+                .as_mut()
+                .and_then(|f| people::read(f, &name).ok().flatten());
+            let mut roles = [0u8; 264];
+            let n = p.map_or(0, |p| roles_text(&p, &mut roles));
+            self.say(&[
+                b"person ",
+                &name,
+                b" roles ",
+                if n == 0 { b"none" } else { &roles[..n] },
+            ]);
+        }
+    }
+
+    fn person_add(&mut self, name: &[u8], roles: &[u8]) {
+        if Person::new(name, roles, [0; 32], 1, [0; 32]).is_none() {
+            return self.say(&[b"person add: roles are up to 8 names, comma-separated"]);
+        }
+        let Some(f) = self.people.as_mut() else {
+            return self.say(&[b"person add: the store is not answering"]);
+        };
+        match people::names(f) {
+            Ok(n) if n.iter().any(|n| n == name) => {
+                return self.say(&[b"person add: ", name, b" exists"]);
+            }
+            Ok(n) if n.len() >= identity::MAX_PEOPLE => {
+                return self.say(&[b"person add: no room for more people"]);
+            }
+            Ok(_) => {}
+            Err(_) => return self.say(&[b"person add: the store is not answering"]),
+        }
+        self.prompt = Prompt::New {
+            name: Name::new(name),
+            roles: Some(Name64::new(roles)),
+            first: None,
+        };
+        self.say(&[b"new passphrase for ", name, b":"]);
+    }
+
+    fn person_roles(&mut self, name: &[u8], roles: &[u8]) {
+        let Some(f) = self.people.as_mut() else {
+            return self.say(&[b"person roles: the store is not answering"]);
+        };
+        let Ok(Some(mut p)) = people::read(f, name) else {
+            return self.say(&[b"person roles: no person ", name]);
+        };
+        if !p.set_roles(roles) {
+            return self.say(&[b"person roles: roles are up to 8 names, comma-separated"]);
+        }
+        if people::write(f, &p).is_err() {
+            return self.say(&[b"person roles: the store refused"]);
+        }
+        let mut d = [0u8; 64];
+        let n = join(&[b"person roles ", name, b" ", roles], &mut d);
+        self.record(audit::action::IDENTITY, None, &d[..n]);
+        self.say(&[b"person ", name, b" roles ", roles]);
+    }
+
+    fn person_passphrase(&mut self, name: &[u8]) {
+        let exists = self
+            .people
+            .as_mut()
+            .is_some_and(|f| matches!(people::read(f, name), Ok(Some(_))));
+        if !exists {
+            return self.say(&[b"person passphrase: no person ", name]);
+        }
+        self.prompt = Prompt::New {
+            name: Name::new(name),
+            roles: None,
+            first: None,
+        };
+        self.say(&[b"new passphrase for ", name, b":"]);
+    }
+
+    fn person_remove(&mut self, name: &[u8]) {
+        let Some(f) = self.people.as_mut() else {
+            return self.say(&[b"person remove: the store is not answering"]);
+        };
+        match people::remove(f, name) {
+            Ok(Removed::Done) => {
+                let mut d = [0u8; 64];
+                let n = join(&[b"person remove ", name], &mut d);
+                self.record(audit::action::IDENTITY, None, &d[..n]);
+                self.say(&[b"removed ", name]);
+                if self.session.person() == Some(name) {
+                    self.logout(false);
+                }
+            }
+            Ok(Removed::NotFound) => self.say(&[b"person remove: no person ", name]),
+            Ok(Removed::Last) => self.say(&[b"person remove: ", name, b" is the last person"]),
+            Err(_) => self.say(&[b"person remove: the store refused"]),
+        }
+    }
+
+    /// A line typed after a `passphrase:` prompt. The caller wipes the
+    /// line after this returns.
+    fn passphrase(&mut self, line: &[u8]) {
+        match core::mem::replace(&mut self.prompt, Prompt::None) {
+            Prompt::None => {}
+            Prompt::Login(name) => {
+                let found = match self.people.as_mut().map(|f| people::read(f, name.get())) {
+                    Some(Ok(found)) => found,
+                    // Not a refusal: no one was checked.
+                    _ => {
+                        return self.say(&[b"login: the identity store did not answer; try again"]);
+                    }
+                };
+                // A name with no record is answered as a wrong passphrase.
+                if found.is_some_and(|p| people::matches(&p, line)) {
+                    self.session.start(name.get(), uptime());
+                    let mut d = [0u8; 64];
+                    let n = join(&[b"login ", name.get()], &mut d);
+                    self.record(audit::action::LOGIN, None, &d[..n]);
+                    self.say(&[b"logged in as ", name.get()]);
+                } else {
+                    self.session.refused(uptime());
+                    let mut d = [0u8; 64];
+                    let n = join(&[b"login refused ", name.get()], &mut d);
+                    self.record_as(audit::action::LOGIN, None, audit::outcome::REFUSED, &d[..n]);
+                    self.say(&[b"login refused"]);
+                }
+            }
+            Prompt::New {
+                name,
+                roles,
+                first: None,
+            } => {
+                if !identity::valid_passphrase(line) {
+                    return self
+                        .say(&[b"a passphrase is 8 to 64 printable characters; not changed"]);
+                }
+                self.prompt = Prompt::New {
+                    name,
+                    roles,
+                    first: Some(Name64::new(line)),
+                };
+                self.say(&[b"again:"]);
+            }
+            Prompt::New {
+                name,
+                roles,
+                first: Some(mut first),
+            } => {
+                let same = first.get() == line;
+                first.wipe();
+                if !same {
+                    return self.say(&[b"the passphrases differ; not changed"]);
+                }
+                self.set_passphrase(name.get(), roles.as_ref().map(Name64::get), line);
+            }
+        }
+    }
+
+    /// Writes `name`'s record with a new passphrase: a new person when
+    /// `roles` is given (`person add`), else the same roles.
+    fn set_passphrase(&mut self, name: &[u8], roles: Option<&[u8]>, passphrase: &[u8]) {
+        let Some(f) = self.people.as_mut() else {
+            return self.say(&[b"person: the store is not answering"]);
+        };
+        let salt = people::salt(
+            name,
+            clock_real().unwrap_or(0),
+            uptime(),
+            pharos_user::entropy::rdseed64(),
+        );
+        let hash = people::hash(passphrase, &salt, ITERATIONS);
+        let (word, done): (&[u8], Result<bool, StoreFailed>) = match roles {
+            Some(roles) => match Person::new(name, roles, salt, ITERATIONS, hash) {
+                Some(p) => (b"person add ", people::add(f, &p).map(|a| a == Added::Done)),
+                None => (b"person add ", Ok(false)),
+            },
+            None => match people::read(f, name) {
+                Ok(Some(mut p)) => {
+                    (p.salt, p.iterations, p.hash) = (salt, ITERATIONS, hash);
+                    (b"person passphrase ", people::write(f, &p).map(|()| true))
+                }
+                _ => (b"person passphrase ", Ok(false)),
+            },
+        };
+        if done != Ok(true) {
+            return self.say(&[word, name, b": not changed"]);
+        }
+        let mut d = [0u8; 64];
+        let n = match roles {
+            Some(r) => join(
+                &[
+                    word,
+                    name,
+                    b" roles ",
+                    if r.is_empty() { b"none" } else { r },
+                ],
+                &mut d,
+            ),
+            None => join(&[word, name], &mut d),
+        };
+        self.record(audit::action::IDENTITY, None, &d[..n]);
+        self.say(&[word, name, b": done"]);
     }
 
     /// `start`, `stop service`, or `restart` (#170): `init` decides and
@@ -1425,18 +1943,51 @@ fn main(_: u64) -> u64 {
         agents: [None; SLOTS as usize],
         limit: Limit::new(),
         limited: false,
+        people: None,
+        session: Session::default(),
+        prompt: Prompt::None,
     };
     if send(REPORT, b"ready", 0, 0, 0).is_err() {
         return 4;
     }
-    t.say(&[b"trust: ready; ", HELP]);
+    t.say(&[b"trust: ready; ", HELP_LOGIN]);
+    // No one to log in as: the host seeds the first person (#310).
+    let none = match IdStore::open() {
+        Ok(mut f) => {
+            let none = matches!(people::names(&mut f).as_deref(), Ok([]));
+            t.people = Some(f);
+            none
+        }
+        Err(why) => {
+            t.say(&[
+                b"trust: the identity store is not answering (",
+                why,
+                b"); only stop all works",
+            ]);
+            false
+        }
+    };
+    if none {
+        t.say(&[b"trust: no people; seed the store with cargo xtask identity first"]);
+    }
     t.audit();
     t.ask_runtime();
     let mut lines = Lines::new();
     let mut msg = [0u8; 256];
     let mut bytes = [0u8; RX_BUFFER];
     loop {
-        match receive(SERVICE, &mut msg) {
+        // A session runs out after 15 idle minutes (#310).
+        let now = uptime();
+        let wait = t
+            .session
+            .idle_at()
+            .map_or(pharos_user::FOREVER, |at| at.saturating_sub(now).max(1));
+        let got = receive_timeout(SERVICE, &mut msg, wait);
+        if t.session.idle(uptime()) {
+            t.prompt = Prompt::None;
+            t.logout(true);
+        }
+        match got {
             Ok(Received::Notification(_)) => {
                 if t.console.reclaim().is_err() {
                     return 5;
@@ -1444,16 +1995,32 @@ fn main(_: u64) -> u64 {
                 loop {
                     match t.console.recv(&mut bytes) {
                         Ok(Some(n)) => {
+                            let mut secret = false;
                             for &b in &bytes[..n] {
                                 match lines.push(b) {
                                     Line::Done(len) => {
                                         let mut line = [0u8; Lines::MAX];
                                         line[..len].copy_from_slice(lines.line(len));
-                                        t.command(&line[..len]);
+                                        t.session.touch(uptime());
+                                        if matches!(t.prompt, Prompt::None) {
+                                            t.command(&line[..len]);
+                                        } else {
+                                            // A passphrase: wiped from
+                                            // every buffer it passed.
+                                            t.passphrase(&line[..len]);
+                                            lines.wipe();
+                                            secret = true;
+                                            line.fill(0);
+                                            core::hint::black_box(&line);
+                                        }
                                     }
                                     Line::TooLong => t.say(&[b"line too long"]),
                                     Line::None => {}
                                 }
+                            }
+                            if secret {
+                                bytes.fill(0);
+                                core::hint::black_box(&bytes);
                             }
                         }
                         Ok(None) => break,
@@ -1469,6 +2036,32 @@ fn main(_: u64) -> u64 {
             _ => {}
         }
     }
+}
+
+/// `parts` joined into `out`, cut to fit; the length.
+fn join(parts: &[&[u8]], out: &mut [u8]) -> usize {
+    let mut n = 0;
+    for p in parts {
+        let k = p.len().min(out.len() - n);
+        out[n..n + k].copy_from_slice(&p[..k]);
+        n += k;
+    }
+    n
+}
+
+/// `p`'s roles, comma-separated, into `out`; the length.
+fn roles_text(p: &Person, out: &mut [u8; 264]) -> usize {
+    let mut n = 0;
+    for i in 0..p.role_count {
+        let r = p.role(i);
+        if i > 0 {
+            out[n] = b',';
+            n += 1;
+        }
+        out[n..n + r.len()].copy_from_slice(r);
+        n += r.len();
+    }
+    n
 }
 
 /// `bytes` in lowercase hex.

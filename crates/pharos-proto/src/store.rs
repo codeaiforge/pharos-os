@@ -97,6 +97,9 @@ pub const NAMESPACES: &[(u16, &[u8])] = &[
     // `system`: the agent runtime's, read-write, to add a file; only the
     // user's `apply` makes `init` use one.
     (9, b"system/incoming"),
+    // People (#310, identity.md), held only by `trust`; the host seeds the
+    // first person (`cargo xtask identity first`).
+    (10, b"identity"),
 ];
 
 /// The namespace `init` reaches on its own unbadged capability (badge 0,

@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-26 (#309), with each open question decided as recommended (section 7). It follows [D-038](../project/decision-log.md#d-038-identity-and-organization-model) (accepted 2026-11-25).
-- **Implementation:** **planned**: the records and the trusted-path commands (#310), owners in policy (#311), actor resolution (#312), and the `identity` test kernel (#313).
+- **Implementation:** the records and the trusted-path commands are **implemented** (#310): `pharos_proto::identity` (the person file, fuzzed), `pharos_crypto::pbkdf2` (RFC 7914's vectors), store namespace 10, audit actions `login`, `logout`, and `identity` (29–31), the `trust` commands and sessions (`pharos_programs::identity`, host-tested), and `cargo xtask identity first`; the `trust` kernel logs in and checks a logout, a refused passphrase, and its delay. *As built* notes below. **Planned:** owners in policy (#311), actor resolution (#312), and the `identity` test kernel (#313); the tenant's name.
 
 ## 2. Context
 
@@ -56,16 +56,20 @@ flowchart LR
 - **The tenant** is one name in the measured image, `system/identity/tenant`. `trust` shows it in `whoami` and in its ready record.
 - **The first administrator** is a person file in the measured image, `system/identity/first`, in the same format. When `trust` starts and `identity/people/` is empty, it copies that file there and records `person add <name> from image`. After that the image's file is not read again; changing the first person's passphrase is a trusted-path command like any other.
 - **`cargo xtask identity first <name>`** writes `system/identity/first` for a build: it reads the passphrase from the builder's terminal twice, without echo, and writes the salt and hash, never the passphrase. Test images use a fixed test passphrase, named like the test secret (`pharos_services::TEST_PASSPHRASE`), which no release image contains.
+- *As built (#310, D-038 amended 2026-11-26):* **the host seeds the store, not the image.** One release image is shared by every install and must build to the same bytes, so it cannot hold a first person. `cargo xtask identity first <name> --store <store.img>` writes `identity/people/<name>` into the store disk before the first boot (refused if the store has people), with a salt from the host's `/dev/urandom` and `identity::ITERATIONS`; `trust` finds the person there, and copies nothing. A release `store.img` stays empty. Test and `cargo xtask run` stores get the test person `admin` (`pharos_services::TEST_PERSON`, `TEST_PASSPHRASE`) with 1,000 iterations, so logins stay quick under TCG; `person add` always uses 600,000. With no people in the store, `trust` says so at start, and only `stop all` works. The tenant file is not built yet.
 
 ### Passphrases
 
 - **The hash** is PBKDF2 with HMAC-SHA-256 (RFC 8018), one 32-byte block, over `pharos_crypto::hmac`: no new dependency. 600,000 iterations (OWASP's 2023 figure for PBKDF2-HMAC-SHA256), stored in the record so a later change does not break old records. The implementation measures it in QEMU and in KVM; if one check takes over 2 s on the reference platform, the design is revisited, not the count quietly cut.
 - **The salt** is 32 bytes: SHA-256 over the name, the wall clock, the uptime, and RDSEED where the CPU has it. A salt needs to be unique, not secret, and `trust` holds no random device (the TLS service holds the only virtio-rng). The hash is compared in constant time (`pharos_crypto::equal`).
 - **A passphrase** is one console line, 8 to 64 bytes. It is held only while it is hashed, then zeroed, and appears in no record and no console line. Pharos echoes nothing; whether the host terminal echoes is the host's (trusted until M8.2), and `cargo xtask run` turns its terminal's echo off while `trust` asks for one.
+- *As built (#310):* after a passphrase line `trust` zeroes the line, the line buffer (`Lines::wipe`), and its receive bytes; the virtio-console driver clears each received chunk from its DMA page as it copies it (`Mapped::take_bytes`). `cargo xtask run`'s console is a pair of FIFOs (`echo ... > trust.in`), not a terminal, so there is no echo to turn off; `identity first` turns its own terminal's echo off (`stty -echo`).
 
 ### Sessions
 
 - **With no one logged in,** the console answers only `login <name>`, `stop all` (the emergency stop, D-018's trusted path, never locked), and `help`. Every other command says `log in first`.
+- *As built (#310, amended by the maintainer on 2026-11-26):* **every stop works logged out**, not only `stop all`: `stop <agent>`, `stop group <group>`, and `stop service <service>` too, recorded with actor `console`. They only take away, never grant, as the emergency stop does. Found by the `aifail` kernel: with memory used up by a runaway service, the store cannot map a restarted `trust`'s buffer, so no one can log in, and the runaway must still be stoppable from the console. Starting, restarting, approving, revoking, applying, rotating, and the people commands still need a login. With the store not answering, `login` says so (`login: the identity store did not answer`), not `login refused`.
+- *As built (#310):* refusals from a no-one state are recorded with actor `console`; a `login` typed while the wait runs is answered `login: wait <n> s` and not checked; `person remove` of the logged-in person ends the session. The owner rule for `person remove` comes with owners (#311).
 - **`login <name>`** prints `passphrase:`; the next line is the passphrase. A match starts a session and records `login <name>`. A wrong passphrase, or a name with no record (answered the same way, so names cannot be probed), records `login refused <name>` and makes the next attempt wait: 1 s, doubling to at most 60 s, reset by a success. The wait keeps `stop all` working.
 - **`logout`**, and 15 minutes without a typed line, end the session and record `logout <name>` or `logout <name> idle`.
 - **`whoami`** prints the person, their roles, and the tenant.
@@ -115,6 +119,7 @@ New actions (`pharos_proto::audit::action`): `login`, `logout`, and `identity` (
 ### Budgets
 
 - `trust` gains `SEND` on the store for namespace 10 (read-write), `READ` on the root filesystem for `system/identity/first` and `system/identity/tenant` (as the runtime reads manifests), and a 4 KiB store buffer (one person file): two capabilities, to 7 of `spawn`'s 12. Its page limit grows by the buffer and the PBKDF2 state, a few pages.
+- *As built (#310):* with the store seeded by the host, `trust` needs no root filesystem capability: it gains only `SEND` on the store for namespace 10 (`IDENTITY_STORE`), its handle 6, to 6 of 12 (the `supervision` table, with no knowledge service, holds a capability with no rights at handle 5, so handle 6 stays the store's). Its page limit was 0 (it mapped nothing); it is now 32 pages (`TRUST_LIMIT`): the buffer and its heap.
 - The runtime gains no capability (it holds `spawn`'s 12 in the full tables): owners are checked through `trust` (above).
 - At most 64 people (a store `list` page), checked at `person add`.
 
@@ -135,7 +140,7 @@ New actions (`pharos_proto::audit::action`): `login`, `logout`, and `identity` (
 | Host, fuzzing (D-020 pattern) | Person files, with a fixed seed and count; none may panic |
 | Host, `pharos-services` | Every compiled policy entry names an owner; namespace 10 held only by `trust` |
 | Host, `xtask` | `identity first` writes a record the parser accepts and no passphrase; `store audit --resolve` on a trail with each kind of actor, and one that does not resolve |
-| QEMU, `identity` | Logged out, only `login`, `stop all`, and `help` answer; a wrong passphrase is refused, recorded, and slowed; the image's first person logs in, adds a person with a role, and that role gains nothing (the agents' grants are unchanged); an agent whose owner does not exist is refused at start and recorded, and one whose owner was checked starts; `logout` and the idle timeout end the session; the runner resolves every record of the trail and finds no passphrase in it or on the console |
+| QEMU, `identity` | Logged out, only `login`, the stops, and `help` answer; a wrong passphrase is refused, recorded, and slowed; the image's first person logs in, adds a person with a role, and that role gains nothing (the agents' grants are unchanged); an agent whose owner does not exist is refused at start and recorded, and one whose owner was checked starts; `logout` and the idle timeout end the session; the runner resolves every record of the trail and finds no passphrase in it or on the console |
 | CI | A throwaway branch where the runtime grants a permission to an agent whose owner has a role must fail `identity` (D-018's rule, M6.5's validation) |
 
 ## 6. Alternatives

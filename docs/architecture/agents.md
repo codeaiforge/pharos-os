@@ -45,6 +45,7 @@ What M3.3 builds on:
 
 - `trust` drives the virtio-console device with the shared user-space virtio transport (`pharos_programs::virtio`), as the network service drives its device (D-015). No other process holds the device, so nothing else can read the user's commands or write what looks like `trust`'s answers.
 - **Commands**, one per line, each answered on the same console:
+  - *Since #310 ([identity.md](identity.md)):* with no one logged in, only `login <name>`, the stops (`stop all`, `stop <agent>`, `stop group <group>`, `stop service <service>`), and `help` answer; `login <name>` asks for the passphrase on the next line; `logout`, `whoami`, `people`, and `person add <name> [<roles>]`, `person roles <name> <roles>`, `person passphrase <name>`, `person remove <name>` manage people; every record names the logged-in person (`console` with no one);
   - `list`: the registered agents and whether each is running;
   - `stop <agent>`: `process_stop` on every process registered under that name (one agent may run several tasks at once, one process each);
   - `stop group <group>` (#136, [coordination.md](coordination.md#failure-and-stop-136)): `process_stop` on every process registered in that group, without the runtime: `REGISTER` carries each agent's policy-entry group. The runtime cancels each stopped task, and a goal's end cancels its subtasks not yet stopped, so nothing the group started keeps running; an approval request of a stopped task ends (`the task ended`). Recorded as a `stop` by the user with the detail `group <group>`;

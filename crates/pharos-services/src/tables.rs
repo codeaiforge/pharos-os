@@ -39,6 +39,11 @@ pub const AGENTS_LIMIT: u32 = 1 << 14;
 pub const AGENTS_TASKS: u32 = 5;
 pub const MODELS_READ_ONLY: u32 = 3 | 1 << 16;
 pub const AUDIT_TRAIL: u32 = 6;
+/// `trust`'s badge at the store: the `identity` namespace, read-write
+/// (#310, identity.md); no one else holds it.
+pub const IDENTITY_STORE: u32 = 10;
+/// `trust`'s pages (#310): its identity store buffer and its heap.
+pub const TRUST_LIMIT: u32 = 32;
 pub const KNOWLEDGE_STORE: u32 = 8;
 /// `trust`'s knowledge client (`pharos_proto::knowledge::client`).
 pub const KNOWLEDGE_TRUST: u32 = 2;
@@ -258,12 +263,13 @@ const BOOT_ENTRIES: [Service; 9] = [
             REPORT,
             send(Ep::Audit, AUDIT_TRUST),
             send(Ep::Knowledge, KNOWLEDGE_TRUST),
+            send(Ep::Store, IDENTITY_STORE),
         ],
         net: &[],
         tcp: &[],
         tls: &[],
         after: &[4, 5],
-        limit: 0,
+        limit: TRUST_LIMIT,
         gains: &[Gain::Processes, Gain::RuntimeChannel],
     },
     // The agent runtime (#98), after `trust`, which `init` then sends its
@@ -739,12 +745,15 @@ pub const SUPERVISE: &[Service] = &[
             receive(Ep::Trust),
             REPORT,
             send(Ep::Audit, AUDIT_TRUST),
+            // No knowledge service here: handle 6 stays the store's.
+            CONSOLE,
+            send(Ep::Store, IDENTITY_STORE),
         ],
         net: &[],
         tcp: &[],
         tls: &[],
         after: &[1],
-        limit: 0,
+        limit: TRUST_LIMIT,
         gains: &[Gain::Processes, Gain::RuntimeChannel],
     },
     infer(0),
@@ -852,6 +861,14 @@ pub const TEST_SECRET_NAME: &str = "test-token";
 /// Its value: a test value, not a credential. The runner checks it never
 /// reaches the console or the audit trail.
 pub const TEST_SECRET_VALUE: &str = "pharos-test-secret-7Hq2vN";
+
+/// The person `cargo xtask` seeds into test and `run` stores (#310,
+/// identity.md), with a known passphrase; no release store holds them.
+/// A low iteration count keeps logins quick under TCG: `person add` on
+/// the console always uses `identity::ITERATIONS`.
+pub const TEST_PERSON: &str = "admin";
+pub const TEST_PASSPHRASE: &str = "pharos-test-passphrase";
+pub const TEST_ITERATIONS: u32 = 1000;
 
 /// The `secrets` kernel's routes (#281): one whose secret the file holds,
 /// one whose secret it lacks, and one with none.

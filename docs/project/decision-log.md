@@ -1450,6 +1450,7 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 5. **Actors resolve from the trail alone** (k): console records name the logged-in person in place of `user`, and the records that bind names (people added, logins, an agent's start with its owner) are in the trail, so an auditor needs nothing from Pharos but the exported trail.
 6. **A directory import is planned, not built** (m): when it comes, a signed file exported from the directory, loaded through D-039's signed-policy path. Pharos never talks to a directory.
 The record formats, the commands, the session timeout, and the passphrase hash's parameters are the design's (#309).
+- *Amended in implementation (#310, approved by the maintainer on 2026-11-26):* item 1's first administrator is written into the store disk by the host before the first boot (`cargo xtask identity first`), not into the measured image: one release image is shared by every install and must build to the same bytes. The fw_cfg route, as for the secrets file, was weighed and not taken, since it needed a new kernel object and system call.
 
 **Consequences.** Owners required in agent policy; four-eyes approval possible (D-037).
 - `trust` grows: the login, the identity commands, and `WRITE` on one store namespace. No new kernel code, no `unsafe`, no new dependency.

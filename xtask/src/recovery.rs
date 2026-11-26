@@ -588,6 +588,8 @@ fn boot_typed(
     // New FIFOs: an earlier round's script still reads the old ones.
     fresh_fifos(dir)?;
     let base = console::fifos(dir)?;
+    // The script logs in as the test person (#310).
+    crate::store_image::seed_test_person(&iso.with_file_name(STORE_IMAGE))?;
     let script = console::Script::start(&base, None, None, steps)?;
     let log = boot(iso, vars, logs, extra, round, None)?;
     let said = script.finish(&[]).map_err(|e| format!("{round}: {e}"))?;

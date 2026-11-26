@@ -619,6 +619,62 @@ pub fn read(image: &Path, path: &[u8]) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+/// Writes `bytes` as file `path` of the existing store `image` (#310).
+pub fn put(image: &Path, path: &[u8], bytes: &[u8]) -> Result<()> {
+    let mut store =
+        Store::mount(FileDevice::open(image)?).map_err(|e| format!("{}: {e}", image.display()))?;
+    store
+        .write(path, bytes)
+        .map_err(|e| format!("{}: {e}", String::from_utf8_lossy(path)))
+}
+
+/// Person `name`'s record (#310, identity.md): PBKDF2-HMAC-SHA256 of
+/// `passphrase` with `salt` and `iterations`, no roles.
+pub fn person_record(
+    name: &str,
+    passphrase: &[u8],
+    salt: [u8; 32],
+    iterations: u32,
+) -> Result<Vec<u8>> {
+    let hash = pharos_crypto::pbkdf2(passphrase, &salt, iterations);
+    let p = pharos_proto::identity::Person::new(name.as_bytes(), b"", salt, iterations, hash)
+        .ok_or_else(|| {
+            format!("{name:?} is not a person's name (1 to 32 letters, digits, - and _)")
+        })?;
+    let mut out = vec![0u8; pharos_proto::identity::MAX_FILE];
+    let n = p.encode(&mut out).ok_or("a person record did not fit")?;
+    out.truncate(n);
+    Ok(out)
+}
+
+/// The store path of person `name`'s record: in the `identity` namespace.
+pub fn person_path(name: &str) -> Vec<u8> {
+    [
+        b"identity/".as_slice(),
+        pharos_proto::identity::PEOPLE,
+        name.as_bytes(),
+    ]
+    .concat()
+}
+
+/// Seeds the test person into `image` unless it is there (#310): test and
+/// `run` stores only, never a release store.
+pub fn seed_test_person(image: &Path) -> Result<()> {
+    use pharos_services::{TEST_ITERATIONS, TEST_PASSPHRASE, TEST_PERSON};
+    let path = person_path(TEST_PERSON);
+    if read(image, &path)?.is_some() {
+        return Ok(());
+    }
+    let salt = pharos_crypto::sha256(&[b"pharos test person salt"]);
+    let record = person_record(
+        TEST_PERSON,
+        TEST_PASSPHRASE.as_bytes(),
+        salt,
+        TEST_ITERATIONS,
+    )?;
+    put(image, &path, &record)
+}
+
 /// `pharos-infer`'s math functions from `libm`, as user programs supply
 /// them (`pharos_programs::fp::Libm`), so the host's reference output
 /// comes from the same arithmetic as Pharos's.

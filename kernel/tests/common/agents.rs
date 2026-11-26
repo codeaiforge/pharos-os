@@ -214,8 +214,11 @@ pub fn setup(t: &mut TestRun) -> Option<Services> {
         Capability::new(Object::Endpoint(report.clone()), SEND),
         audit_send.derive_badged(SEND, AUDIT_TRUST),
         knowledge_send.derive_badged(SEND, KNOWLEDGE_TRUST),
+        // Its people (#310); the runner seeds the test person.
+        store_send.derive_badged(SEND, pharos_services::IDENTITY_STORE),
     ];
-    let trust = start(t, &programs, b"bin/trust", 0, caps, &report, 0)?;
+    let pages = u64::from(pharos_services::TRUST_LIMIT);
+    let trust = start(t, &programs, b"bin/trust", 0, caps, &report, pages)?;
     Some(Services {
         programs,
         runtime_ep: Endpoint::new(),

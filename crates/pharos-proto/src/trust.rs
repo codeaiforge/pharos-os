@@ -821,6 +821,19 @@ pub enum Command<'a> {
     UpdateAnswer(u16, bool),
     /// `rollback`: back to the other slot, if it is good.
     Rollback,
+    /// `login <name>`: the next line is the passphrase (#310, identity.md).
+    Login(&'a [u8]),
+    /// `logout`, `whoami`, `people` (#310).
+    Logout,
+    Whoami,
+    People,
+    /// `person add <name> [<roles>]`, `person roles <name> <roles>`,
+    /// `person passphrase <name>`, `person remove <name>` (#310); roles
+    /// are comma-separated names, checked by `identity::Person`.
+    PersonAdd(&'a [u8], &'a [u8]),
+    PersonRoles(&'a [u8], &'a [u8]),
+    PersonPassphrase(&'a [u8]),
+    PersonRemove(&'a [u8]),
     /// Anything else: the service answers with the commands it knows.
     Help,
 }
@@ -853,6 +866,21 @@ pub fn command(line: &[u8]) -> Command<'_> {
             _ => Command::Help,
         };
     }
+    match &all[..count] {
+        [b"person", b"add", name] if valid_name(name) => return Command::PersonAdd(name, b""),
+        [b"person", b"add", name, roles] if valid_name(name) => {
+            return Command::PersonAdd(name, roles);
+        }
+        [b"person", b"roles", name, roles] if valid_name(name) => {
+            return Command::PersonRoles(name, roles);
+        }
+        [b"person", b"passphrase", name] if valid_name(name) => {
+            return Command::PersonPassphrase(name);
+        }
+        [b"person", b"remove", name] if valid_name(name) => return Command::PersonRemove(name),
+        [b"person", ..] => return Command::Help,
+        _ => {}
+    }
     if let [b"revoke", name, rest @ ..] = &all[..count] {
         return match Permission::parse(rest) {
             Some(p) if valid_name(name) => Command::Revoke(name, p),
@@ -861,6 +889,10 @@ pub fn command(line: &[u8]) -> Command<'_> {
     }
     match (words.next(), words.next(), words.next()) {
         (Some(b"list"), None, None) => Command::List,
+        (Some(b"login"), Some(name), None) if valid_name(name) => Command::Login(name),
+        (Some(b"logout"), None, None) => Command::Logout,
+        (Some(b"whoami"), None, None) => Command::Whoami,
+        (Some(b"people"), None, None) => Command::People,
         (Some(b"audit"), None, None) => Command::Audit,
         (Some(b"audit"), Some(b"rotate"), Some(code)) if words.next().is_none() => {
             match hex_bytes::<8>(code) {
@@ -962,6 +994,13 @@ pub enum Line {
 
 impl Lines {
     pub const MAX: usize = 64;
+
+    /// Zeroes the line buffer: after a passphrase (#310).
+    pub fn wipe(&mut self) {
+        self.buf.fill(0);
+        self.len = 0;
+        core::hint::black_box(&self.buf);
+    }
 
     pub const fn new() -> Self {
         Self {
@@ -1370,6 +1409,32 @@ mod tests {
     #[test]
     fn commands_parse() {
         assert_eq!(command(b"list"), Command::List);
+        // Sessions and people (#310).
+        assert_eq!(command(b"login alice"), Command::Login(b"alice"));
+        assert_eq!(command(b"login"), Command::Help);
+        assert_eq!(command(b"login al/ce"), Command::Help);
+        assert_eq!(command(b"login alice bob"), Command::Help);
+        assert_eq!(command(b"logout"), Command::Logout);
+        assert_eq!(command(b"whoami"), Command::Whoami);
+        assert_eq!(command(b"people"), Command::People);
+        assert_eq!(command(b"person add bob"), Command::PersonAdd(b"bob", b""));
+        assert_eq!(
+            command(b"person add bob ops,approver"),
+            Command::PersonAdd(b"bob", b"ops,approver")
+        );
+        assert_eq!(
+            command(b"person roles bob ops"),
+            Command::PersonRoles(b"bob", b"ops")
+        );
+        assert_eq!(command(b"person roles bob"), Command::Help);
+        assert_eq!(
+            command(b"person passphrase bob"),
+            Command::PersonPassphrase(b"bob")
+        );
+        assert_eq!(command(b"person remove bob"), Command::PersonRemove(b"bob"));
+        assert_eq!(command(b"person remove bob now"), Command::Help);
+        assert_eq!(command(b"person delete bob"), Command::Help);
+        assert_eq!(command(b"person add b@b"), Command::Help);
         assert_eq!(command(b"  list "), Command::List);
         assert_eq!(command(b"stop all"), Command::StopAll);
         assert_eq!(command(b"stop\tworker-1"), Command::Stop(b"worker-1"));

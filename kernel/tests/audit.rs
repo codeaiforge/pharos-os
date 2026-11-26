@@ -200,8 +200,13 @@ fn run(t: &mut TestRun) {
         ep(&trust, RECEIVE),
         ep(&report, SEND),
         ep(&audit, SEND).derive_badged(SEND, TRUST_CLIENT),
+        // No knowledge service here (no rights: a call fails at once), then
+        // its people (#310); the runner seeds the test person.
+        Capability::new(Object::Endpoint(Endpoint::new()), 0),
+        ep(&store, SEND).derive_badged(SEND, pharos_services::IDENTITY_STORE),
     ];
-    if start(t, &programs, b"bin/trust", caps, &report, 0).is_none() {
+    let pages = u64::from(pharos_services::TRUST_LIMIT);
+    if start(t, &programs, b"bin/trust", caps, &report, pages).is_none() {
         return;
     }
     // Answer `trust`'s `RUNTIME` request (#170) as `init` does with no

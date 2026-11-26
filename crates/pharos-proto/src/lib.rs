@@ -20,6 +20,7 @@ pub mod audit;
 pub mod bridge;
 pub mod gateway;
 pub mod http;
+pub mod identity;
 pub mod infer;
 pub mod knowledge;
 pub mod manifest;

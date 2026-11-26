@@ -86,3 +86,31 @@ fn measurement_covers_names_order_and_contents() {
     assert_ne!(m, measurement([(&b"kernel"[..], r), (&b"root"[..], k)]));
     assert_ne!(m, measurement([(&b"kerne"[..], k), (&b"lroot"[..], r)]));
 }
+
+/// RFC 7914 section 11's PBKDF2-HMAC-SHA256 vectors (their first 32 bytes),
+/// and a password longer than a block; each checked against Python's
+/// `hashlib.pbkdf2_hmac` (#310).
+#[test]
+fn pbkdf2_matches_rfc_7914() {
+    let hex = |h: &str| -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap();
+        }
+        out
+    };
+    assert_eq!(
+        pbkdf2(b"passwd", b"salt", 1),
+        hex("55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc")
+    );
+    assert_eq!(
+        pbkdf2(b"Password", b"NaCl", 80000),
+        hex("4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56")
+    );
+    assert_eq!(
+        pbkdf2(&[b'x'; 100], b"salt", 3),
+        hex("59bfa49750dd5462ce38370a1e7abe0736ff334cf1c2f0d84f23a03435d660d1")
+    );
+    // One iteration is one HMAC of the salt and block number 1.
+    assert_eq!(pbkdf2(b"k", b"s", 1), hmac(b"k", &[b"s", &[0, 0, 0, 1]]));
+}

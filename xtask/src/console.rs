@@ -24,6 +24,14 @@ pub const QMP_PREFIX: &str = "qmp:";
 /// step's match, so a line seen before can be waited for again.
 pub const AFTER: &str = ">";
 
+/// The steps every [`Script`] starts with: logging in as the test person
+/// (`pharos_services::TEST_PERSON`), whom the runner seeds (#310).
+pub const LOGIN: &[Step] = &[
+    ("trust: ready", "login admin\n"),
+    ("passphrase:", "pharos-test-passphrase\n"),
+    ("logged in as admin", ""),
+];
+
 /// Makes `trust.in` and `trust.out` FIFOs in `dir` (replacing anything
 /// else by those names); returns `dir/trust`.
 pub fn fifos(dir: &Path) -> Result<PathBuf, String> {
@@ -174,17 +182,23 @@ impl Script {
         serial: Option<&Path>,
         steps: &'static [Step],
     ) -> Result<Self, String> {
-        Self::start_looping(base, qmp, serial, steps, None)
+        Self::start_looping(base, qmp, serial, steps, None, true)
     }
 
-    /// [`start`](Self::start), going back to step `again` after the last.
+    /// [`start`](Self::start), going back to step `again` after the last;
+    /// with `login`, the script first logs in as the test person (#310,
+    /// identity.md), whom the runner seeds into the store.
     pub fn start_looping(
         base: &Path,
         qmp: Option<&Path>,
         serial: Option<&Path>,
         steps: &'static [Step],
         again: Option<usize>,
+        login: bool,
     ) -> Result<Self, String> {
+        let prelude: &[Step] = if login { LOGIN } else { &[] };
+        let steps: &'static [Step] = Box::leak([prelude, steps].concat().into_boxed_slice());
+        let again = again.map(|a| a + prelude.len());
         if again.is_some_and(|a| !loops(steps, a)) {
             return Err("a looping script's steps from its loop on must all be AFTER steps".into());
         }
@@ -284,6 +298,14 @@ impl Script {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_login_prelude_is_the_seeded_test_person() {
+        use pharos_services::{TEST_PASSPHRASE, TEST_PERSON};
+        assert_eq!(super::LOGIN[0].1, format!("login {TEST_PERSON}\n"));
+        assert_eq!(super::LOGIN[1].1, format!("{TEST_PASSPHRASE}\n"));
+        assert_eq!(super::LOGIN[2].0, format!("logged in as {TEST_PERSON}"));
+    }
+
     use super::*;
 
     fn advance(

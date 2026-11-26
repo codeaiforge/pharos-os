@@ -172,15 +172,15 @@ Design: [bridge.md](../architecture/bridge.md) (accepted 2026-11-24, #295; D-036
 
 ### Identity and owners (M6.5)
 
-Design: [identity.md](../architecture/identity.md) (accepted 2026-11-26, #309; D-038). Each row is **planned** until its issue lands (#310–#313).
+Design: [identity.md](../architecture/identity.md) (accepted 2026-11-26, #309; D-038). Each row is **planned** until its issue lands (#310–#313); #310's rows are marked.
 
 | Threat | Mitigation |
 | --- | --- |
-| Someone at the console acts as another person | `login <name>` with a passphrase checked against a salted PBKDF2-HMAC-SHA256 hash (600,000 iterations); a refusal recorded and the next try delayed, 1 s doubling to 60 s; a 15-minute idle logout. **Limit:** the host sees the console's bytes and the store, and is trusted until M8.2 |
+| Someone at the console acts as another person | **Implemented (#310):** `login <name>` with a passphrase checked against a salted PBKDF2-HMAC-SHA256 hash (600,000 iterations); a refusal recorded and the next try delayed, 1 s doubling to 60 s; a 15-minute idle logout; the passphrase is wiped from `trust`'s buffers and the console's DMA page, and never shown or recorded (`trust` kernel: a refused passphrase, its delay, a logout; mutation-checked). **Limit:** the host sees the console's bytes and the store, and is trusted until M8.2 |
 | A role, or an identity, grants a capability | Roles are data only: no code reads one to decide anything (D-018 item 2); the `identity` kernel checks a role gains nothing, and a throwaway branch that grants by role must fail CI |
 | An agent runs with no one answerable for it | Every compiled policy entry names an owner; the runtime refuses an attempt whose owner is not a current person, and records why |
 | An audit record's actor cannot be traced to a person or an agent | Console records name the logged-in person; actors resolve by audit client and name from the trail's own records (`cargo xtask store audit --resolve`) |
-| The emergency stop is locked behind a login | `stop all` answers with no one logged in, recorded with actor `console` |
+| The emergency stop is locked behind a login | **Implemented (#310):** every stop (`stop all`, an agent, a group, a service) answers with no one logged in, recorded with actor `console`, so a runaway that leaves no memory to read the identity store can still be stopped (`pharos_programs::identity::allowed_logged_out`, host-tested; the `aifail` kernel stops its runaway `infer` logged out). **Limit:** a stop typed logged out names no person |
 | **Limits** | A shared passphrase; one person with two passphrases; records before M6.5 name `user` |
 
 ### User environment and storage (M3.0)

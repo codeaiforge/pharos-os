@@ -155,7 +155,14 @@ pub mod action {
     /// detail.
     pub const BIND: u8 = 27;
     pub const UNBIND: u8 = 28;
-    pub const LAST: u8 = UNBIND;
+    /// A console session (#310, identity.md), from `trust`: `login
+    /// <name>`, `login refused <name>`, `logout <name>` (`idle`).
+    pub const LOGIN: u8 = 29;
+    pub const LOGOUT: u8 = 30;
+    /// A `person` command on the trusted console (#310): the person and
+    /// what changed, never a passphrase, salt, or hash.
+    pub const IDENTITY: u8 = 31;
+    pub const LAST: u8 = IDENTITY;
 
     pub fn name(code: u8) -> &'static str {
         [
@@ -188,6 +195,9 @@ pub mod action {
             "https",
             "bind",
             "unbind",
+            "login",
+            "logout",
+            "identity",
         ]
         .get(usize::from(code))
         .copied()

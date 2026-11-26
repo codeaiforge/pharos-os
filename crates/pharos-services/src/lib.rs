@@ -625,6 +625,28 @@ mod tests {
     }
 
     #[test]
+    fn only_trust_holds_the_identity_namespace_at_its_handle_6() {
+        // #310 (identity.md): the people's records, written only by `trust`.
+        for n in 0..=12 {
+            for s in table(n) {
+                for (i, g) in s.caps.iter().enumerate() {
+                    let identity = matches!(g.object, Object::Endpoint(Ep::Store))
+                        && matches!(g.badge, Badge::Fixed(b) if b & 0xffff == IDENTITY_STORE);
+                    assert!(
+                        !identity || (s.name == "trust" && i == 5),
+                        "table {n}: {}",
+                        s.name
+                    );
+                }
+                if s.name == "trust" {
+                    let g = s.caps.get(5).expect("trust's handle 6");
+                    assert!(matches!(g.badge, Badge::Fixed(IDENTITY_STORE)), "table {n}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_vault_and_gateway_read_their_own_tables_routes() {
         // Each table's vault and gateway name the table itself (#288).
         for n in 0..=12 {

@@ -11,9 +11,9 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode};
+use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 mod bench;
@@ -205,6 +205,11 @@ COMMANDS:
                             regular files under DIR (storage.md part 8).
     store ls <IMAGE>        Mount a store with the storage service's code, check
                             every object, and list them.
+    identity first <NAME> --store <IMAGE>
+                            Seed a store that has no people with its first
+                            administrator (identity.md, #310): reads the
+                            passphrase twice from the terminal, without echo,
+                            and writes only its salt and hash.
     store audit <IMAGE> [--key <FILE>] [--archive <DIR>]
                             Check every audit stream (log/<boot>) in a store: each
                             record's CRC-32 and SHA-256 chain, its format, and
@@ -314,6 +319,10 @@ enum Task {
     },
     StoreLs {
         image: PathBuf,
+    },
+    IdentityFirst {
+        name: String,
+        store: PathBuf,
     },
     StoreAudit {
         image: PathBuf,
@@ -552,6 +561,24 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Task> {
             }
             _ => return Err("fs needs 'build <DIR> <IMAGE>' or 'ls <IMAGE>'".to_owned()),
         },
+        Some("identity") => {
+            let usage = "identity first needs <NAME> --store <IMAGE>";
+            if args.next().as_deref() != Some("first") {
+                return Err(usage.to_owned());
+            }
+            let name = args.next().ok_or(usage)?;
+            if args.next().as_deref() != Some("--store") {
+                return Err(usage.to_owned());
+            }
+            let store = args.next().ok_or(usage)?;
+            if args.next().is_some() {
+                return Err(usage.to_owned());
+            }
+            Task::IdentityFirst {
+                name,
+                store: PathBuf::from(store),
+            }
+        }
         Some("store") => match args.next().as_deref() {
             Some("build") => {
                 let usage = "store build needs <DIR> <IMAGE> --blocks <N>";
@@ -1571,6 +1598,57 @@ fn qemu_error(e: io::Error) -> String {
     }
 }
 
+/// `cargo xtask identity first <name> --store <image>` (#310): the first
+/// person of a store with no people, the passphrase read twice from the
+/// terminal without echo (`stty -echo`), and only its salt and hash
+/// written, with `identity::ITERATIONS`.
+fn identity_first(name: &str, store: &Path) -> Result<()> {
+    let people = store_image::paths(store, b"identity/people/")?;
+    if !people.is_empty() {
+        return Err(format!(
+            "{} already has people ({}); add more on the trusted console with `person add`",
+            store.display(),
+            people.join(", ")
+        ));
+    }
+    let ask = |prompt: &str| -> Result<Vec<u8>> {
+        eprint!("{prompt}");
+        let _ = io::stderr().flush();
+        let echo_off = Command::new("stty")
+            .arg("-echo")
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        let mut line = String::new();
+        let read = io::stdin().read_line(&mut line);
+        if echo_off {
+            let _ = Command::new("stty").arg("echo").status();
+            eprintln!();
+        }
+        read.map_err(|e| format!("cannot read the passphrase: {e}"))?;
+        Ok(line.trim_end_matches(['\n', '\r']).as_bytes().to_vec())
+    };
+    let first = ask(&format!("passphrase for {name}: "))?;
+    if !pharos_proto::identity::valid_passphrase(&first) {
+        return Err("a passphrase is 8 to 64 printable characters".into());
+    }
+    if ask("again: ")? != first {
+        return Err("the passphrases differ".into());
+    }
+    let mut salt = [0u8; 32];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut salt))
+        .map_err(|e| format!("cannot read /dev/urandom for the salt: {e}"))?;
+    let record =
+        store_image::person_record(name, &first, salt, pharos_proto::identity::ITERATIONS)?;
+    store_image::put(store, &store_image::person_path(name), &record)?;
+    println!(
+        "{}: {name} added; log in on the trusted console with `login {name}`",
+        store.display()
+    );
+    Ok(())
+}
+
 fn run_qemu(
     paths: &Paths,
     bios: bool,
@@ -1591,6 +1669,9 @@ fn run_qemu(
     };
     let iso = image(paths, Some(elf.clone()), &modules, &paths.image_dir(), None)?;
     let out = paths.image_dir();
+    // A development store: the test person, so the console can be used
+    // at once (#310); a release store has no one.
+    store_image::seed_test_person(&out.join(STORE_IMAGE))?;
     let vars = out.join("ovmf-vars.fd");
     prepare_firmware(&vars, bios)?;
     let trust = console::fifos(&out)?;
@@ -1608,9 +1689,12 @@ fn run_qemu(
     );
     println!(
         "Trusted console (D-018): in another terminal, `cat {}` shows it, and \
-         `echo list > {}` types a command (list, stop <agent>, stop all)",
+         `echo list > {}` types a command (list, stop <agent>, stop all); log in first \
+         with `login {}`, then the test passphrase `{}` (a test person, never in a release store)",
         trust.with_extension("out").display(),
-        trust.with_extension("in").display()
+        trust.with_extension("in").display(),
+        pharos_services::TEST_PERSON,
+        pharos_services::TEST_PASSPHRASE,
     );
     let mut args = qemu_args(&iso, &vars, OsStr::new("stdio"), bios, gdb);
     args.extend(secrets.into_iter().flat_map(|a| ["-fw_cfg".into(), a]));
@@ -2107,6 +2191,8 @@ fn running(iso: &Path, logs: &Path, timeout: Duration) -> Result<()> {
     recovery::fresh_fifos(dir)?;
     let base = console::fifos(dir)?;
     let _ = fs::remove_file(&log);
+    // Its script logs in as the test person (#310).
+    store_image::seed_test_person(&iso.with_file_name(STORE_IMAGE))?;
     let script = console::Script::start(&base, None, Some(&log), RUNNING_SCRIPT)?;
     let mut serial = OsString::from("file:");
     serial.push(&log);
@@ -2710,88 +2796,130 @@ const MANAGE_SCRIPT: &[console::Step] = &[
     // when the last one ends (review F1; 16 used to exhaust them).
     (
         "service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "restart trust\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "restart trust\n"),
     (
         ">service trust restarted by the user; used by agents\r\ntrust: ready; ",
-        "services\n",
+        "login admin\n",
     ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "services\n"),
     ("services: agents ready, restarts 0 of 3", "stop all\n"),
     ("stopped all", ""),
 ];
@@ -3094,11 +3222,27 @@ const TRUST_SCRIPT: &[console::Step] = &[
         "",
     ),
     ("approve #1: the runtime ended", "yes 1\n"),
-    ("no request #1", ""),
+    // #310: the session (the runner logged in first), a logout, and a
+    // wrong passphrase, refused and delayed.
+    ("no request #1", "whoami\n"),
+    (">admin roles none", "people\n"),
+    (">person admin roles none", "logout\n"),
+    (">logged out admin", "list\n"),
+    (">log in first: login <name>", "login admin\n"),
+    (">passphrase:", "not-the-passphrase\n"),
+    (">login refused", "login admin\n"),
+    (">login: wait 1 s", ""),
 ];
 /// The impostor the kernel registers under `init`'s badge must be dropped,
-/// and the guest whose attempt ended neither listed nor stopped (#304).
-const TRUST_REFUSED: &[&str] = &["impostor", "gone guest", "stopped gone"];
+/// and the guest whose attempt ended neither listed nor stopped (#304); no
+/// passphrase is ever shown (#310).
+const TRUST_REFUSED: &[&str] = &[
+    "impostor",
+    "gone guest",
+    "stopped gone",
+    "pharos-test-passphrase",
+    "not-the-passphrase",
+];
 /// Agent permissions revoked on the trusted console (#105): the
 /// `inference` test's store, for model 2.
 const PERMISSIONS_TEST: &str = "permissions";
@@ -3371,6 +3515,8 @@ const KNOWLEDGE_BLOCKS: u64 = 512;
 const AUDIT_SCRIPT: &[console::Step] = &[
     ("trust: ready", ""),
     ("audit: boot 1, 1 records, head ", "audit\n"),
+    // Logged out (#310): only login, stop all, and help answer.
+    (">log in first: login <name>", ""),
 ];
 /// Rotating the audit trail (#217, D-048), in a fresh store.
 const ROTATE_TEST: &str = "rotate";
@@ -3379,8 +3525,11 @@ const ROTATE_BLOCKS: u64 = 64;
 /// yet or the code does not match, and both refuse.
 const ROTATE_SCRIPT: &[console::Step] = &[
     ("trust: ready", ""),
+    // Logged out (#310), the rotation is refused before it reaches the
+    // audit service: this kernel counts the trail's records, so it runs
+    // without the login prelude.
     ("audit: boot 1, ", "audit rotate 0123456789abcdef\n"),
-    ("audit rotate: ", ""),
+    (">log in first: login <name>", ""),
 ];
 /// A refused permission is never asked for again.
 const PERMISSIONS_REFUSED: &[&str] = &["approve #4"];
@@ -3396,6 +3545,10 @@ const AIFAIL_TEST: &str = "aifail";
 /// kernel's kill of `trust`, the new `trust` stops `infer`, reads the
 /// audit trail, starts both services again, and shows their health
 /// (in table order).
+/// A restarted `trust` starts logged out (#310), and with memory used up
+/// it cannot read the identity store, so no one can log in: it stops the
+/// runaway `infer` logged out, as every stop works, then logs in for the
+/// rest.
 const AIFAIL_SCRIPT: &[console::Step] = &[
     ("system ready: 8 services", ""),
     (
@@ -3406,7 +3559,9 @@ const AIFAIL_SCRIPT: &[console::Step] = &[
     ("stopped all", ""),
     // `>`: after the previous match, not the same lines at boot.
     (">trust: ready", "stop service infer\n"),
-    (">service infer stopped by the user", "audit\n"),
+    (">service infer stopped by the user", "login admin\n"),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "audit\n"),
     (">audit: boot 1, ", "start infer\n"),
     (">service infer ready", "start agents\n"),
     (">service agents ready", "health\n"),
@@ -3510,13 +3665,13 @@ fn rotate_checks(image: &Path, console: &str) -> Result<()> {
     });
     let rotated = rotated.ok_or("audit/log/2 has no rotate record for boot 1")?;
     println!("  only boot 2 is left, signed, with {rotated}");
-    let refused = console.lines().any(|l| {
-        let l = l.trim();
-        l == "audit rotate: no earlier streams to free"
-            || l.starts_with("audit rotate: the code matches no export")
-    });
+    // Logged out (#310), the typed rotation is refused by `trust` itself,
+    // before it reaches the audit service.
+    let refused = console
+        .lines()
+        .any(|l| l.trim() == "log in first: login <name>");
     if !refused {
-        return Err("trust did not refuse the typed rotation".into());
+        return Err("trust did not refuse the typed rotation while logged out".into());
     }
     println!("  trust refused the typed rotation");
     Ok(())
@@ -3558,8 +3713,9 @@ fn audit_checks(image: &Path, console: &str) -> Result<()> {
             "trust showed head {shown}, but the image's first record chains to {want}"
         ));
     }
-    if console.matches("audit: boot 1, ").count() < 2 {
-        return Err("the typed `audit` command showed nothing".into());
+    // Logged out (#310), the typed `audit` is refused, not answered.
+    if console.matches("audit: boot 1, ").count() != 1 || !console.contains("log in first") {
+        return Err("the typed `audit` command was not refused while logged out".into());
     }
     println!("  the anchor trust showed matches the image");
     // D-048 (#217): both warnings reached the trusted console.
@@ -3769,14 +3925,14 @@ fn permissions_audit(image: &Path) -> Result<()> {
         "client 3 Event grant keeper task 1/1 data write",
         "client 3 Intent data write keeper task 1/1 data write store",
         "client 3 Intent infer keeper task 1/1 model 2 infer",
-        "client 2 Event revoke user task 0/0 data read trust outcome 1 keeper",
+        "client 2 Event revoke admin task 0/0 data read trust outcome 1 keeper",
         "client 3 Event revoke keeper task 2/1 data read",
         "client 3 Event revoke keeper task 2/1 model 2",
         // #230: from `keeper-e`, which had not started.
         "client 3 Event revoke keeper task 3/0 data read",
         "client 3 Event revoke keeper task 3/0 model 2",
-        "client 2 Event approve user task 0/0  trust outcome 1 #1",
-        "client 2 Event refuse user task 0/0  trust outcome 1 #2",
+        "client 2 Event approve admin task 0/0  trust outcome 1 #1",
+        "client 2 Event refuse admin task 0/0  trust outcome 1 #2",
         "client 3 Event approve asker task 4/1 model 2",
         "client 3 Event expire asker task 4/1 model 2",
         "client 3 Event refuse asker task 4/1 data write  outcome 2 user",
@@ -4599,7 +4755,7 @@ fn knowledge_agents_audit(image: &Path) -> Result<()> {
             1,
         ),
         (
-            "client 2 Event verify user task 0/0  trust outcome 1 notes/vendor version 2"
+            "client 2 Event verify admin task 0/0  trust outcome 1 notes/vendor version 2"
                 .to_owned(),
             1,
         ),
@@ -4767,7 +4923,7 @@ fn groups_audit(image: &Path) -> Result<()> {
             1,
         ),
         (
-            "client 2 Event stop user task 0/0  trust outcome 1 group crew",
+            "client 2 Event stop admin task 0/0  trust outcome 1 group crew",
             1,
         ),
         ("Intent submit boss task 18/1", 2),
@@ -5228,6 +5384,8 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     let script = if steps.is_empty() {
         None
     } else {
+        // Its script logs in as the test person (#310).
+        store_image::seed_test_person(&out.join(STORE_IMAGE))?;
         let base = console::fresh(&out, console::PIPE)?;
         let (qmp, serial) = if name == HOTPLUG_TEST {
             // The kernel's own lines too: its audit holds the removal back.
@@ -5244,12 +5402,16 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
             (None, None)
         };
         let again = (name == SOAK_TEST).then_some(SOAK_AGAIN);
+        // These count the trail's records exactly while `trust` runs, so a
+        // login record would break them: their scripts stay logged out.
+        let login = !matches!(name.as_str(), AUDIT_TEST | ROTATE_TEST);
         Some(console::Script::start_looping(
             &base,
             qmp.as_deref(),
             serial,
             steps,
             again,
+            login,
         )?)
     };
     let run = if guest.is_some() {
@@ -5453,6 +5615,7 @@ fn main() -> ExitCode {
                 Task::FsLs { image } => fs_image::ls(&image),
                 Task::StoreBuild { dir, image, blocks } => store_image::build(&dir, &image, blocks),
                 Task::StoreLs { image } => store_image::ls(&image),
+                Task::IdentityFirst { name, store } => identity_first(&name, &store),
                 Task::StoreAudit {
                     image,
                     key,
@@ -5535,6 +5698,33 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_test_person_is_seeded_once_and_matches_its_passphrase() {
+        // #310: the record trust reads, with the test passphrase.
+        let dir = std::env::temp_dir().join(format!("pharos-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("store.img");
+        super::store_image::fresh(&image, 256).unwrap();
+        super::store_image::seed_test_person(&image).unwrap();
+        let path = super::store_image::person_path(pharos_services::TEST_PERSON);
+        let bytes = super::store_image::read(&image, &path).unwrap().unwrap();
+        super::store_image::seed_test_person(&image).unwrap();
+        assert_eq!(
+            super::store_image::read(&image, &path).unwrap(),
+            Some(bytes.clone())
+        );
+        let p = pharos_proto::identity::parse(&bytes).unwrap();
+        assert_eq!(p.name(), pharos_services::TEST_PERSON.as_bytes());
+        let hash = pharos_crypto::pbkdf2(
+            pharos_services::TEST_PASSPHRASE.as_bytes(),
+            &p.salt,
+            p.iterations,
+        );
+        assert_eq!(hash, p.hash);
+        assert_eq!(path, b"identity/people/admin");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn the_kernel_clock_floor_defaults_to_the_build_date() {
         assert_eq!(super::DEFAULT_SOURCE_DATE_EPOCH, 1_761_436_800);
@@ -5853,6 +6043,22 @@ mod tests {
         );
         assert!(parse(args(&["store", "knowledge"])).is_err());
         assert!(parse(args(&["store", "build", "d", "s.img"])).is_err());
+        // #310.
+        assert_eq!(
+            parse(args(&["identity", "first", "alice", "--store", "s.img"])),
+            Ok(Task::IdentityFirst {
+                name: "alice".into(),
+                store: PathBuf::from("s.img"),
+            })
+        );
+        assert!(parse(args(&["identity", "first", "alice"])).is_err());
+        assert!(parse(args(&["identity", "add", "alice", "--store", "s.img"])).is_err());
+        assert!(
+            parse(args(&[
+                "identity", "first", "alice", "--store", "s.img", "x"
+            ]))
+            .is_err()
+        );
         assert!(parse(args(&["store", "build", "d", "s.img", "--blocks", "3"])).is_err());
         assert!(parse(args(&["store", "build", "d", "s.img", "--blocks", "x"])).is_err());
         assert!(parse(args(&["store"])).is_err());
