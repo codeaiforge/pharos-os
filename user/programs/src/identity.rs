@@ -118,16 +118,7 @@ pub fn salt(name: &[u8], clock: u64, uptime: u64, rdseed: Option<u64>) -> [u8; 3
 /// read the identity store, and a runaway must still be stoppable (#310,
 /// the maintainer's choice of 2026-11-26).
 pub fn allowed_logged_out(c: &Command<'_>) -> bool {
-    use pharos_proto::service::Action;
-    matches!(
-        c,
-        Command::Login(_)
-            | Command::StopAll
-            | Command::Stop(_)
-            | Command::StopGroup(_)
-            | Command::Manage(Action::Stop, _)
-            | Command::Help
-    )
+    matches!(c, Command::Login(_) | Command::Help) || pharos_proto::trust::is_stop(c)
 }
 
 /// Whether a record's detail made of `parts` fits whole in an audit

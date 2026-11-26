@@ -213,7 +213,7 @@ pub struct Entry {
 pub const fn owned(table: &[Entry]) -> bool {
     let mut i = 0;
     while i < table.len() {
-        if !valid_name(table[i].owner) {
+        if !crate::identity::valid_person(table[i].owner) {
             return false;
         }
         i += 1;
@@ -714,7 +714,7 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
     #[test]
     fn every_compiled_entry_names_an_owner() {
         assert!(owned(TABLE) && owned(&[]));
-        for bad in [&b""[..], b"two words", &[b'o'; 33]] {
+        for bad in [&b""[..], b"two words", &[b'o'; 33], b"console", b"user"] {
             let e = Entry {
                 owner: bad,
                 ..TABLE[0]

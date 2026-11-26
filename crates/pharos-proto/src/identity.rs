@@ -41,8 +41,26 @@ pub const MAX_PASSPHRASE: usize = 64;
 pub const RESERVED: &[&[u8]] = &[b"console", b"user"];
 
 /// A valid person's name: an agent-style name that is not [`RESERVED`].
-pub fn valid_person(name: &[u8]) -> bool {
-    valid_name(name) && !RESERVED.contains(&name)
+/// `const`, so compiled tables check owners with it (`manifest::owned`).
+pub const fn valid_person(name: &[u8]) -> bool {
+    if !valid_name(name) {
+        return false;
+    }
+    let mut i = 0;
+    while i < RESERVED.len() {
+        let r = RESERVED[i];
+        if r.len() == name.len() {
+            let mut j = 0;
+            while j < r.len() && r[j] == name[j] {
+                j += 1;
+            }
+            if j == r.len() {
+                return false;
+            }
+        }
+        i += 1;
+    }
+    true
 }
 
 /// One person's record.
@@ -265,9 +283,11 @@ pub fn parse(text: &[u8]) -> Result<Person, Refusal> {
 }
 
 /// Whether `p` may be a passphrase: 8 to 64 printable bytes.
+/// A stop command is never a passphrase: typed during a prompt, it stops.
 pub fn valid_passphrase(p: &[u8]) -> bool {
     (MIN_PASSPHRASE..=MAX_PASSPHRASE).contains(&p.len())
         && p.iter().all(|b| (b' '..=b'~').contains(b))
+        && !crate::trust::is_stop(&crate::trust::command(p))
 }
 
 #[cfg(test)]
@@ -276,6 +296,19 @@ mod tests {
 
     fn alice() -> Person {
         Person::new(b"alice", b"approver,ops", [1; 32], 600_000, [2; 32]).unwrap()
+    }
+
+    #[test]
+    fn a_stop_is_never_a_passphrase() {
+        for stop in [
+            &b"stop all"[..],
+            b"stop hunter22x",
+            b"stop group ops-team",
+            b"stop service infer",
+        ] {
+            assert!(!valid_passphrase(stop), "{stop:?}");
+        }
+        assert!(valid_passphrase(b"stop-all-please") && valid_passphrase(b"nonstop all"));
     }
 
     #[test]

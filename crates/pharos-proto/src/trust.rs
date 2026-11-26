@@ -354,6 +354,20 @@ pub const SLOTS: u8 = 16;
 pub const MAX_NAME: usize = 32;
 
 /// A valid agent name: 1 to 32 letters, digits, `-`, or `_`.
+/// A stop the trusted console answers whatever else is going on: logged
+/// out (#310), and during a passphrase prompt, which it ends (the M6.5
+/// review's Gemini finding: a pending prompt took `stop all` as a
+/// passphrase).
+pub fn is_stop(c: &Command<'_>) -> bool {
+    matches!(
+        c,
+        Command::StopAll
+            | Command::Stop(_)
+            | Command::StopGroup(_)
+            | Command::Manage(Action::Stop, _)
+    )
+}
+
 /// `const`, so compiled policy tables check their owners (#311).
 pub const fn valid_name(name: &[u8]) -> bool {
     if name.is_empty() || name.len() > MAX_NAME {

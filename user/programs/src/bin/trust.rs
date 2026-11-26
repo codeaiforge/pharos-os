@@ -919,6 +919,17 @@ export them first (cargo xtask store export)",
         self.say(&[b"new passphrase for ", name, b":"]);
     }
 
+    /// Ends a pending passphrase prompt, wiping what it holds.
+    fn end_prompt(&mut self) {
+        if let Prompt::New {
+            first: Some(mut first),
+            ..
+        } = core::mem::replace(&mut self.prompt, Prompt::None)
+        {
+            first.wipe();
+        }
+    }
+
     fn person_remove(&mut self, name: &[u8]) {
         // An agent's owner stays a person (identity.md, #311).
         if self.owners.iter().any(|o| o.get() == name) {
@@ -2039,6 +2050,12 @@ fn main(arg: u64) -> u64 {
                                         let mut line = [0u8; Lines::MAX];
                                         line[..len].copy_from_slice(lines.line(len));
                                         t.session.touch(uptime());
+                                        let stop = trust::is_stop(&trust::command(&line[..len]));
+                                        if stop {
+                                            // A stop ends any prompt (no
+                                            // passphrase is one).
+                                            t.end_prompt();
+                                        }
                                         if matches!(t.prompt, Prompt::None) {
                                             t.command(&line[..len]);
                                         } else {

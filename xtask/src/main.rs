@@ -3625,7 +3625,11 @@ const IDENTITY_SCRIPT: &[console::Step] = &[
     (">login: wait 1 s", ""),
     ("registered asker", "login admin\n"),
     (">passphrase:", "pharos-test-passphrase\n"),
-    (">logged in as admin", "person add bob ops\n"),
+    // The M6.5 review (Gemini): a stop typed at a passphrase prompt stops,
+    // and ends the prompt.
+    (">logged in as admin", "person passphrase admin\n"),
+    (">new passphrase for admin:", "stop nosuch\n"),
+    (">no agent nosuch", "person add bob ops\n"),
     (">new passphrase for bob:", "bob-passphrase-1\n"),
     (">again:", "bob-passphrase-1\n"),
     (">person add bob: done", "person roles admin ops\n"),
