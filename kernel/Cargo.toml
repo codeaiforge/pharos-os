@@ -291,6 +291,10 @@ name = "knowledge_agents"
 harness = false
 
 [[test]]
+name = "identity"
+harness = false
+
+[[test]]
 name = "poison"
 harness = false
 

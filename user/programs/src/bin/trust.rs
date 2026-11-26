@@ -1951,7 +1951,7 @@ fn decimal(mut v: u64, out: &mut [u8; 20]) -> &[u8] {
     }
 }
 
-fn main(_: u64) -> u64 {
+fn main(arg: u64) -> u64 {
     let Ok(irq) = irq_create(DEVICE, 0) else {
         return 1;
     };
@@ -1973,7 +1973,8 @@ fn main(_: u64) -> u64 {
         limit: Limit::new(),
         limited: false,
         people: None,
-        session: Session::default(),
+        // Argument: the idle limit in seconds, 0 for 15 minutes (#313).
+        session: Session::with_idle(arg),
         prompt: Prompt::None,
     };
     if send(REPORT, b"ready", 0, 0, 0).is_err() {
@@ -2042,6 +2043,10 @@ fn main(_: u64) -> u64 {
                                             line.fill(0);
                                             core::hint::black_box(&line);
                                         }
+                                        // Idle from the answer, not the
+                                        // line: a passphrase hash takes
+                                        // seconds (#313).
+                                        t.session.touch(uptime());
                                     }
                                     Line::TooLong => t.say(&[b"line too long"]),
                                     Line::None => {}

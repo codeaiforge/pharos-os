@@ -2784,6 +2784,23 @@ fn main(_: u64) -> u64 {
         b"rate" => a.rate(),
         b"queue" => a.queue(),
         b"group-spend" => a.group_spend(),
+        // The `identity` kernel's (#313): runs until the user stops it
+        // from the trusted console, at most 50 s.
+        b"wait-stop" => {
+            for _ in 0..100 {
+                a.call(&Request::Task, &mut out);
+                sleep(500_000);
+            }
+            a.complete(b"not stopped")
+        }
+        // Its owner now has a role: it holds only what its manifest gives
+        // (no model, no files), since a role grants nothing (D-018).
+        b"role-blind"
+            if a.generate(4).0 == status::NO_ACCESS && a.get(b"notes").0 == status::NO_ACCESS =>
+        {
+            a.complete(b"role-blind ok")
+        }
+        b"role-blind" => a.fail(b"granted beyond its manifest"),
         // Runs 600 ms, asking the runtime for its task now and then.
         b"nap" => {
             for _ in 0..6 {

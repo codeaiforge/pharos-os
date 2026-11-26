@@ -147,6 +147,12 @@ fn start(
 /// Starts `store` (on the second virtio-blk disk), `infer`, `audit` (#108),
 /// `knowledge` (#144), and `trust` (on the virtio-console), as `init` does. The scheduler and processes must be set up.
 pub fn setup(t: &mut TestRun) -> Option<Services> {
+    setup_with(t, 0)
+}
+
+/// [`setup`], with `trust` started with `trust_arg`: its idle limit in
+/// seconds, 0 for 15 minutes (#313).
+pub fn setup_with(t: &mut TestRun, trust_arg: u64) -> Option<Services> {
     pharos_kernel::testing::init_iommu(crate::requests::RSDP.response());
     pci::enumerate();
     let devices = pci::devices();
@@ -218,7 +224,7 @@ pub fn setup(t: &mut TestRun) -> Option<Services> {
         store_send.derive_badged(SEND, pharos_services::IDENTITY_STORE),
     ];
     let pages = u64::from(pharos_services::TRUST_LIMIT);
-    let trust = start(t, &programs, b"bin/trust", 0, caps, &report, pages)?;
+    let trust = start(t, &programs, b"bin/trust", trust_arg, caps, &report, pages)?;
     Some(Services {
         programs,
         runtime_ep: Endpoint::new(),

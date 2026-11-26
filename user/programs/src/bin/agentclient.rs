@@ -24,7 +24,9 @@
 //! 11: the `groups` kernel (#134): a `boss` task. Argument 12: the
 //! `deputy` kernel (#138): three `boss` goals, one after the other.
 //! Argument 13: the `knowledge_agents` kernel (#144): a `scribe` task,
-//! then a `peeker` task once it is done. Argument 14: the `poison` kernel
+//! then a `peeker` task once it is done. Argument 19: the `identity`
+//! kernel (#313): `orphan`, then two `asker` tasks, one stopped from the
+//! trusted console. Argument 14: the `poison` kernel
 //! (#146): a `gullible` task. Argument 15: `soaker` in the `soak` table
 //! (#189), started by `init`: handle 3 is `init`'s report endpoint. It
 //! reports `ready`, then runs one `worker` `complete` task to its end every
@@ -195,6 +197,9 @@ fn main(arg: u64) -> u64 {
     }
     if arg == 18 {
         return guest(c);
+    }
+    if arg == 19 {
+        return identity(c);
     }
     if arg == 2 {
         return permissions(c);
@@ -614,6 +619,39 @@ fn s1(mut c: Client) -> u64 {
 /// <case>` for each as wanted.
 /// How long after `flood` the next case waits.
 const FLOOD_US: u64 = 3_000_000;
+
+/// The `identity` kernel (#313): `orphan` refused at its start; an
+/// `asker` that runs until the user stops it on the trusted console,
+/// after giving its owner a role there; then an `asker` that must hold
+/// only what its manifest gives.
+fn identity(mut c: Client) -> u64 {
+    let orphan = c
+        .submit(b"orphan", b"complete")
+        .ok()
+        .and_then(|task| c.wait(task, 20));
+    c.step(
+        "an agent whose owner is no person fails at its start: no owner nobody",
+        orphan.is_some_and(|(s, r)| s.state == State::Failed && r == b"no owner nobody"),
+    );
+    let waited = c
+        .submit(b"asker", b"wait-stop")
+        .ok()
+        .and_then(|task| c.wait(task, 70));
+    c.step(
+        "an agent whose owner was checked started, and was stopped on the trusted console",
+        waited.is_some_and(|(s, r)| s.state != State::Done && r != b"not stopped"),
+    );
+    let blind = c
+        .submit(b"asker", b"role-blind")
+        .ok()
+        .and_then(|task| c.wait(task, 60));
+    c.step(
+        "an agent whose owner has a role holds only what its manifest gives",
+        blind.is_some_and(|(s, r)| s.state == State::Done && r == b"role-blind ok"),
+    );
+    let _ = send(REPORT, b"done", 0, 0, 0);
+    c.failed
+}
 
 fn guest(c: Client) -> u64 {
     let say = |line: &[u8]| {

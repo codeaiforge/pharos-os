@@ -3595,6 +3595,47 @@ const COMPROMISED_SCRIPT: &[console::Step] = &[
 /// `rogue` as the runtime registers a capability that is not a process.
 const COMPROMISED_REFUSED: &[&str] = &["registered rogue", "#77"];
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(150);
+/// The `identity` kernel (#313, identity.md): people, owners, actors.
+const IDENTITY_TEST: &str = "identity";
+/// Two passphrases hashed at 600,000 iterations under TCG, and a 50 s
+/// agent waiting to be stopped.
+const IDENTITY_TIMEOUT: Duration = Duration::from_secs(240);
+/// Its trusted console, from logged out: no login prelude, so the first
+/// steps run before anyone logs in. The kernel starts its client 5 s in,
+/// so `registered asker` comes after the refused login's 1 s wait.
+const IDENTITY_SCRIPT: &[console::Step] = &[
+    ("trust: ready", "list\n"),
+    (">log in first: login <name>", "help\n"),
+    (
+        ">commands: login <name>, stop all, stop <agent>, stop group <group>, stop service <service>, help",
+        "stop nosuch\n",
+    ),
+    (">no agent nosuch", "login admin\n"),
+    (">passphrase:", "not-the-passphrase\n"),
+    (">login refused", "login admin\n"),
+    (">login: wait 1 s", ""),
+    ("registered asker", "login admin\n"),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "person add bob ops\n"),
+    (">new passphrase for bob:", "bob-passphrase-1\n"),
+    (">again:", "bob-passphrase-1\n"),
+    (">person add bob: done", "person roles admin ops\n"),
+    (">person admin roles ops", "audit rotate 0123456789abcdef\n"),
+    // Logged in, the rotation reaches the audit service (#310).
+    (">audit rotate: ", "logout\n"),
+    (">logged out admin", "login bob\n"),
+    (">passphrase:", "bob-passphrase-1\n"),
+    (">logged in as bob", "whoami\n"),
+    (">bob roles ops", ""),
+    (">logged out bob (idle)", "stop asker\n"),
+    (">stopped asker", ""),
+];
+/// No passphrase is ever shown.
+const IDENTITY_REFUSED: &[&str] = &[
+    "pharos-test-passphrase",
+    "not-the-passphrase",
+    "bob-passphrase-1",
+];
 
 /// A test kernel that `runner` first boots `rounds` times on one store
 /// disk and kills at random moments.
@@ -3911,6 +3952,53 @@ fn event_checks(
             "  {test}: {copied} record sent again after the store was killed (at least once, review F2)"
         );
     }
+    Ok(())
+}
+
+/// After the `identity` kernel (#313): the refused login, the logins,
+/// the logouts (one idle), `bob` added and `admin` given a role, both
+/// with no passphrase, salt, or hash in the trail; the stop recorded as
+/// the console's; and the last `asker` (task 3) started after the role
+/// was given, owned by `admin`, with no grant (a role grants nothing).
+fn identity_audit(image: &Path) -> Result<()> {
+    let streams = store_image::audit(image)?;
+    let [(_, lines)] = streams.as_slice() else {
+        return Err(format!("expected one audit stream, got {}", streams.len()));
+    };
+    let at = |want: &str| lines.iter().position(|l| l.contains(want));
+    for want in [
+        "client 2 Event login console task 0/0  trust outcome 2 login refused admin",
+        "client 2 Event login admin task 0/0  trust outcome 1 login admin",
+        "client 2 Event identity admin task 0/0  trust outcome 1 person add bob roles ops",
+        "client 2 Event logout admin task 0/0  trust outcome 1 logout admin",
+        "client 2 Event login bob task 0/0  trust outcome 1 login bob",
+        "client 2 Event logout bob task 0/0  trust outcome 1 logout bob idle",
+        "client 2 Event stop console task 0/0  trust outcome 1 asker",
+        "client 3 Event start orphan task 1/1   outcome 2 no owner nobody",
+        "client 3 Event start asker task 2/1   outcome 1 owner admin",
+    ] {
+        if at(want).is_none() {
+            return Err(format!("the audit trail has no record like {want:?}"));
+        }
+    }
+    let role = at("client 2 Event identity admin task 0/0  trust outcome 1 person roles admin ops");
+    let started = at("client 3 Event start asker task 3/1   outcome 1 owner admin");
+    if !matches!((role, started), (Some(r), Some(s)) if r < s) {
+        return Err(format!(
+            "the last asker must start after admin's role was given: role at {role:?}, start at {started:?}"
+        ));
+    }
+    if let Some(g) = lines.iter().find(|l| l.contains(" grant asker task 3/")) {
+        return Err(format!("a role granted something: {g}"));
+    }
+    for secret in IDENTITY_REFUSED {
+        if lines.iter().any(|l| l.contains(secret)) {
+            return Err(format!("a passphrase is in the audit trail: {secret}"));
+        }
+    }
+    println!(
+        "  identity: logins, logouts, people, the stop, and owners recorded; the role given before the last asker started, which got no grant; no passphrase in the trail"
+    );
     Ok(())
 }
 
@@ -5169,6 +5257,8 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         timeout.max(LARGE_FILE_TIMEOUT)
     } else if name == HEALTH_TEST {
         timeout.max(HEALTH_TIMEOUT)
+    } else if name == IDENTITY_TEST {
+        timeout.max(IDENTITY_TIMEOUT)
     } else if name == S1_TEST {
         timeout.max(S1_TIMEOUT)
     } else if name == SOAK_TEST {
@@ -5358,6 +5448,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         KNOWLEDGE_AGENTS_TEST,
         GROUPS_TEST,
         DEPUTY_TEST,
+        IDENTITY_TEST,
     ];
     if service_store.contains(&name.as_str()) {
         store_image::service(&out.join(STORE_IMAGE))?;
@@ -5408,6 +5499,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         POISON_TEST => (POISON_SCRIPT, POISON_REFUSED),
         GROUPS_TEST => (GROUPS_SCRIPT, &[]),
         DEPUTY_TEST => (DEPUTY_SCRIPT, DEPUTY_REFUSED),
+        IDENTITY_TEST => (IDENTITY_SCRIPT, IDENTITY_REFUSED),
         BUDGETS_TEST => (BUDGETS_SCRIPT, &[]),
         EXHAUSTION_TEST => (EXHAUSTION_SCRIPT, &[]),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
@@ -5445,7 +5537,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         let again = (name == SOAK_TEST).then_some(SOAK_AGAIN);
         // These count the trail's records exactly while `trust` runs, so a
         // login record would break them: their scripts stay logged out.
-        let login = !matches!(name.as_str(), AUDIT_TEST | ROTATE_TEST);
+        let login = !matches!(name.as_str(), AUDIT_TEST | ROTATE_TEST | IDENTITY_TEST);
         Some(console::Script::start_looping(
             &base,
             qmp.as_deref(),
@@ -5531,6 +5623,9 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
             }
             if name == DEPUTY_TEST {
                 deputy_audit(&out.join(STORE_IMAGE))?;
+            }
+            if name == IDENTITY_TEST {
+                identity_audit(&out.join(STORE_IMAGE))?;
             }
             if name == EXHAUSTION_TEST {
                 for (step, what) in [(3, "usage"), (5, "stop all")] {

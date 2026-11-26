@@ -138,9 +138,29 @@ pub struct Session {
     last: u64,
     failures: u32,
     wait_until: u64,
+    /// The idle limit in microseconds; 0 for [`IDLE_US`].
+    idle_us: u64,
 }
 
 impl Session {
+    /// A session that ends after `secs` seconds idle; 0 for [`IDLE_US`].
+    /// `trust`'s argument: `init` passes 0; a test kernel passes a few
+    /// seconds (#313).
+    pub fn with_idle(secs: u64) -> Self {
+        Self {
+            idle_us: secs.saturating_mul(1_000_000),
+            ..Self::default()
+        }
+    }
+
+    fn idle_limit(&self) -> u64 {
+        if self.idle_us == 0 {
+            IDLE_US
+        } else {
+            self.idle_us
+        }
+    }
+
     pub fn person(&self) -> Option<&[u8]> {
         (self.len > 0).then(|| &self.name[..self.len])
     }
@@ -182,12 +202,12 @@ impl Session {
 
     /// Whether the session has run out (no line for [`IDLE_US`]).
     pub fn idle(&self, now: u64) -> bool {
-        self.len > 0 && now.saturating_sub(self.last) >= IDLE_US
+        self.len > 0 && now.saturating_sub(self.last) >= self.idle_limit()
     }
 
     /// When the session runs out, if someone is logged in.
     pub fn idle_at(&self) -> Option<u64> {
-        (self.len > 0).then(|| self.last.saturating_add(IDLE_US))
+        (self.len > 0).then(|| self.last.saturating_add(self.idle_limit()))
     }
 }
 
@@ -355,5 +375,16 @@ mod tests {
         s.end();
         assert_eq!(s.person(), None);
         assert!(!s.idle(u64::MAX));
+    }
+
+    #[test]
+    fn trusts_argument_sets_the_idle_limit_in_seconds() {
+        assert_eq!(Session::with_idle(0), Session::default(), "0: 15 minutes");
+        let mut s = Session::with_idle(3);
+        s.start(b"alice", 10);
+        assert!(!s.idle(10 + 2_999_999));
+        assert!(s.idle(10 + 3_000_000));
+        assert_eq!(s.idle_at(), Some(10 + 3_000_000));
+        assert!(Session::with_idle(u64::MAX).idle_at().is_none());
     }
 }
