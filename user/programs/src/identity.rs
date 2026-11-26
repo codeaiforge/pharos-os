@@ -130,6 +130,13 @@ pub fn allowed_logged_out(c: &Command<'_>) -> bool {
     )
 }
 
+/// Whether a record's detail made of `parts` fits whole in an audit
+/// record (M6.5 review F4): a person command whose record would be cut
+/// is refused, so the trail never hides a role.
+pub fn recordable(parts: &[&[u8]]) -> bool {
+    parts.iter().map(|p| p.len()).sum::<usize>() <= pharos_proto::audit::MAX_DETAIL
+}
+
 /// Who is logged in at the trusted console, and the refusal delay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Session {
@@ -138,6 +145,10 @@ pub struct Session {
     last: u64,
     failures: u32,
     wait_until: u64,
+    /// The name last refused: only its own login resets the delay (M6.5
+    /// review F1), not another person's.
+    refused: [u8; MAX_NAME],
+    refused_len: usize,
     /// The idle limit in microseconds; 0 for [`IDLE_US`].
     idle_us: u64,
 }
@@ -170,8 +181,12 @@ impl Session {
         self.wait_until.saturating_sub(now)
     }
 
-    /// A refused login: the next waits 1 s, doubling to 60 s.
-    pub fn refused(&mut self, now: u64) {
+    /// A refused login of `name`: the next waits 1 s, doubling to 60 s.
+    pub fn refused(&mut self, name: &[u8], now: u64) {
+        let n = name.len().min(MAX_NAME);
+        self.refused = [0; MAX_NAME];
+        self.refused[..n].copy_from_slice(&name[..n]);
+        self.refused_len = n;
         self.failures = self.failures.saturating_add(1);
         let wait = FIRST_WAIT_US
             .checked_shl(self.failures - 1)
@@ -180,15 +195,18 @@ impl Session {
         self.wait_until = now.saturating_add(wait);
     }
 
-    /// `name` logged in: the delay is reset.
+    /// `name` logged in: the delay is reset if `name` was the one
+    /// refused; another person's login keeps it (M6.5 review F1).
     pub fn start(&mut self, name: &[u8], now: u64) {
         let n = name.len().min(MAX_NAME);
         self.name = [0; MAX_NAME];
         self.name[..n].copy_from_slice(&name[..n]);
         self.len = n;
         self.last = now;
-        self.failures = 0;
-        self.wait_until = 0;
+        if self.refused[..self.refused_len] == name[..n] {
+            self.failures = 0;
+            self.wait_until = 0;
+        }
     }
 
     pub fn end(&mut self) {
@@ -342,23 +360,51 @@ mod tests {
         let mut s = Session::default();
         assert_eq!((s.person(), s.wait(0)), (None, 0));
         let t = 1_000_000_000;
-        s.refused(t);
+        s.refused(b"alice", t);
         assert_eq!(s.wait(t), 1_000_000);
-        s.refused(t);
+        s.refused(b"alice", t);
         assert_eq!(s.wait(t), 2_000_000);
         for _ in 0..10 {
-            s.refused(t);
+            s.refused(b"alice", t);
         }
         assert_eq!(s.wait(t), MAX_WAIT_US, "at most 60 s");
         for _ in 0..100 {
-            s.refused(t);
+            s.refused(b"alice", t);
         }
         assert_eq!(s.wait(t), MAX_WAIT_US, "no overflow");
         assert_eq!(s.wait(t + MAX_WAIT_US), 0);
         s.start(b"alice", t + MAX_WAIT_US);
         assert_eq!(s.person(), Some(&b"alice"[..]));
-        s.refused(t + MAX_WAIT_US);
+        s.refused(b"alice", t + MAX_WAIT_US);
         assert_eq!(s.wait(t + MAX_WAIT_US), 1_000_000, "reset by the login");
+    }
+
+    #[test]
+    fn a_detail_that_would_be_cut_is_not_recordable() {
+        let roles = [b'r'; 51];
+        assert!(recordable(&[b"person roles ", b"bob", b" ", &roles[..47]]));
+        assert!(!recordable(&[b"person roles ", b"bob", b" ", &roles]));
+    }
+
+    #[test]
+    fn another_persons_login_keeps_the_delay() {
+        let mut s = Session::default();
+        let t = 1_000_000_000;
+        s.refused(b"admin", t);
+        s.refused(b"admin", t);
+        assert_eq!(s.wait(t), 2_000_000);
+        // Logging in as oneself between guesses at another's passphrase.
+        s.start(b"bob", t + 2_000_000);
+        s.end();
+        s.refused(b"admin", t + 2_000_000);
+        assert_eq!(s.wait(t + 2_000_000), 4_000_000, "still doubling");
+        s.start(b"admin", t + 6_000_000);
+        s.refused(b"admin", t + 6_000_000);
+        assert_eq!(
+            s.wait(t + 6_000_000),
+            1_000_000,
+            "reset by admin's own login"
+        );
     }
 
     #[test]

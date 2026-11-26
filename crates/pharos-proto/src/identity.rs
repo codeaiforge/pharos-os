@@ -35,6 +35,15 @@ pub const ITERATIONS: u32 = 600_000;
 /// A passphrase is one console line: 8 to 64 printable bytes.
 pub const MIN_PASSPHRASE: usize = 8;
 pub const MAX_PASSPHRASE: usize = 64;
+/// Actor names that are not people (M6.5 review F2): `console` is the
+/// trusted console with no one logged in, `user` its actor before M6.5.
+/// A person so named would make their records read as no one's.
+pub const RESERVED: &[&[u8]] = &[b"console", b"user"];
+
+/// A valid person's name: an agent-style name that is not [`RESERVED`].
+pub fn valid_person(name: &[u8]) -> bool {
+    valid_name(name) && !RESERVED.contains(&name)
+}
 
 /// One person's record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,7 +90,7 @@ impl Person {
         iterations: u32,
         hash: [u8; 32],
     ) -> Option<Self> {
-        if !valid_name(name) || iterations == 0 {
+        if !valid_person(name) || iterations == 0 {
             return None;
         }
         let mut p = Self {
@@ -241,7 +250,7 @@ pub fn parse(text: &[u8]) -> Result<Person, Refusal> {
     if version != b"1" {
         return Err(Refusal::Version);
     }
-    if !valid_name(name) {
+    if !valid_person(name) {
         return Err(Refusal::Name);
     }
     let salt = unhex(salt).ok_or(Refusal::Hex)?;
@@ -267,6 +276,23 @@ mod tests {
 
     fn alice() -> Person {
         Person::new(b"alice", b"approver,ops", [1; 32], 600_000, [2; 32]).unwrap()
+    }
+
+    #[test]
+    fn console_and_user_are_no_persons_names() {
+        for name in RESERVED {
+            assert!(!valid_person(name));
+            assert!(Person::new(name, b"", [1; 32], 1, [2; 32]).is_none());
+            let p = Person::new(b"alice", b"", [1; 32], 1, [2; 32]).unwrap();
+            let mut out = [0u8; MAX_FILE];
+            let n = p.encode(&mut out).unwrap();
+            let text = core::str::from_utf8(&out[..n]).unwrap().replace(
+                "name = alice",
+                &std::format!("name = {}", core::str::from_utf8(name).unwrap()),
+            );
+            assert_eq!(parse(text.as_bytes()), Err(Refusal::Name));
+        }
+        assert!(valid_person(b"consoles") && valid_person(b"users"));
     }
 
     #[test]

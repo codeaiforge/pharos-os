@@ -3238,7 +3238,16 @@ const TRUST_SCRIPT: &[console::Step] = &[
     // #310: the session (the runner logged in first), a logout, and a
     // wrong passphrase, refused and delayed.
     ("no request #1", "whoami\n"),
-    (">admin roles none", "people\n"),
+    // M6.5 review F4: the line fits (64 bytes), its record (`person add
+    // bob roles ...`) would not, so it is refused, not cut.
+    (
+        ">admin roles none",
+        "person add bob operations,reader,writer,auditor,deployer,ab\n",
+    ),
+    (
+        ">person add: too long to record; use fewer or shorter roles",
+        "people\n",
+    ),
     (">person admin roles none", "person remove admin\n"),
     // #311: an owner the runtime asked about stays a person.
     (">person remove: admin owns an agent", "logout\n"),

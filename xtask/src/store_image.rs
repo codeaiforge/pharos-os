@@ -662,7 +662,9 @@ pub fn person_record(
     let hash = pharos_crypto::pbkdf2(passphrase, &salt, iterations);
     let p = pharos_proto::identity::Person::new(name.as_bytes(), b"", salt, iterations, hash)
         .ok_or_else(|| {
-            format!("{name:?} is not a person's name (1 to 32 letters, digits, - and _)")
+            format!(
+                "{name:?} is not a person's name (1 to 32 letters, digits, - and _, not console or user)"
+            )
         })?;
     let mut out = vec![0u8; pharos_proto::identity::MAX_FILE];
     let n = p.encode(&mut out).ok_or("a person record did not fit")?;

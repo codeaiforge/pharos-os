@@ -853,8 +853,15 @@ export them first (cargo xtask store export)",
     }
 
     fn person_add(&mut self, name: &[u8], roles: &[u8]) {
+        if !identity::valid_person(name) {
+            return self.say(&[b"person add: ", name, b" is reserved"]);
+        }
         if Person::new(name, roles, [0; 32], 1, [0; 32]).is_none() {
             return self.say(&[b"person add: roles are up to 8 names, comma-separated"]);
+        }
+        let shown: &[u8] = if roles.is_empty() { b"none" } else { roles };
+        if !people::recordable(&[b"person add ", name, b" roles ", shown]) {
+            return self.say(&[b"person add: too long to record; use fewer or shorter roles"]);
         }
         let Some(f) = self.people.as_mut() else {
             return self.say(&[b"person add: the store is not answering"]);
@@ -957,7 +964,7 @@ export them first (cargo xtask store export)",
                     self.record(audit::action::LOGIN, None, &d[..n]);
                     self.say(&[b"logged in as ", name.get()]);
                 } else {
-                    self.session.refused(uptime());
+                    self.session.refused(name.get(), uptime());
                     let mut d = [0u8; 64];
                     let n = join(&[b"login refused ", name.get()], &mut d);
                     self.record_as(audit::action::LOGIN, None, audit::outcome::REFUSED, &d[..n]);

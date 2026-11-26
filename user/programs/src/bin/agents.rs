@@ -1385,7 +1385,8 @@ fn data_path(agent: &[u8], file: &[u8]) -> Vec<u8> {
 }
 
 /// How long `trust` may take to answer `OWNER` (#311): it may be hashing
-/// a passphrase (at most 2 s).
+/// a passphrase (about 0.6 s on the host, 5 s under TCG; an attempt that
+/// starts then fails closed, `owner not checked`; M6.5 review F5).
 const OWNER_US: u64 = 5_000_000;
 
 /// Asks `trust` whether `owner` is a current person (#311, identity.md),
