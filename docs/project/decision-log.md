@@ -1406,21 +1406,57 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-038: Identity and organization model
 
-- **Status:** Open
+- **Status:** Accepted (#308)
 - **Needed by:** M6.5
-- **Date accepted:**
+- **Date accepted:** 2026-11-25
 
-**Context.** Audit actors are badges today. Organizations need people, roles, tenants, and an owner for every agent, without identity becoming authority (D-018).
+**Context.** Audit actors are badges today. Organizations need people, roles, tenants, and an owner for every agent, without identity becoming authority (D-018). What exists at M6.3 (checked 2026-11-25):
+- An audit record's `actor` is a free name: an agent's name (the runtime's records), a service's name from `init`'s table (`init`'s records), `user` for everything typed on the trusted console (`trust`'s and the audit service's records), or empty for a service writing its own records, where its client number (`audit::client`) says who it is.
+- The trusted console does not know who is typing. Whoever holds it approves, stops, revokes, and applies updates; that is the trusted path (vision goal 6), and there is one user (vision: "the single user of v0.5.0"; one runtime per tenant is planned for M6.5 and M6.10).
+- Agent policy is the runtime's compiled, reviewed `manifest::Entry` for each agent; a manifest in the measured image can only ask for less (D-030's ceilings). Policy loaded at run time is M6.6 (D-039).
+- `trust` holds the console device, its endpoint, `init`'s report endpoint, and `SEND` on the audit and knowledge services. It holds no store capability.
+- `pharos-crypto` has SHA-256, HMAC-SHA-256, and an HKDF-style `derive`; nothing else is needed for a salted, iterated passphrase hash.
+- M6.4 (D-037) needs two distinct approvers, neither the requester. That is only meaningful if the console knows which person is approving.
 
-**Options.** Local identity records managed on the trusted path; import from an external directory (Entra ID or LDAP, for example); mapping of badges to identities in `init` or the runtime.
+**Options.**
+- **Where identity records live, and how they change.**
+  - (a) **In the measured image**, like the TLS roots: reviewed with the image, changed only by a rebuild. The smallest trusted base, but not "managed from the trusted path", and a person leaving needs a new release.
+  - (b) **In the store, changed only from the trusted path:** `trust` alone holds `WRITE` on a new store namespace `identity`, and each change (`person add`, `person remove`, `person role`) is a command typed on the trusted console and an audit record. `trust` gains a store capability.
+  - (c) **(b), with the first person in the measured image:** the image names the machine's first administrator (`system/identity/first`), so a fresh system has someone to log in as; everything after is (b).
+- **Who is at the console.**
+  - (d) **A name, no secret:** `login <name>` sets who the following records name. Attribution only, and honest about it, but anyone at the console can be anyone, so M6.4's two approvers are two names typed by one person.
+  - (e) **A name and a passphrase:** `login <name>` asks for a passphrase on the trusted console (not echoed), checked against a salted, iterated HMAC-SHA-256 hash in the person's record (PBKDF2's construction on `pharos-crypto`, no new dependency); a wrong one is recorded and slowed. `logout`, and a timeout, end the session; with no one logged in, the console only answers `login` and the emergency stop.
+  - (f) **A hardware token** (FIDO2 or a smart card): strongest, but a new USB or NFC driver and protocol in the trusted base. Not before M8.1.
+- **An owner for every agent.**
+  - (g) **In the compiled policy entry** (`manifest::Entry::owner`, a person's name), reviewed with the rest of the policy until M6.6 loads it at run time. At an agent's start the runtime refuses it, and records why, if it has no owner or the owner is not a current person.
+  - (h) In the manifest: untrusted (it only asks), so it cannot be where the owner is decided.
+- **Roles and tenants.**
+  - (i) **Data only:** a person's roles are names in their record, shown and recorded, and nothing reads a role to grant anything (D-018 item 2). A later decision may use a role to *narrow* (who may approve a marked action, D-037), never to grant. One tenant per runtime, named in the image; several tenants are M6.10's.
+  - (j) Roles that grant permissions (role-based access control): the request D-018 forbids.
+- **Actor resolution.**
+  - (k) **From the trail alone:** every record names its actor (a person's name for console commands, in place of `user`; an agent's name; a service's name), and the records that bind them are in the trail too (`person add`, `login`, an agent's start with its owner). An auditor resolves any actor from the exported trail, without Pharos. Records from before M6.5 name `user`, which resolves to "the console, before identities".
+  - (l) A resolution table kept beside the trail: one more thing to export and anchor (M6.7), and it can disagree with the trail.
+- **An external directory** (Entra ID or LDAP, for example).
+  - (m) **Planned, not built:** an import, when it comes, is a signed file exported from the directory and loaded through D-039's signed-policy path, so it trusts the exporter's key and nothing live. Pharos never talks to the directory.
+  - (n) A live directory connection now: an LDAP or OIDC client in the trusted base, and the directory's availability in the boot path.
 
-**Evaluation criteria.** Every actor resolves; no grant by role; trusted-base size; what an import trusts.
+**Evaluation criteria.** Every actor resolves; no grant by role; trusted-base size; what an import trusts; what M6.4's two approvers need.
 
-**Decision.** (empty while Open)
+**Decision.** Accepted by the maintainer on 2026-11-25, as proposed:
+1. **Identity records live in the store** (c), in a namespace only `trust` may write, and change only by commands typed on the trusted console, each an audit record. The measured image names the first administrator, so a fresh system has someone to log in as.
+2. **The console knows who is typing by a name and a passphrase** (e): `login <name>`, the passphrase checked against a salted, iterated HMAC-SHA-256 hash in the person's record; failures recorded and slowed; `logout` and a timeout end the session; with no one logged in, the console answers only `login` and the emergency stop.
+3. **Every agent has an owner in its compiled policy entry** (g), a current person; the runtime refuses to start an agent without one, and records why.
+4. **Roles and tenants are data only** (i): nothing reads a role to grant anything (D-018 item 2); a later decision may use one to narrow, never to grant. One tenant per runtime, named in the image.
+5. **Actors resolve from the trail alone** (k): console records name the logged-in person in place of `user`, and the records that bind names (people added, logins, an agent's start with its owner) are in the trail, so an auditor needs nothing from Pharos but the exported trail.
+6. **A directory import is planned, not built** (m): when it comes, a signed file exported from the directory, loaded through D-039's signed-policy path. Pharos never talks to a directory.
+The record formats, the commands, the session timeout, and the passphrase hash's parameters are the design's (#309).
 
 **Consequences.** Owners required in agent policy; four-eyes approval possible (D-037).
-
-**Evidence.** None yet.
+- `trust` grows: the login, the identity commands, and `WRITE` on one store namespace. No new kernel code, no `unsafe`, no new dependency.
+- Who may change the records is the trusted console's logged-in person, as for every other trusted-path command today. Restricting it by role would make the role an authority; any restriction is D-037's or D-039's to decide.
+- The console gains a state with no one logged in. The emergency stop still works in it.
+- `user` in older records stays, and is documented as the console before identities.
+- The directory import, OIDC, and single sign-on are out of scope (the roadmap's M6.5 out-of-scope list).
 
 ### D-039: Runtime policy and its language
 
