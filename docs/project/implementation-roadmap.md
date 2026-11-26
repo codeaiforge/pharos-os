@@ -661,7 +661,7 @@ Rules for every planned milestone below: nothing moves into the kernel (each com
 - **Risks and mitigations:** Growth into a general-purpose OS → POSIX stays a non-goal (Tier 3 covers it) and every component is a user-space service; overstating Tier 3's containment → D-036 and the threat model say the host is trusted; a demo that only defeats known attacks → an adaptive-attack evaluation at the gate.
 - **Out of scope:** POSIX on Pharos; a graphical interface; bare metal (M8.1).
 - **Definition of done:** Standard; threat model updated.
-- **Gate:** The five-beat demo recorded; independent review of M6.1–M6.4 with no open critical or high findings; an adaptive-attack evaluation published, with attacks written against Pharos's own defenses rather than taken from a fixed corpus; M5.5 done.
+- **Gate:** Released as v0.6.0 when it passes (the maintainer's choice, 2026-11-26: one release per phase, as v0.1.0–v0.5.0). The five-beat demo recorded; independent review of M6.1–M6.4 with no open critical or high findings; an adaptive-attack evaluation published, with attacks written against Pharos's own defenses rather than taken from a fixed corpus; M5.5 done.
 
 ### M6.0 — Repositioning: vision and architecture
 
@@ -725,7 +725,7 @@ Rules for every planned milestone below: nothing moves into the kernel (each com
 
 ### M6.5 — Identity and organization model
 
-- **Objective and scope:** Human principals, roles, tenants, and a named human owner for every agent; every audit actor resolves to a person or an agent, not only a badge. Identity stays attribution, never authority (D-018 item 2). **Status: Current** (since 2026-11-25): D-038 accepted (#308); issues #308–#314. It comes before M6.4, whose prerequisites include it.
+- **Objective and scope:** Human principals, roles, tenants, and a named human owner for every agent; every audit actor resolves to a person or an agent, not only a badge. Identity stays attribution, never authority (D-018 item 2). **Status: Current** (since 2026-11-25): D-038 accepted (#308); the [design](../architecture/identity.md) accepted (#309); issues #308–#314. It comes before M6.4, whose prerequisites include it.
 - **Deliverables:** Identity records and roles managed from the trusted path; an owner required in agent policy; actor resolution in audit; an import path from an external directory evaluated (Entra ID or LDAP, for example).
 - **Prerequisites:** D-038 accepted; M6.3.
 - **Acceptance criteria:** Test kernel `identity`: an agent without an owner refused at start; every audit record's actor resolves; a role alone grants no capability.

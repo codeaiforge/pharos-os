@@ -170,6 +170,19 @@ Design: [bridge.md](../architecture/bridge.md) (accepted 2026-11-24, #295; D-036
 | The new `derive` system call widens a capability | It needs `GRANT`, as passing a capability on does, never adds rights, and never re-badges a badged one; revoking the child reaches only what came from it (kernel tests, #298) |
 | **Limits** | The host and both QEMUs can read and forge every frame; stopping a guest agent goes through the runtime (`STOP_GUEST`, naming the attempt since #304), with `trust` stopping the runtime if it does not take it in 2 s; a killed runtime sends no `ENDED`, so `trust` lists its guest's attempt until the slot is registered again (#304); the guest image's downloads are trusted by their pinned hashes |
 
+### Identity and owners (M6.5)
+
+Design: [identity.md](../architecture/identity.md) (accepted 2026-11-26, #309; D-038). Each row is **planned** until its issue lands (#310–#313).
+
+| Threat | Mitigation |
+| --- | --- |
+| Someone at the console acts as another person | `login <name>` with a passphrase checked against a salted PBKDF2-HMAC-SHA256 hash (600,000 iterations); a refusal recorded and the next try delayed, 1 s doubling to 60 s; a 15-minute idle logout. **Limit:** the host sees the console's bytes and the store, and is trusted until M8.2 |
+| A role, or an identity, grants a capability | Roles are data only: no code reads one to decide anything (D-018 item 2); the `identity` kernel checks a role gains nothing, and a throwaway branch that grants by role must fail CI |
+| An agent runs with no one answerable for it | Every compiled policy entry names an owner; the runtime refuses an attempt whose owner is not a current person, and records why |
+| An audit record's actor cannot be traced to a person or an agent | Console records name the logged-in person; actors resolve by audit client and name from the trail's own records (`cargo xtask store audit --resolve`) |
+| The emergency stop is locked behind a login | `stop all` answers with no one logged in, recorded with actor `console` |
+| **Limits** | A shared passphrase; one person with two passphrases; records before M6.5 name `user` |
+
 ### User environment and storage (M3.0)
 
 Design: [user-environment.md](../architecture/user-environment.md) and [storage.md part 8](../architecture/storage.md#8-the-writable-store-m30), from D-016 and D-017. Rows are marked implemented as their issues land (#74–#78, #80); all are reviewed at the M3.0 gate.
