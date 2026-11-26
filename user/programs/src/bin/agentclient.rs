@@ -59,7 +59,7 @@ const REPORT: Handle = 3;
 const BUFFER: u64 = MAX_BUFFER;
 /// Agents the runtime's test table accepts (`agents.rs` `TEST`, less the
 /// entries whose manifests it refuses). INFO reports it while idle.
-const ACCEPTED: u8 = 22;
+const ACCEPTED: u8 = 23;
 
 struct Client {
     reply: Handle,
@@ -410,6 +410,17 @@ fn main(arg: u64) -> u64 {
     c.step(
         "agents with a refused, missing, or unlisted manifest are not found",
         refused,
+    );
+    // Its owner is no person (#311): refused at the attempt's start.
+    let orphan = c
+        .submit(b"orphan", b"complete")
+        .ok()
+        .and_then(|task| c.wait(task, 20));
+    c.step(
+        "an agent whose owner is no person fails at its start: no owner nobody",
+        orphan.is_some_and(|(s, r)| {
+            s.state == State::Failed && s.attempts == 1 && r == b"no owner nobody"
+        }),
     );
     c.step(
         "agent requests from a control client are refused",

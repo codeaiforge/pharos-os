@@ -140,6 +140,8 @@ struct Agent {
     process: Handle,
     task: u32,
     attempt: u8,
+    /// Its policy entry's owner (#311).
+    owner: Name,
 }
 
 struct Trust {
@@ -154,6 +156,9 @@ struct Trust {
     /// For `call`s to the audit service.
     reply: Option<Handle>,
     agents: [Option<Agent>; SLOTS as usize],
+    /// Each owner the runtime asked about (`OWNER`, #311): `person
+    /// remove` refuses them. At most [`identity::MAX_PEOPLE`].
+    owners: alloc::vec::Vec<Name>,
     /// The rate of lines the runtime's messages make (#228).
     limit: Limit,
     /// Whether the line being said is one of them.
@@ -400,7 +405,7 @@ impl Trust {
         let _ = self.console.send(&line[..n]);
     }
 
-    fn status(&mut self, label: &[u8], process: Handle) {
+    fn status(&mut self, label: &[u8], process: Handle, tail: &[u8]) {
         let mut digits = [0u8; 20];
         let (word, number): (&[u8], Option<u64>) = match process_status(process) {
             Ok(Status::Running) => (b"running", None),
@@ -411,7 +416,7 @@ impl Trust {
         };
         let number = number.map_or(&b""[..], |v| decimal(v, &mut digits));
         let space: &[u8] = if number.is_empty() { b"" } else { b" " };
-        self.say(&[label, b" ", word, space, number]);
+        self.say(&[label, b" ", word, space, number, tail]);
     }
 
     /// Stops `process` and waits up to [`STOP_WAIT_US`] for it to end.
@@ -616,17 +621,18 @@ export them first (cargo xtask store export)",
             Command::PersonRemove(name) => self.person_remove(name),
             Command::List => {
                 if let Some(runtime) = self.runtime {
-                    self.status(b"runtime", runtime);
+                    self.status(b"runtime", runtime, b"");
                 }
                 let agents = self.agents;
                 if agents.iter().all(Option::is_none) {
                     self.say(&[b"no agents"]);
                 }
                 for a in agents.iter().flatten() {
+                    let owner = [&b"; owner "[..], a.owner.get()].concat();
                     if a.process == 0 {
-                        self.say(&[&a.name[..a.len], b" guest"]);
+                        self.say(&[&a.name[..a.len], b" guest", &owner]);
                     } else {
-                        self.status(&a.name[..a.len], a.process);
+                        self.status(&a.name[..a.len], a.process, &owner);
                     }
                 }
             }
@@ -907,6 +913,10 @@ export them first (cargo xtask store export)",
     }
 
     fn person_remove(&mut self, name: &[u8]) {
+        // An agent's owner stays a person (identity.md, #311).
+        if self.owners.iter().any(|o| o.get() == name) {
+            return self.say(&[b"person remove: ", name, b" owns an agent"]);
+        }
         let Some(f) = self.people.as_mut() else {
             return self.say(&[b"person remove: the store is not answering"]);
         };
@@ -1354,7 +1364,7 @@ export them first (cargo xtask store export)",
             decimal(pages, &mut b).to_vec(),
         );
         let label = [&b"health: agent "[..], label].concat();
-        self.status(&label, process);
+        self.status(&label, process, b"");
         self.say(&[&label, b": cpu ", &cpu, b" ms, ", &pages, b" pages"]);
     }
 
@@ -1747,8 +1757,10 @@ export them first (cargo xtask store export)",
                 group,
                 task,
                 attempt,
+                owner,
             }) if badge == RUNTIME && (valid || cap == 0) => {
                 let mut a = Agent {
+                    owner: Name::new(owner),
                     name: [0; MAX_NAME],
                     len: name.len(),
                     group: [0; MAX_NAME],
@@ -1763,6 +1775,22 @@ export them first (cargo xtask store export)",
                     let _ = delete(old.process);
                 }
                 self.say(&[b"registered ", name]);
+            }
+            // The one request answered (#311): on the reply capability the
+            // runtime's `call` passed. `BUSY` if no one could be checked.
+            Ok(Request::Owner { name }) if badge == RUNTIME && cap != 0 => {
+                let answer = match self.people.as_mut().map(|f| people::read(f, name)) {
+                    Some(Ok(Some(_))) => status::OK,
+                    Some(Ok(None)) => status::NOT_FOUND,
+                    _ => status::BUSY,
+                };
+                let _ = try_send(cap, &[answer]);
+                let _ = delete(cap);
+                if !self.owners.iter().any(|o| o.get() == name)
+                    && self.owners.len() < identity::MAX_PEOPLE
+                {
+                    self.owners.push(Name::new(name));
+                }
             }
             // Only the guest attempt it names (#304): a late `ENDED` never
             // drops the slot's next registration.
@@ -1941,6 +1969,7 @@ fn main(_: u64) -> u64 {
         confirms: [0; 4],
         reply: endpoint_create().ok(),
         agents: [None; SLOTS as usize],
+        owners: alloc::vec::Vec::new(),
         limit: Limit::new(),
         limited: false,
         people: None,

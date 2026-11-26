@@ -3203,8 +3203,9 @@ const TRUST_SCRIPT: &[console::Step] = &[
     ("registered runtime", ""),
     ("registered worker", "list\n"),
     // #304: the guest whose attempt is not known to have ended.
-    ("visitor guest", ""),
-    ("worker running", "stop worker\n"),
+    // #311: each with its owner.
+    ("visitor guest; owner carol", ""),
+    ("worker running; owner admin", "stop worker\n"),
     // The guest whose attempt ended is not there to stop.
     ("stopped worker", "stop gone\n"),
     ("no agent gone", "status please\n"),
@@ -3212,7 +3213,7 @@ const TRUST_SCRIPT: &[console::Step] = &[
     // The runtime still runs (hung) after both its agents named `worker`
     // were stopped.
     (
-        "runtime running\r\nworker stopped\r\nworker stopped",
+        "runtime running\r\nworker stopped; owner admin\r\nworker stopped; owner admin",
         "stop all\n",
     ),
     ("stopped all", ""),
@@ -3226,7 +3227,9 @@ const TRUST_SCRIPT: &[console::Step] = &[
     // wrong passphrase, refused and delayed.
     ("no request #1", "whoami\n"),
     (">admin roles none", "people\n"),
-    (">person admin roles none", "logout\n"),
+    (">person admin roles none", "person remove admin\n"),
+    // #311: an owner the runtime asked about stays a person.
+    (">person remove: admin owns an agent", "logout\n"),
     (">logged out admin", "list\n"),
     (">log in first: login <name>", "login admin\n"),
     (">passphrase:", "not-the-passphrase\n"),
@@ -5342,6 +5345,9 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     if name == SUPERVISION_TEST {
         store_image::supervision(&out.join(STORE_IMAGE))?;
     }
+    // The test person: each script logs in as it (#310), and owns every
+    // test agent (#311).
+    store_image::seed_test_person(&out.join(STORE_IMAGE))?;
     for c in [&STORE_CRASH, &AGENTS_CRASH] {
         if name == c.test {
             crash_rounds(c, &iso, &out.join("ovmf-vars.fd"), &logs, &extra)?;
@@ -5384,7 +5390,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     let script = if steps.is_empty() {
         None
     } else {
-        // Its script logs in as the test person (#310).
+        // Again: the rounds above may leave a store of their own (#310).
         store_image::seed_test_person(&out.join(STORE_IMAGE))?;
         let base = console::fresh(&out, console::PIPE)?;
         let (qmp, serial) = if name == HOTPLUG_TEST {

@@ -244,7 +244,7 @@ pub fn bad_programs(elf: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// `channels` kernel's four (#133), the `groups` kernel's three (#134),
 /// the `knowledge_agents` kernel's two (#144), and the `poison` kernel's
 /// (#146).
-pub const TEST_MANIFESTS: [(&str, &str); 38] = [
+pub const TEST_MANIFESTS: [(&str, &str); 39] = [
     // The `vault` kernel's (#284): four routes (a list's most); `other`
     // is not asked for.
     (
@@ -273,6 +273,12 @@ pub const TEST_MANIFESTS: [(&str, &str); 38] = [
         "agents/counter.manifest",
         "manifest = 1\nname = counter\nprogram = bin/testagent\npages = 64\nmodels =\n\
          attempts = 10\nprogress_ms = 5000\ntask_ms = 120000\ndata = none\nnet =\n",
+    ),
+    (
+        "agents/orphan.manifest",
+        "# The agents kernel's agent whose owner is no person (#311).\nmanifest = 1\nname = orphan\n\
+         program = bin/testagent\npages = 256\nmodels =\nattempts = 1\nprogress_ms = 10000\n\
+         task_ms = 60000\ndata = none\nnet =\n",
     ),
     (
         "agents/noentry.manifest",

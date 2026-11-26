@@ -258,6 +258,7 @@ fn hostile(arg: u64) -> u64 {
                 group: b"",
                 task: 0,
                 attempt: 0,
+                owner: b"admin",
             },
             &mut msg,
         ) {

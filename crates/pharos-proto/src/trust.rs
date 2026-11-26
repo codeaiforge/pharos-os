@@ -5,10 +5,10 @@
 //! else is asked of the service:
 //! - `RUNTIME` `[version, op]`, from `init` only: the agent runtime;
 //! - `REGISTER` `[version, op, slot, name length, name, group length,
-//!   group, task (4), attempt]`, from the runtime only: an agent and its
-//!   policy entry's group (empty for none; #136), before the runtime
-//!   grants it anything, and the attempt it runs (#304). A Tier 3 guest's
-//!   carries no capability (#298).
+//!   group, task (4), attempt, owner length, owner]`, from the runtime
+//!   only: an agent and its policy entry's group (empty for none; #136),
+//!   before the runtime grants it anything, the attempt it runs (#304),
+//!   and its owner (#311). A Tier 3 guest's carries no capability (#298).
 //!
 //! And from the runtime only (#105):
 //! - `CHANNEL` `[version, op]`, carrying `SEND` on the runtime's endpoint
@@ -29,7 +29,12 @@
 //!   answer and `RESOLVED` work as for `APPROVE`;
 //! - `ENDED` `[version, op, slot, task (4), attempt]` (#304): the guest
 //!   attempt registered in `slot` ended. `trust` drops the registration
-//!   only if it names that attempt.
+//!   only if it names that attempt;
+//! - `OWNER` `[version, op, name length, name]` (#311, identity.md): is
+//!   `name` a current person? Sent with `call`, the one request `trust`
+//!   answers: one byte, [`crate::status::OK`], [`crate::status::NOT_FOUND`],
+//!   or [`crate::status::BUSY`] when it cannot read its people. `trust`
+//!   then refuses `person remove` of each owner it was asked about.
 //!
 //! And from `init` only:
 //! - `SERVICE` (#151): a service event or the system's state;
@@ -40,7 +45,8 @@
 //!   0 when it was never offered), with the image running and its version;
 //!   `trust` writes the prompt from these fields.
 //!
-//! The badge says who sends: [`INIT`] or [`RUNTIME`]. There is no reply:
+//! The badge says who sends: [`INIT`] or [`RUNTIME`]. Except to `OWNER`,
+//! there is no reply:
 //! the sender's blocking `send` returns once the service has the message,
 //! and the service never refuses a valid one (it replaces a slot's entry).
 
@@ -93,6 +99,8 @@ pub mod op {
     pub const OFFER: u8 = 11;
     /// A guest attempt ended, from the runtime (#304).
     pub const ENDED: u8 = 12;
+    /// Is a name a current person (#311)? Answered.
+    pub const OWNER: u8 = 13;
 }
 
 /// What happened to a service, or to the system (#151, D-026).
@@ -346,11 +354,20 @@ pub const SLOTS: u8 = 16;
 pub const MAX_NAME: usize = 32;
 
 /// A valid agent name: 1 to 32 letters, digits, `-`, or `_`.
-pub fn valid_name(name: &[u8]) -> bool {
-    (1..=MAX_NAME).contains(&name.len())
-        && name
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+/// `const`, so compiled policy tables check their owners (#311).
+pub const fn valid_name(name: &[u8]) -> bool {
+    if name.is_empty() || name.len() > MAX_NAME {
+        return false;
+    }
+    let mut i = 0;
+    while i < name.len() {
+        let b = name[i];
+        if !(b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -365,6 +382,8 @@ pub enum Request<'a> {
         /// `ENDED` name for a guest.
         task: u32,
         attempt: u8,
+        /// Its policy entry's owner (#311).
+        owner: &'a [u8],
     },
     /// The guest attempt in `slot` ended (#304).
     Ended {
@@ -373,6 +392,10 @@ pub enum Request<'a> {
         attempt: u8,
     },
     Channel,
+    /// Is `name` a current person (#311)?
+    Owner {
+        name: &'a [u8],
+    },
     Approve {
         number: u16,
         name: &'a [u8],
@@ -466,13 +489,21 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             let name = r.take(len).filter(|n| valid_name(n))?;
             let len = usize::from(r.u8()?);
             let group = r.take(len).filter(|g| g.is_empty() || valid_name(g))?;
+            let (task, attempt) = (r.u32()?, r.u8()?);
+            let len = usize::from(r.u8()?);
             Some(Request::Register {
                 slot,
                 name,
                 group,
-                task: r.u32()?,
-                attempt: r.u8()?,
+                task,
+                attempt,
+                owner: r.take(len).filter(|o| valid_name(o))?,
             })
+        })(),
+        op::OWNER => (|| {
+            let len = usize::from(r.u8()?);
+            let name = r.take(len).filter(|n| valid_name(n))?;
+            Some(Request::Owner { name })
         })(),
         op::ENDED => (|| {
             Some(Request::Ended {
@@ -614,8 +645,13 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             group,
             task,
             attempt,
+            owner,
         } => {
-            if slot >= SLOTS || !valid_name(name) || !(group.is_empty() || valid_name(group)) {
+            if slot >= SLOTS
+                || !valid_name(name)
+                || !(group.is_empty() || valid_name(group))
+                || !valid_name(owner)
+            {
                 return None;
             }
             w.bytes(&[VERSION, op::REGISTER, slot, name.len() as u8])?;
@@ -623,7 +659,15 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.bytes(&[group.len() as u8])?;
             w.bytes(group)?;
             w.u32(task)?;
-            w.bytes(&[attempt])?;
+            w.bytes(&[attempt, owner.len() as u8])?;
+            w.bytes(owner)?;
+        }
+        Request::Owner { name } => {
+            if !valid_name(name) {
+                return None;
+            }
+            w.bytes(&[VERSION, op::OWNER, name.len() as u8])?;
+            w.bytes(name)?;
         }
         Request::Ended {
             slot,
@@ -1079,6 +1123,7 @@ mod tests {
                 group: b"",
                 task: 0,
                 attempt: 0,
+                owner: b"alice",
             },
             Request::Register {
                 slot: SLOTS - 1,
@@ -1086,7 +1131,10 @@ mod tests {
                 group: &long,
                 task: u32::MAX,
                 attempt: u8::MAX,
+                owner: &long,
             },
+            Request::Owner { name: b"alice" },
+            Request::Owner { name: &long },
             Request::Ended {
                 slot: 3,
                 task: 7,
@@ -1151,7 +1199,7 @@ mod tests {
                 },
             },
         ] {
-            let mut buf = [0u8; 80];
+            let mut buf = [0u8; 128];
             let n = encode(&req, &mut buf).unwrap();
             assert_eq!(parse(&buf[..n]), Ok(req));
             assert_eq!(parse(&buf[..n + 1]), Err(Refused::Bad), "{req:?} + byte");
@@ -1321,7 +1369,8 @@ mod tests {
             m.extend_from_slice(name);
             m.push(group.len() as u8);
             m.extend_from_slice(group);
-            m.extend_from_slice(&[7, 0, 0, 0, 1]);
+            m.extend_from_slice(&[7, 0, 0, 0, 1, 5]);
+            m.extend_from_slice(b"alice");
             m
         };
         let reg = |slot: u8, name: &[u8]| reg_in(slot, name, b"");
@@ -1349,11 +1398,29 @@ mod tests {
                 group: b"",
                 task: 7,
                 attempt: 1,
+                owner: b"alice",
             }),
-            "the attempt after the group (#304)"
+            "the attempt after the group (#304), then the owner (#311)"
         );
         let r = reg(0, b"a");
-        assert_eq!(parse(&r[..r.len() - 1]), Err(Refused::Bad), "no attempt");
+        assert_eq!(parse(&r[..r.len() - 7]), Err(Refused::Bad), "no attempt");
+        assert_eq!(parse(&r[..r.len() - 6]), Err(Refused::Bad), "no owner");
+        assert_eq!(parse(&r[..r.len() - 1]), Err(Refused::Bad), "short owner");
+        let mut r = reg(0, b"a");
+        r.truncate(r.len() - 6);
+        r.push(0);
+        assert_eq!(parse(&r), Err(Refused::Bad), "empty owner");
+        for bad in [&b""[..], b"a b", &[b'o'; 33]] {
+            let mut m = std::vec![VERSION, op::OWNER, bad.len() as u8];
+            m.extend_from_slice(bad);
+            assert_eq!(parse(&m), Err(Refused::Bad), "OWNER {bad:?}");
+            assert_eq!(encode(&Request::Owner { name: bad }, &mut [0; 80]), None);
+        }
+        assert_eq!(
+            parse(&[VERSION, op::OWNER, 1, b'a', b'b']),
+            Err(Refused::Bad),
+            "OWNER trailing"
+        );
         assert_eq!(
             parse(&[VERSION, op::ENDED, SLOTS, 7, 0, 0, 0, 1]),
             Err(Refused::Bad),
@@ -1380,6 +1447,7 @@ mod tests {
             group: b"",
             task: 0,
             attempt: 0,
+            owner: b"alice",
         };
         assert_eq!(encode(&bad, &mut [0; 80]), None);
         let bad = Request::Register {
@@ -1388,18 +1456,35 @@ mod tests {
             group: b"x\n",
             task: 0,
             attempt: 0,
+            owner: b"alice",
         };
         assert_eq!(encode(&bad, &mut [0; 80]), None);
+        let bad = Request::Register {
+            slot: 0,
+            name: b"x",
+            group: b"",
+            task: 0,
+            attempt: 0,
+            owner: b"",
+        };
+        assert_eq!(encode(&bad, &mut [0; 80]), None, "no owner");
         crate::fuzz(100_000, 6, |m| {
             let mut v = [0u8; 302];
             v[0] = VERSION;
             v[1..1 + m.len()].copy_from_slice(m);
-            if let Ok(Request::Register {
-                name, slot, group, ..
-            }) = parse(&v[..1 + m.len()])
-            {
-                assert!(valid_name(name) && slot < SLOTS);
-                assert!(group.is_empty() || valid_name(group));
+            match parse(&v[..1 + m.len()]) {
+                Ok(Request::Register {
+                    name,
+                    slot,
+                    group,
+                    owner,
+                    ..
+                }) => {
+                    assert!(valid_name(name) && slot < SLOTS && valid_name(owner));
+                    assert!(group.is_empty() || valid_name(group));
+                }
+                Ok(Request::Owner { name }) => assert!(valid_name(name)),
+                _ => {}
             }
             let _ = parse(m);
             let _ = command(m);

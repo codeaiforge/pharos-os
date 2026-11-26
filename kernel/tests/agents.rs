@@ -129,6 +129,7 @@ fn run(t: &mut TestRun) {
     for step in [
         "INFO: interface agents, every test agent accepted, none running",
         "agents with a refused, missing, or unlisted manifest are not found",
+        "an agent whose owner is no person fails at its start: no owner nobody",
         "agent requests from a control client are refused",
         "an unknown task is not found",
         "a task completes on its first attempt",
@@ -188,6 +189,10 @@ fn run(t: &mut TestRun) {
             "agents: absent manifest refused: no manifest",
         ),
         ("a start", " started"),
+        (
+            "an attempt refused for its owner",
+            " refused: no owner nobody",
+        ),
         ("a completion", " completed"),
         ("a crash with its vector", " crashed 14"),
         ("an exit with its code", " exited 3"),

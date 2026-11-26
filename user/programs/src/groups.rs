@@ -155,6 +155,7 @@ mod tests {
             https: &[],
             guest: false,
             channels: &[],
+            owner: b"admin",
         }
     }
 

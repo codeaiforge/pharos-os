@@ -26,9 +26,10 @@
 //!
 //! For the `trust` test kernel (#96): 15, a stand-in agent runtime that
 //! hangs. Handles 1 `bin/child`, 2 the trusted service's endpoint (`SEND`,
-//! badged as the runtime). Starts a looping agent (5) with no
-//! capabilities, registers it with the trusted service as `worker`, and
-//! loops forever.
+//! badged as the runtime). First asks `OWNER` (#311) of `admin` and of
+//! `nobody`, exiting 4 unless they are `OK` and `NOT_FOUND`; then starts
+//! a looping agent (5) with no capabilities, registers it with the
+//! trusted service as `worker`, and loops forever.
 //!
 //! For the `spawn` test kernel's classes (#114): 16, started in the agents
 //! class, handle 1 `bin/child`. Exits 0 if a child in a higher class
@@ -146,8 +147,26 @@ fn main(arg: u64) -> u64 {
             let reads = process_status(1) == Ok(Status::Running);
             if refused && reads { 0 } else { 1 }
         }
-        // Two tasks of one agent: both registered as `worker`.
+        // Two tasks of one agent: both registered as `worker`, after the
+        // owner checks the runtime makes (#311).
         15 => {
+            let Ok(reply) = endpoint_create() else {
+                return 4;
+            };
+            let ask = |name: &[u8]| {
+                let mut msg = [0u8; 64];
+                let n = trust::encode(&Request::Owner { name }, &mut msg)?;
+                let mut out = [0u8; 64];
+                match call_timeout(2, &msg[..n], reply, &mut out, 5_000_000) {
+                    Ok(Received::Message { len: 1, .. }) => Some(out[0]),
+                    _ => None,
+                }
+            };
+            if ask(b"admin") != Some(pharos_proto::status::OK)
+                || ask(b"nobody") != Some(pharos_proto::status::NOT_FOUND)
+            {
+                return 4;
+            }
             for slot in 0..2 {
                 let Ok(agent) = spawn(1, 5, &[], None) else {
                     return 1;
@@ -159,6 +178,7 @@ fn main(arg: u64) -> u64 {
                     group: b"",
                     task: 0,
                     attempt: 0,
+                    owner: b"admin",
                 };
                 let Some(n) = trust::encode(&register, &mut msg) else {
                     return 2;

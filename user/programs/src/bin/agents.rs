@@ -304,6 +304,19 @@ const MAX_CONTROLS: usize = 4;
 
 const BOOT: &[Entry] = &[];
 
+/// Every test agent's owner (#311): the person the runner seeds
+/// (`pharos_services::TEST_PERSON`).
+const TEST_OWNER: &[u8] = b"admin";
+
+// No compiled entry without an owner (D-038, #311).
+const _: () = assert!(
+    manifest::owned(BOOT)
+        && manifest::owned(TEST)
+        && manifest::owned(BUDGETS)
+        && manifest::owned(HTTPS_TABLE)
+        && manifest::owned(GUEST_TABLE)
+);
+
 /// The `budgets` test kernel's agents (#116): `spender` within its own
 /// budget, `grouper` within its group's minute, `hog` over its CPU time,
 /// and `pair` and `big` held by their groups' attempts and pages.
@@ -346,6 +359,7 @@ const HTTPS_TABLE: &[Entry] = &[Entry {
     propose: false,
     https: &[b"items", b"echo", b"post", b"missing"],
     guest: false,
+    owner: TEST_OWNER,
     channels: &[],
 }];
 
@@ -375,6 +389,7 @@ const GUEST_TABLE: &[Entry] = &[Entry {
     propose: false,
     https: &[b"items"],
     guest: true,
+    owner: TEST_OWNER,
     channels: &[],
 }];
 
@@ -540,6 +555,7 @@ const fn budget_entry(name: &'static [u8], budget: Budget, pages: u32) -> Entry 
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     }
 }
@@ -571,6 +587,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     Entry {
@@ -596,6 +613,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     Entry {
@@ -621,6 +639,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     Entry {
@@ -646,6 +665,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     // The `permissions` kernel's (#105).
@@ -673,6 +693,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     // Gets nothing; may ask for model 2 and data access (#106).
@@ -699,6 +720,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     // The `agents_net` kernel's (#109): gets the host echo server, may
@@ -726,6 +748,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     // The same grant as `netter`, which the user's `revoke netter` leaves.
@@ -752,6 +775,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     // The `hostile` kernel's (#110): its own files, and five models to ask
@@ -779,6 +803,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     // The `tools` kernel's (#126, #127): both tools, `report.txt` and
@@ -811,6 +836,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     // The `injection` kernel's (#129): both tools, `report.txt` with its
@@ -838,6 +864,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     // The `channels` kernel's (#133): `talker` may send to `hearer` (and
@@ -866,6 +893,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[b"hearer"],
     },
     Entry {
@@ -891,6 +919,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     Entry {
@@ -916,6 +945,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     Entry {
@@ -944,6 +974,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[b"outsider"],
     },
     // The `groups` kernel's (#134): `boss` supervises `helper` and `aide`
@@ -975,6 +1006,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     Entry {
@@ -1004,6 +1036,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     Entry {
@@ -1032,6 +1065,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         // Its one channel, for the `deputy` kernel (#138).
         channels: &[b"boss"],
     },
@@ -1058,6 +1092,7 @@ const TEST: &[Entry] = &[
         propose: false,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     // The `tools` kernel's too (#165): proposes its own file as an update.
@@ -1084,10 +1119,17 @@ const TEST: &[Entry] = &[
         propose: true,
         https: &[],
         guest: false,
+        owner: TEST_OWNER,
         channels: &[],
     },
     KNOWLEDGE_AGENTS[0],
     KNOWLEDGE_AGENTS[1],
+    // The `agents` kernel's (#311): owned by no current person, so each
+    // attempt is refused at its start.
+    Entry {
+        owner: b"nobody",
+        ..knowledge_entry(b"orphan")
+    },
     // The `poison` kernel's (#146): reads and writes `notes` and `ops`,
     // and may ask for nothing.
     Entry {
@@ -1340,6 +1382,27 @@ fn data_path(agent: &[u8], file: &[u8]) -> Vec<u8> {
     p.push(b'/');
     p.extend_from_slice(file);
     p
+}
+
+/// How long `trust` may take to answer `OWNER` (#311): it may be hashing
+/// a passphrase (at most 2 s).
+const OWNER_US: u64 = 5_000_000;
+
+/// Asks `trust` whether `owner` is a current person (#311, identity.md),
+/// on the runtime's `reply`. `Err` is what the attempt fails with: it
+/// fails closed when `trust` does not answer.
+fn check_owner(owner: &[u8], reply: Handle) -> Result<(), Vec<u8>> {
+    let mut msg = [0u8; 64];
+    let mut out = [0u8; 64];
+    let answer = trust::encode(&trust::Request::Owner { name: owner }, &mut msg)
+        .and_then(|n| call_timeout(TRUST, &msg[..n], reply, &mut out, OWNER_US).ok());
+    match answer {
+        Some(Received::Message { len: 1.., .. }) if out[0] == status::OK => Ok(()),
+        Some(Received::Message { len: 1.., .. }) if out[0] == status::NOT_FOUND => {
+            Err([&b"no owner "[..], owner].concat())
+        }
+        _ => Err(b"owner not checked".to_vec()),
+    }
 }
 
 /// Sends `req` to `trust` without blocking, trying for at most 1 s:
@@ -2001,6 +2064,25 @@ impl Runtime {
         else {
             return;
         };
+        // Its owner must be a current person (#311), before anything runs
+        // or is granted; the start record names the owner either way.
+        let owner = limits.entry.owner;
+        let checked = check_owner(owner, self.reply);
+        let detail = match &checked {
+            Ok(()) => [&b"owner "[..], owner].concat(),
+            Err(why) => why.clone(),
+        };
+        let result = if checked.is_ok() {
+            outcome::OK
+        } else {
+            outcome::REFUSED
+        };
+        self.start_event(limits.entry.name, id, result, &detail);
+        if let Err(why) = checked {
+            self.finish(id, State::Failed, &why);
+            self.event(id, &[&b"refused: "[..], &why].concat(), None);
+            return;
+        }
         // A guest has no program (#298): its attempt waits for `BIND`.
         let guest = limits.entry.guest;
         let process = if guest {
@@ -2031,13 +2113,14 @@ impl Runtime {
         };
         // `trust` holds the agent's STOP before the runtime answers it; a
         // guest is registered with none, and stopped through the runtime.
-        let mut msg = [0u8; 80];
+        let mut msg = [0u8; 128];
         let register = trust::Request::Register {
             slot: slot as u8,
             name: limits.entry.name,
             group: limits.entry.budget.group,
             task: id,
             attempt: self.attempt(id),
+            owner,
         };
         let registered = trust::encode(&register, &mut msg)
             .is_some_and(|n| send(TRUST, &msg[..n], process, STOP | WAIT, 0).is_ok());
@@ -3574,6 +3657,24 @@ impl Runtime {
     }
 
     /// An event about `task`'s `permission`; true if recorded.
+    /// The `start` record of task `task`'s attempt (#311): its owner, or
+    /// why it was refused.
+    fn start_event(&self, actor: &[u8], task: u32, result: u8, detail: &[u8]) -> bool {
+        self.audit(&Record {
+            kind: Kind::Event,
+            refers: 0,
+            actor,
+            task,
+            attempt: self.attempt(task),
+            action: action::START,
+            permission: None,
+            service: b"",
+            outcome: result,
+            detail,
+        })
+        .is_some()
+    }
+
     fn permission_event(
         &self,
         actor: &[u8],
@@ -4708,6 +4809,13 @@ fn main(arg: u64) -> u64 {
         .is_some_and(|n| send(TRUST, &msg[..n], SERVICE, SEND, agents::TRUST).is_ok());
     if !channel {
         return 8;
+    }
+    // Every owner, so `trust` refuses `person remove` of one before its
+    // agents run (#311); each attempt's start checks again.
+    for (i, e) in table.iter().enumerate() {
+        if !table[..i].iter().any(|o| o.owner == e.owner) {
+            let _ = check_owner(e.owner, r.reply);
+        }
     }
     if send(REPORT, b"ready", 0, 0, 0).is_err() {
         return 4;

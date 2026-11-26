@@ -202,6 +202,23 @@ pub struct Entry {
     /// A Tier 3 guest's entry (#298, bridge.md): the runtime starts no
     /// program for it; its attempts wait for the bridge's `BIND`.
     pub guest: bool,
+    /// The person who owns it (D-038, #311): checked with `trust` at each
+    /// attempt's start. A manifest cannot name or change it; [`owned`]
+    /// refuses a compiled table where an entry has none.
+    pub owner: &'static [u8],
+}
+
+/// Every entry of `table` names an owner, a valid person name (#311).
+/// The runtime asserts it of each table when it compiles.
+pub const fn owned(table: &[Entry]) -> bool {
+    let mut i = 0;
+    while i < table.len() {
+        if !valid_name(table[i].owner) {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// What one attempt of an agent may use (D-022, resources.md). Each limit
@@ -691,7 +708,20 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
         propose: false,
         https: &[],
         guest: false,
+        owner: b"alice",
     }];
+
+    #[test]
+    fn every_compiled_entry_names_an_owner() {
+        assert!(owned(TABLE) && owned(&[]));
+        for bad in [&b""[..], b"two words", &[b'o'; 33]] {
+            let e = Entry {
+                owner: bad,
+                ..TABLE[0]
+            };
+            assert!(!owned(&[TABLE[0], e]), "owner {bad:?}");
+        }
+    }
 
     fn with(key: &str, value: &str) -> std::string::String {
         let text = std::str::from_utf8(S).unwrap();

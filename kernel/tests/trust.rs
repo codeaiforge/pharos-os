@@ -7,7 +7,9 @@
 //! the runtime under `init`'s badge, and sends an impostor agent under the
 //! wrong badge, which `trust` must drop, and two guests with no process
 //! (#304): `gone`, whose attempt then ends (`ENDED`), and `visitor`, told
-//! only of an earlier attempt's end. `cargo xtask runner` types on the
+//! only of an earlier attempt's end. The stand-in registers its agents
+//! only after `OWNER` answers `OK` for the seeded person and `NOT_FOUND`
+//! for a name with no record (#311). `cargo xtask runner` types on the
 //! trusted console (`TRUST_SCRIPT`): `list` (`visitor`, not `gone`), `stop
 //! worker`, `stop gone` (no agent), a bad command, `list`, `stop all`. The kernel checks both agents end while the runtime
 //! spins, then the runtime ends, and what each process holds. Last, an
@@ -89,6 +91,9 @@ fn guest(slot: u8, name: &[u8], task: u32, attempt: u8) -> Vec<u8> {
     m.push(0);
     m.extend_from_slice(&task.to_le_bytes());
     m.push(attempt);
+    // Its owner (#311).
+    m.push(5);
+    m.extend_from_slice(b"carol");
     m
 }
 
@@ -250,7 +255,10 @@ fn run(t: &mut TestRun) {
         }
         sched::sleep(Duration::from_millis(50));
     }
-    t.check("the runtime started its two agents", agents.len() == 2);
+    t.check(
+        "OWNER answered OK and NOT_FOUND (#311), then the runtime started its two agents",
+        agents.len() == 2,
+    );
     t.check(
         "the agents hold no capability",
         agents.iter().all(|&a| holds(a, |_| true) == 0),
