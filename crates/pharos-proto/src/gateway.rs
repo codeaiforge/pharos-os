@@ -14,7 +14,8 @@
 //! (32)]`: the request on that route whose approved bytes (`route ‖ 0 ‖
 //! target ‖ 0 ‖ body`) have that SHA-256 may be sent once, within
 //! [`APPROVAL_US`], if `approvers` meets the route's mark. Its reply is one
-//! byte: `OK`, `NOT_FOUND` (no such route, or not marked), or `BUSY`
+//! byte: `OK`, `NOT_FOUND` (no such route; since the M6.4 review, F4, an
+//! unmarked route takes one too, for a manifest's `approve`), or `BUSY`
 //! ([`MAX_APPROVALS`] held). `[1, MARK, name length, route name]` (#326),
 //! from a client: how many people must approve a request on that route,
 //! answered `[OK, approvers]` or `[NOT_FOUND]`, and recorded nowhere.

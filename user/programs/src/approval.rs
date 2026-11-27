@@ -8,13 +8,15 @@ use alloc::vec::Vec;
 use pharos_proto::permission::Permission;
 use pharos_proto::trust::Kind;
 
-/// Approved bytes on one line.
-pub const LINE: usize = 32;
+/// Approved bytes on one line: 16, so the longest line (71 characters)
+/// fits an 80-column terminal and no part of one wraps to a line without
+/// [`MARK`] (M6.4 review F7; the design had 32, 135 characters).
+pub const LINE: usize = 16;
 /// Lines on one page.
 pub const PAGE_LINES: usize = 16;
 /// Approved bytes on one page.
 pub const PAGE: usize = LINE * PAGE_LINES;
-/// The longest line: `| `, 4 hex digits, a space, and 32 bytes of at most
+/// The longest line: `| `, 4 hex digits, a space, and 16 bytes of at most
 /// 4 characters each (`\xNN`).
 pub const LINE_TEXT: usize = 7 + LINE * 4;
 /// Every line of a payload starts so, and no line of `trust`'s own does.
@@ -121,21 +123,29 @@ pub enum NotApproved {
     Requester,
     /// Of an ask for two: the person already approved it.
     Again,
+    /// Of an ask for two: the person's passphrase was last set by someone
+    /// else (`person add`, `person passphrase`), who could log in as them
+    /// (M6.4 review F1). They count once they set their own.
+    NotTheirs,
 }
 
 /// Whether `person` may be one of the `needed` approvers of an ask whose
 /// requester is `owner`, after those in `by` (#326, approval.md, "Answers
-/// and approvers"): for two, distinct people, neither the requester, and
-/// none at all while `trust` does not know who the requester is. For one,
+/// and approvers"): for two, distinct people, neither the requester, none
+/// at all while `trust` does not know who the requester is, and none whose
+/// passphrase someone else set (`not_theirs`, M6.4 review F1). For one,
 /// anyone logged in, the owner too.
 pub fn may_approve(
     needed: u8,
     owner: Option<&[u8]>,
     by: &[&[u8]],
     person: &[u8],
+    not_theirs: bool,
 ) -> Result<(), NotApproved> {
     if needed < 2 {
         Ok(())
+    } else if not_theirs {
+        Err(NotApproved::NotTheirs)
     } else if owner.is_none_or(|o| o == person) {
         Err(NotApproved::Requester)
     } else if by.contains(&person) {
@@ -170,14 +180,15 @@ pub fn holds(yes: bool, own: Option<[u8; 32]>, given: Option<[u8; 32]>, call: bo
 
 /// How long an ask waits for its approvers before it is denied (#327,
 /// approval.md, "Timeouts and failures"): 60 s for one, 10 min for two,
-/// who log in one after the other; 5 s and 20 s with the test policy
-/// tables, so a kernel sees each end, with room for two logins.
+/// who log in one after the other; 5 s and 40 s with the test policy
+/// tables, so a kernel sees each end, with room for a person added and
+/// three logins (the `approval` kernel).
 pub const fn timeout_us(approvers: u8, test: bool) -> u64 {
     match (approvers >= 2, test) {
         (false, false) => 60_000_000,
         (true, false) => 600_000_000,
         (false, true) => 5_000_000,
-        (true, true) => 20_000_000,
+        (true, true) => 40_000_000,
     }
 }
 
@@ -206,23 +217,30 @@ mod tests {
     fn two_approvers_are_two_people_neither_the_requester() {
         let owner = Some(&b"admin"[..]);
         assert_eq!(
-            may_approve(1, owner, &[], b"admin"),
+            may_approve(1, owner, &[], b"admin", false),
             Ok(()),
             "one: the owner too"
         );
         assert_eq!(
-            may_approve(2, owner, &[], b"admin"),
+            may_approve(2, owner, &[], b"admin", false),
             Err(NotApproved::Requester)
         );
-        assert_eq!(may_approve(2, owner, &[], b"bob"), Ok(()));
+        assert_eq!(may_approve(2, owner, &[], b"bob", false), Ok(()));
         assert_eq!(
-            may_approve(2, owner, &[b"bob"], b"bob"),
+            may_approve(2, owner, &[b"bob"], b"bob", false),
             Err(NotApproved::Again)
         );
-        assert_eq!(may_approve(2, owner, &[b"bob"], b"carol"), Ok(()));
+        assert_eq!(may_approve(2, owner, &[b"bob"], b"carol", false), Ok(()));
+        // One whose passphrase another set: someone else could be them
+        // (review F1); one approver is still one person.
+        assert_eq!(
+            may_approve(2, owner, &[b"bob"], b"dave", true),
+            Err(NotApproved::NotTheirs)
+        );
+        assert_eq!(may_approve(1, owner, &[], b"dave", true), Ok(()));
         // With the requester unknown, no one can be shown not to be it.
         assert_eq!(
-            may_approve(2, None, &[], b"bob"),
+            may_approve(2, None, &[], b"bob", false),
             Err(NotApproved::Requester)
         );
     }
@@ -286,18 +304,19 @@ mod tests {
 
     #[test]
     fn lines_carry_their_offset_and_the_longest_fits() {
-        let bytes = [0u8; 40];
+        let bytes = [0u8; 20];
         assert_eq!(
             text(&bytes, 1),
-            std::format!("| 0020 {}", "\\x00".repeat(8))
+            std::format!("| 0010 {}", "\\x00".repeat(4))
         );
         assert_eq!(text(&bytes, 0).len(), LINE_TEXT);
+        assert!(LINE_TEXT <= 80, "fits an 80-column terminal");
         assert_eq!(text(b"a\\b\n", 0), "| 0000 a\\\\b\\x0a");
-        assert_eq!(text(b"a", 1), "| 0020 ");
+        assert_eq!(text(b"a", 1), "| 0010 ");
         assert_eq!(pages(1), 1);
         assert_eq!(pages(PAGE), 1);
         assert_eq!(pages(PAGE + 1), 2);
-        assert_eq!(pages(pharos_proto::trust::MAX_PAYLOAD), 8);
+        assert_eq!(pages(pharos_proto::trust::MAX_PAYLOAD), 16);
     }
 
     #[test]

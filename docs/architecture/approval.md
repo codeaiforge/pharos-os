@@ -69,7 +69,7 @@ The route's name is in the digest because the route fixes the host, the method, 
 
 ### Marks
 
-- **Gateway routes:** `Route` gains `approve: Approve` (`None`, `One`, or `Two`), with `None` the default, so every existing route stays grant-only. `pharos_services::check` refuses:
+- **Gateway routes:** `Route` gains `approve: Approve` (`None`, `One`, or `Two`), with `None` the default, so every existing route stays grant-only. Host tests over every table refuse (`check_routes` and `trust_approves`; `pharos_services::check` itself does not, M6.4 review G1):
   - a marked route whose `max_body` plus its longest target is over the largest approvable payload (open question 1);
   - a marked route in a table without `trust`'s capability on the gateway.
 - **`send`:** always `One`.
@@ -97,18 +97,21 @@ The route's name is in the digest because the route fixes the host, the method, 
 `trust` writes everything itself, from the copy and the fields.
 
 ```text
-ask #3: fetcher task 7 (owner admin) wants POST on route issues, 2 approvers
-| 0000 issues\x00/repos/acme/demo/issues\x00{
-| 0020 "title":"Disk full on build-3","
-| 0040 body":"C:\\logs\x0a"}
+ask #3: fetcher task 7 (owner admin) wants an HTTPS request on route issues, 2 approvers
+| 0000 issues\x00/repos/ac
+| 0010 me/demo/issues\x00{
+| 0020 "title":"Disk fu
+| 0030 ll on build-3","
+| 0040 body":"C:\\logs\x0a"
+| 0050 }
 #3: 81 bytes, sha256 ada84318; yes 3 ada84318 / no 3
 ```
 
-- Each line shows 32 approved bytes, as `| `, the offset in 4 hex digits, a space, and the bytes. Printable ASCII (0x20–0x7e) is written as itself, except `\`, which is written `\\`. Every other byte is written `\xNN`. So the longest line is 7 + 32 × 4 = 135 bytes, and nothing in a payload can end a line or write a control sequence.
+- Each line shows 16 approved bytes (32 in the design as accepted; 16 since the M6.4 review, F7), as `| `, the offset in 4 hex digits, a space, and the bytes. Printable ASCII (0x20–0x7e) is written as itself, except `\`, which is written `\\`. Every other byte is written `\xNN`. So the longest line is 7 + 16 × 4 = 71 bytes, which fits an 80-column terminal without wrapping, and nothing in a payload can end a line or write a control sequence.
 - No line of `trust`'s own starts with `| `, so payload text cannot pass for a prompt, a name, or an answer.
-- 16 lines (512 bytes) make a page. `more <n>` shows the next page, and `show <n>` shows the first again.
+- 16 lines (256 bytes) make a page, so a 4 KiB payload is 16 pages. `more <n>` shows the next page, and `show <n>` shows the first again.
 - The hash line comes only after the last page. It gives the length, the first 8 hex digits of the digest, and the answers.
-- The header line names the agent and its owner (from `REGISTER`), the route and its method (from the request; the route's name is in the digest, so a lie here is refused at the gateway), and how many approvers are needed.
+- The header line names the agent and its owner (from `REGISTER`), the route (from the request; the route's name is in the digest, so a lie here is refused at the gateway). *As built:* not its method, which `ASK` does not carry and the compiled route fixes (M6.4 review F5), and how many approvers are needed.
 
 ### Answers and approvers
 
@@ -145,7 +148,7 @@ ask #3: fetcher task 7 (owner admin) wants POST on route issues, 2 approvers
 - A manifest may now list 8 routes (`manifest::MAX_ROUTES`), so `fetcher` holds `approved` beside its four. Files, channels, and knowledge scopes stay at 4.
 
 *As built (#326):*
-- **The runtime learns a route's mark from the gateway:** gateway v1 `MARK` (op 3), `[1, 3, name length, name]`, answered `[OK, approvers]`, or `[NOT_FOUND]` for a route the table lacks or the client may not use, and recorded nowhere. The runtime cannot read the route table itself, as it does not know which table `init` runs. It asks before every `REQUEST`; no answer within 1 s is `BUSY`. The approvers it asks for are the higher of the mark and the manifest's. A runtime that skips this or asks for fewer is still refused at the gateway.
+- **The runtime learns a route's mark from the gateway:** gateway v1 `MARK` (op 3), `[1, 3, name length, name]`, answered `[OK, approvers]`, or `[NOT_FOUND]` for a route the table lacks or the client may not use, and recorded nowhere. The runtime cannot read the route table itself, as it does not know which table `init` runs. It asks before every `REQUEST`; no answer within the request's own wait (35 s) is `BUSY`. It was 1 s in #326, which failed the `vault` kernel's request after the gateway's restart under the full suite's load; a `REQUEST` alone had waited. The approvers it asks for are the higher of the mark and the manifest's. A runtime that skips this or asks for fewer is still refused at the gateway.
 - **The manifest's `approve` key:** `approve = <route>:<one|two>, ...`, each a route of its `https` list, at most once (`Manifest::approvers`). The runtime keeps the marks beside the entry's route names. It raises a mark; the gateway enforces the route's own.
 - **A marked request is held as `send`'s call is:** `approved_call` keeps the approved bytes (`route ‖ 0 ‖ target ‖ 0 ‖ body`) in the slot's `Confirm`, answers `PENDING` while the agent repeats the request, `BUSY` for another, and `REFUSED` for a no or no answer. Only then are the budget charged and the intent recorded, and the request goes to the gateway, which uses the approval `trust` sent it. `Confirm::data` now holds the approved bytes for `send` too, and the digest check compares them.
 - **Two approvers in `trust`** (`approval::may_approve`, host-tested): for two, distinct people, neither the agent's owner from `REGISTER`, and no one at all while `trust` does not know the owner. Each person must be shown the hash line since their own login, so a second approver logs in and types `show <n>`. A yes short of the count shows `ask #<n>: approved by <name>, 1 more needed`. Only the last one sends `APPROVED` (with the count) and answers the runtime; if either fails, that yes is taken back. A yes refused because its author is the requester, or approved before, is recorded as `approve`, outcome refused, `ask #<n> <8 hex> requester` (or `again`).
@@ -169,7 +172,7 @@ Each of these denies, and each is recorded:
 One call waits per task, and at most 4 per runtime (`MAX_PENDING`), so a flood of calls asks the console at most four times at once.
 
 *As built (#327):*
-- The timeout is `approval::timeout_us`: 60 s for one approver and 10 min for two, or 5 s and 20 s (10 s before #328, which needed room for two logins) with the test policy tables (the runtime's arguments 1 and 5), host-tested. The runtime sets each ask's deadline by its approvers, and a permission's approval keeps one approver's.
+- The timeout is `approval::timeout_us`: 60 s for one approver and 10 min for two, or 5 s and 40 s (10 s before #328, 20 s before the M6.4 review, as the `approval` kernel adds a person and logs in three times) with the test policy tables (the runtime's arguments 1 and 5), host-tested. The runtime sets each ask's deadline by its approvers, and a permission's approval keeps one approver's.
 - **A logout does not deny.** The issue's text (#327) asked that a logout or an idle session end deny a pending ask. The design keeps a yes given after its approver logs out, and two approvers at one console can only take turns. So a logout, or an idle end, only takes away "shown since their login" (each ask's `seen`); the next person must read it again. The deadline still bounds every ask.
 - **A restarted `trust`** is not given the runtime's `CHANNEL` again, so it cannot answer; it knows none of the asks before it, and ignores their `RESOLVED`. Each ask ends at its deadline as `EXPIRE`, denied: not at once, as section 3 had it, but within the timeout. A restarted runtime's `CHANNEL` makes `trust` drop every ask it shows (`ask #<n>: the runtime ended`, #324), and a restarted gateway holds no approvals (#325), so an approved request after it is `NOT_APPROVED`.
 - The kernel tests of each, with timeouts the kernel shortens and `trust` and the gateway killed, are the `approval` kernel's (#328).
@@ -192,12 +195,25 @@ No payload byte reaches the trail, only its length and its digest. The trail sho
 - The gateway: 4 approvals of 34 bytes each.
 - Approvals a task needs are counted in the demo scenarios and held to a budget at the gate (#329). This counts against approval fatigue.
 
+### Since the M6.4 review
+
+[review-m6.4-approval.md](../security/review-m6.4-approval.md):
+- `ASK` carries the runtime's deadline (`wait_ms`), and `trust` ends each ask then itself (F3).
+- An ask approved and told to the runtime takes no further yes, and the gateway replaces an approval of the same route and bytes rather than keeping two (F2).
+- The gateway takes an approval for any route its table has, so a manifest's `approve` on an unmarked route can be approved (F4).
+- Each ask's first line is written with every first page and never dropped (F5).
+- A login or logout sets each ask back to its first page (F6).
+- Lines are 16 bytes (F7).
+- A `trust` with no channel to the runtime refuses every yes at once and tells the gateway nothing (F9).
+- A two-approver ask refuses a person whose passphrase someone else set since `trust` started, until they set their own (F1).
+- `MARK` waits as long as a request (35 s), not 1 s: found by the gate's own run, on a gateway slow to restart.
+
 ## 4. Security
 
 - **The bytes sent equal the bytes shown.** `trust` hashes its own copy, the one it shows. The gateway hashes the request it is about to send and refuses any other. A runtime that writes one payload to `trust` and gives the gateway another is refused at the gateway.
 - **The agent cannot shape the prompt.** Payload lines are escaped and prefixed, so no payload line looks like one of `trust`'s. Names are checked names (`valid_name`). The hash line comes from `trust` alone.
 - **The approver reads to the end.** `yes` needs the digits from the hash line, which only follows the last page. An approval mistyped against another `#<n>` does not match that request's digest.
-- **Four eyes:** two different logged-in people, and the owner (the requester) can be neither. Approvers are only as distinct as their passphrases are private (identity.md, the limits).
+- **Four eyes:** two different logged-in people, and the owner (the requester) can be neither. *Since the M6.4 review (F1):* anyone logged in may add a person or set another's passphrase (D-038, the M6.5 review's F3), then log in as them. So a two-approver ask refuses a person whose passphrase someone else set since `trust` started, until they set their own. **Limit:** `trust` keeps that list in memory, so a passphrase set before `trust` restarted counts again once a restarted runtime lets `trust` approve.
 - **Limits:**
   - for `send`, the runtime is the sender, so a compromised runtime can send unapproved data (D-037's consequence) until `send` moves behind a service of its own;
   - a compromised runtime can lie about an agent's owner (M6.5 review F11), and so about who the requester is;
@@ -209,7 +225,7 @@ No payload byte reaches the trail, only its length and its digest. The trail sho
 | Where | What |
 | --- | --- |
 | Host | The escaping, line, and page layout, with every byte value, `\`, and the longest line; the digest of both kinds; the `ASK` and `APPROVED` codecs (fuzzed like the other interfaces); manifest `approve` parsing and `within`; `check` refusing a marked route too large to approve; the answer rules (each refusal reason) on `pharos_programs` state, host-tested |
-| QEMU, `approval` (#328) | **Implemented.** `init` table 13 (the `vault` table's services and routes, the runtime on policy table 5, `fetcher` with the short timeouts) and `agentclient` 20. The runner seeds `bob` and `carol` beside `admin`, starts the `vault` kernel's HTTPS server, and plays `APPROVAL_SCRIPT`: `a` (one approver) shown, `show` and its digits, sent; `b` (two) refused as `admin`'s, the requester's, then `bob`'s yes refused until he reads it after his login, his second refused, and `carol`'s; `c` (two) unanswered, refused at the 20 s deadline; `d` shown while no one was logged in, a yes refused until `show`; `e` approved, then changed by the agent to `f`, asked anew and refused. The client then sends `f` to the gateway itself as client 2 (`NOT_APPROVED`), `e` (sent: it was approved) and `e` again (`NOT_APPROVED`, used once). The kernel kills `trust` at the client's cue; the restarted `trust` shows `g`, the runner approves it, the gateway keeps it, and `trust` cannot tell the runtime (`answer: the runtime is not answering`): the ask is denied at its deadline. The runner checks the server received `a`, `b`, `d`, and `e` once each and never `c`, `f`, or `g` (it logs the first 16 hex digits of each POST body's SHA-256), and the trail: each answer by its person, the requester's and the repeated yes refused, the approvals kept by count and used. Mutation-checked: a gateway that adds a byte to an approved body fails it |
+| QEMU, `approval` (#328) | **Implemented.** `init` table 13 (the `vault` table's services and routes, the runtime on policy table 5, `fetcher` with the short timeouts) and `agentclient` 20. The runner seeds `bob` and `carol` beside `admin`, starts the `vault` kernel's HTTPS server, and plays `APPROVAL_SCRIPT`: `a` (one approver) shown, `show` and its digits, sent; `b` (two) refused as `admin`'s, the requester's, then as `dave`'s, whom `admin` just added (M6.4 review F1), then `bob`'s yes refused until he reads it after his login, his second refused, and `carol`'s; `c` (two) unanswered, refused at the 40 s deadline (20 s before the M6.4 review); `d` shown while no one was logged in, a yes refused until `show`; `e` approved, then changed by the agent to `f`, asked anew and refused. The client then sends `f` to the gateway itself as client 2 (`NOT_APPROVED`), `e` (sent: it was approved) and `e` again (`NOT_APPROVED`, used once). The kernel kills `trust` at the client's cue; the restarted `trust` shows `g`, the runner approves it, the gateway keeps it, and `trust` cannot tell the runtime (`answer: the runtime is not answering`): the ask is denied at its deadline. The runner checks the server received `a`, `b`, `d`, and `e` once each and never `c`, `f`, or `g` (it logs the first 16 hex digits of each POST body's SHA-256), and the trail: each answer by its person, the requester's and the repeated yes refused, the approvals kept by count and used. Mutation-checked: a gateway that adds a byte to an approved body fails it |
 | CI | A throwaway branch where the gateway sends a request whose digest differs from the approved one must fail `approval` (run linked in the gate) |
 
 ## 6. Alternatives

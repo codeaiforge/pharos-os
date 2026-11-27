@@ -7,7 +7,8 @@
 //! routes, the runtime on policy table 5 (`fetcher`, short approval
 //! timeouts), and `agentclient` 20. Each of `fetcher`'s requests on a
 //! marked route ends as the runner answers it: one approver, sent; two,
-//! the requester refused, then `bob` and `carol`; two, unanswered,
+//! the requester refused, a person the requester just added refused
+//! (M6.4 review F1), then `bob` and `carol`; two, unanswered,
 //! refused at the deadline; one shown while no one was logged in, approved
 //! only after `show`; one approved, then changed, and the change refused.
 //! Then the client, as gateway client 2, finds the changed body refused

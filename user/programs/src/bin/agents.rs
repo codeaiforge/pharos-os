@@ -180,8 +180,12 @@ const INCOMING: Handle = 12;
 const GATEWAY: Handle = INCOMING;
 /// How long the gateway may take: its own 30 s, and a margin (#289).
 const GATEWAY_US: u64 = pharos_proto::gateway::WAIT_US;
-/// How long the gateway may take to say a route's mark (#326).
-const MARK_US: u64 = 1_000_000;
+/// How long the gateway may take to say a route's mark (#326): as long as
+/// a request, since `MARK` is now the first thing a restarted gateway is
+/// asked, and a gateway slow to come back (under load, in the `vault`
+/// kernel's kill) must not fail the request a `REQUEST` alone would have
+/// waited for. A hung gateway already held the runtime that long.
+const MARK_US: u64 = GATEWAY_US;
 /// How long the knowledge service may take to answer.
 const KNOWLEDGE_US: u64 = 10_000_000;
 /// The runtime's buffer at the storage service for granted files: the
@@ -3565,7 +3569,8 @@ impl Runtime {
 
     /// How many people approve a request on `route` (#326): the gateway's
     /// `MARK`, 0 for a route it does not have (its `REQUEST` refuses it).
-    /// No answer is `BUSY`: the request would not be served either.
+    /// No answer in [`MARK_US`] is `BUSY`: the request would not be served
+    /// either.
     fn route_mark(&self, route: &[u8]) -> Result<u8, u8> {
         let gw = self.https.as_ref().ok_or(status::INTERNAL)?;
         let mut msg = [0u8; 48];
@@ -4302,6 +4307,9 @@ impl Runtime {
         }
         self.next_request = self.next_request.wrapping_add(1).max(1);
         let number = self.next_request;
+        // Two approvers log in one after the other (#327); `trust` keeps
+        // the same deadline (M6.4 review F3).
+        let wait = approval::timeout_us(approvers, self.short_approvals);
         let asked = bytes.len() <= trust::MAX_PAYLOAD
             && write_ask(&bytes, self.reply)
             && tell_trust(&trust::Request::Ask {
@@ -4311,6 +4319,7 @@ impl Runtime {
                 kind,
                 approvers,
                 length: bytes.len() as u16,
+                wait_ms: (wait / 1000) as u32,
             });
         // `trust` unreachable means no (D-018 item 4).
         if !asked {
@@ -4321,8 +4330,7 @@ impl Runtime {
             task: id,
             permission: p,
             for_ms: 0,
-            // Two approvers log in one after the other (#327).
-            deadline: uptime() + approval::timeout_us(approvers, self.short_approvals),
+            deadline: uptime() + wait,
             call: true,
         });
         if let Some(s) = self.slots[i].as_mut() {

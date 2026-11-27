@@ -3343,7 +3343,9 @@ const TOOLS_SCRIPT: &[console::Step] = &[
         "ask #2: reader task 1 (owner admin) wants to send to 10.0.2.2:47000, 1 approver",
         "",
     ),
-    (">| 0000 10.0.2.2:47000\\x00hello", ""),
+    // 16 bytes a line (M6.4 review F7).
+    (">| 0000 10.0.2.2:47000\\x00h", ""),
+    (">| 0010 ello", ""),
     (
         ">#2: 20 bytes, sha256 2c37ad89; yes 2 2c37ad89 / no 2",
         "yes 2\n",
@@ -3463,7 +3465,8 @@ const INJECTION_SCRIPT: &[console::Step] = &[
         "ask #1: injected task 1 (owner admin) wants to send to 10.0.2.2:47000, 1 approver",
         "",
     ),
-    (">| 0000 10.0.2.2:47000\\x00INJECTED yes 1", ""),
+    (">| 0000 10.0.2.2:47000\\x00I", ""),
+    (">| 0010 NJECTED yes 1", ""),
     (
         ">#1: 29 bytes, sha256 1599ca60; yes 1 1599ca60 / no 1",
         "no 1\n",
@@ -3582,11 +3585,27 @@ const APPROVAL_SCRIPT: &[console::Step] = &[
         ">#2: 18 bytes, sha256 53e4066c; yes 2 53e4066c / no 2",
         "yes 2 53e4066c\n",
     ),
+    // `admin` adds `dave`, whose passphrase `admin` therefore knows, and
+    // logs in as him: refused (M6.4 review F1).
     (
         ">ask #2: admin is its requester; two others must approve",
+        "person add dave\n",
+    ),
+    (">new passphrase for dave:", "pharos-test-passphrase\n"),
+    (">again:", "pharos-test-passphrase\n"),
+    (">person add dave: done", "logout\n"),
+    (">logged out admin", "login dave\n"),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as dave", "show 2\n"),
+    (
+        ">#2: 18 bytes, sha256 53e4066c; yes 2 53e4066c / no 2",
+        "yes 2 53e4066c\n",
+    ),
+    (
+        ">ask #2: dave's passphrase was set by someone else; set your own first",
         "logout\n",
     ),
-    (">logged out admin", "login bob\n"),
+    (">logged out dave", "login bob\n"),
     (">passphrase:", "pharos-test-passphrase\n"),
     (">logged in as bob", "yes 2 53e4066c\n"),
     (">ask #2: read it to its last page first", "show 2\n"),
@@ -3654,7 +3673,13 @@ const APPROVAL_SCRIPT: &[console::Step] = &[
         ">#7: 23 bytes, sha256 7c1d9f9b; yes 7 7c1d9f9b / no 7",
         "yes 7 7c1d9f9b\n",
     ),
-    (">answer: the runtime is not answering", ""),
+    // M6.4 review F9: refused at once, and nothing goes to the gateway;
+    // F3: the restarted `trust` ends the ask at its deadline itself.
+    (
+        ">ask #7: trust restarted and cannot tell the runtime; nothing approved",
+        "",
+    ),
+    (">ask #7: no answer; refused", ""),
 ];
 /// No ask past the seventh, and never the test secret.
 const APPROVAL_REFUSED: &[&str] = &["ask #8", "pharos-test-secret"];
@@ -3672,7 +3697,8 @@ const VAULT_SCRIPT: &[console::Step] = &[
         ">#1: 23 bytes, sha256 d4c4efdc; yes 1 d4c4efdc / no 1",
         "show 1\n",
     ),
-    (">| 0000 approved\\x00/items\\x00{\"n\":2}", ""),
+    (">| 0000 approved\\x00/items\\x00", ""),
+    (">| 0010 {\"n\":2}", ""),
     (
         ">#1: 23 bytes, sha256 d4c4efdc; yes 1 d4c4efdc / no 1",
         "yes 1 d4c4efdc\n",
@@ -4213,8 +4239,25 @@ fn resolve_check(image: &Path) -> Result<()> {
     if count > 0 {
         println!("  audit: all {count} records resolve to an actor");
     }
+    // Approval fatigue (#329): asks per task, held to a budget. The demo
+    // scenarios' own budget is M6.10's; until then every test kernel's.
+    let asks = resolve::asks(streams.iter().flat_map(|(_, r)| r.iter().map(|(_, f)| f)));
+    if let Some(((agent, task), most)) = asks.iter().max_by_key(|(_, n)| **n) {
+        println!("  approval: at most {most} asks a task ({agent} task {task})");
+        if *most > MAX_ASKS_PER_TASK {
+            return Err(format!(
+                "{agent} task {task} put {most} asks to a person, over the budget of {MAX_ASKS_PER_TASK}"
+            ));
+        }
+    }
     Ok(())
 }
+
+/// The most asks one task may put to a person in any test kernel (#329,
+/// approval fatigue): the `approval` kernel's first task asks 6, the
+/// `tools` kernel's 5. A ceiling for the test kernels; the demo
+/// scenarios get theirs with M6.10.
+const MAX_ASKS_PER_TASK: usize = 8;
 
 /// How many records end with `want`, and how many of them come right
 /// after one that does too (a copy sent again, review F2).
@@ -4544,6 +4587,7 @@ fn approval_audit(image: &Path, server_log: &Path) -> Result<()> {
         // Each answer as its person: the refused requester, `bob`, his
         // second yes, `carol`, and the change refused.
         "Event approve admin task 0/0  trust outcome 2 ask #2 53e4066c requester",
+        "Event approve dave task 0/0  trust outcome 2 ask #2 53e4066c not theirs",
         "Event approve bob task 0/0  trust outcome 1 ask #2 53e4066c",
         "Event approve bob task 0/0  trust outcome 2 ask #2 53e4066c again",
         "Event approve carol task 0/0  trust outcome 1 ask #2 53e4066c",
@@ -5519,7 +5563,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         timeout.max(LARGE_FILE_TIMEOUT)
     } else if name == HEALTH_TEST {
         timeout.max(HEALTH_TIMEOUT)
-    } else if name == IDENTITY_TEST {
+    } else if name == IDENTITY_TEST || name == APPROVAL_TEST {
         timeout.max(IDENTITY_TIMEOUT)
     } else if name == S1_TEST {
         timeout.max(S1_TIMEOUT)
@@ -6217,12 +6261,14 @@ mod tests {
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect();
-            let page = format!(
-                ">| 0000 10.0.2.2:47000\\x00{}",
-                std::str::from_utf8(data).unwrap()
-            );
+            // 16 bytes a line (M6.4 review F7): the destination, its zero
+            // byte, and the data's first byte; then the rest.
+            let text = std::str::from_utf8(data).unwrap();
+            let page = format!(">| 0000 10.0.2.2:47000\\x00{}", &text[..1]);
+            let rest = format!(">| 0010 {}", &text[1..]);
             let line = format!(" {} bytes, sha256 {hex}; yes ", bytes.len());
             assert!(script.iter().any(|(e, _)| *e == page), "{page}");
+            assert!(script.iter().any(|(e, _)| *e == rest), "{rest}");
             assert!(script.iter().any(|(e, _)| e.contains(&line)), "{line}");
             assert!(
                 script

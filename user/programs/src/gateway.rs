@@ -317,24 +317,23 @@ struct Approval {
 
 impl Approvals {
     /// Whether an approval on `route` (`None`: no such route) could be
-    /// kept now: `NOT_FOUND` for no route or one not marked, `BUSY` with
-    /// [`MAX_APPROVALS`] held, else `OK`. Keeps nothing.
+    /// kept now: `NOT_FOUND` for no route, `BUSY` with [`MAX_APPROVALS`]
+    /// held, else `OK`. A route the table does not mark may be marked by
+    /// an agent's manifest (`approve`, M6.4 review F4), so it takes
+    /// approvals too, though its requests need none here. Keeps nothing.
     pub fn room(&mut self, route: Option<(u8, &Route)>, now: u64) -> u8 {
         self.held.retain(|a| a.until > now);
         match route {
-            Some((_, r)) if r.approve.count() > 0 => {
-                if self.held.len() >= MAX_APPROVALS {
-                    BUSY
-                } else {
-                    OK
-                }
-            }
-            _ => NOT_FOUND,
+            Some(_) if self.held.len() >= MAX_APPROVALS => BUSY,
+            Some(_) => OK,
+            None => NOT_FOUND,
         }
     }
 
     /// Keeps an approval of request bytes with `digest` on `route` by
-    /// `approvers` people, if [`Self::room`] allows; its status.
+    /// `approvers` people, if [`Self::room`] allows; its status. One for
+    /// the same route and bytes replaces it, so one decision never leaves
+    /// two uses (M6.4 review F2).
     pub fn add(
         &mut self,
         route: Option<(u8, &Route)>,
@@ -342,6 +341,10 @@ impl Approvals {
         digest: [u8; 32],
         now: u64,
     ) -> u8 {
+        if let Some((route, _)) = route {
+            self.held
+                .retain(|a| !(a.route == route && a.digest == digest));
+        }
         let status = self.room(route, now);
         if let (OK, Some((route, _))) = (status, route) {
             self.held.push(Approval {
@@ -421,12 +424,17 @@ mod tests {
         assert!(a.take(0, &ROUTE, &d, 0));
         assert!(!a.take(0, &one, &d, 0));
         assert_eq!(a.add(None, 1, d, 0), NOT_FOUND);
-        assert_eq!(a.add(Some((0, &ROUTE)), 1, d, 0), NOT_FOUND, "not marked");
+        // A route the table does not mark takes one (review F4); its
+        // requests go without, and leave it unused.
+        assert_eq!(a.add(Some((0, &ROUTE)), 1, d, 0), OK, "not marked");
+        assert!(a.take(0, &ROUTE, &d, 0));
+        // The same bytes approved again replace the first (review F2).
+        assert_eq!(a.add(Some((0, &one)), 1, d, 0), OK);
         assert_eq!(a.add(Some((0, &one)), 1, d, 0), OK);
         assert!(!a.take(0, &one, &other, 1), "other bytes");
         assert!(!a.take(1, &one, &d, 1), "another route");
         assert!(a.take(0, &one, &d, 1));
-        assert!(!a.take(0, &one, &d, 2), "used once");
+        assert!(!a.take(0, &one, &d, 2), "used once, though approved twice");
         // Fewer approvers than the mark.
         assert_eq!(a.add(Some((0, &two)), 1, d, 0), OK);
         assert!(!a.take(0, &two, &d, 1));
@@ -434,10 +442,10 @@ mod tests {
         assert_eq!(a.add(Some((0, &one)), 1, d, 0), OK);
         assert!(!a.take(0, &one, &d, APPROVAL_US));
         // At most MAX_APPROVALS (the one for `two` expired too).
-        for _ in 0..MAX_APPROVALS {
-            assert_eq!(a.add(Some((0, &one)), 1, d, APPROVAL_US), OK);
+        for i in 0..=MAX_APPROVALS {
+            let want = if i < MAX_APPROVALS { OK } else { BUSY };
+            assert_eq!(a.add(Some((0, &one)), 1, [i as u8; 32], APPROVAL_US), want);
         }
-        assert_eq!(a.add(Some((0, &one)), 1, d, APPROVAL_US), BUSY);
         assert_eq!(
             &approval_detail(b"issues", &d, 1)[..16],
             b"approval issues "

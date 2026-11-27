@@ -172,6 +172,10 @@ struct Trust {
     /// Which of them are asks (#324): their bytes, copied, and where
     /// their display is.
     asks: alloc::vec::Vec<Asked>,
+    /// People whose passphrase someone else set since `trust` started
+    /// (`person add`, or `person passphrase` of another): they approve no
+    /// two-approver ask until they set their own (M6.4 review F1).
+    not_theirs: alloc::vec::Vec<Name>,
     /// The buffer the runtime writes an ask's bytes in (`BUFFER`), of
     /// [`trust::MAX_PAYLOAD`] bytes.
     ask_buffer: Option<Mapped>,
@@ -209,6 +213,14 @@ struct Asked {
     by: alloc::vec::Vec<Name>,
     /// Its requester: the agent's owner, from `REGISTER`.
     owner: Option<Name>,
+    /// Its first line, shown again with every first page, never dropped
+    /// (M6.4 review F5).
+    header: alloc::vec::Vec<u8>,
+    /// When the runtime stops waiting for it: `trust` ends it then too
+    /// (M6.4 review F3).
+    until: u64,
+    /// Approved and told to the runtime: no further yes (review F2).
+    answered: bool,
 }
 
 /// A line that is a passphrase, not a command (#310).
@@ -907,7 +919,9 @@ export them first (cargo xtask store export)",
         let n = join(detail, &mut d);
         self.record(audit::action::LOGOUT, None, &d[..n]);
         self.session.end();
-        self.asks.iter_mut().for_each(|a| a.seen = false);
+        self.asks
+            .iter_mut()
+            .for_each(|a| (a.seen, a.next) = (false, 0));
         self.say(&[
             b"logged out ",
             name.get(),
@@ -919,6 +933,7 @@ export them first (cargo xtask store export)",
     /// and clears it, so nothing the runtime writes later is shown or
     /// hashed; then shows the first page. Bytes that do not parse as
     /// `kind`, or an ask for two approvers (#326, not yet), are refused.
+    #[allow(clippy::too_many_arguments)]
     fn ask(
         &mut self,
         number: u16,
@@ -927,6 +942,7 @@ export them first (cargo xtask store export)",
         kind: trust::Kind,
         approvers: u8,
         length: usize,
+        wait_ms: u32,
     ) {
         let mut bytes = alloc::vec![0u8; length];
         let copied = self.ask_buffer.as_ref().is_some_and(|b| {
@@ -976,24 +992,29 @@ export them first (cargo xtask store export)",
             trust::Kind::Send => b" wants to send to ",
             trust::Kind::Https => b" wants an HTTPS request on route ",
         };
-        self.say(&[
-            b"ask #",
-            n,
-            b": ",
-            name,
-            b" task ",
-            id,
-            b" (owner ",
-            owner.as_ref().map_or(&b"?"[..], Name::get),
-            b")",
-            what,
-            head,
-            if approvers == 2 {
-                b", 2 approvers"
-            } else {
-                b", 1 approver"
-            },
-        ]);
+        let mut line = [0u8; TX_BUFFER];
+        let k = output::line(
+            &[
+                b"ask #",
+                n,
+                b": ",
+                name,
+                b" task ",
+                id,
+                b" (owner ",
+                owner.as_ref().map_or(&b"?"[..], Name::get),
+                b")",
+                what,
+                head,
+                if approvers == 2 {
+                    b", 2 approvers"
+                } else {
+                    b", 1 approver"
+                },
+            ],
+            &mut line,
+        );
+        let header = alloc::vec::Vec::from(&line[..k]);
         let digest = approval::digest(&bytes);
         self.asks.push(Asked {
             number,
@@ -1005,8 +1026,37 @@ export them first (cargo xtask store export)",
             needed: approvers,
             by: alloc::vec::Vec::new(),
             owner,
+            header,
+            until: uptime().saturating_add(u64::from(wait_ms) * 1000),
+            answered: false,
         });
         self.page(number, true);
+    }
+
+    /// Ends each ask past its deadline (review F3), as the runtime does,
+    /// whether or not its `RESOLVED` comes; how long until the next one.
+    fn expire_asks(&mut self) -> u64 {
+        let now = uptime();
+        let due: alloc::vec::Vec<u16> = (self.asks.iter())
+            .filter(|a| a.until <= now)
+            .map(|a| a.number)
+            .collect();
+        for number in due {
+            self.asks.retain(|a| a.number != number);
+            for open in self.open.iter_mut().filter(|n| **n == number) {
+                *open = 0;
+            }
+            let mut a = [0u8; 20];
+            self.say(&[
+                b"ask #",
+                decimal(u64::from(number), &mut a),
+                b": no answer; refused",
+            ]);
+        }
+        (self.asks.iter())
+            .map(|a| a.until.saturating_sub(now).max(1))
+            .min()
+            .unwrap_or(pharos_user::FOREVER)
     }
 
     /// Shows ask `number`'s next page (`more`), or its first (`show`),
@@ -1029,6 +1079,13 @@ export them first (cargo xtask store export)",
         // A page with a line the console could not take is not shown:
         // no hash line, so it cannot be approved from it.
         self.asks[i].next = 0;
+        // The first page comes with the ask's first line (review F5).
+        let header = (page == 0).then(|| self.asks[i].header.clone());
+        if let Some(h) = header
+            && !self.say_all(&[&h])
+        {
+            return self.say(&[b"ask #", n, b": the console was full; show ", n, b" again"]);
+        }
         for l in page * approval::PAGE_LINES..(page + 1) * approval::PAGE_LINES {
             if l * approval::LINE >= self.asks[i].bytes.len() {
                 break;
@@ -1076,6 +1133,20 @@ export them first (cargo xtask store export)",
         let Some(ask) = self.asks.iter().find(|a| a.number == number) else {
             return self.say(&[b"no ask #", n]);
         };
+        // Approved and told to the runtime: one decision gives one use
+        // (review F2).
+        if ask.answered {
+            return self.say(&[b"ask #", n, b": approved; waiting for the runtime"]);
+        }
+        // A restarted `trust` cannot tell the runtime (review F9): it
+        // gives the gateway nothing either.
+        if self.channel.is_none() {
+            return self.say(&[
+                b"ask #",
+                n,
+                b": trust restarted and cannot tell the runtime; nothing approved",
+            ]);
+        }
         let digest = ask.digest;
         let route = match ask.kind {
             trust::Kind::Https => {
@@ -1097,16 +1168,21 @@ export them first (cargo xtask store export)",
         let before = ask.by.len();
         let allowed = {
             let by: alloc::vec::Vec<&[u8]> = ask.by.iter().map(Name::get).collect();
-            approval::may_approve(needed, ask.owner.as_ref().map(Name::get), &by, person.get())
+            let not_theirs = self.not_theirs.iter().any(|n| n.get() == person.get());
+            let owner = ask.owner.as_ref().map(Name::get);
+            approval::may_approve(needed, owner, &by, person.get(), not_theirs)
         };
         let hex = approval::hex8(&digest);
         match allowed {
             Ok(()) => {}
             Err(why) => {
-                let (said, noted): (&[u8], &[u8]) = if why == approval::NotApproved::Again {
-                    (b" already approved it", b" again")
-                } else {
-                    (b" is its requester; two others must approve", b" requester")
+                let (said, noted): (&[u8], &[u8]) = match why {
+                    approval::NotApproved::Again => (b" already approved it", b" again"),
+                    approval::NotApproved::NotTheirs => (
+                        b"'s passphrase was set by someone else; set your own first",
+                        b" not theirs",
+                    ),
+                    _ => (b" is its requester; two others must approve", b" requester"),
                 };
                 self.say(&[b"ask #", n, b": ", person.get(), said]);
                 let mut detail = [0u8; 48];
@@ -1154,6 +1230,9 @@ export them first (cargo xtask store export)",
         }) {
             self.forget_approver(number, &person);
             return self.say(&[b"answer: the runtime is not answering; stop works"]);
+        }
+        if let Some(ask) = self.asks.iter_mut().find(|a| a.number == number) {
+            ask.answered = true;
         }
         self.record(audit::action::APPROVE, None, &detail[..k]);
     }
@@ -1326,7 +1405,9 @@ export them first (cargo xtask store export)",
                 // A name with no record is answered as a wrong passphrase.
                 if found.is_some_and(|p| people::matches(&p, line)) {
                     self.session.start(name.get(), uptime());
-                    self.asks.iter_mut().for_each(|a| a.seen = false);
+                    self.asks
+                        .iter_mut()
+                        .for_each(|a| (a.seen, a.next) = (false, 0));
                     let mut d = [0u8; 64];
                     let n = join(&[b"login ", name.get()], &mut d);
                     self.record(audit::action::LOGIN, None, &d[..n]);
@@ -1398,6 +1479,11 @@ export them first (cargo xtask store export)",
         };
         if done != Ok(true) {
             return self.say(&[word, name, b": not changed"]);
+        }
+        // Set by someone else, it is known to them too (review F1).
+        self.not_theirs.retain(|n| n.get() != name);
+        if self.session.person() != Some(name) && self.not_theirs.len() < identity::MAX_PEOPLE {
+            self.not_theirs.push(Name::new(name));
         }
         let mut d = [0u8; 64];
         let n = match roles {
@@ -1964,11 +2050,13 @@ export them first (cargo xtask store export)",
                 kind,
                 approvers,
                 length,
+                wait_ms,
             }) if badge == RUNTIME && number != 0 => {
                 if cap != 0 {
                     let _ = delete(cap);
                 }
-                self.ask(number, name, task, kind, approvers, usize::from(length));
+                let len = usize::from(length);
+                self.ask(number, name, task, kind, approvers, len, wait_ms);
             }
             // Only for an approval it showed and has open (#193): any other
             // number would put a line on the trusted console the runtime made up.
@@ -2315,6 +2403,7 @@ fn main(arg: u64) -> u64 {
         open: [0; 4],
         asks: alloc::vec::Vec::new(),
         ask_buffer: mem_map(trust::MAX_PAYLOAD as u64).ok(),
+        not_theirs: alloc::vec::Vec::new(),
         reply: endpoint_create().ok(),
         agents: [None; SLOTS as usize],
         owners: alloc::vec::Vec::new(),
@@ -2360,6 +2449,7 @@ fn main(arg: u64) -> u64 {
             .session
             .idle_at()
             .map_or(pharos_user::FOREVER, |at| at.saturating_sub(now).max(1));
+        let wait = wait.min(t.expire_asks());
         let got = receive_timeout(SERVICE, &mut msg, wait);
         if t.session.idle(uptime()) {
             t.prompt = Prompt::None;

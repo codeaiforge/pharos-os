@@ -23,7 +23,9 @@
 //!   ended, decided by the runtime (granted, refused, or not answered in
 //!   time);
 //! - `ASK` `[version, op, number (2), name length, name, task (4), kind,
-//!   approvers, length (2)]` (#324, approval.md): ask for approval of
+//!   approvers, length (2), wait_ms (4)]` (#324, approval.md): ask for
+//!   approval, within `wait_ms`, the runtime's deadline, which `trust`
+//!   keeps too (M6.4 review F3), of
 //!   `length` bytes the runtime wrote at the start of the buffer `trust`
 //!   gave it (`BUFFER`): the approved bytes of one action of
 //!   [`Kind`], which `trust` copies at once, then shows, every byte,
@@ -459,6 +461,9 @@ pub enum Request<'a> {
         kind: Kind,
         approvers: u8,
         length: u16,
+        /// How long the runtime waits for it: `trust` ends it then too,
+        /// whether or not `RESOLVED` reaches it (M6.4 review F3).
+        wait_ms: u32,
     },
     Revoked {
         outcome: Outcome,
@@ -585,6 +590,7 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                 length: r
                     .u16()
                     .filter(|n| (1..=MAX_PAYLOAD).contains(&usize::from(*n)))?,
+                wait_ms: r.u32()?,
             })
         })(),
         op::RESOLVED => (|| {
@@ -756,6 +762,7 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             kind,
             approvers,
             length,
+            wait_ms,
         } => {
             if !valid_name(name)
                 || !(1..=MAX_APPROVERS).contains(&approvers)
@@ -770,6 +777,7 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.u32(task)?;
             w.bytes(&[kind as u8, approvers])?;
             w.u16(length)?;
+            w.u32(wait_ms)?;
         }
         Request::Resolved { number, resolution } => {
             w.bytes(&[VERSION, op::RESOLVED])?;
@@ -1252,6 +1260,7 @@ mod tests {
                 kind: Kind::Send,
                 approvers: 1,
                 length: 1,
+                wait_ms: 5_000,
             },
             Request::Ask {
                 number: u16::MAX,
@@ -1260,6 +1269,7 @@ mod tests {
                 kind: Kind::Https,
                 approvers: MAX_APPROVERS,
                 length: MAX_PAYLOAD as u16,
+                wait_ms: u32::MAX,
             },
             Request::Revoked {
                 outcome: Outcome::NotHeld,
@@ -1443,6 +1453,7 @@ mod tests {
         let ask = |kind: u8, approvers: u8, length: u16| {
             let mut m = std::vec![VERSION, op::ASK, 0, 1, 1, b'a', 0, 0, 0, 1, kind, approvers];
             m.extend_from_slice(&length.to_le_bytes());
+            m.extend_from_slice(&60_000u32.to_le_bytes());
             m
         };
         let good = ask(2, 1, 5);
@@ -1468,6 +1479,7 @@ mod tests {
             kind: Kind::Send,
             approvers,
             length,
+            wait_ms: 1,
         };
         assert!(encode(&req(0, 5), &mut buf).is_none());
         assert!(encode(&req(1, 0), &mut buf).is_none());

@@ -99,9 +99,55 @@ impl Resolver {
     }
 }
 
+/// The asks each task put to a person (#329, approval fatigue): one per
+/// runtime record that ends one, `approve` or `refuse` with `user`, `no
+/// answer`, or `task ended` as its detail; a refusal for any other reason
+/// (`no grant`, `malformed`, ...) asked no one. Keyed by agent and task.
+pub fn asks<'a>(records: impl IntoIterator<Item = &'a Fields>) -> HashMap<(String, u32), usize> {
+    let mut count = HashMap::new();
+    for r in records {
+        let ended = matches!(r.detail.as_str(), "user" | "no answer" | "task ended");
+        if r.client == client::RUNTIME
+            && matches!(r.action, action::APPROVE | action::REFUSE)
+            && ended
+        {
+            *count.entry((r.actor.clone(), r.task)).or_default() += 1;
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asks_count_only_what_a_person_answered() {
+        let rec = |act, detail: &str, task| Fields {
+            client: client::RUNTIME,
+            action: act,
+            actor: "fetcher".into(),
+            task,
+            outcome: outcome::OK,
+            detail: detail.into(),
+        };
+        let trail = [
+            rec(action::APPROVE, "user", 1),
+            rec(action::REFUSE, "no answer", 1),
+            rec(action::REFUSE, "user", 1),
+            rec(action::REFUSE, "no grant", 1),
+            rec(action::REFUSE, "malformed", 1),
+            rec(action::GRANT, "user", 1),
+            rec(action::REFUSE, "task ended", 2),
+            Fields {
+                client: client::TRUST,
+                ..rec(action::APPROVE, "user", 1)
+            },
+        ];
+        let n = asks(&trail);
+        assert_eq!(n.get(&("fetcher".into(), 1)), Some(&3));
+        assert_eq!(n.get(&("fetcher".into(), 2)), Some(&1));
+    }
 
     fn rec(client: u8, act: u8, actor: &str, result: u8, detail: &str) -> Fields {
         Fields {
