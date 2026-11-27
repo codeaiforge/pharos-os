@@ -6,8 +6,10 @@
 //! Handles: 1 the virtio-console device, 2 its endpoint (`RECEIVE`), 3
 //! `init`'s report endpoint (`SEND`), 4 the audit service (`SEND`,
 //! badged as `trust`; #107), and 5 the knowledge service (`SEND`, client
-//! 2; #144), when given. Nothing else: it holds no serial console,
-//! storage, network, or inference capability.
+//! 2; #144), when given; 6 the store's `identity` namespace (#310); and 7
+//! the gateway (`SEND`, badge 3; #325), only in a table that runs one.
+//! Nothing else: it holds no serial console, network, or inference
+//! capability.
 //!
 //! The audit trail's anchor (#107): at start and on `audit`, `trust` shows
 //! the audit service's boot, record count, and chain head, so the user can
@@ -56,7 +58,8 @@
 //! lines a page (`more <n>`, `show <n>`), and after the last page their
 //! SHA-256's first 8 hex digits. `yes <n> <digits>` approves, typed by a
 //! person shown that line since their login; the `ANSWER` carries the
-//! digest.
+//! digest. For an HTTPS request the gateway keeps the approval first
+//! (`APPROVED`, handle 7, #325), or nothing is approved.
 //!
 //! Services (#152): `init` sends each service event as `SERVICE`, which
 //! `trust` writes from its fields; `services` asks `init` for each
@@ -118,6 +121,11 @@ const AUDIT: Handle = 4;
 const KNOWLEDGE: Handle = 5;
 /// The store's `identity` namespace (#310).
 const IDENTITY: Handle = 6;
+/// `SEND` on the gateway, badge 3, where its table runs one (#325): the
+/// approvals of HTTPS requests go there.
+const GATEWAY: Handle = 7;
+/// How long the gateway may take to keep an approval.
+const GATEWAY_US: u64 = 1_000_000;
 /// Its buffer: one person file.
 const ID_BUFFER: u64 = 4096;
 const STORE_US: u64 = 2_000_000;
@@ -189,6 +197,7 @@ struct Trust {
 /// from the buffer once, and their digest.
 struct Asked {
     number: u16,
+    kind: trust::Kind,
     bytes: alloc::vec::Vec<u8>,
     digest: [u8; 32],
     /// The next page `more` shows.
@@ -537,6 +546,31 @@ impl Trust {
             sleep(10_000);
         }
         false
+    }
+
+    /// Sends the gateway `APPROVED` for one approver (#325) and waits up to
+    /// [`GATEWAY_US`] for its `OK`.
+    fn tell_gateway(&self, route: &[u8], digest: [u8; 32]) -> bool {
+        let mut msg = [0u8; 80];
+        let req = pharos_proto::gateway::Request::Approved {
+            route,
+            approvers: 1,
+            digest,
+        };
+        let (Some(reply), Some(n)) = (self.reply, pharos_proto::gateway::encode(&req, &mut msg))
+        else {
+            return false;
+        };
+        let mut out = [0u8; 16];
+        match call_timeout(GATEWAY, &msg[..n], reply, &mut out, GATEWAY_US) {
+            Ok(Received::Message { len, cap, .. }) => {
+                if cap != 0 {
+                    let _ = delete(cap);
+                }
+                len == 1 && out[0] == status::OK
+            }
+            _ => false,
+        }
     }
 
     /// Records a user command (best effort, at most 1 s), as the person
@@ -971,6 +1005,7 @@ export them first (cargo xtask store export)",
         let digest = approval::digest(&bytes);
         self.asks.push(Asked {
             number,
+            kind,
             bytes,
             digest,
             next: 0,
@@ -1047,6 +1082,12 @@ export them first (cargo xtask store export)",
             return self.say(&[b"no ask #", n]);
         };
         let digest = ask.digest;
+        let route = match ask.kind {
+            trust::Kind::Https => {
+                approval::parts(ask.kind, &ask.bytes).map(|(r, _, _)| Name::new(r))
+            }
+            trust::Kind::Send => None,
+        };
         match approval::check_yes(ask.seen, &digest, hash) {
             Ok(()) => {}
             Err(approval::NotApproved::NotSeen) => {
@@ -1065,6 +1106,17 @@ export them first (cargo xtask store export)",
                     b": those digits are not its sha256; nothing approved",
                 ]);
             }
+        }
+        // The gateway keeps the approval first (#325): without it the
+        // request would be refused there, so nothing is approved.
+        if let Some(route) = route
+            && !self.tell_gateway(route.get(), digest)
+        {
+            return self.say(&[
+                b"ask #",
+                n,
+                b": the gateway did not take the approval; nothing approved",
+            ]);
         }
         if !self.tell_runtime(&agents::Request::Answer {
             number,

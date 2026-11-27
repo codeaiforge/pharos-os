@@ -5,7 +5,8 @@
 //! allows, and a body; never a host, a header, or a secret.
 //!
 //! Capabilities, in handle order: 1 the debug console, 2 `RECEIVE` on its
-//! endpoint (client 1 the agent runtime, 2 test programs), 3 `init`'s
+//! endpoint (client 1 the agent runtime, 2 test programs, and badge 3
+//! `trust`, which sends approvals only), 3 `init`'s
 //! report endpoint, 4 `SEND` on the vault (badge 1), 5 `SEND` on the TLS
 //! service as a TLS client, whose destinations are its entry's `tls`
 //! list, 6 `SEND` on the audit service as client 6. Its argument is the
@@ -17,6 +18,13 @@
 //! parsed with no secret in memory, the secret released again to strip
 //! it, the outcome recorded, the answer. Every refusal is recorded too.
 //! Any failure closes the connection and erases what was released.
+//!
+//! Approvals (#325, approval.md): `trust` sends `APPROVED` with the
+//! SHA-256 of a request's approved bytes (`route ‖ 0 ‖ target ‖ 0 ‖
+//! body`), recorded as it is kept. A request on a route marked for
+//! approval goes only with an unused one of its own bytes, by at least the
+//! mark's approvers, which it uses up; else it is `NOT_APPROVED`, recorded,
+//! before anything is released or opened. A restarted gateway holds none.
 
 #![no_std]
 #![no_main]
@@ -26,12 +34,13 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use pharos_programs::gateway::{self as logic, Wiped};
+use pharos_programs::approval;
+use pharos_programs::gateway::{self as logic, Approvals, Wiped};
 use pharos_programs::output::Limit;
 use pharos_proto::audit::{self, Entry, Kind, action, outcome};
 use pharos_proto::gateway::{
-    self, ANSWER, Answered, MAX_BUFFER, NAME, NO_ACCESS, NO_AUDIT, NO_BUFFER, OK, Request, TAIL_US,
-    TIMEOUT, TIMEOUT_US, TLS as TLS_FAILED, VERSION,
+    self, ANSWER, Answered, MAX_BUFFER, NAME, NO_ACCESS, NO_AUDIT, NO_BUFFER, NOT_APPROVED, OK,
+    Request, TAIL_US, TIMEOUT, TIMEOUT_US, TLS as TLS_FAILED, VERSION,
 };
 use pharos_proto::http::reason;
 use pharos_proto::net::parse_count;
@@ -91,6 +100,8 @@ struct Gateway {
     reply: Handle,
     /// Malformed requests recorded (#291).
     malformed: Limit,
+    /// What `trust` approved (#325).
+    approvals: Approvals,
 }
 
 impl Gateway {
@@ -139,8 +150,39 @@ impl Gateway {
                 };
                 answer(cap, &a.encode());
             }
+            Request::Approved {
+                route,
+                approvers,
+                digest,
+            } => {
+                let status = self.approved(badge, route, approvers, digest);
+                answer(cap, &[status]);
+            }
             Request::Attach { .. } => {}
         }
+    }
+
+    /// `APPROVED` (#325): only from `trust`'s badge; kept only once
+    /// recorded.
+    fn approved(&mut self, badge: u32, name: &[u8], approvers: u8, digest: [u8; 32]) -> u8 {
+        if badge != u32::from(pharos_services::GATEWAY_TRUST) {
+            let client = u8::try_from(badge).unwrap_or(u8::MAX);
+            let d = logic::refusal_detail(client, name, NO_ACCESS);
+            return self.refused(NO_ACCESS, &d).status;
+        }
+        let found = self.routes.iter().position(|r| r.name.as_bytes() == name);
+        let route = found.map(|i| (i as u8, &self.routes[i]));
+        let now = uptime();
+        let status = self.approvals.room(route, now);
+        if status != OK {
+            let d = logic::refusal_detail(pharos_services::GATEWAY_TRUST, name, status);
+            return self.refused(status, &d).status;
+        }
+        let d = logic::approval_detail(name, &digest, approvers);
+        if self.audit(Kind::Event, 0, outcome::OK, &d).is_none() {
+            return NO_AUDIT;
+        }
+        self.approvals.add(route, approvers, digest, now)
     }
 
     fn attach(&mut self, client: Option<u8>, memory: Handle, len: u64) {
@@ -181,6 +223,19 @@ impl Gateway {
                 return self.refused(s, &d);
             }
         };
+        // A marked route's request goes only with an approval of its own
+        // bytes (#325), before anything is recorded as intended.
+        if r.approve.count() > 0 {
+            let digest = approval::digest(&logic::approved_bytes(name, &target, &body));
+            if !self.approvals.take(index, r, &digest, uptime()) {
+                let d = logic::refusal_detail(client, name, NOT_APPROVED);
+                return self.refused(NOT_APPROVED, &d);
+            }
+            let d = logic::approved_detail(name, &digest);
+            if self.audit(Kind::Event, 0, outcome::OK, &d).is_none() {
+                return failed(NO_AUDIT, 0, 0);
+            }
+        }
         // Every step fits in TIMEOUT_US from here: the exchange ends
         // TAIL_US early, for the steps after it (#289).
         let start = uptime();
@@ -501,6 +556,7 @@ fn main(arg: u64) -> u64 {
         tls,
         reply,
         malformed: Limit::rate(logic::MALFORMED_BURST, logic::MALFORMED_EVERY_US),
+        approvals: Approvals::default(),
     };
     if send(REPORT, b"ready", 0, 0, 0).is_err() {
         return 1;

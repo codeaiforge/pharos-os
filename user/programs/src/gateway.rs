@@ -7,7 +7,9 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use pharos_proto::gateway::{Answered, BAD_REQUEST, NO_ACCESS, NOT_FOUND, OK, TOO_LARGE};
+use pharos_proto::gateway::{
+    APPROVAL_US, Answered, BAD_REQUEST, BUSY, MAX_APPROVALS, NO_ACCESS, NOT_FOUND, OK, TOO_LARGE,
+};
 use pharos_proto::http::{self, Head};
 use pharos_services::Route;
 
@@ -298,8 +300,162 @@ pub fn runtime_outcome_detail(a: &Answered) -> Vec<u8> {
     d
 }
 
+/// The approvals `trust` sent (#325, approval.md): each lets one request
+/// on its route, whose approved bytes have its digest, be sent once within
+/// [`APPROVAL_US`]. At most [`MAX_APPROVALS`].
+#[derive(Default)]
+pub struct Approvals {
+    held: Vec<Approval>,
+}
+
+struct Approval {
+    route: u8,
+    approvers: u8,
+    digest: [u8; 32],
+    until: u64,
+}
+
+impl Approvals {
+    /// Whether an approval on `route` (`None`: no such route) could be
+    /// kept now: `NOT_FOUND` for no route or one not marked, `BUSY` with
+    /// [`MAX_APPROVALS`] held, else `OK`. Keeps nothing.
+    pub fn room(&mut self, route: Option<(u8, &Route)>, now: u64) -> u8 {
+        self.held.retain(|a| a.until > now);
+        match route {
+            Some((_, r)) if r.approve.count() > 0 => {
+                if self.held.len() >= MAX_APPROVALS {
+                    BUSY
+                } else {
+                    OK
+                }
+            }
+            _ => NOT_FOUND,
+        }
+    }
+
+    /// Keeps an approval of request bytes with `digest` on `route` by
+    /// `approvers` people, if [`Self::room`] allows; its status.
+    pub fn add(
+        &mut self,
+        route: Option<(u8, &Route)>,
+        approvers: u8,
+        digest: [u8; 32],
+        now: u64,
+    ) -> u8 {
+        let status = self.room(route, now);
+        if let (OK, Some((route, _))) = (status, route) {
+            self.held.push(Approval {
+                route,
+                approvers,
+                digest,
+                until: now + APPROVAL_US,
+            });
+        }
+        status
+    }
+
+    /// Whether a request on route `route` (`r`) whose approved bytes have
+    /// `digest` may go: a route not marked always may; a marked one only
+    /// with an unused, unexpired approval of that digest by at least its
+    /// mark's approvers, which this uses up.
+    pub fn take(&mut self, route: u8, r: &Route, digest: &[u8; 32], now: u64) -> bool {
+        let need = r.approve.count();
+        if need == 0 {
+            return true;
+        }
+        self.held.retain(|a| a.until > now);
+        let found = self
+            .held
+            .iter()
+            .position(|a| a.route == route && a.approvers >= need && &a.digest == digest);
+        found.map(|i| self.held.remove(i)).is_some()
+    }
+}
+
+/// A request's approved bytes: `route ‖ 0 ‖ target ‖ 0 ‖ body`, which
+/// `trust` showed and hashed (approval.md, "What is approved").
+pub fn approved_bytes(route: &[u8], target: &[u8], body: &[u8]) -> Vec<u8> {
+    [route, &[0], target, &[0], body].concat()
+}
+
+/// The record of an approval used, before the request's intent:
+/// `approved <route> <8 hex>`.
+pub fn approved_detail(route: &[u8], digest: &[u8; 32]) -> Vec<u8> {
+    let mut d = Vec::with_capacity(64);
+    d.extend_from_slice(b"approved ");
+    d.extend_from_slice(route);
+    d.push(b' ');
+    d.extend_from_slice(&crate::approval::hex8(digest));
+    cut(d)
+}
+
+/// The record of an approval kept: `approval <route> <8 hex> by <k>`.
+pub fn approval_detail(route: &[u8], digest: &[u8; 32], approvers: u8) -> Vec<u8> {
+    let mut d = Vec::with_capacity(64);
+    d.extend_from_slice(b"approval ");
+    d.extend_from_slice(route);
+    d.push(b' ');
+    d.extend_from_slice(&crate::approval::hex8(digest));
+    d.extend_from_slice(b" by ");
+    number(&mut d, approvers.into());
+    cut(d)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_approval_lets_one_request_with_its_bytes_go_once() {
+        use pharos_services::Approve;
+        let one = Route {
+            approve: Approve::One,
+            ..ROUTE
+        };
+        let two = Route {
+            approve: Approve::Two,
+            ..ROUTE
+        };
+        let d = crate::approval::digest(&approved_bytes(b"issues", b"/x", b"body"));
+        let other = crate::approval::digest(&approved_bytes(b"issues", b"/x", b"bodY"));
+        let mut a = Approvals::default();
+        // Not marked: always; marked: never without an approval.
+        assert!(a.take(0, &ROUTE, &d, 0));
+        assert!(!a.take(0, &one, &d, 0));
+        assert_eq!(a.add(None, 1, d, 0), NOT_FOUND);
+        assert_eq!(a.add(Some((0, &ROUTE)), 1, d, 0), NOT_FOUND, "not marked");
+        assert_eq!(a.add(Some((0, &one)), 1, d, 0), OK);
+        assert!(!a.take(0, &one, &other, 1), "other bytes");
+        assert!(!a.take(1, &one, &d, 1), "another route");
+        assert!(a.take(0, &one, &d, 1));
+        assert!(!a.take(0, &one, &d, 2), "used once");
+        // Fewer approvers than the mark.
+        assert_eq!(a.add(Some((0, &two)), 1, d, 0), OK);
+        assert!(!a.take(0, &two, &d, 1));
+        // Expired.
+        assert_eq!(a.add(Some((0, &one)), 1, d, 0), OK);
+        assert!(!a.take(0, &one, &d, APPROVAL_US));
+        // At most MAX_APPROVALS (the one for `two` expired too).
+        for _ in 0..MAX_APPROVALS {
+            assert_eq!(a.add(Some((0, &one)), 1, d, APPROVAL_US), OK);
+        }
+        assert_eq!(a.add(Some((0, &one)), 1, d, APPROVAL_US), BUSY);
+        assert_eq!(
+            &approval_detail(b"issues", &d, 1)[..16],
+            b"approval issues "
+        );
+    }
+
+    #[test]
+    fn the_approvable_size_agrees_with_trusts() {
+        assert_eq!(
+            pharos_services::MAX_APPROVABLE,
+            pharos_proto::trust::MAX_PAYLOAD
+        );
+        assert_eq!(
+            usize::from(pharos_services::GATEWAY_TRUST),
+            pharos_services::GATEWAY_CLIENTS as usize + 1
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -337,6 +493,7 @@ mod tests {
         max_body: 100,
         max_answer: 200,
         clients: &[1],
+        approve: pharos_services::Approve::None,
     };
 
     #[test]

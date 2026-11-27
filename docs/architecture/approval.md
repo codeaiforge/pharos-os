@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-27 (#323), with each open question decided as recommended (section 7). It follows [D-037](../project/decision-log.md#d-037-payload-approval-and-risk-routing) (accepted 2026-11-27) and builds on the [egress gateway](gateway.md), the [identity model](identity.md), and the `send` tool ([tools.md](tools.md)).
-- **Implementation:** the payload display, `ASK`, and `send` on it are **implemented** (#324): *as built* notes in section 3. **Planned:** the gateway's check (#325), marks and two approvers (#326), timeouts (#327), and the `approval` test kernel (#328). The gate is #329.
+- **Implementation:** the payload display, `ASK`, and `send` on it are **implemented** (#324): *as built* notes in section 3. the gateway's check is **implemented** (#325). **Planned:** marks and two approvers (#326), timeouts (#327), and the `approval` test kernel (#328). The gate is #329.
 
 ## 2. Context
 
@@ -135,6 +135,14 @@ ask #3: fetcher task 7 (owner admin) wants POST on route issues, 2 approvers
   - None found: status 45 `NOT_APPROVED` (`status::OWN + 13`), recorded as a refusal, before any release or connection.
   - Found: the approval is removed, then the request goes ahead, with `approved <8 hex>` in the intent's record.
 - **On restart** the gateway keeps no approvals, so a request approved before it restarted is refused.
+
+*As built (#325):*
+- `APPROVED` names its route by name, as `REQUEST` does: `[1, 2, name length, name, approvers, digest (32)]`. `trust` does not know which table `init` runs, so it cannot number routes. A badge other than 3 is refused `NO_ACCESS`. A route not in the table, or not marked, is `NOT_FOUND`.
+- The table is `pharos_programs::gateway::Approvals`, host-tested: kept only if `room` allows (`NOT_FOUND`, `BUSY`) and only once recorded (`approval <route> <8 hex> by <k>`); used once, by digest, route, and at least the mark's approvers; expired after `gateway::APPROVAL_US`.
+- The use is a record of its own before the intent, `approved <route> <8 hex>`, not part of the intent's detail, whose 64 bytes are already full. A refusal is `c<client> <route> status 45`.
+- `Route::approve` (`pharos_services::Approve`: `None`, `One`, `Two`), `None` on every route but the `vault` table's `approved`. `check_routes` refuses a marked route whose longest approved bytes (`longest_request`) are over 4 KiB (`BrokenRoute::Approvable`). A host test requires every table with a marked route to give `trust` `SEND` on the gateway with badge 3 (`trust_approves`), and in tables 11 and 12 it is `trust`'s handle 7.
+- `trust` sends `APPROVED` for an HTTPS ask before it answers the runtime, and waits up to 1 s for `OK`. Otherwise it says `the gateway did not take the approval; nothing approved`. Until the runtime asks for HTTPS requests (#326), no HTTPS ask reaches `trust`. The `vault` kernel checks the refusal side: `fetcher`'s request on `approved`, which the runtime passes on, is `NOT_APPROVED` from the gateway, with no release and no intent in the trail. Mutation-checked: with the gateway's check off, `vault` fails.
+- A manifest may now list 8 routes (`manifest::MAX_ROUTES`), so `fetcher` holds `approved` beside its four. Files, channels, and knowledge scopes stay at 4.
 
 ### Timeouts and failures
 

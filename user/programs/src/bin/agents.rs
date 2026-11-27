@@ -339,8 +339,9 @@ const SPEND: Budget = Budget {
     group: b"spend",
 };
 
-/// The `vault` kernel's policy table (#284): `fetcher`, granted four of
-/// the table's gateway routes, never `other`.
+/// The `vault` kernel's policy table (#284): `fetcher`, granted five of
+/// the table's gateway routes, never `other`; `approved` is marked for
+/// approval (#325).
 const HTTPS_TABLE: &[Entry] = &[Entry {
     name: b"fetcher",
     program: b"bin/testagent",
@@ -362,7 +363,7 @@ const HTTPS_TABLE: &[Entry] = &[Entry {
     knowledge_write: &[],
     ask_knowledge: &[],
     propose: false,
-    https: &[b"items", b"echo", b"post", b"missing"],
+    https: &[b"items", b"echo", b"post", b"missing", b"approved"],
     guest: false,
     owner: TEST_OWNER,
     channels: &[],
@@ -1209,7 +1210,7 @@ struct Limits {
     /// `update propose` (#165).
     propose: bool,
     /// The gateway's routes it may use (#282), as the entry's names.
-    https: [&'static [u8]; manifest::MAX_FILES],
+    https: [&'static [u8]; manifest::MAX_ROUTES],
     https_count: usize,
     /// The tools it may call and the files it gets (#126, #127), as the
     /// entry's names.
@@ -1750,7 +1751,7 @@ fn load(e: &'static Entry, table: &'static [Entry]) -> Result<Limits, &'static [
             channel_count += 1;
         }
     }
-    let mut https = [&b""[..]; manifest::MAX_FILES];
+    let mut https = [&b""[..]; manifest::MAX_ROUTES];
     let mut https_count = 0;
     for r in m.https.as_slice() {
         if let Some(name) = e.https.iter().find(|n| *n == r) {

@@ -6,8 +6,8 @@
 
 use crate::rights::{GRANT, READ, RECEIVE, SEND};
 use crate::{
-    Badge, CONSOLE, Dest, Ep, Gain, Give, Kind, Object, REPORT, ROOT, Restart, Route, Service,
-    arrived, device, give, receive, send,
+    Approve, Badge, CONSOLE, Dest, Ep, Gain, Give, Kind, Object, REPORT, ROOT, Restart, Route,
+    Service, arrived, device, give, receive, send,
 };
 
 pub const VIRTIO_BLK: u32 = 0x1042_1af4;
@@ -885,6 +885,7 @@ const SECRETS_ROUTES: [Route; 3] = [
         max_body: 0,
         max_answer: 4096,
         clients: &[1],
+        approve: Approve::None,
     },
     Route {
         name: "missing",
@@ -898,6 +899,7 @@ const SECRETS_ROUTES: [Route; 3] = [
         max_body: 0,
         max_answer: 4096,
         clients: &[1],
+        approve: Approve::None,
     },
     Route {
         name: "open",
@@ -911,6 +913,7 @@ const SECRETS_ROUTES: [Route; 3] = [
         max_body: 0,
         max_answer: 4096,
         clients: &[1],
+        approve: Approve::None,
     },
 ];
 
@@ -1032,13 +1035,16 @@ const fn bearer(name: &'static str, method: &'static str, path: &'static str) ->
         max_body: 0,
         max_answer: 4096,
         clients: &[1],
+        approve: Approve::None,
     }
 }
 
 /// The `vault` kernel's routes (#284): `items` (the server checks the
 /// header), `echo` (the server sends the header back), `post`, `missing`
-/// (a secret the file lacks), and `other`, which `fetcher` is not granted.
-const VAULT_ROUTES: [Route; 5] = [
+/// (a secret the file lacks), `other`, which `fetcher` is not granted, and
+/// `approved` (#325), marked for one approver, which the gateway refuses
+/// without an approval from `trust`.
+const VAULT_ROUTES: [Route; 6] = [
     bearer("items", "GET", "/items"),
     bearer("echo", "GET", "/echo"),
     Route {
@@ -1052,6 +1058,11 @@ const VAULT_ROUTES: [Route; 5] = [
         ..bearer("missing", "GET", "/items")
     },
     bearer("other", "GET", "/items"),
+    Route {
+        max_body: 1024,
+        approve: Approve::One,
+        ..bearer("approved", "POST", "/items")
+    },
 ];
 
 /// The `vault` kernel (#284): the boot table's services up to `trust`, the
@@ -1090,7 +1101,20 @@ const GATEWAY_CAPS: [Give; 6] = [
 const GATEWAY_DESTS: [crate::TlsDest; 1] = [(VAULT_SERVER.0, VAULT_SERVER.1, TLS_TEST_NAME)];
 const FETCHCLIENT_CAPS: [Give; 2] = [CONSOLE, send(Ep::Agents, AGENTS_CONTROL)];
 
+/// `trust` with `SEND` on the gateway (#325), for its approvals.
+const TRUST_GATEWAY_CAPS: [Give; 7] = [
+    device(VIRTIO_CONSOLE, 0),
+    receive(Ep::Trust),
+    REPORT,
+    send(Ep::Audit, AUDIT_TRUST),
+    send(Ep::Knowledge, KNOWLEDGE_TRUST),
+    send(Ep::Store, IDENTITY_STORE),
+    send(Ep::Gateway, crate::GATEWAY_TRUST as u32),
+];
+
 const fn vault_table(boot: [Service; 9]) -> [Service; 12] {
+    let mut trust = boot[6];
+    trust.caps = &TRUST_GATEWAY_CAPS;
     let mut runtime = boot[AGENTS];
     runtime.arg = 3;
     runtime.caps = &VAULT_RUNTIME_CAPS;
@@ -1102,7 +1126,7 @@ const fn vault_table(boot: [Service; 9]) -> [Service; 12] {
         boot[3],
         boot[4],
         boot[5],
-        boot[6],
+        trust,
         Service {
             name: "tls",
             path: b"bin/tls",

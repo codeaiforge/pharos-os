@@ -171,7 +171,36 @@ pub struct Route {
     pub max_answer: u32,
     /// The gateway's clients that may use it.
     pub clients: &'static [u8],
+    /// How many people approve each request's bytes on the trusted path
+    /// first (D-037, approval.md); the gateway refuses one without.
+    pub approve: Approve,
 }
+
+/// A route's mark (D-037): who approves its requests' bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Approve {
+    /// Grant-only, as every route before M6.4.
+    None,
+    One,
+    Two,
+}
+
+impl Approve {
+    /// The approvers it needs.
+    pub const fn count(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Most approved bytes of one request (`pharos_proto::trust::MAX_PAYLOAD`;
+/// this crate has no dependencies, and a host test checks they agree).
+pub const MAX_APPROVABLE: usize = 4096;
+/// Most bytes of a request's target: a path of 256 and a query of `?`
+/// and 256 (gateway.md, "Paths").
+pub const MAX_TARGET: usize = 256 + 1 + 256;
+/// `trust`'s badge at the gateway (#325): it sends approvals, never
+/// requests, and attaches no buffer.
+pub const GATEWAY_TRUST: u8 = 3;
 
 /// Most fixed headers on a route.
 pub const MAX_ROUTE_HEADERS: usize = 4;
@@ -372,6 +401,11 @@ pub enum BrokenRoute {
     Dest,
     /// No client, or one outside the gateway's badges (1 and 2).
     Clients,
+    /// A route marked for approval whose longest request (its name, two
+    /// zero bytes, the longest target, and `max_body`) is over
+    /// [`MAX_APPROVABLE`]: no one could read it whole (approval.md, open
+    /// question 1).
+    Approvable,
 }
 
 /// Largest body or answer on a route.
@@ -478,8 +512,32 @@ pub fn check_routes(routes: &[Route], dests: Option<usize>) -> Result<(), (usize
         if r.clients.is_empty() || r.clients.iter().any(|c| !(1..=GATEWAY_CLIENTS).contains(c)) {
             return fail(BrokenRoute::Clients);
         }
+        if r.approve != Approve::None && longest_request(r) > MAX_APPROVABLE {
+            return fail(BrokenRoute::Approvable);
+        }
     }
     Ok(())
+}
+
+/// The longest approved bytes a request on `r` can have: `route ‖ 0 ‖
+/// target ‖ 0 ‖ body` (approval.md, "What is approved").
+pub const fn longest_request(r: &Route) -> usize {
+    let target = if r.query { MAX_TARGET } else { 256 };
+    r.name.len() + 2 + target + r.max_body as usize
+}
+
+/// Whether `table`'s `trust` can approve its marked routes (#325): it
+/// holds `SEND` on the gateway with badge [`GATEWAY_TRUST`].
+pub fn trust_approves(table: &[Service]) -> bool {
+    let wanted = Give {
+        object: Object::Endpoint(Ep::Gateway),
+        rights: SEND,
+        badge: Badge::Fixed(GATEWAY_TRUST as u32),
+    };
+    table
+        .iter()
+        .find(|s| s.name == "trust")
+        .is_some_and(|t| t.caps.contains(&wanted))
 }
 
 /// How many TLS destinations `table`'s gateway entry lists, if it has one.
@@ -670,10 +728,50 @@ mod tests {
             assert_eq!(check_routes(routes(arg), dests), Ok(()), "table {arg}");
         }
         assert_eq!(routes(10).len(), 3);
-        assert_eq!(routes(11).len(), 5);
-        assert_eq!(routes(12).len(), 5);
+        assert_eq!(routes(11).len(), 6);
+        assert_eq!(routes(12).len(), 6);
         assert_eq!(gateway_dests(BRIDGE), Some(1));
         assert_eq!(gateway_dests(VAULT), Some(1));
+        // A table with a marked route lets its `trust` approve (#325).
+        for arg in 0..=12 {
+            if routes(arg).iter().any(|r| r.approve != Approve::None) {
+                assert!(trust_approves(table(arg)), "table {arg}");
+            }
+        }
+        assert!(routes(11).iter().any(|r| r.approve == Approve::One));
+    }
+
+    #[test]
+    fn a_marked_route_must_be_readable_whole() {
+        let r = |max_body, query, approve| Route {
+            name: "issues",
+            dest: 0,
+            method: "POST",
+            path: "/x",
+            query,
+            secret: None,
+            header: ("", ""),
+            headers: &[],
+            max_body,
+            max_answer: 0,
+            clients: &[1],
+            approve,
+        };
+        // 6 + 2 + 256 + 3832 = 4096.
+        assert_eq!(check_routes(&[r(3832, false, Approve::One)], None), Ok(()));
+        assert_eq!(
+            check_routes(&[r(3833, false, Approve::Two)], None),
+            Err((0, BrokenRoute::Approvable))
+        );
+        assert_eq!(
+            check_routes(&[r(3832, true, Approve::One)], None),
+            Err((0, BrokenRoute::Approvable))
+        );
+        assert_eq!(
+            check_routes(&[r(60 * 1024, true, Approve::None)], None),
+            Ok(())
+        );
+        assert_eq!(Approve::Two.count(), 2);
     }
 
     #[test]

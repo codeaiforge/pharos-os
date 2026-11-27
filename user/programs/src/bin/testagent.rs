@@ -1997,7 +1997,7 @@ impl Agent {
             u8,
             &'static [u8],
         );
-        let refusals: [Refusal; 5] = [
+        let refusals: [Refusal; 6] = [
             (
                 b"other",
                 b"/items",
@@ -2032,6 +2032,15 @@ impl Agent {
                 b"",
                 gateway::NO_SECRET,
                 b"a route whose secret is missing",
+            ),
+            // The runtime passes it on, and the gateway itself refuses a
+            // marked route's request no one approved (#325).
+            (
+                b"approved",
+                b"/items",
+                b"{\"n\":2}",
+                gateway::NOT_APPROVED,
+                b"a marked route with no approval",
             ),
         ];
         for (route, path, body, want, what) in refusals {

@@ -251,7 +251,7 @@ pub const TEST_MANIFESTS: [(&str, &str); 39] = [
         "agents/fetcher.manifest",
         "manifest = 1\nname = fetcher\nprogram = bin/testagent\npages = 256\nmodels =\n\
          attempts = 1\nprogress_ms = 40000\ntask_ms = 120000\ndata = none\nnet =\n\
-         https = items, echo, post, missing\n",
+         https = items, echo, post, missing, approved\n",
     ),
     (
         "agents/guest.manifest",

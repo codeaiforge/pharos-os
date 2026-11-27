@@ -9,7 +9,13 @@
 //!
 //! Requests: `[1, ATTACH, size (u64)]` (a `send` with the buffer),
 //! `[1, REQUEST, name length, route name, path length (u16), body length
-//! (u32)]`, `[1, INFO]`.
+//! (u32)]`, `[1, INFO]`, and, from `trust` only (badge 3, #325,
+//! approval.md), `[1, APPROVED, name length, route name, approvers, digest
+//! (32)]`: the request on that route whose approved bytes (`route ‖ 0 ‖
+//! target ‖ 0 ‖ body`) have that SHA-256 may be sent once, within
+//! [`APPROVAL_US`], if `approvers` meets the route's mark. Its reply is one
+//! byte: `OK`, `NOT_FOUND` (no such route, or not marked), or `BUSY`
+//! ([`MAX_APPROVALS`] held).
 //! A `REQUEST` reply is `[status, detail, http (u16), type length,
 //! answer length (u32), stripped, sent]`; a refusal before the request is
 //! sent is a bare status. `sent` is 1 once the request may have reached
@@ -24,6 +30,8 @@ pub const VERSION: u8 = 1;
 pub mod op {
     /// An HTTPS request on a route; deferred until the answer.
     pub const REQUEST: u8 = 1;
+    /// `trust`'s approval of one request's bytes (#325).
+    pub const APPROVED: u8 = 2;
 }
 
 pub const OK: u8 = status::OK;
@@ -47,6 +55,13 @@ pub const ANSWER: u8 = status::OWN + 10;
 pub const NO_AUDIT: u8 = crate::vault::NO_AUDIT;
 /// The whole request took over [`TIMEOUT_US`].
 pub const TIMEOUT: u8 = status::OWN + 12;
+/// A marked route's request with no unused approval of its bytes (#325).
+pub const NOT_APPROVED: u8 = status::OWN + 13;
+
+/// Most approvals the gateway holds at once (approval.md).
+pub const MAX_APPROVALS: usize = 4;
+/// How long an unused approval is kept (approval.md, open question 3).
+pub const APPROVAL_US: u64 = 60_000_000;
 
 /// Largest buffer a client may attach.
 pub const MAX_BUFFER: u64 = 64 * 1024;
@@ -77,6 +92,12 @@ pub enum Request<'a> {
         body_len: u32,
     },
     Info,
+    /// From `trust`: one request's bytes approved by `approvers` people.
+    Approved {
+        route: &'a [u8],
+        approvers: u8,
+        digest: [u8; 32],
+    },
 }
 
 pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
@@ -93,6 +114,16 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             })
         })(),
         common::INFO => Some(Request::Info),
+        op::APPROVED => (|| {
+            let n = usize::from(r.u8()?);
+            Some(Request::Approved {
+                route: r.take(n).filter(|n| crate::vault::valid_name(n))?,
+                approvers: r
+                    .u8()
+                    .filter(|a| (1..=crate::trust::MAX_APPROVERS).contains(a))?,
+                digest: r.take(32)?.try_into().ok()?,
+            })
+        })(),
         _ => None,
     };
     match req {
@@ -122,6 +153,21 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.u32(body_len)?;
         }
         Request::Info => w.bytes(&[VERSION, common::INFO])?,
+        Request::Approved {
+            route,
+            approvers,
+            digest,
+        } => {
+            if !crate::vault::valid_name(route)
+                || !(1..=crate::trust::MAX_APPROVERS).contains(&approvers)
+            {
+                return None;
+            }
+            w.bytes(&[VERSION, op::APPROVED, route.len() as u8])?;
+            w.bytes(route)?;
+            w.bytes(&[approvers])?;
+            w.bytes(&digest)?;
+        }
     }
     Some(w.len())
 }
@@ -201,8 +247,13 @@ mod tests {
                 body_len: 70_000,
             },
             Request::Info,
+            Request::Approved {
+                route: b"issues",
+                approvers: 2,
+                digest: [7; 32],
+            },
         ] {
-            let mut out = [0u8; 32];
+            let mut out = [0u8; 64];
             let n = encode(&req, &mut out).unwrap();
             assert_eq!(parse(&out[..n]), Ok(req));
             for cut in 0..n {
@@ -213,6 +264,14 @@ mod tests {
             assert_eq!(parse(&long[..=n]), Err(Refused::Bad));
         }
         assert_eq!(parse(&[2, op::REQUEST]), Err(Refused::Version));
+        let approved = |approvers| {
+            let mut m = std::vec![1, op::APPROVED, 1, b'a', approvers];
+            m.extend_from_slice(&[0; 32]);
+            m
+        };
+        assert!(parse(&approved(1)).is_ok());
+        assert_eq!(parse(&approved(0)), Err(Refused::Bad));
+        assert_eq!(parse(&approved(3)), Err(Refused::Bad));
         assert_eq!(parse(&[1, 7]), Err(Refused::Bad));
         assert_eq!(
             parse(&[1, op::REQUEST, 1, b'A', 0, 0, 0, 0, 0, 0]),

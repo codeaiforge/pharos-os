@@ -50,18 +50,32 @@ pub const MAX_PROGRESS_MS: u32 = 3_600_000;
 pub const MAX_TASK_MS: u32 = 86_400_000;
 /// Most network destinations a manifest may list.
 pub const MAX_NET: usize = 4;
-/// Most files a manifest may list (#127).
+/// Most files a manifest may list (#127), and channels and knowledge
+/// scopes.
 pub const MAX_FILES: usize = 4;
+/// Most gateway routes a manifest may list (#325): eight, so an agent can
+/// hold an approval-marked route beside the others.
+pub const MAX_ROUTES: usize = 8;
 
-/// The files a manifest lists (`file <name>` permissions, #127).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Files<'a> {
-    list: [&'a [u8]; MAX_FILES],
+/// The names a manifest lists (`file <name>` permissions, #127; channels,
+/// scopes, and at most `N` of them; routes, [`MAX_ROUTES`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Files<'a, const N: usize = MAX_FILES> {
+    list: [&'a [u8]; N],
     len: u8,
 }
 
-impl<'a> Files<'a> {
-    /// `None` if more than [`MAX_FILES`], repeated, or not file names.
+impl<const N: usize> Default for Files<'_, N> {
+    fn default() -> Self {
+        Self {
+            list: [&[]; N],
+            len: 0,
+        }
+    }
+}
+
+impl<'a, const N: usize> Files<'a, N> {
+    /// `None` if more than `N`, repeated, or not file names.
     pub fn new(names: &[&'a [u8]]) -> Option<Self> {
         Self::new_with(names, crate::permission::valid_file)
     }
@@ -155,7 +169,7 @@ pub struct Manifest<'a> {
     /// Optional (#165): `update = propose`.
     pub propose: bool,
     /// Optional (#282): the gateway's routes it may use.
-    pub https: Files<'a>,
+    pub https: Files<'a, MAX_ROUTES>,
 }
 
 /// What the runtime's policy table allows one agent: the most it may get.
@@ -413,7 +427,7 @@ fn destinations(v: &[u8]) -> Option<Net> {
 }
 
 /// A comma-separated list (spaces allowed around each); empty for none.
-fn list<'a>(v: &'a [u8], out: &mut [&'a [u8]; MAX_FILES + 1]) -> Option<usize> {
+fn list<'a>(v: &'a [u8], out: &mut [&'a [u8]]) -> Option<usize> {
     if v.is_empty() {
         return Some(0);
     }
@@ -448,8 +462,8 @@ fn channels(v: &[u8]) -> Option<Files<'_>> {
 }
 
 /// Route names (`pharos_proto::vault::valid_name`), each at most once.
-fn routes(v: &[u8]) -> Option<Files<'_>> {
-    let mut names = [&b""[..]; MAX_FILES + 1];
+fn routes(v: &[u8]) -> Option<Files<'_, MAX_ROUTES>> {
+    let mut names = [&b""[..]; MAX_ROUTES + 1];
     let n = list(v, &mut names)?;
     Files::new_with(&names[..n], crate::vault::valid_name)
 }
@@ -652,18 +666,18 @@ impl Manifest<'_> {
             }
         }
         for (key, list) in [
-            (&b"\nfiles ="[..], &self.files),
-            (b"\nchannels =", &self.channels),
-            (b"\nknowledge_read =", &self.knowledge_read),
-            (b"\nknowledge_write =", &self.knowledge_write),
-            (b"\nhttps =", &self.https),
+            (&b"\nfiles ="[..], self.files.as_slice()),
+            (b"\nchannels =", self.channels.as_slice()),
+            (b"\nknowledge_read =", self.knowledge_read.as_slice()),
+            (b"\nknowledge_write =", self.knowledge_write.as_slice()),
+            (b"\nhttps =", self.https.as_slice()),
         ] {
-            if list.as_slice().is_empty() {
+            if list.is_empty() {
                 continue;
             }
             w.bytes(key)?;
             let mut sep = &b" "[..];
-            for f in list.as_slice() {
+            for f in list {
                 w.bytes(sep)?;
                 w.bytes(f)?;
                 sep = b", ";
@@ -1085,6 +1099,19 @@ knowledge_read = notes, ops\nknowledge_write = notes\n",
         ] {
             assert!(parse(plus(bad).as_bytes()).is_err(), "{bad}");
         }
+        // Up to MAX_ROUTES routes (#325); files stay at MAX_FILES.
+        let names = |key: &str, n: usize| {
+            let list: std::vec::Vec<std::string::String> =
+                (0..n).map(|i| std::format!("r{i}")).collect();
+            plus(&std::format!("{key} = {}", list.join(", ")))
+        };
+        let eight = names("https", MAX_ROUTES);
+        assert_eq!(
+            parse(eight.as_bytes()).map(|m| m.https.as_slice().len()),
+            Ok(MAX_ROUTES)
+        );
+        assert!(parse(names("https", MAX_ROUTES + 1).as_bytes()).is_err());
+        assert!(parse(names("files", MAX_FILES + 1).as_bytes()).is_err());
         let mut entry = TABLE[0];
         entry.propose = true;
         let text = plus("update = propose");

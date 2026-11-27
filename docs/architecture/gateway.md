@@ -94,6 +94,7 @@ A route is a compiled entry in `pharos_services`, in the table `init` runs, besi
 | `headers` | `Accept: application/json` | Fixed headers, at most 4 |
 | `max_body`, `max_answer` | 4 KiB, 32 KiB | Each at most 60 KiB; `max_body` 0 for `GET` and `DELETE` |
 | `clients` | `[1]` | The gateway's clients that may use it |
+| `approve` | `None` | Since #325 ([approval.md](approval.md)): `None`, `One`, or `Two` people approve each request's bytes on the trusted path first; the gateway refuses a marked route's request without (`NOT_APPROVED`) |
 
 Both the vault and the gateway link the table. The vault uses it to check that a route names a secret, and the gateway uses it for everything else. `cargo xtask` refuses a table whose route names a header the gateway writes (`Host`, `Content-Length`, `Connection`, `Accept-Encoding`, `Transfer-Encoding`) or puts the secret's header among the fixed ones.
 
@@ -145,7 +146,7 @@ Both the vault and the gateway link the table. The vault uses it to check that a
   - There is no common `INVALID`: a path the pattern refuses is `BAD_REQUEST`, a body over `max_body` `TOO_LARGE`, a route the table lacks `NOT_FOUND`, a buffer too small `NO_BUFFER`. Each refusal is recorded (an event, outcome `refused`) before it is answered, or the answer is `NO_AUDIT`.
   - The reply is always `[status, detail, http:u16, type_len:u8, answer_len:u32, stripped:u8]`: on `TLS`, `detail` is the TLS service's status and `http` its reason; on `ANSWER`, `detail` is the reason.
   - *Since #293 (M6.2 review R-11):* the reply ends with `sent:u8`, so it is 11 bytes: `[status, detail, http:u16, type_len:u8, answer_len:u32, stripped:u8, sent:u8]`. `sent` is 1 once the gateway began writing the request to the TLS service, whatever the status: the server may have acted on it (route `post` may have created an item) though the answer failed, for example on `Content-Encoding: gzip`, a timeout while reading, a failed second release, or `NO_AUDIT` on the outcome. It is 0 for a refusal and for a failure before the write (the release, the connection). A bare status means 0. The gateway, the runtime, the bridge, and the guest library all build from this tree, so the older 10-byte reply is not accepted anywhere; a `sent` byte other than 0 or 1 is refused. In the guest library, a failed `request` raises `PharosError` with `sent` set from it.
-  - The statuses are 40 `NO_SECRET`, 41 `TLS`, 42 `ANSWER`, 43 `NO_AUDIT`, and 44 `TIMEOUT`, as above.
+  - The statuses are 40 `NO_SECRET`, 41 `TLS`, 42 `ANSWER`, 43 `NO_AUDIT`, and 44 `TIMEOUT`, as above, and since #325 45 `NOT_APPROVED` with op 2 `APPROVED` from `trust` (badge 3; [approval.md](approval.md#the-gateways-check)).
   - One request at a time: a second client waits in the endpoint's queue for up to the first's 30 s.
   - *Restarts (M6.2 review, F1):* the vault, the TLS service, and the gateway each restart under their policy with no buffer attached. When the vault or the TLS service answers `NO_BUFFER`, the gateway attaches its buffer there again and asks once more. The runtime does the same when the gateway answers `NO_BUFFER`. The `vault` kernel kills all three and checks that a request works afterwards.
 - **A request, in order:**
@@ -187,7 +188,7 @@ Both the vault and the gateway link the table. The vault uses it to check that a
 
 ### The agent runtime: `REQUEST` and the `https` grant
 
-- **Policy entries gain `https`:** route names the agent may use. Manifests can narrow it (`https = issues`) but never widen it, as with `net`.
+- **Policy entries gain `https`:** route names the agent may use. Manifests can narrow it (`https = issues`) but never widen it, as with `net`. *Since #325:* a manifest lists at most 8 routes (`manifest::MAX_ROUTES`).
 - **A new runtime operation, `REQUEST`** (agents v1), works like `SEND_TO`:
   - the agent puts the route's name, the path, and the body in its buffer;
   - the runtime checks the grant and the agent's network budget (bytes each way count against it), records the request (agent, task, route) or answers `NO_AUDIT`, and copies the path and the body into its own buffer at the gateway;

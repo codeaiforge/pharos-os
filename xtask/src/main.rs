@@ -4315,6 +4315,9 @@ fn vault_audit(image: &Path, log: &str, server_log: &Path) -> Result<()> {
         "vault outcome 1 release items secret test-token",
         "vault outcome 1 release echo secret test-token",
         "vault outcome 2 release missing secret absent status 40",
+        // The marked route's request no one approved, refused by the
+        // gateway itself (#325).
+        "c1 approved status 45",
     ] {
         if !lines.iter().any(|l| l.contains(want)) {
             println!("  audit trail:");
@@ -4323,6 +4326,13 @@ fn vault_audit(image: &Path, log: &str, server_log: &Path) -> Result<()> {
             }
             return Err(format!("the audit trail has no record like {want:?}"));
         }
+    }
+    // Refused before anything was released or recorded as intended.
+    if lines
+        .iter()
+        .any(|l| l.contains("release approved") || l.contains(" approved/items"))
+    {
+        return Err("the unapproved request reached the vault or an intent".into());
     }
     let releases = lines
         .iter()
