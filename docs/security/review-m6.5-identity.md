@@ -23,7 +23,7 @@
   - a record resolving to the wrong principal;
   - `trust` hanging, or the emergency stop locked behind a login.
 - **Dates:** 2026-11-26, milestone M6.5. Code under review: `main` at `2c5a54a` (#310–#313).
-- **Status:** **awaiting the maintainer's sign-off** (the M6.5 gate, #314). Fixed: F1, F2, F4, F13, and F14. Documented as limits: F3 (by design) and F11. Filed: #315–#321.
+- **Status:** **signed off by the maintainer on 2026-11-27** (the M6.5 gate, #314), with the severities as proposed and #315–#321 filed rather than fixed before the gate. CI: `identity` passed on `main` at `41d531b` (run 45956899434); the throwaway branch granting `asker` model 2 failed `identity` and `permissions` (run 45976522180). Fixed: F1, F2, F4, F13, and F14. Documented as limits: F3 (by design) and F11. Filed: #315–#321.
 
 ## Reviewers and their independence
 
