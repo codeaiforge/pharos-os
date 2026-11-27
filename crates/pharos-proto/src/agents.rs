@@ -498,10 +498,13 @@ pub enum Request<'a> {
         tag: &'a [u8],
         start: u16,
     },
-    /// `trust`: the user's answer to approval request `number`.
+    /// `trust`: the user's answer to approval request `number`; for a
+    /// trust v1 `ASK` approved, the SHA-256 of the bytes `trust` showed,
+    /// which the runtime checks against its own copy (#324).
     Answer {
         number: u16,
         yes: bool,
+        digest: Option<[u8; 32]>,
     },
     /// `trust`: send `trust` what each running attempt and group uses.
     Usage,
@@ -694,6 +697,11 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                     0 => false,
                     1 => true,
                     _ => return None,
+                },
+                digest: if r.is_empty() {
+                    None
+                } else {
+                    Some(r.take(32)?.try_into().ok()?)
                 },
             },
             op::REVOKE => Request::Revoke {
@@ -911,10 +919,17 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.u16(call_len)?;
             w.u32(result_at)?;
         }
-        Request::Answer { number, yes } => {
+        Request::Answer {
+            number,
+            yes,
+            digest,
+        } => {
             head(&mut w, op::ANSWER)?;
             w.u16(number)?;
             w.bytes(&[u8::from(yes)])?;
+            if let Some(d) = digest {
+                w.bytes(&d)?;
+            }
         }
         Request::Revoke { name, permission } => {
             head(&mut w, op::REVOKE)?;
@@ -1202,6 +1217,12 @@ mod tests {
             Request::Answer {
                 number: 7,
                 yes: true,
+                digest: None,
+            },
+            Request::Answer {
+                number: 8,
+                yes: true,
+                digest: Some([0xab; 32]),
             },
             Request::SendTo {
                 addr: [10, 0, 2, 2],
@@ -1272,6 +1293,7 @@ mod tests {
             Request::Answer {
                 number: u16::MAX,
                 yes: false,
+                digest: None,
             },
             Request::Revoke {
                 name: b"w",

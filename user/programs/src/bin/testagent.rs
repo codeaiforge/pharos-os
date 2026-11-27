@@ -780,6 +780,7 @@ impl Agent {
         let own = Request::Answer {
             number: 1,
             yes: true,
+            digest: None,
         };
         if self.call(&own, &mut out).0 != status::NO_ACCESS {
             return self.fail(b"the agent answered its own confirmation");
@@ -1152,6 +1153,7 @@ impl Agent {
         let own = Request::Answer {
             number: 1,
             yes: true,
+            digest: None,
         };
         if self.k_get(IN_HR, b"pay", 0).err() != Some(status::NO_ACCESS)
             || hr.and_then(|p| self.ask(p, 0)) != Some(Asked::Refused)
@@ -2225,6 +2227,7 @@ impl Agent {
             Request::Answer {
                 number: 1,
                 yes: true,
+                digest: None,
             },
             Request::Usage,
         ];
@@ -2340,6 +2343,7 @@ impl Agent {
         let answer = Request::Answer {
             number: 1,
             yes: true,
+            digest: None,
         };
         if self.call(&answer, &mut out).0 != status::NO_ACCESS
             || self.ask(Permission::Model(3), 0) != Some(Asked::Pending)

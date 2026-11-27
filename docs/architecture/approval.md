@@ -3,7 +3,7 @@
 ## 1. Status
 
 - **Design:** **Accepted**: approved by the maintainer on 2026-11-27 (#323), with each open question decided as recommended (section 7). It follows [D-037](../project/decision-log.md#d-037-payload-approval-and-risk-routing) (accepted 2026-11-27) and builds on the [egress gateway](gateway.md), the [identity model](identity.md), and the `send` tool ([tools.md](tools.md)).
-- **Implementation:** **planned**: the payload display (#324), the gateway's check (#325), marks and two approvers (#326), timeouts (#327), and the `approval` test kernel (#328). The gate is #329.
+- **Implementation:** the payload display, `ASK`, and `send` on it are **implemented** (#324): *as built* notes in section 3. **Planned:** the gateway's check (#325), marks and two approvers (#326), timeouts (#327), and the `approval` test kernel (#328). The gate is #329.
 
 ## 2. Context
 
@@ -83,6 +83,14 @@ The route's name is in the digest because the route fixes the host, the method, 
 3. **The copy:** `trust` copies `length` bytes into its own memory at once, checks that the bytes parse as `kind` says (two zero bytes for `REQUEST`, one for `send`), and clears the buffer. Everything after works on the copy, so a later write by the runtime changes nothing that was shown or hashed.
 
 `CONFIRM` stays for its old prompt only until `send` moves to `ASK` (#324). Then it is removed, with its prompt.
+
+*As built (#324):*
+- The buffer is 4 KiB (`trust::MAX_PAYLOAD`), the largest approvable payload (open question 1), not 8 KiB. `trust` maps it at start and gives it on each `CHANNEL` with agents v1 `ATTACH`. A non-blocking send reaches the runtime only while it receives, so `trust` tries once each time its loop wakes, at most 100 ms apart, until the runtime takes it. The runtime maps only a buffer of exactly that size from `trust`'s badge.
+- `ASK` is trust v1 op 14. Op 9 (`CONFIRM`) is gone. `trust` refuses an ask whose bytes do not parse as its kind (`approval::parts`), and, until #326, an ask for two approvers.
+- The digest goes back in agents v1 `ANSWER`, which carries 32 more bytes for an ask approved, not in `RESOLVED`, which runs the other way. The runtime takes a yes for a call only with a digest equal to its own copy's, and a permission's only with none (`approval::holds`).
+- Pages bypass the rate limit on lines the runtime's messages make, and each line waits up to 100 ms for a transmit buffer. A page with a line the console could not take ends there, with `ask #<n>: the console was full; show <n> again` and no hash line.
+- `yes <n>` without digits on an ask says to type them. The answer rules are `approval::check_yes`. The approval is recorded `APPROVE` with `ask #<n> <8 hex>`, and a refusal `REFUSE` with `ask #<n>`.
+- The runtime asks only for `send` so far. Gateway requests follow with the gateway's check (#325) and the marks (#326).
 
 ### The display
 

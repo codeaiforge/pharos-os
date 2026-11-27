@@ -50,6 +50,14 @@
 //! `yes <n>` or `no <n>`. The runtime decides the outcome (including the
 //! timeout) and says so with `RESOLVED`, which `trust` shows.
 //!
+//! Asks (#324, approval.md): the runtime's `ASK` names bytes it wrote in
+//! the buffer `trust` gave it (agents v1 `ATTACH`). `trust` copies them at
+//! once, then shows every byte itself, escaped, 32 a line behind `| `, 16
+//! lines a page (`more <n>`, `show <n>`), and after the last page their
+//! SHA-256's first 8 hex digits. `yes <n> <digits>` approves, typed by a
+//! person shown that line since their login; the `ANSWER` carries the
+//! digest.
+//!
 //! Services (#152): `init` sends each service event as `SERVICE`, which
 //! `trust` writes from its fields; `services` asks `init` for each
 //! service's state (`pharos_proto::service`, on the report capability),
@@ -79,6 +87,7 @@
 
 extern crate alloc;
 
+use pharos_programs::approval;
 use pharos_programs::identity::{self as people, Added, Removed, Session};
 use pharos_programs::output::{self, Limit};
 use pharos_programs::tasks::{Files, StoreFailed};
@@ -97,7 +106,7 @@ use pharos_user::rights::{READ, WRITE};
 use pharos_user::{
     Handle, Mapped, Received, Status, Usage as Use, call_timeout, clock_real, delete,
     endpoint_create, irq_create, irq_notify, mem_map, mem_share, process_status, process_stop,
-    process_usage, receive_timeout, send, sleep, try_send, uptime,
+    process_usage, receive_timeout, send, sleep, try_send, try_send_cap, uptime,
 };
 
 pharos_user::entry!(main);
@@ -124,7 +133,7 @@ const HELP_PEOPLE: &[u8] = b"commands: logout, whoami, people, person add <name>
 person roles <name> <roles>, person passphrase <name>, person remove <name>";
 /// Two lines: one console line holds at most 256 bytes.
 const HELP: &[u8] = b"commands: list, stop <agent>, stop group <group>, stop all, \
-revoke <agent> <permission>, yes <n>, no <n>, audit, audit rotate <code>, usage, \
+revoke <agent> <permission>, yes <n>, no <n>, yes <n> <hash>, more <n>, show <n>, audit, audit rotate <code>, usage, \
 verify <scope> <key> <version> <hash>";
 const HELP_SYSTEM: &[u8] = b"commands: services, health, config, start <service>, \
 restart <service>, stop service <service>, system, safe, recovery, update, apply <n>, discard <n>, rollback";
@@ -151,8 +160,14 @@ struct Trust {
     channel: Option<Handle>,
     /// Approval requests shown and not yet resolved.
     open: [u16; 4],
-    /// Which of them are confirmations of a tool call (#128).
-    confirms: [u16; 4],
+    /// Which of them are asks (#324): their bytes, copied, and where
+    /// their display is.
+    asks: alloc::vec::Vec<Asked>,
+    /// The buffer the runtime writes an ask's bytes in (agents v1
+    /// `ATTACH`), at most [`trust::MAX_PAYLOAD`].
+    ask_buffer: Option<Mapped>,
+    /// Whether the runtime on the channel took it.
+    ask_given: bool,
     /// For `call`s to the audit service.
     reply: Option<Handle>,
     agents: [Option<Agent>; SLOTS as usize],
@@ -168,6 +183,19 @@ struct Trust {
     session: Session,
     /// What the next line is, if it is a passphrase.
     prompt: Prompt,
+}
+
+/// An ask shown on the console (#324, approval.md): its bytes, copied
+/// from the buffer once, and their digest.
+struct Asked {
+    number: u16,
+    bytes: alloc::vec::Vec<u8>,
+    digest: [u8; 32],
+    /// The next page `more` shows.
+    next: usize,
+    /// Whether the person logged in was shown its hash line since their
+    /// login: only then may they approve it.
+    seen: bool,
 }
 
 /// A line that is a passphrase, not a command (#310).
@@ -403,6 +431,21 @@ impl Trust {
             }
         }
         let _ = self.console.send(&line[..n]);
+    }
+
+    /// Writes one line of an ask's display (#324), never rate-limited and
+    /// never dropped silently: it waits up to 100 ms for a transmit buffer
+    /// and says whether the line was written.
+    fn say_all(&mut self, parts: &[&[u8]]) -> bool {
+        let mut line = [0u8; TX_BUFFER];
+        let n = output::line(parts, &mut line);
+        for _ in 0..100 {
+            if self.console.send(&line[..n]).is_ok() {
+                return true;
+            }
+            sleep(1_000);
+        }
+        false
     }
 
     fn status(&mut self, label: &[u8], process: Handle, tail: &[u8]) {
@@ -709,21 +752,39 @@ export them first (cargo xtask store export)",
                     self.say(&[b"revoke: the runtime is not answering; stop works"]);
                 }
             }
+            Command::Answer(number, true) if self.asks.iter().any(|a| a.number == number) => {
+                let mut d = [0u8; 20];
+                let n = decimal(u64::from(number), &mut d);
+                self.say(&[
+                    b"ask #",
+                    n,
+                    b": type yes ",
+                    n,
+                    b" and the 8 hex digits after its last page",
+                ]);
+            }
+            Command::Approve(number, hash) => self.approve(number, hash),
+            Command::More(number) => self.page(number, false),
+            Command::Show(number) => self.page(number, true),
             Command::Answer(number, yes) => {
                 let mut d = [0u8; 20];
                 let n = decimal(u64::from(number), &mut d);
+                let asked = self.asks.iter().any(|a| a.number == number);
                 if number == 0 || !self.open.contains(&number) {
                     self.say(&[b"no request #", n]);
-                } else if self.tell_runtime(&agents::Request::Answer { number, yes }) {
+                } else if self.tell_runtime(&agents::Request::Answer {
+                    number,
+                    yes,
+                    digest: None,
+                }) {
                     let act = if yes {
                         audit::action::APPROVE
                     } else {
                         audit::action::REFUSE
                     };
-                    let mut detail = [0u8; 21];
-                    detail[0] = b'#';
-                    detail[1..1 + n.len()].copy_from_slice(n);
-                    let k = 1 + n.len();
+                    let mut detail = [0u8; 32];
+                    let label: &[u8] = if asked { b"ask #" } else { b"#" };
+                    let k = join(&[label, n], &mut detail);
                     self.record(act, None, &detail[..k]);
                 } else {
                     self.say(&[b"answer: the runtime is not answering; stop works"]);
@@ -802,11 +863,220 @@ export them first (cargo xtask store export)",
         let n = join(detail, &mut d);
         self.record(audit::action::LOGOUT, None, &d[..n]);
         self.session.end();
+        self.asks.iter_mut().for_each(|a| a.seen = false);
         self.say(&[
             b"logged out ",
             name.get(),
             if idle { b" (idle)" } else { b"" },
         ]);
+    }
+
+    /// Gives the runtime `WRITE` on the ask buffer (agents v1 `ATTACH`,
+    /// #324) after each `CHANNEL`, since a restarted runtime holds none of
+    /// it. One try, without waiting: the runtime takes it only while it
+    /// receives, so the main loop tries again every 100 ms until it does.
+    fn give_ask_buffer(&mut self) {
+        let (Some(c), Some(buffer), false) =
+            (self.channel, self.ask_buffer.as_ref(), self.ask_given)
+        else {
+            return;
+        };
+        let Ok(memory) = mem_share(buffer) else {
+            return;
+        };
+        let mut msg = [0u8; 16];
+        let req = agents::Request::Attach {
+            len: trust::MAX_PAYLOAD as u64,
+        };
+        self.ask_given = agents::encode(&req, &mut msg)
+            .is_some_and(|n| try_send_cap(c, &msg[..n], memory, READ | WRITE, 0).is_ok());
+        let _ = delete(memory);
+    }
+
+    /// `ASK` (#324, approval.md): copies the bytes from the buffer at once
+    /// and clears it, so nothing the runtime writes later is shown or
+    /// hashed; then shows the first page. Bytes that do not parse as
+    /// `kind`, or an ask for two approvers (#326, not yet), are refused.
+    fn ask(
+        &mut self,
+        number: u16,
+        name: &[u8],
+        task: u32,
+        kind: trust::Kind,
+        approvers: u8,
+        length: usize,
+    ) {
+        let mut bytes = alloc::vec![0u8; length];
+        let copied = self.ask_buffer.as_ref().is_some_and(|b| {
+            b.len() >= length && {
+                b.read_bytes(0, &mut bytes);
+                b.write_bytes(0, &alloc::vec![0u8; length]);
+                true
+            }
+        });
+        let (mut a, mut b) = ([0u8; 20], [0u8; 20]);
+        let n = decimal(u64::from(number), &mut a);
+        let id = decimal(u64::from(task), &mut b);
+        let parts = approval::parts(kind, &bytes).filter(|_| copied);
+        let Some((head, _, _)) = parts.filter(|_| approvers == 1) else {
+            self.say(&[
+                b"ask #",
+                n,
+                b": ",
+                name,
+                b" task ",
+                id,
+                b" sent an ask that cannot be shown; refused",
+            ]);
+            let _ = self.tell_runtime(&agents::Request::Answer {
+                number,
+                yes: false,
+                digest: None,
+            });
+            return;
+        };
+        let Some(free) = self.open.iter_mut().find(|n| **n == 0) else {
+            let _ = self.tell_runtime(&agents::Request::Answer {
+                number,
+                yes: false,
+                digest: None,
+            });
+            return;
+        };
+        *free = number;
+        let owner = self
+            .agents
+            .iter()
+            .flatten()
+            .find(|g| &g.name[..g.len] == name)
+            .map(|g| g.owner);
+        let what: &[u8] = match kind {
+            trust::Kind::Send => b" wants to send to ",
+            trust::Kind::Https => b" wants an HTTPS request on route ",
+        };
+        self.say(&[
+            b"ask #",
+            n,
+            b": ",
+            name,
+            b" task ",
+            id,
+            b" (owner ",
+            owner.as_ref().map_or(&b"?"[..], Name::get),
+            b")",
+            what,
+            head,
+            b", 1 approver",
+        ]);
+        let digest = approval::digest(&bytes);
+        self.asks.push(Asked {
+            number,
+            bytes,
+            digest,
+            next: 0,
+            seen: false,
+        });
+        self.page(number, true);
+    }
+
+    /// Shows ask `number`'s next page (`more`), or its first (`show`),
+    /// every line written by `trust` from its copy; after the last page,
+    /// the hash line, which marks it seen by the person logged in.
+    fn page(&mut self, number: u16, first: bool) {
+        let mut a = [0u8; 20];
+        let n = decimal(u64::from(number), &mut a);
+        let Some(i) = self.asks.iter().position(|a| a.number == number) else {
+            return self.say(&[b"no ask #", n]);
+        };
+        let pages = approval::pages(self.asks[i].bytes.len());
+        if first {
+            self.asks[i].next = 0;
+        }
+        let page = self.asks[i].next;
+        if page >= pages {
+            return self.say(&[b"ask #", n, b": no more pages; show ", n]);
+        }
+        // A page with a line the console could not take is not shown:
+        // no hash line, so it cannot be approved from it.
+        self.asks[i].next = 0;
+        for l in page * approval::PAGE_LINES..(page + 1) * approval::PAGE_LINES {
+            if l * approval::LINE >= self.asks[i].bytes.len() {
+                break;
+            }
+            let mut out = [0u8; approval::LINE_TEXT];
+            let line = approval::line(&self.asks[i].bytes, l, &mut out);
+            let line = alloc::vec::Vec::from(line);
+            if !self.say_all(&[&line]) {
+                self.say(&[b"ask #", n, b": the console was full; show ", n, b" again"]);
+                return;
+            }
+        }
+        self.asks[i].next = page + 1;
+        let (mut b, mut c, mut d) = ([0u8; 20], [0u8; 20], [0u8; 20]);
+        if page + 1 < pages {
+            let p = decimal(page as u64 + 1, &mut b);
+            let all = decimal(pages as u64, &mut c);
+            let _ = self.say_all(&[b"#", n, b": page ", p, b" of ", all, b"; more ", n]);
+            return;
+        }
+        let hex = approval::hex8(&self.asks[i].digest);
+        let len = decimal(self.asks[i].bytes.len() as u64, &mut d);
+        self.asks[i].seen = self.say_all(&[
+            b"#",
+            n,
+            b": ",
+            len,
+            b" bytes, sha256 ",
+            &hex,
+            b"; yes ",
+            n,
+            b" ",
+            &hex,
+            b" / no ",
+            n,
+        ]) && self.session.person().is_some();
+    }
+
+    /// `yes <n> <hash>` (#324): approved only by a person shown the hash
+    /// line since their login, with its digits; the runtime gets the
+    /// digest of the bytes shown, and checks it against its own copy.
+    fn approve(&mut self, number: u16, hash: [u8; 4]) {
+        let mut a = [0u8; 20];
+        let n = decimal(u64::from(number), &mut a);
+        let Some(ask) = self.asks.iter().find(|a| a.number == number) else {
+            return self.say(&[b"no ask #", n]);
+        };
+        let digest = ask.digest;
+        match approval::check_yes(ask.seen, &digest, hash) {
+            Ok(()) => {}
+            Err(approval::NotApproved::NotSeen) => {
+                return self.say(&[
+                    b"ask #",
+                    n,
+                    b": read it to its last page first (show ",
+                    n,
+                    b")",
+                ]);
+            }
+            Err(approval::NotApproved::Digits) => {
+                return self.say(&[
+                    b"ask #",
+                    n,
+                    b": those digits are not its sha256; nothing approved",
+                ]);
+            }
+        }
+        if !self.tell_runtime(&agents::Request::Answer {
+            number,
+            yes: true,
+            digest: Some(digest),
+        }) {
+            return self.say(&[b"answer: the runtime is not answering; stop works"]);
+        }
+        let hex = approval::hex8(&digest);
+        let mut detail = [0u8; 40];
+        let k = join(&[b"ask #", n, b" ", &hex], &mut detail);
+        self.record(audit::action::APPROVE, None, &detail[..k]);
     }
 
     fn whoami(&mut self) {
@@ -970,6 +1240,7 @@ export them first (cargo xtask store export)",
                 // A name with no record is answered as a wrong passphrase.
                 if found.is_some_and(|p| people::matches(&p, line)) {
                     self.session.start(name.get(), uptime());
+                    self.asks.iter_mut().for_each(|a| a.seen = false);
                     let mut d = [0u8; 64];
                     let n = join(&[b"login ", name.get()], &mut d);
                     self.record(audit::action::LOGIN, None, &d[..n]);
@@ -1537,13 +1808,15 @@ export them first (cargo xtask store export)",
                 if let Some(old) = self.channel.replace(cap) {
                     let _ = delete(old);
                 }
+                self.ask_given = false;
+                self.give_ask_buffer();
                 for i in 0..self.open.len() {
                     let number = core::mem::take(&mut self.open[i]);
                     if number == 0 {
                         continue;
                     }
-                    let confirm = self.confirms.contains(&number);
-                    let label: &[u8] = if confirm { b"confirm #" } else { b"approve #" };
+                    let asked = self.asks.iter().any(|a| a.number == number);
+                    let label: &[u8] = if asked { b"ask #" } else { b"approve #" };
                     let mut a = [0u8; 20];
                     self.say(&[
                         label,
@@ -1551,7 +1824,7 @@ export them first (cargo xtask store export)",
                         b": the runtime ended",
                     ]);
                 }
-                self.confirms = [0; 4];
+                self.asks.clear();
             }
             Ok(Request::Approve {
                 number,
@@ -1600,55 +1873,18 @@ export them first (cargo xtask store export)",
                     let _ = delete(cap);
                 }
             }
-            Ok(Request::Confirm {
+            Ok(Request::Ask {
                 number,
                 name,
                 task,
-                tool,
-                addr,
-                port,
-                bytes,
+                kind,
+                approvers,
+                length,
             }) if badge == RUNTIME && number != 0 => {
-                if let Some(free) = self.open.iter_mut().find(|n| **n == 0) {
-                    *free = number;
-                }
-                if let Some(free) = self.confirms.iter_mut().find(|n| **n == 0) {
-                    *free = number;
-                }
-                let mut d = [[0u8; 20]; 3];
-                let [a, b, c] = &mut d;
-                let n = decimal(u64::from(number), a);
-                let id = decimal(u64::from(task), b);
-                let size = decimal(u64::from(bytes), c);
-                let mut t = [0u8; pharos_proto::permission::TEXT];
-                // Only `send` is sensitive; its destination as `net` types it.
-                let dest = &Permission::Net { addr, port }.text(&mut t)[4..];
-                let (what, size, to, dest): (&[u8], &[u8], &[u8], &[u8]) =
-                    if tool == pharos_proto::tool::number::SEND {
-                        (b" wants to send ", size, b" bytes to ", dest)
-                    } else {
-                        (b" wants to use an unknown tool", b"", b"", b"")
-                    };
-                self.say(&[
-                    b"confirm #",
-                    n,
-                    b": ",
-                    name,
-                    b" task ",
-                    id,
-                    what,
-                    size,
-                    to,
-                    dest,
-                    b"? (yes ",
-                    n,
-                    b" / no ",
-                    n,
-                    b")",
-                ]);
                 if cap != 0 {
                     let _ = delete(cap);
                 }
+                self.ask(number, name, task, kind, approvers, usize::from(length));
             }
             // Only for an approval it showed and has open (#193): any other
             // number would put a line on the trusted console the runtime made up.
@@ -1658,20 +1894,18 @@ export them first (cargo xtask store export)",
                 for open in self.open.iter_mut().filter(|n| **n == number) {
                     *open = 0;
                 }
-                let confirm = self.confirms.contains(&number);
-                for c in self.confirms.iter_mut().filter(|n| **n == number) {
-                    *c = 0;
-                }
+                let asked = self.asks.iter().any(|a| a.number == number);
+                self.asks.retain(|a| a.number != number);
                 let mut a = [0u8; 20];
                 let n = decimal(u64::from(number), &mut a);
                 let what: &[u8] = match resolution {
-                    trust::Resolution::Granted if confirm => b"confirmed",
+                    trust::Resolution::Granted if asked => b"approved",
                     trust::Resolution::Granted => b"granted",
                     trust::Resolution::Refused => b"refused",
                     trust::Resolution::Unanswered => b"no answer; refused",
                     trust::Resolution::Ended => b"the task ended",
                 };
-                let label: &[u8] = if confirm { b"confirm #" } else { b"approve #" };
+                let label: &[u8] = if asked { b"ask #" } else { b"approve #" };
                 self.say(&[label, n, b": ", what]);
                 if cap != 0 {
                     let _ = delete(cap);
@@ -1984,7 +2218,9 @@ fn main(arg: u64) -> u64 {
         runtime: None,
         channel: None,
         open: [0; 4],
-        confirms: [0; 4],
+        asks: alloc::vec::Vec::new(),
+        ask_buffer: mem_map(trust::MAX_PAYLOAD as u64).ok(),
+        ask_given: false,
         reply: endpoint_create().ok(),
         agents: [None; SLOTS as usize],
         owners: alloc::vec::Vec::new(),
@@ -2030,7 +2266,14 @@ fn main(arg: u64) -> u64 {
             .session
             .idle_at()
             .map_or(pharos_user::FOREVER, |at| at.saturating_sub(now).max(1));
+        // Until the runtime took the ask buffer (#324).
+        let wait = if t.channel.is_some() && !t.ask_given {
+            wait.min(100_000)
+        } else {
+            wait
+        };
         let got = receive_timeout(SERVICE, &mut msg, wait);
+        t.give_ask_buffer();
         if t.session.idle(uptime()) {
             t.prompt = Prompt::None;
             t.logout(true);

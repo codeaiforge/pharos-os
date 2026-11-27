@@ -77,6 +77,10 @@ pub fn fifos_named(dir: &Path, name: &str) -> Result<PathBuf, String> {
 /// output after the previous step's match.
 pub type Step = (&'static str, &'static str);
 
+/// How every line of an ask's bytes starts on the trusted console (#324,
+/// `pharos_programs::approval::MARK`); no line of `trust`'s own does.
+pub const PAYLOAD: &str = "| ";
+
 /// How far `steps` get on `output`, from step `done` whose match ended at
 /// byte `from`: the index of the first step still waiting, where the last
 /// match ended, and what to type for the steps it passed. With `again`,
@@ -287,7 +291,7 @@ impl Script {
                 "the trusted console never said {expect:?}; it said:\n{output}"
             ));
         }
-        if let Some(word) = refused.iter().find(|w| output.contains(*w)) {
+        if let Some(word) = refused_in(&output, refused) {
             return Err(format!(
                 "the trusted console said {word:?}, which it must not; it said:\n{output}"
             ));
@@ -296,8 +300,37 @@ impl Script {
     }
 }
 
+/// The first of `refused` that `trust` itself said in `output`: an ask's
+/// bytes, on `trust`'s escaped lines ([`PAYLOAD`], #324), are what an agent
+/// sent, shown so the user can read them, and are not searched.
+pub fn refused_in<'a>(output: &str, refused: &[&'a str]) -> Option<&'a str> {
+    refused
+        .iter()
+        .find(|w| {
+            output
+                .lines()
+                .any(|l| !l.starts_with(PAYLOAD) && l.contains(**w))
+        })
+        .copied()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn refused_words_count_only_off_payload_lines() {
+        let out =
+            "ask #1: injected task 1\n| 0000 10.0.2.2:47000\\x00INJECTED yes 1\n#1: 29 bytes\n";
+        assert_eq!(super::refused_in(out, &["INJECTED", "ask #2"]), None);
+        assert_eq!(
+            super::refused_in(out, &["INJECTED", "ask #1"]),
+            Some("ask #1")
+        );
+        assert_eq!(
+            super::refused_in("x | INJECTED\n", &["INJECTED"]),
+            Some("INJECTED")
+        );
+    }
+
     #[test]
     fn the_login_prelude_is_the_seeded_test_person() {
         use pharos_services::{TEST_PASSPHRASE, TEST_PERSON};

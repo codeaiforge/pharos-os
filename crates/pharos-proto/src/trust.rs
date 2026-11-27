@@ -22,11 +22,14 @@
 //! - `RESOLVED` `[version, op, number (2), result]`: how request `number`
 //!   ended, decided by the runtime (granted, refused, or not answered in
 //!   time);
-//! - `CONFIRM` `[version, op, number (2), name length, name, task (4),
-//!   tool, address (4), port (2), bytes (2)]` (#128, tools.md): ask the
-//!   user to confirm one call of a sensitive tool; `trust` writes the
-//!   prompt from these fields, never from agent or model text, and the
-//!   answer and `RESOLVED` work as for `APPROVE`;
+//! - `ASK` `[version, op, number (2), name length, name, task (4), kind,
+//!   approvers, length (2)]` (#324, approval.md): ask for approval of
+//!   `length` bytes the runtime wrote at the start of the buffer `trust`
+//!   gave it (agents v1 `ATTACH`): the approved bytes of one action of
+//!   [`Kind`], which `trust` copies at once, then shows, every byte,
+//!   escaped and paged, and hashes. `RESOLVED` ends it as for `APPROVE`.
+//!   It replaced `CONFIRM` (op 9, #128), which showed only the
+//!   destination and the size;
 //! - `ENDED` `[version, op, slot, task (4), attempt]` (#304): the guest
 //!   attempt registered in `slot` ended. `trust` drops the registration
 //!   only if it names that attempt;
@@ -91,8 +94,7 @@ pub mod op {
     /// What one running attempt uses, and one group (#119).
     pub const USED: u8 = 7;
     pub const GROUP_USED: u8 = 8;
-    /// Confirm one call of a sensitive tool (#128).
-    pub const CONFIRM: u8 = 9;
+    // 9 was `CONFIRM` (#128), replaced by `ASK` (#324).
     /// A service event or the system's ready state, from `init` (#151).
     pub const SERVICE: u8 = 10;
     /// An incoming image offered or refused, from `init` (#165).
@@ -101,7 +103,26 @@ pub mod op {
     pub const ENDED: u8 = 12;
     /// Is a name a current person (#311)? Answered.
     pub const OWNER: u8 = 13;
+    /// Approve the bytes of one action, in `trust`'s buffer (#324).
+    pub const ASK: u8 = 14;
 }
+
+/// What an `ASK` approves (approval.md, "What is approved"): the kinds of
+/// action whose bytes an agent chose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Kind {
+    /// A gateway request: `route ‖ 0 ‖ target ‖ 0 ‖ body`.
+    Https = 1,
+    /// The `send` tool: `address:port ‖ 0 ‖ data`.
+    Send = 2,
+}
+
+/// Most approved bytes in one `ASK` (approval.md, open question 1): 8
+/// pages of 512 bytes, the size of `trust`'s buffer.
+pub const MAX_PAYLOAD: usize = 4096;
+/// Most approvers an action needs (`two`, D-037).
+pub const MAX_APPROVERS: u8 = 2;
 
 /// What happened to a service, or to the system (#151, D-026).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,16 +442,15 @@ pub enum Request<'a> {
         number: u16,
         resolution: Resolution,
     },
-    /// One call of tool `tool` (`pharos_proto::tool::number`): for `send`,
-    /// `bytes` to `addr:port` (#128).
-    Confirm {
+    /// Approve `length` bytes of a `kind` action, in `trust`'s buffer,
+    /// by `approvers` people (#324).
+    Ask {
         number: u16,
         name: &'a [u8],
         task: u32,
-        tool: u8,
-        addr: [u8; 4],
-        port: u16,
-        bytes: u16,
+        kind: Kind,
+        approvers: u8,
+        length: u16,
     },
     Revoked {
         outcome: Outcome,
@@ -539,18 +559,23 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
                 for_ms: r.u32()?,
             })
         })(),
-        op::CONFIRM => (|| {
+        op::ASK => (|| {
             let number = r.u16()?;
             let len = usize::from(r.u8()?);
             let name = r.take(len).filter(|n| valid_name(n))?;
-            Some(Request::Confirm {
+            Some(Request::Ask {
                 number,
                 name,
                 task: r.u32()?,
-                tool: r.u8()?,
-                addr: r.take(4)?.try_into().ok()?,
-                port: r.u16()?,
-                bytes: r.u16()?,
+                kind: match r.u8()? {
+                    1 => Kind::Https,
+                    2 => Kind::Send,
+                    _ => return None,
+                },
+                approvers: r.u8().filter(|a| (1..=MAX_APPROVERS).contains(a))?,
+                length: r
+                    .u16()
+                    .filter(|n| (1..=MAX_PAYLOAD).contains(&usize::from(*n)))?,
             })
         })(),
         op::RESOLVED => (|| {
@@ -714,27 +739,27 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             permission.write(&mut w)?;
             w.u32(for_ms)?;
         }
-        Request::Confirm {
+        Request::Ask {
             number,
             name,
             task,
-            tool,
-            addr,
-            port,
-            bytes,
+            kind,
+            approvers,
+            length,
         } => {
-            if !valid_name(name) {
+            if !valid_name(name)
+                || !(1..=MAX_APPROVERS).contains(&approvers)
+                || !(1..=MAX_PAYLOAD).contains(&usize::from(length))
+            {
                 return None;
             }
-            w.bytes(&[VERSION, op::CONFIRM])?;
+            w.bytes(&[VERSION, op::ASK])?;
             w.u16(number)?;
             w.bytes(&[name.len() as u8])?;
             w.bytes(name)?;
             w.u32(task)?;
-            w.bytes(&[tool])?;
-            w.bytes(&addr)?;
-            w.u16(port)?;
-            w.u16(bytes)?;
+            w.bytes(&[kind as u8, approvers])?;
+            w.u16(length)?;
         }
         Request::Resolved { number, resolution } => {
             w.bytes(&[VERSION, op::RESOLVED])?;
@@ -843,6 +868,14 @@ pub enum Command<'a> {
     Revoke(&'a [u8], Permission),
     /// `yes <n>` or `no <n>`: the answer to approval request `n` (#106).
     Answer(u16, bool),
+    /// `yes <n> <hash>`: approves ask `n` (#324, approval.md); `hash` is
+    /// the first 8 hexadecimal digits of the SHA-256 of its bytes, as 4
+    /// bytes, from the line after its last page.
+    Approve(u16, [u8; 4]),
+    /// `more <n>`: the next page of ask `n` (#324).
+    More(u16),
+    /// `show <n>`: ask `n` again from its first page (#324).
+    Show(u16),
     /// `audit`: the audit trail's boot, record count, and chain head (#107).
     Audit,
     /// `audit rotate <code>`: free the earlier streams once exported
@@ -991,6 +1024,17 @@ pub fn command(line: &[u8]) -> Command<'_> {
         (Some(b"stop"), Some(name), None) if valid_name(name) => Command::Stop(name),
         (Some(word @ (b"yes" | b"no")), Some(n), None) => match request_number(n) {
             Some(n) => Command::Answer(n, word == b"yes"),
+            None => Command::Help,
+        },
+        (Some(b"yes"), Some(n), Some(hash)) if words.next().is_none() => {
+            match (request_number(n), hex_bytes::<4>(hash)) {
+                (Some(n), Some(hash)) => Command::Approve(n, hash),
+                _ => Command::Help,
+            }
+        }
+        (Some(word @ (b"more" | b"show")), Some(n), None) => match request_number(n) {
+            Some(n) if word == b"more" => Command::More(n),
+            Some(n) => Command::Show(n),
             None => Command::Help,
         },
         _ => Command::Help,
@@ -1190,14 +1234,21 @@ mod tests {
                 number: u16::MAX,
                 resolution: Resolution::Ended,
             },
-            Request::Confirm {
+            Request::Ask {
                 number: 4,
                 name: &long,
                 task: u32::MAX,
-                tool: 2,
-                addr: [10, 0, 2, 2],
-                port: 47_000,
-                bytes: 248,
+                kind: Kind::Send,
+                approvers: 1,
+                length: 1,
+            },
+            Request::Ask {
+                number: u16::MAX,
+                name: b"fetcher",
+                task: 7,
+                kind: Kind::Https,
+                approvers: MAX_APPROVERS,
+                length: MAX_PAYLOAD as u16,
             },
             Request::Revoked {
                 outcome: Outcome::NotHeld,
@@ -1377,6 +1428,42 @@ mod tests {
     }
 
     #[test]
+    fn asks_with_a_bad_kind_approvers_or_length_are_refused() {
+        let ask = |kind: u8, approvers: u8, length: u16| {
+            let mut m = std::vec![VERSION, op::ASK, 0, 1, 1, b'a', 0, 0, 0, 1, kind, approvers];
+            m.extend_from_slice(&length.to_le_bytes());
+            m
+        };
+        let good = ask(2, 1, 5);
+        assert!(
+            matches!(parse(&good), Ok(Request::Ask { length: 5, .. })),
+            "{good:?}"
+        );
+        for (bad, why) in [
+            (ask(0, 1, 5), "kind 0"),
+            (ask(3, 1, 5), "kind 3"),
+            (ask(2, 0, 5), "no approver"),
+            (ask(2, 3, 5), "three approvers"),
+            (ask(2, 1, 0), "empty"),
+            (ask(2, 1, MAX_PAYLOAD as u16 + 1), "too long to show"),
+        ] {
+            assert_eq!(parse(&bad), Err(Refused::Bad), "{why}");
+        }
+        let mut buf = [0u8; 64];
+        let req = |approvers, length| Request::Ask {
+            number: 1,
+            name: b"a",
+            task: 1,
+            kind: Kind::Send,
+            approvers,
+            length,
+        };
+        assert!(encode(&req(0, 5), &mut buf).is_none());
+        assert!(encode(&req(1, 0), &mut buf).is_none());
+        assert!(encode(&req(1, MAX_PAYLOAD as u16 + 1), &mut buf).is_none());
+    }
+
+    #[test]
     fn bad_requests_are_refused() {
         let reg_in = |slot: u8, name: &[u8], group: &[u8]| {
             let mut m = std::vec![VERSION, op::REGISTER, slot, name.len() as u8];
@@ -1535,6 +1622,29 @@ mod tests {
         assert_eq!(command(b"person delete bob"), Command::Help);
         assert_eq!(command(b"person add b@b"), Command::Help);
         assert_eq!(command(b"  list "), Command::List);
+        assert_eq!(
+            command(b"yes 3 ada84318"),
+            Command::Approve(3, [0xad, 0xa8, 0x43, 0x18])
+        );
+        assert_eq!(
+            command(b"yes 3 ADA84318"),
+            Command::Approve(3, [0xad, 0xa8, 0x43, 0x18])
+        );
+        for bad in [
+            &b"yes 3 ada8431"[..],
+            b"yes 3 ada843189",
+            b"yes 3 ada8431g",
+            b"yes 0 ada84318",
+            b"yes 3 ada84318 x",
+            b"no 3 ada84318",
+            b"more 0",
+            b"more",
+            b"show 3 4",
+        ] {
+            assert_eq!(command(bad), Command::Help, "{bad:?}");
+        }
+        assert_eq!(command(b"more 3"), Command::More(3));
+        assert_eq!(command(b"show 65535"), Command::Show(65_535));
         assert_eq!(command(b"stop all"), Command::StopAll);
         assert_eq!(command(b"stop\tworker-1"), Command::Stop(b"worker-1"));
         assert_eq!(command(b"stop group crew"), Command::StopGroup(b"crew"));

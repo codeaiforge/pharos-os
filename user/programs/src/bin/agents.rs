@@ -73,10 +73,14 @@
 //! needs, then the budget, and audits before running it. `read_file` reads
 //! one granted file of the `files` namespace into the agent's buffer.
 //! `send` is sensitive (#128): each call waits for the user's `yes` on the
-//! trusted console (`CONFIRM`, structured fields only), answered `PENDING`
-//! while the agent repeats the same call, sent once on a yes, and
-//! `REFUSED` otherwise (no answer within the approval timeout, `no`, or
-//! `trust` unreachable).
+//! trusted console, answered `PENDING` while the agent repeats the same
+//! call, sent once on a yes, and `REFUSED` otherwise (no answer within the
+//! approval timeout, `no`, or `trust` unreachable). Since #324
+//! (approval.md) the runtime writes the call's approved bytes
+//! (`address:port ‖ 0 ‖ data`) into the buffer `trust` gave it (agents v1
+//! `ATTACH` from `trust`) and sends `ASK`; `trust` shows every byte, and a
+//! yes carries the SHA-256 of what it showed, which must equal the
+//! digest of the runtime's own copy, or the call is refused.
 //!
 //! Knowledge (#144, knowledge.md): `KNOWLEDGE_PUT` needs `knowledge write`
 //! for its scope, counts against the attempt's `knowledge` budget, and is
@@ -124,6 +128,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use pharos_programs::approval;
 use pharos_programs::budgets::{self, Bucket, GroupUse, Over, Usage};
 use pharos_programs::grants::{self, Grants, Kept};
 use pharos_programs::groups;
@@ -1574,6 +1579,8 @@ struct Runtime {
     kept: Kept,
     /// Approval requests waiting for the user (#106).
     pending: Vec<Pending>,
+    /// `trust`'s buffer for an ask's bytes (#324), once it gave it.
+    trust_buffer: Option<Mapped>,
     next_request: u16,
     approve_us: u64,
     /// The policy table's groups, and what each has used this minute.
@@ -2488,8 +2495,19 @@ impl Runtime {
         left
     }
 
-    /// `ATTACH`: maps the caller's buffer read-write.
+    /// `ATTACH`: maps the caller's buffer read-write; `trust`'s is the
+    /// one its asks' bytes go in (#324), replacing any before.
     fn attach(&mut self, badge: u32, memory: Handle, len: u64) {
+        if badge == agents::TRUST {
+            let mapped = (len == trust::MAX_PAYLOAD as u64)
+                .then(|| mem_map_cap(memory, true, len).ok())
+                .flatten();
+            let _ = delete(memory);
+            if let Some(old) = mapped.and_then(|m| self.trust_buffer.replace(m)) {
+                unmap(old);
+            }
+            return;
+        }
         let mapped = (len <= MAX_BUFFER)
             .then(|| mem_map_cap(memory, true, len).ok())
             .flatten();
@@ -4210,15 +4228,23 @@ impl Runtime {
         }
         self.next_request = self.next_request.wrapping_add(1).max(1);
         let number = self.next_request;
-        let asked = tell_trust(&trust::Request::Confirm {
-            number,
-            name: limits.entry.name,
-            task: id,
-            tool: tool::number::SEND,
-            addr,
-            port,
-            bytes: data.len() as u16,
-        });
+        // Its approved bytes, in `trust`'s buffer, then `ASK` (#324).
+        let bytes = approval::send_bytes(addr, port, data);
+        let asked = self
+            .trust_buffer
+            .as_ref()
+            .filter(|b| bytes.len() <= trust::MAX_PAYLOAD && b.len() >= bytes.len())
+            .is_some_and(|b| {
+                b.write_bytes(0, &bytes);
+                tell_trust(&trust::Request::Ask {
+                    number,
+                    name: limits.entry.name,
+                    task: id,
+                    kind: trust::Kind::Send,
+                    approvers: 1,
+                    length: bytes.len() as u16,
+                })
+            });
         // `trust` unreachable means no (D-018 item 4).
         if !asked {
             return Err(agents::REFUSED);
@@ -4240,6 +4266,20 @@ impl Runtime {
             });
         }
         Err(agents::PENDING)
+    }
+
+    /// The digest of the approved bytes of call `number` on `task` (#324).
+    fn call_digest(&self, task: u32, number: u16) -> Option<[u8; 32]> {
+        let c = self
+            .slots
+            .iter()
+            .flatten()
+            .filter(|s| s.task == task)
+            .find_map(|s| s.confirm.as_ref().filter(|c| c.number == number))?;
+        let Permission::Net { addr, port } = c.permission else {
+            return None;
+        };
+        Some(approval::digest(&approval::send_bytes(addr, port, &c.data)))
     }
 
     /// Requests past their deadline are refused; returns the wait until
@@ -4570,7 +4610,17 @@ impl Runtime {
                     self.stop_guest(usize::from(slot), task, attempt);
                     Ok(done(out))
                 }
-                Request::Answer { number, yes } => {
+                Request::Answer {
+                    number,
+                    yes,
+                    digest,
+                } => {
+                    // A call's yes holds only with the digest of the bytes
+                    // `trust` showed, equal to its own copy's (#324); a
+                    // permission's carries none.
+                    let call = self.pending.iter().find(|q| q.number == number && q.call);
+                    let own = call.and_then(|q| self.call_digest(q.task, number));
+                    let yes = approval::holds(yes, own, digest, call.is_some());
                     let how = if yes {
                         trust::Resolution::Granted
                     } else {
@@ -4792,6 +4842,7 @@ fn main(arg: u64) -> u64 {
             refused,
         },
         pending: Vec::new(),
+        trust_buffer: None,
         next_request: 0,
         approve_us: APPROVE_US[usize::from(arg == 1)],
         groups,

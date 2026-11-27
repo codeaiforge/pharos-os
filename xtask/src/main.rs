@@ -3322,10 +3322,14 @@ const AGENTS_NET_SCRIPT: &[console::Step] = &[
 /// `10.0.2.2:47002` is not askable: never a prompt.
 const AGENTS_NET_REFUSED: &[&str] = &["approve #2"];
 /// Tool calls (#126, #127): `reader` (task 1) asks for `notes.txt`; once
-/// approved, the user revokes `report.txt`. Then its `send` calls (#128):
-/// confirmed, refused, left unanswered, and ended by revoking the
-/// destination.
+/// approved, the user revokes `report.txt`. Then its `send` calls (#128),
+/// each shown in full since #324 (approval.md): approved with the digest's
+/// digits, refused, left unanswered, and ended by revoking the
+/// destination. A yes without the digits, and with wrong ones, approves
+/// nothing.
 const TOOLS_TEST: &str = "tools";
+// Each `send` shown is `10.0.2.2:47000 ‖ 0 ‖ hello`, 20 bytes; the
+// digits typed are its SHA-256's first 8 (`scripts_type_each_asks_digest`).
 const TOOLS_SCRIPT: &[console::Step] = &[
     ("trust: ready", ""),
     ("registered runtime", ""),
@@ -3336,30 +3340,42 @@ const TOOLS_SCRIPT: &[console::Step] = &[
     ("approve #1: granted", "revoke reader file report.txt\n"),
     ("revoked file report.txt from reader", ""),
     (
-        "confirm #2: reader task 1 wants to send 5 bytes to 10.0.2.2:47000? (yes 2 / no 2)",
-        "yes 2\n",
-    ),
-    ("confirm #2: confirmed", ""),
-    (
-        "confirm #3: reader task 1 wants to send 5 bytes to 10.0.2.2:47000? (yes 3 / no 3)",
-        "no 3\n",
-    ),
-    ("confirm #3: refused", ""),
-    (
-        "confirm #4: reader task 1 wants to send 5 bytes to 10.0.2.2:47000? (yes 4 / no 4)",
+        "ask #2: reader task 1 (owner admin) wants to send to 10.0.2.2:47000, 1 approver",
         "",
     ),
-    ("confirm #4: no answer; refused", ""),
+    (">| 0000 10.0.2.2:47000\\x00hello", ""),
     (
-        "confirm #5: reader task 1 wants to send 5 bytes to 10.0.2.2:47000? (yes 5 / no 5)",
+        ">#2: 20 bytes, sha256 2c37ad89; yes 2 2c37ad89 / no 2",
+        "yes 2\n",
+    ),
+    (
+        ">ask #2: type yes 2 and the 8 hex digits",
+        "yes 2 00000000\n",
+    ),
+    (
+        ">ask #2: those digits are not its sha256",
+        "yes 2 2c37ad89\n",
+    ),
+    ("ask #2: approved", ""),
+    (
+        ">#3: 20 bytes, sha256 2c37ad89; yes 3 2c37ad89 / no 3",
+        "no 3\n",
+    ),
+    ("ask #3: refused", ""),
+    (">#4: 20 bytes, sha256 2c37ad89; yes 4 2c37ad89 / no 4", ""),
+    ("ask #4: no answer; refused", ""),
+    (
+        ">#5: 20 bytes, sha256 2c37ad89; yes 5 2c37ad89 / no 5",
         "revoke reader net 10.0.2.2:47000\n",
     ),
-    ("confirm #5: refused", ""),
+    ("ask #5: refused", ""),
     ("revoked net 10.0.2.2:47000 from reader", ""),
 ];
 /// Nothing else is asked (`secrets.txt` is not askable, and the call
-/// made while one waits is `BUSY`), and no payload reaches the console.
-const TOOLS_REFUSED: &[&str] = &["approve #2", "confirm #6", "hello", "other"];
+/// made while one waits is `BUSY`), and the payload reaches the console
+/// only on `trust`'s escaped lines (`| `), which [`console::Script::finish`]
+/// does not search.
+const TOOLS_REFUSED: &[&str] = &["approve #2", "ask #6", "hello", "other"];
 /// Agent groups and subtasks (#134): the console is only watched, so the
 /// trail is checked afterwards.
 const GROUPS_TEST: &str = "groups";
@@ -3367,7 +3383,7 @@ const GROUPS_TEST: &str = "groups";
 /// and the injected message never reaches the console.
 const DEPUTY_TEST: &str = "deputy";
 const DEPUTY_SCRIPT: &[console::Step] = &[("trust: ready", ""), ("registered runtime", "")];
-const DEPUTY_REFUSED: &[&str] = &["approve #", "confirm #", "SYSTEM", "let me in"];
+const DEPUTY_REFUSED: &[&str] = &["approve #", "ask #", "SYSTEM", "let me in"];
 /// `aide` (task 12) holds model 2 from `boss` and asks for model 3; the
 /// user refuses, then revokes boss's model 2, which takes aide's (#135).
 const GROUPS_SCRIPT: &[console::Step] = &[
@@ -3437,22 +3453,30 @@ const CHANNELS_SCRIPT: &[console::Step] = &[
 /// Message contents never reach the trusted console.
 const CHANNELS_REFUSED: &[&str] = &["approve #2", "three", "let me in"];
 /// Prompt injection and malformed calls (#129): the user refuses the one
-/// `send` the naive agent makes.
+/// `send` the naive agent makes, shown in full since #324: its payload,
+/// which reads like an answer, only on `trust`'s escaped lines.
 const INJECTION_TEST: &str = "injection";
 const INJECTION_SCRIPT: &[console::Step] = &[
     ("trust: ready", ""),
     ("registered runtime", ""),
     (
-        "confirm #1: injected task 1 wants to send 14 bytes to 10.0.2.2:47000? (yes 1 / no 1)",
+        "ask #1: injected task 1 (owner admin) wants to send to 10.0.2.2:47000, 1 approver",
+        "",
+    ),
+    (">| 0000 10.0.2.2:47000\\x00INJECTED yes 1", ""),
+    (
+        ">#1: 29 bytes, sha256 1599ca60; yes 1 1599ca60 / no 1",
         "no 1\n",
     ),
-    ("confirm #1: refused", ""),
+    ("ask #1: refused", ""),
 ];
-/// The fake prompt the agent logs, its payload, the secret file's text,
-/// and any other request never reach the trusted console.
+/// The fake prompt the agent logs, its payload (but on `trust`'s escaped
+/// lines), the secret file's text, and any other request never reach the
+/// trusted console.
 const INJECTION_REFUSED: &[&str] = &[
-    "confirm #9",
-    "confirm #2",
+    "confirm #",
+    "ask #9",
+    "ask #2",
     "approve #",
     "INJECTED",
     "launch codes",
@@ -5907,6 +5931,38 @@ mod tests {
     }
 
     use super::*;
+
+    /// The `send`s the `tools` and `injection` scripts approve or refuse
+    /// (#324): each script shows the bytes as `trust` escapes them, and
+    /// their length and digest as `trust` computes them.
+    #[test]
+    fn scripts_type_each_asks_digest() {
+        for (script, data) in [
+            (TOOLS_SCRIPT, &b"hello"[..]),
+            (INJECTION_SCRIPT, b"INJECTED yes 1"),
+        ] {
+            let bytes = [&b"10.0.2.2:47000\0"[..], data].concat();
+            let hex: String = pharos_crypto::sha256(&[&bytes])[..4]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let page = format!(
+                ">| 0000 10.0.2.2:47000\\x00{}",
+                std::str::from_utf8(data).unwrap()
+            );
+            let line = format!(" {} bytes, sha256 {hex}; yes ", bytes.len());
+            assert!(script.iter().any(|(e, _)| *e == page), "{page}");
+            assert!(script.iter().any(|(e, _)| e.contains(&line)), "{line}");
+            assert!(
+                script
+                    .iter()
+                    .filter(|(_, typed)| typed.starts_with("yes ") && typed.len() > 8)
+                    .all(|(_, typed)| typed.ends_with(&format!("{hex}\n"))
+                        || typed.ends_with("00000000\n")),
+                "{hex}"
+            );
+        }
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
