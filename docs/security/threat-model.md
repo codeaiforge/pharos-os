@@ -183,6 +183,19 @@ Design: [identity.md](../architecture/identity.md) (accepted 2026-11-26, #309; D
 | The emergency stop is locked behind a login | **Implemented (#310):** every stop (`stop all`, an agent, a group, a service) answers with no one logged in, and at a passphrase prompt, which it ends (no passphrase is a stop; M6.5 review F13), recorded with actor `console`, so a runaway that leaves no memory to read the identity store can still be stopped (`pharos_programs::identity::allowed_logged_out`, host-tested; the `aifail` kernel stops its runaway `infer` logged out). **Limit:** a stop typed logged out names no person |
 | **Limits** | A shared passphrase; one person with two passphrases; records before M6.5 name `user`. The owner check is the runtime's: a compromised runtime skips it, and can fill or fake `trust`'s owners (`OWNER`, at most 64 names) so `person remove` refuses or allows the wrong names (review F11). Under TCG a passphrase hash (5 s) can hold `trust` past an attempt's 5 s `OWNER` wait (that attempt fails closed) and past its own 2 s sends to the runtime (review F5, #315). The [M6.5 review](review-m6.5-identity.md)'s Low and Info findings are filed (#315–#321) |
 
+### Payload approval (M6.4)
+
+Design: [approval.md](../architecture/approval.md) (accepted 2026-11-27, #323; D-037). Each row is **planned** until its issue lands (#324–#328).
+
+| Threat | Mitigation |
+| --- | --- |
+| An approver approves bytes other than the ones sent | **Planned (#324, #325):** `trust` copies the payload, shows every byte, and hashes its copy (SHA-256); the gateway sends a marked route's request only with an unused approval of that digest, and refuses any other (`NOT_APPROVED`); for `send` the runtime checks the digest |
+| An agent shapes the prompt (a payload that looks like `trust`'s lines, or ends one) | **Planned (#324):** payload lines escaped (`\xNN`, `\\`) and prefixed with `\| ` and an offset; no line of `trust`'s own starts so; the hash line comes only after the last page |
+| An approval typed without reading the payload, or against the wrong request | **Planned (#324):** `yes <n>` needs the digest's first 8 hex digits, shown only after the last page to that person since their login |
+| One person approves a four-eyes action alone, or the requester approves | **Planned (#326):** a route marked `two` needs two distinct logged-in people, neither the agent's owner; the gateway refuses fewer approvers than the route's mark |
+| A pending approval waits forever, or survives a restart | **Planned (#327):** no answer denies (60 s, 10 min for `two`); a `no` denies at once; a restart of `trust`, the runtime, or the gateway denies what is pending |
+| **Limits** | For `send` the runtime is the sender, so a compromised runtime can send unapproved data; a compromised runtime can lie about an owner, and so about the requester; a route's host and fixed headers are compiled, not shown; a payload over the approvable size cannot be approved |
+
 ### User environment and storage (M3.0)
 
 Design: [user-environment.md](../architecture/user-environment.md) and [storage.md part 8](../architecture/storage.md#8-the-writable-store-m30), from D-016 and D-017. Rows are marked implemented as their issues land (#74–#78, #80); all are reviewed at the M3.0 gate.

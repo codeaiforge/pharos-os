@@ -1,0 +1,205 @@
+# Payload approval, four eyes, and timeouts
+
+## 1. Status
+
+- **Design:** **Accepted**: approved by the maintainer on 2026-11-27 (#323), with each open question decided as recommended (section 7). It follows [D-037](../project/decision-log.md#d-037-payload-approval-and-risk-routing) (accepted 2026-11-27) and builds on the [egress gateway](gateway.md), the [identity model](identity.md), and the `send` tool ([tools.md](tools.md)).
+- **Implementation:** **planned**: the payload display (#324), the gateway's check (#325), marks and two approvers (#326), timeouts (#327), and the `approval` test kernel (#328). The gate is #329.
+
+## 2. Context
+
+An approver should see the exact bytes an action sends. D-037 decided the parts:
+- `trust` shows every byte, escaped, prefixed, and paged;
+- the approval names the SHA-256 of the bytes shown, and is checked where the bytes leave;
+- the approver types `yes <n>` with the hash's first 8 hex digits;
+- compiled policy marks each gateway route `none`, `one`, or `two`, and `send` needs at least `one`;
+- `two` means two distinct people, neither the requester;
+- no answer denies.
+
+What exists today (M6.5, checked at `9731b39`):
+- **`send`:**
+  - the runtime keeps a copy of the call and asks `trust` with `CONFIRM`, which carries the agent, the task, the destination, and the size;
+  - `trust` writes `confirm #<n>: ...` from those fields, and the agent's call answers `PENDING` until the user types `yes <n>` or `no <n>`, or 60 s pass (`APPROVE_US`);
+  - the agent repeats the same call to learn the outcome, and a different call is `BUSY`.
+- **The gateway's `REQUEST`:**
+  - checks the grant, records the intent (with 8 bytes of SHA-256 over `target ‖ 0 ‖ body`), and sends;
+  - its whole request is bounded at 30 s, and the runtime waits 35 s;
+  - a route's `max_body` is 4 KiB by default, and at most 60 KiB.
+- **Messages and `trust`:**
+  - IPC messages are at most 256 bytes, so a payload cannot travel in one;
+  - `trust` reads lines of at most 64 bytes and writes lines of at most 256;
+  - `trust` knows each agent's owner from `REGISTER` (#311) and who is logged in (#310);
+  - `trust` holds no capability on the gateway.
+- **Audit:** actions `APPROVE` (5), `REFUSE` (6), and `EXPIRE` (7) already exist.
+
+## 3. Design
+
+### Overview
+
+```mermaid
+flowchart LR
+    agent["agent<br/>(REQUEST or send)"]:::untrusted
+    runtime["agent runtime<br/>(holds the call, asks)"]:::service
+    trust["trust<br/>(copies, shows, hashes,<br/>collects yes)"]:::service
+    console["trusted console<br/>(approvers)"]:::device
+    gateway["gateway<br/>(approved hashes,<br/>used once)"]:::service
+    agent -- "call (PENDING until answered)" --> runtime
+    runtime -- "PAYLOAD into trust's buffer, then ASK" --> trust
+    trust -- "pages, then sha256 prefix" --> console
+    console -- "yes n hex (each approver)" --> trust
+    trust -- "APPROVED (digest, approvers)" --> gateway
+    trust -- "RESOLVED (digest)" --> runtime
+    runtime -- "REQUEST (after the agent repeats it)" --> gateway
+    classDef untrusted fill:#fde2e2,stroke:#b91c1c
+    classDef service fill:#e0f2fe,stroke:#0369a1
+    classDef device fill:#f3f4f6,stroke:#4b5563
+```
+
+An approval finishes before the request reaches the gateway. A `two` approval can take 10 minutes, and the gateway's 30 s budget runs only from when it takes the request. This is how `send` already works: the call is held, the agent repeats it, and only an answered call goes on.
+
+### What is approved
+
+The *approved bytes* are what `trust` shows and hashes. The *digest* is SHA-256 over them:
+
+| Action | Approved bytes | Shown as |
+| --- | --- | --- |
+| `REQUEST` | `route ‖ 0 ‖ target ‖ 0 ‖ body`, where the target is the path and query | a header line naming the route and the method, then the target and the body, paged |
+| `send` | `address:port ‖ 0 ‖ data` (the destination as `net` writes it) | a header line naming the destination, then the data, paged |
+
+The route's name is in the digest because the route fixes the host, the method, the secret, and the headers. The bytes the gateway writes beyond the approved ones (`Host`, `Content-Length`, the secret's header, and the fixed headers) come from the compiled route, which is reviewed with the image. They are not shown: they are the same on every request.
+
+### Marks
+
+- **Gateway routes:** `Route` gains `approve: Approve` (`None`, `One`, or `Two`), with `None` the default, so every existing route stays grant-only. `pharos_services::check` refuses:
+  - a marked route whose `max_body` plus its longest target is over the largest approvable payload (open question 1);
+  - a marked route in a table without `trust`'s capability on the gateway.
+- **`send`:** always `One`.
+- **The manifest may ask for more:** the optional key `approve = <route>:<one|two>,...` raises a route's mark for that agent and never lowers it. A route the agent has no grant for, a lower mark, or an unknown mark is refused at parse or by `Manifest::within`.
+- **Where each mark is enforced:** the runtime uses the higher of the route's and the manifest's marks when it asks. The gateway enforces the route's own mark, so a runtime that asks for fewer approvers is refused there. Only the runtime enforces a mark the manifest raised.
+
+### Getting the payload to `trust`
+
+1. **The buffer:** at start, `trust` maps one 8 KiB buffer and gives the runtime `WRITE` on it (`ATTACH`, as the gateway's clients do). The runtime attaches it again on `NO_BUFFER`, after either one restarts.
+2. **The request:** the runtime writes the approved bytes at offset 0, then sends trust v1 `ASK`: `[version, op, number (2), name length, name, task (4), kind, approvers, length (2)]`. `kind` is 1 for `REQUEST` and 2 for `send`. `approvers` is 1 or 2.
+3. **The copy:** `trust` copies `length` bytes into its own memory at once, checks that the bytes parse as `kind` says (two zero bytes for `REQUEST`, one for `send`), and clears the buffer. Everything after works on the copy, so a later write by the runtime changes nothing that was shown or hashed.
+
+`CONFIRM` stays for its old prompt only until `send` moves to `ASK` (#324). Then it is removed, with its prompt.
+
+### The display
+
+`trust` writes everything itself, from the copy and the fields.
+
+```text
+ask #3: fetcher task 7 (owner admin) wants POST on route issues, 2 approvers
+| 0000 issues\x00/repos/acme/demo/issues\x00{
+| 0020 "title":"Disk full on build-3","
+| 0040 body":"C:\\logs\x0a"}
+#3: 81 bytes, sha256 ada84318; yes 3 ada84318 / no 3
+```
+
+- Each line shows 32 approved bytes, as `| `, the offset in 4 hex digits, a space, and the bytes. Printable ASCII (0x20–0x7e) is written as itself, except `\`, which is written `\\`. Every other byte is written `\xNN`. So the longest line is 7 + 32 × 4 = 135 bytes, and nothing in a payload can end a line or write a control sequence.
+- No line of `trust`'s own starts with `| `, so payload text cannot pass for a prompt, a name, or an answer.
+- 16 lines (512 bytes) make a page. `more <n>` shows the next page, and `show <n>` shows the first again.
+- The hash line comes only after the last page. It gives the length, the first 8 hex digits of the digest, and the answers.
+- The header line names the agent and its owner (from `REGISTER`), the route and its method (from the request; the route's name is in the digest, so a lie here is refused at the gateway), and how many approvers are needed.
+
+### Answers and approvers
+
+- **`yes <n> <8 hex>`** is refused, and says why, unless:
+  - someone is logged in;
+  - this person has been shown the hash line of `<n>` since their login;
+  - the digits match the digest's first 8;
+  - for `two`: the person is not the requester and has not already approved `<n>`.
+- **`no <n>`** needs only a login, and denies at once.
+- **The requester** is the agent's owner. No person submits tasks today (tasks come from control clients and from agents), so no other person can be the requester. When a person can submit a task, that person becomes its requester.
+- **Two approvers** log in one after the other at the one console. A `yes` stays given after its approver logs out. Each `yes` is recorded when it is typed, and the console shows `ask #3: approved by bob, 1 more needed`.
+- **When enough people have approved:**
+  1. for `REQUEST`, `trust` sends the gateway `APPROVED` (below) and waits up to 1 s for its answer, and a failure denies;
+  2. `trust` sends the runtime `RESOLVED` with the digest;
+  3. the runtime checks the digest against its own copy and answers the agent's next repeat of the call by going on (`REQUEST` to the gateway, or the datagram), or by refusing it if the digests differ.
+
+### The gateway's check
+
+- **The capability:** `trust` gets `SEND` on the gateway as a new client, badge 3 (`init`'s table gives it, as for the vault's client).
+- **`APPROVED`:** gateway v1 op 2, `[1, 2, route:u8, approvers:u8, digest (32)]`, from client 3 only. The answer is `OK`, `NOT_FOUND`, or `BUSY`.
+  - The gateway keeps at most 4 approvals. Each is used once and expires 60 s after it arrives (open question 3).
+  - A fifth is `BUSY`, and `trust` denies it.
+- **On `REQUEST` for a marked route:** the gateway computes the digest of the request it was given and looks for an approval with that route and digest, with `approvers` at least the route's mark.
+  - None found: status 45 `NOT_APPROVED` (`status::OWN + 13`), recorded as a refusal, before any release or connection.
+  - Found: the approval is removed, then the request goes ahead, with `approved <8 hex>` in the intent's record.
+- **On restart** the gateway keeps no approvals, so a request approved before it restarted is refused.
+
+### Timeouts and failures
+
+Each of these denies, and each is recorded:
+
+| Event | Outcome |
+| --- | --- |
+| No decision within 60 s (`one`) or 10 min (`two`), timed by the runtime as today (`APPROVE_US`, a second value for `two`) | `EXPIRE` |
+| A `no` from any logged-in person | `REFUSE` at once |
+| `trust` restarts | the runtime denies every pending call when `trust` registers again (`CHANNEL`) |
+| The runtime restarts | every attempt restarts, and the pending calls go with them |
+| The gateway restarts, or `APPROVED` fails | the request is refused (`NOT_APPROVED`, or `trust` denies it) |
+| The agent repeats a different call | `BUSY`, as for `send` today |
+| The agent never repeats the call | the gateway's approval expires unused |
+
+One call waits per task, and at most 4 per runtime (`MAX_PENDING`), so a flood of calls asks the console at most four times at once.
+
+### Audit
+
+| Record | By | Contents |
+| --- | --- | --- |
+| The ask | runtime | agent, task, kind, route or destination, length, digest prefix, approvers needed |
+| Each answer | `trust`, actor the person | `APPROVE` or `REFUSE`, `ask #<n> <8 hex>`, and `requester` when a `yes` is refused for that reason |
+| Expiry | runtime | `EXPIRE`, `ask #<n>` |
+| The approval stored, and its use | gateway | `approved <route> <8 hex> by <k>`; the intent then carries `approved <8 hex>` |
+| A refusal at the gateway | gateway | `NOT_APPROVED`, the route, the digest prefix |
+
+No payload byte reaches the trail, only its length and its digest. The trail shows who approved what and when. An auditor holding the payload can check it against the digest prefix, and with the full digest when the trail's records allow it (open question 4).
+
+### Budgets
+
+- `trust`: the 8 KiB buffer, one 8 KiB copy for each of 4 pending asks, and the approvers (at most 2 names each). That is about 48 KiB.
+- The gateway: 4 approvals of 34 bytes each.
+- Approvals a task needs are counted in the demo scenarios and held to a budget at the gate (#329). This counts against approval fatigue.
+
+## 4. Security
+
+- **The bytes sent equal the bytes shown.** `trust` hashes its own copy, the one it shows. The gateway hashes the request it is about to send and refuses any other. A runtime that writes one payload to `trust` and gives the gateway another is refused at the gateway.
+- **The agent cannot shape the prompt.** Payload lines are escaped and prefixed, so no payload line looks like one of `trust`'s. Names are checked names (`valid_name`). The hash line comes from `trust` alone.
+- **The approver reads to the end.** `yes` needs the digits from the hash line, which only follows the last page. An approval mistyped against another `#<n>` does not match that request's digest.
+- **Four eyes:** two different logged-in people, and the owner (the requester) can be neither. Approvers are only as distinct as their passphrases are private (identity.md, the limits).
+- **Limits:**
+  - for `send`, the runtime is the sender, so a compromised runtime can send unapproved data (D-037's consequence) until `send` moves behind a service of its own;
+  - a compromised runtime can lie about an agent's owner (M6.5 review F11), and so about who the requester is;
+  - the route's fixed headers and host are not shown (they are compiled and reviewed);
+  - a payload over the largest approvable size cannot be approved at all.
+
+## 5. Testing
+
+| Where | What |
+| --- | --- |
+| Host | The escaping, line, and page layout, with every byte value, `\`, and the longest line; the digest of both kinds; the `ASK` and `APPROVED` codecs (fuzzed like the other interfaces); manifest `approve` parsing and `within`; `check` refusing a marked route too large to approve; the answer rules (each refusal reason) on `pharos_programs` state, host-tested |
+| QEMU, `approval` (#328) | A table with the gateway, the vault, the TLS service, and a host HTTPS server (as `vault`), with a route marked `one` and a route marked `two`. The runner logs in. A `one` request is shown in full, a wrong hex is refused, and `yes <n> <hex>` sends it; the server checks it received exactly the approved bytes. A test client of the gateway sends a marked route's request with no approval, then with a body other than the approved one, and both are `NOT_APPROVED`. For `two`: the owner's `yes` is refused (`requester`), the same person twice is refused, and two other people send it. A `no` denies, and no answer denies (a shortened timeout, the kernel's argument). `send` shows its data and is checked by digest. The trail is checked: each answer's actor, no payload byte, and every actor resolves |
+| CI | A throwaway branch where the gateway sends a request whose digest differs from the approved one must fail `approval` (run linked in the gate) |
+
+## 6. Alternatives
+
+- **The approval inside the gateway's request:** simpler messages, but the gateway would wait up to 10 minutes per request with a TLS connection open, against its 30 s bound.
+- **The runtime keeping the digest alone:** taken for `send` only, as its limit. For `REQUEST`, D-037 puts the check where the bytes leave.
+- **Payload in IPC messages:** at most 256 bytes each, so a 4 KiB body would be about 20 messages, with ordering and loss to handle. The shared buffer is one copy.
+- **`trust` reading the route table for marks:** `trust` would need the table's number, as the vault and gateway take it. The gateway enforces the route's mark anyway, so the runtime's claim cannot lower it.
+
+## 7. Open questions
+
+**Decided (2026-11-27, #323):** 1. at most 4 KiB approvable, a marked route that could exceed it refused at build; 2. 16 lines of 32 bytes a page; 3. the gateway keeps an unused approval 60 s; 4. the digest's first 8 bytes in the trail, the whole 32 with a longer record (M6.7); 5. a role narrowing approvers planned, not built; 6. `send` moved to `ASK` now, `CONFIRM` removed.
+
+1. **The largest approvable payload:** 4 KiB (8 pages), refusing a marked route whose `max_body` could exceed it, or 16 KiB (32 pages)? Recommended: 4 KiB. A payload no one reads to the end is not approved in any real sense.
+2. **Page size:** 16 lines of 32 bytes, or a whole payload at once? Recommended: 16 lines, so a page fits a terminal and `more` is a deliberate step.
+3. **How long the gateway keeps an approval:** 60 s, or the request's 30 s? Recommended: 60 s. The agent may be slow to repeat its call, and the approval is used once anyway.
+4. **The digest in the trail:** the first 8 bytes in hex (as the intent today), or the whole 32? Recommended: 8 bytes in the 64-byte record, and the whole digest when a longer record exists (M6.7). 8 bytes already bind the approval to its intent.
+5. **A role narrowing who may approve a route:** built now, or planned? Recommended: planned. D-037 allows it, but no route needs it yet.
+6. **`send` moved to `ASK` now:** or keep `CONFIRM` and add payload pages to it? Recommended: move it, so there is one approval path to review.
+
+## Implementation issues
+
+#324 (the display and `ASK`), #325 (the gateway's check), #326 (marks and two approvers), #327 (timeouts), #328 (the `approval` kernel), #329 (the gate).
