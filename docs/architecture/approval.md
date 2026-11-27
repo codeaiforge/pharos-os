@@ -168,6 +168,12 @@ Each of these denies, and each is recorded:
 
 One call waits per task, and at most 4 per runtime (`MAX_PENDING`), so a flood of calls asks the console at most four times at once.
 
+*As built (#327):*
+- The timeout is `approval::timeout_us`: 60 s for one approver and 10 min for two, or 5 s and 10 s with the test policy table (the runtime's argument 1), host-tested. The runtime sets each ask's deadline by its approvers, and a permission's approval keeps one approver's.
+- **A logout does not deny.** The issue's text (#327) asked that a logout or an idle session end deny a pending ask. The design keeps a yes given after its approver logs out, and two approvers at one console can only take turns. So a logout, or an idle end, only takes away "shown since their login" (each ask's `seen`); the next person must read it again. The deadline still bounds every ask.
+- **A restarted `trust`** is not given the runtime's `CHANNEL` again, so it cannot answer; it knows none of the asks before it, and ignores their `RESOLVED`. Each ask ends at its deadline as `EXPIRE`, denied: not at once, as section 3 had it, but within the timeout. A restarted runtime's `CHANNEL` makes `trust` drop every ask it shows (`ask #<n>: the runtime ended`, #324), and a restarted gateway holds no approvals (#325), so an approved request after it is `NOT_APPROVED`.
+- The kernel tests of each, with timeouts the kernel shortens and `trust` and the gateway killed, are the `approval` kernel's (#328).
+
 ### Audit
 
 | Record | By | Contents |

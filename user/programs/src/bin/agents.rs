@@ -295,9 +295,6 @@ const STORE_US: u64 = 10_000_000;
 /// How long a call to the inference service may take; `GENERATE` waits
 /// [`infer::GENERATE_US`].
 const INFER_US: u64 = 10_000_000;
-/// How long the user has to answer an approval request: boot table, test
-/// table.
-const APPROVE_US: [u64; 2] = [60_000_000, 5_000_000];
 /// Handles each agent may hold (D-022): its runtime endpoint, endpoints and
 /// buffers of its own. The runtime's own budget from `init` has room for
 /// [`SLOTS`] of these.
@@ -1614,7 +1611,9 @@ struct Runtime {
     /// Approval requests waiting for the user (#106).
     pending: Vec<Pending>,
     next_request: u16,
-    approve_us: u64,
+    /// Whether the test policy table's short approval timeouts apply
+    /// (`approval::timeout_us`, #327).
+    short_approvals: bool,
     /// The policy table's groups, and what each has used this minute.
     groups: &'static [Group],
     group_use: Vec<GroupUse>,
@@ -4136,7 +4135,7 @@ impl Runtime {
             task,
             permission: p,
             for_ms,
-            deadline: now + self.approve_us,
+            deadline: now + approval::timeout_us(1, self.short_approvals),
             call: false,
         });
         Asked::Pending
@@ -4322,7 +4321,8 @@ impl Runtime {
             task: id,
             permission: p,
             for_ms: 0,
-            deadline: uptime() + self.approve_us,
+            // Two approvers log in one after the other (#327).
+            deadline: uptime() + approval::timeout_us(approvers, self.short_approvals),
             call: true,
         });
         if let Some(s) = self.slots[i].as_mut() {
@@ -4908,7 +4908,7 @@ fn main(arg: u64) -> u64 {
         },
         pending: Vec::new(),
         next_request: 0,
-        approve_us: APPROVE_US[usize::from(arg == 1)],
+        short_approvals: arg == 1,
         groups,
         group_use: alloc::vec![GroupUse::default(); groups.len()],
         infer_health: Health {

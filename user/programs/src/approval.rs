@@ -168,8 +168,29 @@ pub fn holds(yes: bool, own: Option<[u8; 32]>, given: Option<[u8; 32]>, call: bo
     }
 }
 
+/// How long an ask waits for its approvers before it is denied (#327,
+/// approval.md, "Timeouts and failures"): 60 s for one, 10 min for two,
+/// who log in one after the other; 5 s and 10 s with the test policy
+/// table, so a kernel sees each end.
+pub const fn timeout_us(approvers: u8, test: bool) -> u64 {
+    match (approvers >= 2, test) {
+        (false, false) => 60_000_000,
+        (true, false) => 600_000_000,
+        (false, true) => 5_000_000,
+        (true, true) => 10_000_000,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn two_approvers_wait_longer_and_every_ask_ends() {
+        assert_eq!(timeout_us(1, false), 60_000_000);
+        assert_eq!(timeout_us(2, false), 600_000_000);
+        assert!(timeout_us(2, true) > timeout_us(1, true));
+        assert!(timeout_us(2, true) < timeout_us(1, false));
+    }
+
     #[test]
     fn a_yes_needs_the_hash_line_seen_and_its_digits() {
         let d = digest(b"x");
