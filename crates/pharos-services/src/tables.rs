@@ -1043,8 +1043,9 @@ const fn bearer(name: &'static str, method: &'static str, path: &'static str) ->
 /// header), `echo` (the server sends the header back), `post`, `missing`
 /// (a secret the file lacks), `other`, which `fetcher` is not granted, and
 /// `approved` (#325), marked for one approver, which the gateway refuses
-/// without an approval from `trust`.
-const VAULT_ROUTES: [Route; 6] = [
+/// without an approval from `trust`, and which `agentclient` 17 also asks
+/// for directly (client 2); and `two` (#326), marked for two.
+const VAULT_ROUTES: [Route; 7] = [
     bearer("items", "GET", "/items"),
     bearer("echo", "GET", "/echo"),
     Route {
@@ -1061,7 +1062,13 @@ const VAULT_ROUTES: [Route; 6] = [
     Route {
         max_body: 1024,
         approve: Approve::One,
+        clients: &[1, 2],
         ..bearer("approved", "POST", "/items")
+    },
+    Route {
+        max_body: 1024,
+        approve: Approve::Two,
+        ..bearer("two", "POST", "/items")
     },
 ];
 
@@ -1099,7 +1106,12 @@ const GATEWAY_CAPS: [Give; 6] = [
     send(Ep::Audit, AUDIT_GATEWAY),
 ];
 const GATEWAY_DESTS: [crate::TlsDest; 1] = [(VAULT_SERVER.0, VAULT_SERVER.1, TLS_TEST_NAME)];
-const FETCHCLIENT_CAPS: [Give; 2] = [CONSOLE, send(Ep::Agents, AGENTS_CONTROL)];
+/// `agentclient` 17, with the gateway as test client 2 (#326).
+const FETCHCLIENT_CAPS: [Give; 3] = [
+    CONSOLE,
+    send(Ep::Agents, AGENTS_CONTROL),
+    send(Ep::Gateway, 2),
+];
 
 /// `trust` with `SEND` on the gateway (#325), for its approvals.
 const TRUST_GATEWAY_CAPS: [Give; 7] = [

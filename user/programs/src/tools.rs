@@ -41,7 +41,9 @@ pub fn sensitive(tool: u8) -> bool {
 }
 
 /// A sensitive call waiting for the user, or answered and not yet taken
-/// (#128): its destination and payload, compared with each repeat.
+/// (#128): its destination and payload, compared with each repeat. Since
+/// #326 any approved call: `data` is its approved bytes (approval.md, "What
+/// is approved"), the ones `trust` shows and hashes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Confirm {
     pub number: u16,

@@ -131,6 +131,10 @@ fn run(t: &mut TestRun) {
         "the fetcher's requests and refusals all checked",
         has(b"ok vault: the fetcher's requests and refusals all checked"),
     );
+    t.check(
+        "the gateway refuses a marked route's request with no approval, from any client",
+        has(b"ok vault: the gateway refuses a marked route's request with no approval"),
+    );
     // Each restart after its kill and before the request that needed it.
     let in_order = |want: &[&[u8]]| {
         let mut rest = lines.iter();

@@ -25,7 +25,7 @@
 //! - `ASK` `[version, op, number (2), name length, name, task (4), kind,
 //!   approvers, length (2)]` (#324, approval.md): ask for approval of
 //!   `length` bytes the runtime wrote at the start of the buffer `trust`
-//!   gave it (agents v1 `ATTACH`): the approved bytes of one action of
+//!   gave it (`BUFFER`): the approved bytes of one action of
 //!   [`Kind`], which `trust` copies at once, then shows, every byte,
 //!   escaped and paged, and hashes. `RESOLVED` ends it as for `APPROVE`.
 //!   It replaced `CONFIRM` (op 9, #128), which showed only the
@@ -33,6 +33,10 @@
 //! - `ENDED` `[version, op, slot, task (4), attempt]` (#304): the guest
 //!   attempt registered in `slot` ended. `trust` drops the registration
 //!   only if it names that attempt;
+//! - `BUFFER` `[version, op]` (#326): sent with `call`, answered `[OK]`
+//!   with `WRITE` on `trust`'s ask buffer, of [`MAX_PAYLOAD`] bytes. The
+//!   runtime asks before each `ASK`, so a restarted `trust`'s is the one
+//!   it writes;
 //! - `OWNER` `[version, op, name length, name]` (#311, identity.md): is
 //!   `name` a current person? Sent with `call`, the one request `trust`
 //!   answers: one byte, [`crate::status::OK`], [`crate::status::NOT_FOUND`],
@@ -48,8 +52,8 @@
 //!   0 when it was never offered), with the image running and its version;
 //!   `trust` writes the prompt from these fields.
 //!
-//! The badge says who sends: [`INIT`] or [`RUNTIME`]. Except to `OWNER`,
-//! there is no reply:
+//! The badge says who sends: [`INIT`] or [`RUNTIME`]. Except to `OWNER`
+//! and `BUFFER`, there is no reply:
 //! the sender's blocking `send` returns once the service has the message,
 //! and the service never refuses a valid one (it replaces a slot's entry).
 
@@ -105,6 +109,8 @@ pub mod op {
     pub const OWNER: u8 = 13;
     /// Approve the bytes of one action, in `trust`'s buffer (#324).
     pub const ASK: u8 = 14;
+    /// The ask buffer, for the runtime (#326). Answered.
+    pub const BUFFER: u8 = 15;
 }
 
 /// What an `ASK` approves (approval.md, "What is approved"): the kinds of
@@ -427,6 +433,8 @@ pub enum Request<'a> {
         attempt: u8,
     },
     Channel,
+    /// `trust`'s ask buffer, on the reply (#326).
+    Buffer,
     /// Is `name` a current person (#311)?
     Owner {
         name: &'a [u8],
@@ -547,6 +555,7 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             })
         })(),
         op::CHANNEL => Some(Request::Channel),
+        op::BUFFER => Some(Request::Buffer),
         op::APPROVE => (|| {
             let number = r.u16()?;
             let len = usize::from(r.u8()?);
@@ -721,6 +730,7 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.bytes(&[attempt])?;
         }
         Request::Channel => w.bytes(&[VERSION, op::CHANNEL])?,
+        Request::Buffer => w.bytes(&[VERSION, op::BUFFER])?,
         Request::Approve {
             number,
             name,
@@ -1204,6 +1214,7 @@ mod tests {
                 attempt: u8::MAX,
             },
             Request::Channel,
+            Request::Buffer,
             Request::Used {
                 name: &long,
                 task: u32::MAX,

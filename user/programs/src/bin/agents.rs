@@ -77,10 +77,13 @@
 //! call, sent once on a yes, and `REFUSED` otherwise (no answer within the
 //! approval timeout, `no`, or `trust` unreachable). Since #324
 //! (approval.md) the runtime writes the call's approved bytes
-//! (`address:port ‖ 0 ‖ data`) into the buffer `trust` gave it (agents v1
-//! `ATTACH` from `trust`) and sends `ASK`; `trust` shows every byte, and a
+//! (`address:port ‖ 0 ‖ data`) into the buffer `trust` gives it on a
+//! `BUFFER` call (#326) and sends `ASK`; `trust` shows every byte, and a
 //! yes carries the SHA-256 of what it showed, which must equal the
-//! digest of the runtime's own copy, or the call is refused.
+//! digest of the runtime's own copy, or the call is refused. A `REQUEST`
+//! on a route the gateway's `MARK` or the manifest's `approve` marks
+//! (#326) is held the same way, its approved bytes `route ‖ 0 ‖ target ‖ 0
+//! ‖ body`, for that many approvers.
 //!
 //! Knowledge (#144, knowledge.md): `KNOWLEDGE_PUT` needs `knowledge write`
 //! for its scope, counts against the attempt's `knowledge` budget, and is
@@ -177,6 +180,8 @@ const INCOMING: Handle = 12;
 const GATEWAY: Handle = INCOMING;
 /// How long the gateway may take: its own 30 s, and a margin (#289).
 const GATEWAY_US: u64 = pharos_proto::gateway::WAIT_US;
+/// How long the gateway may take to say a route's mark (#326).
+const MARK_US: u64 = 1_000_000;
 /// How long the knowledge service may take to answer.
 const KNOWLEDGE_US: u64 = 10_000_000;
 /// The runtime's buffer at the storage service for granted files: the
@@ -339,9 +344,9 @@ const SPEND: Budget = Budget {
     group: b"spend",
 };
 
-/// The `vault` kernel's policy table (#284): `fetcher`, granted five of
-/// the table's gateway routes, never `other`; `approved` is marked for
-/// approval (#325).
+/// The `vault` kernel's policy table (#284): `fetcher`, granted six of
+/// the table's gateway routes, never `other`; `approved` and `two` are
+/// marked for one and two approvers (#325, #326).
 const HTTPS_TABLE: &[Entry] = &[Entry {
     name: b"fetcher",
     program: b"bin/testagent",
@@ -363,7 +368,7 @@ const HTTPS_TABLE: &[Entry] = &[Entry {
     knowledge_write: &[],
     ask_knowledge: &[],
     propose: false,
-    https: &[b"items", b"echo", b"post", b"missing", b"approved"],
+    https: &[b"items", b"echo", b"post", b"missing", b"approved", b"two"],
     guest: false,
     owner: TEST_OWNER,
     channels: &[],
@@ -1212,6 +1217,9 @@ struct Limits {
     /// The gateway's routes it may use (#282), as the entry's names.
     https: [&'static [u8]; manifest::MAX_ROUTES],
     https_count: usize,
+    /// How many people its manifest asks to approve each of them (#326,
+    /// `approve`): 0, 1, or 2.
+    https_approve: [u8; manifest::MAX_ROUTES],
     /// The tools it may call and the files it gets (#126, #127), as the
     /// entry's names.
     tools: u32,
@@ -1412,6 +1420,31 @@ fn check_owner(owner: &[u8], reply: Handle) -> Result<(), Vec<u8>> {
     }
 }
 
+/// Writes an ask's `bytes` into `trust`'s buffer (#324, #326), asked for
+/// with `BUFFER` on `reply` each time, so a restarted `trust`'s is the one
+/// written; whether they were.
+fn write_ask(bytes: &[u8], reply: Handle) -> bool {
+    let mut msg = [0u8; 8];
+    let mut out = [0u8; 8];
+    let got = trust::encode(&trust::Request::Buffer, &mut msg)
+        .and_then(|n| call_timeout(TRUST, &msg[..n], reply, &mut out, OWNER_US).ok());
+    let Some(Received::Message { len: 1, cap, .. }) = got else {
+        return false;
+    };
+    if cap == 0 {
+        return false;
+    }
+    let len = trust::MAX_PAYLOAD as u64;
+    let mapped = (out[0] == status::OK)
+        .then(|| mem_map_cap(cap, true, len).ok())
+        .flatten();
+    let _ = delete(cap);
+    let Some(m) = mapped else { return false };
+    m.write_bytes(0, bytes);
+    unmap(m);
+    true
+}
+
 /// Sends `req` to `trust` without blocking, trying for at most 1 s:
 /// `trust` waits in `receive` almost always, and is never waited on long.
 fn tell_trust(req: &trust::Request<'_>) -> bool {
@@ -1580,8 +1613,6 @@ struct Runtime {
     kept: Kept,
     /// Approval requests waiting for the user (#106).
     pending: Vec<Pending>,
-    /// `trust`'s buffer for an ask's bytes (#324), once it gave it.
-    trust_buffer: Option<Mapped>,
     next_request: u16,
     approve_us: u64,
     /// The policy table's groups, and what each has used this minute.
@@ -1753,9 +1784,11 @@ fn load(e: &'static Entry, table: &'static [Entry]) -> Result<Limits, &'static [
     }
     let mut https = [&b""[..]; manifest::MAX_ROUTES];
     let mut https_count = 0;
+    let mut https_approve = [0u8; manifest::MAX_ROUTES];
     for r in m.https.as_slice() {
         if let Some(name) = e.https.iter().find(|n| *n == r) {
             https[https_count] = name;
+            https_approve[https_count] = m.approvers(r);
             https_count += 1;
         }
     }
@@ -1782,6 +1815,7 @@ fn load(e: &'static Entry, table: &'static [Entry]) -> Result<Limits, &'static [
         propose: m.propose,
         https,
         https_count,
+        https_approve,
     })
 }
 
@@ -2496,19 +2530,8 @@ impl Runtime {
         left
     }
 
-    /// `ATTACH`: maps the caller's buffer read-write; `trust`'s is the
-    /// one its asks' bytes go in (#324), replacing any before.
+    /// `ATTACH`: maps the caller's buffer read-write.
     fn attach(&mut self, badge: u32, memory: Handle, len: u64) {
-        if badge == agents::TRUST {
-            let mapped = (len == trust::MAX_PAYLOAD as u64)
-                .then(|| mem_map_cap(memory, true, len).ok())
-                .flatten();
-            let _ = delete(memory);
-            if let Some(old) = mapped.and_then(|m| self.trust_buffer.replace(m)) {
-                unmap(old);
-            }
-            return;
-        }
         let mapped = (len <= MAX_BUFFER)
             .then(|| mem_map_cap(memory, true, len).ok())
             .flatten();
@@ -3472,6 +3495,17 @@ impl Runtime {
         if let Some(b) = agent_buffer {
             b.read_bytes(0, &mut bytes);
         }
+        // A marked route, or one its manifest marks higher (#326): its
+        // bytes approved first, as `send`'s are; the gateway checks again.
+        let raise = (limits.https[..limits.https_count].iter())
+            .position(|n| *n == route)
+            .map_or(0, |k| limits.https_approve[k]);
+        let need = self.route_mark(route)?.max(raise);
+        if need > 0 {
+            let (target, body) = bytes.split_at(usize::from(path_len));
+            let approved = pharos_programs::gateway::approved_bytes(route, target, body);
+            self.approved_call(i, id, limits, p, trust::Kind::Https, need, approved)?;
+        }
         let agent = limits.entry.name;
         let budget = limits.entry.budget;
         self.charge(i, &budget, Some(p), |u, g| {
@@ -3528,6 +3562,27 @@ impl Runtime {
         }
         out[..Answered::LEN].copy_from_slice(&a.encode());
         Ok(Answered::LEN)
+    }
+
+    /// How many people approve a request on `route` (#326): the gateway's
+    /// `MARK`, 0 for a route it does not have (its `REQUEST` refuses it).
+    /// No answer is `BUSY`: the request would not be served either.
+    fn route_mark(&self, route: &[u8]) -> Result<u8, u8> {
+        let gw = self.https.as_ref().ok_or(status::INTERNAL)?;
+        let mut msg = [0u8; 48];
+        let n =
+            gateway::encode(&GatewayRequest::Mark { route }, &mut msg).ok_or(status::INTERNAL)?;
+        let mut reply = [0u8; 256];
+        match gw
+            .health
+            .call(GATEWAY, &msg[..n], gw.reply, &mut reply, MARK_US)
+        {
+            Ok(Received::Message { len: 2, .. }) if reply[0] == gateway::OK => {
+                Ok(reply[1].min(trust::MAX_APPROVERS))
+            }
+            Ok(Received::Message { .. }) => Ok(0),
+            _ => Err(status::BUSY),
+        }
     }
 
     /// `read_file` (#127) for slot `i` on task `id`, its `file` permission
@@ -4188,7 +4243,7 @@ impl Runtime {
     }
 
     /// `send` from slot `i` on task `id` (#128), its grant checked: sent
-    /// once the user confirms this call; `PENDING` until then.
+    /// once the user approves this call's bytes; `PENDING` until then.
     fn confirmed_send(
         &mut self,
         i: usize,
@@ -4201,10 +4256,35 @@ impl Runtime {
         let Permission::Net { addr, port } = p else {
             return Err(status::INTERNAL);
         };
+        let bytes = approval::send_bytes(addr, port, data);
+        self.approved_call(i, id, limits, p, trust::Kind::Send, 1, bytes)?;
+        self.net_health.ready()?;
+        let how = (action::TOOL, net::NAME, &b"send"[..]);
+        self.send_datagram(i, id, limits, addr, port, data, how)?;
+        Ok(done(out))
+    }
+
+    /// A call whose approved `bytes` need `approvers` people (#128, #324,
+    /// #326): `Ok` once they approved these very bytes, then the call
+    /// goes on; `PENDING` while it waits and the agent repeats it;
+    /// `BUSY` for another call meanwhile; `REFUSED` for a no, no answer, or
+    /// `trust` unreachable. The first time, the bytes go into `trust`'s
+    /// buffer and `trust` is sent `ASK`.
+    #[allow(clippy::too_many_arguments)]
+    fn approved_call(
+        &mut self,
+        i: usize,
+        id: u32,
+        limits: &Limits,
+        p: Permission,
+        kind: trust::Kind,
+        approvers: u8,
+        bytes: Vec<u8>,
+    ) -> Result<(), u8> {
         let state = self.slots[i]
             .as_ref()
             .and_then(|s| s.confirm.as_ref())
-            .map(|c| (c.permission == p && c.data == data, c.answer));
+            .map(|c| (c.permission == p && c.data == bytes, c.answer));
         match state {
             Some((true, None)) => return Err(agents::PENDING),
             Some((false, None)) => return Err(status::BUSY),
@@ -4212,13 +4292,7 @@ impl Runtime {
                 if let Some(s) = self.slots[i].as_mut() {
                     s.confirm = None;
                 }
-                if !yes {
-                    return Err(agents::REFUSED);
-                }
-                self.net_health.ready()?;
-                let how = (action::TOOL, net::NAME, &b"send"[..]);
-                self.send_datagram(i, id, limits, addr, port, data, how)?;
-                return Ok(done(out));
+                return if yes { Ok(()) } else { Err(agents::REFUSED) };
             }
             // Answered, then a different call: asked anew.
             Some((false, Some(_))) | None => {}
@@ -4229,22 +4303,15 @@ impl Runtime {
         }
         self.next_request = self.next_request.wrapping_add(1).max(1);
         let number = self.next_request;
-        // Its approved bytes, in `trust`'s buffer, then `ASK` (#324).
-        let bytes = approval::send_bytes(addr, port, data);
-        let asked = self
-            .trust_buffer
-            .as_ref()
-            .filter(|b| bytes.len() <= trust::MAX_PAYLOAD && b.len() >= bytes.len())
-            .is_some_and(|b| {
-                b.write_bytes(0, &bytes);
-                tell_trust(&trust::Request::Ask {
-                    number,
-                    name: limits.entry.name,
-                    task: id,
-                    kind: trust::Kind::Send,
-                    approvers: 1,
-                    length: bytes.len() as u16,
-                })
+        let asked = bytes.len() <= trust::MAX_PAYLOAD
+            && write_ask(&bytes, self.reply)
+            && tell_trust(&trust::Request::Ask {
+                number,
+                name: limits.entry.name,
+                task: id,
+                kind,
+                approvers,
+                length: bytes.len() as u16,
             });
         // `trust` unreachable means no (D-018 item 4).
         if !asked {
@@ -4262,7 +4329,7 @@ impl Runtime {
             s.confirm = Some(Confirm {
                 number,
                 permission: p,
-                data: data.to_vec(),
+                data: bytes,
                 answer: None,
             });
         }
@@ -4277,10 +4344,7 @@ impl Runtime {
             .flatten()
             .filter(|s| s.task == task)
             .find_map(|s| s.confirm.as_ref().filter(|c| c.number == number))?;
-        let Permission::Net { addr, port } = c.permission else {
-            return None;
-        };
-        Some(approval::digest(&approval::send_bytes(addr, port, &c.data)))
+        Some(approval::digest(&c.data))
     }
 
     /// Requests past their deadline are refused; returns the wait until
@@ -4843,7 +4907,6 @@ fn main(arg: u64) -> u64 {
             refused,
         },
         pending: Vec::new(),
-        trust_buffer: None,
         next_request: 0,
         approve_us: APPROVE_US[usize::from(arg == 1)],
         groups,

@@ -1962,6 +1962,19 @@ impl Agent {
         (a, got)
     }
 
+    /// A request on a marked route (#326): repeated, as `send` is, while it
+    /// is `PENDING`, for at most 100 s; the answer it ends with.
+    fn request_approved(&self, route: &[u8], path: &[u8], body: &[u8]) -> (Answered, Vec<u8>) {
+        for _ in 0..500 {
+            let (a, got) = self.request(route, path, body);
+            if a.status != agents::PENDING {
+                return (a, got);
+            }
+            sleep(200_000);
+        }
+        self.request(route, path, body)
+    }
+
     /// The `vault` kernel's agent (#284, gateway.md): a granted request
     /// succeeds (the server checks the header), the echo route's answer
     /// holds `[secret]` and never the secret, and each refusal comes back
@@ -1997,7 +2010,7 @@ impl Agent {
             u8,
             &'static [u8],
         );
-        let refusals: [Refusal; 6] = [
+        let refusals: [Refusal; 5] = [
             (
                 b"other",
                 b"/items",
@@ -2033,15 +2046,6 @@ impl Agent {
                 gateway::NO_SECRET,
                 b"a route whose secret is missing",
             ),
-            // The runtime passes it on, and the gateway itself refuses a
-            // marked route's request no one approved (#325).
-            (
-                b"approved",
-                b"/items",
-                b"{\"n\":2}",
-                gateway::NOT_APPROVED,
-                b"a marked route with no approval",
-            ),
         ];
         for (route, path, body, want, what) in refusals {
             let (a, _) = self.request(route, path, body);
@@ -2051,6 +2055,28 @@ impl Agent {
             if a.sent {
                 return self.fail(&[&b"marked sent: "[..], what].concat());
             }
+        }
+        // Marked routes (#326): held while `trust` shows the bytes; sent
+        // once the runner approves them, and refused when the one approver
+        // a route for two gets is its requester, then a no.
+        let (a, got) = self.request_approved(b"approved", b"/items", b"{\"n\":2}");
+        if (a.status, a.http) != (gateway::OK, 201) || !has(&got, b"created 7") {
+            let code = [
+                b'0' + a.status / 100,
+                b'0' + a.status / 10 % 10,
+                b'0' + a.status % 10,
+            ];
+            return self.fail(
+                &[
+                    &b"the approved POST was not answered 201: status "[..],
+                    &code,
+                ]
+                .concat(),
+            );
+        }
+        let (a, _) = self.request_approved(b"two", b"/items", b"{\"n\":3}");
+        if a.status != agents::REFUSED || a.sent {
+            return self.fail(b"the request for two approvers was not refused");
         }
         let mut all = alloc::vec![0u8; self.buffer.len()];
         self.buffer.read_bytes(0, &mut all);

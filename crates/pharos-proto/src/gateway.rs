@@ -15,7 +15,9 @@
 //! target ‖ 0 ‖ body`) have that SHA-256 may be sent once, within
 //! [`APPROVAL_US`], if `approvers` meets the route's mark. Its reply is one
 //! byte: `OK`, `NOT_FOUND` (no such route, or not marked), or `BUSY`
-//! ([`MAX_APPROVALS`] held).
+//! ([`MAX_APPROVALS`] held). `[1, MARK, name length, route name]` (#326),
+//! from a client: how many people must approve a request on that route,
+//! answered `[OK, approvers]` or `[NOT_FOUND]`, and recorded nowhere.
 //! A `REQUEST` reply is `[status, detail, http (u16), type length,
 //! answer length (u32), stripped, sent]`; a refusal before the request is
 //! sent is a bare status. `sent` is 1 once the request may have reached
@@ -32,6 +34,8 @@ pub mod op {
     pub const REQUEST: u8 = 1;
     /// `trust`'s approval of one request's bytes (#325).
     pub const APPROVED: u8 = 2;
+    /// A route's mark, for the runtime, which asks first (#326).
+    pub const MARK: u8 = 3;
 }
 
 pub const OK: u8 = status::OK;
@@ -92,6 +96,10 @@ pub enum Request<'a> {
         body_len: u32,
     },
     Info,
+    /// How many people approve a request on `route` (#326).
+    Mark {
+        route: &'a [u8],
+    },
     /// From `trust`: one request's bytes approved by `approvers` people.
     Approved {
         route: &'a [u8],
@@ -114,6 +122,12 @@ pub fn parse(msg: &[u8]) -> Result<Request<'_>, Refused> {
             })
         })(),
         common::INFO => Some(Request::Info),
+        op::MARK => (|| {
+            let n = usize::from(r.u8()?);
+            Some(Request::Mark {
+                route: r.take(n).filter(|n| crate::vault::valid_name(n))?,
+            })
+        })(),
         op::APPROVED => (|| {
             let n = usize::from(r.u8()?);
             Some(Request::Approved {
@@ -153,6 +167,13 @@ pub fn encode(req: &Request<'_>, out: &mut [u8]) -> Option<usize> {
             w.u32(body_len)?;
         }
         Request::Info => w.bytes(&[VERSION, common::INFO])?,
+        Request::Mark { route } => {
+            if !crate::vault::valid_name(route) {
+                return None;
+            }
+            w.bytes(&[VERSION, op::MARK, route.len() as u8])?;
+            w.bytes(route)?;
+        }
         Request::Approved {
             route,
             approvers,
@@ -252,6 +273,7 @@ mod tests {
                 approvers: 2,
                 digest: [7; 32],
             },
+            Request::Mark { route: b"issues" },
         ] {
             let mut out = [0u8; 64];
             let n = encode(&req, &mut out).unwrap();

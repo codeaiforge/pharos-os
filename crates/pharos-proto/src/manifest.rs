@@ -24,6 +24,10 @@
 //! The optional `update = propose` (#165) asks for `update propose`:
 //! proposing one of its files as a system update, which only the user's
 //! `apply` on the trusted console can make run.
+//! The optional `approve` (#326, approval.md) lists `route:one` or
+//! `route:two` for routes of its `https` list: it asks that each request on
+//! that route be approved by that many people, raising the route's own
+//! mark, never lowering it (the gateway enforces the route's).
 //! A manifest is untrusted: [`parse`] refuses unknown, repeated, and
 //! missing keys and values out of range, and never panics. It only asks:
 //! [`Manifest::within`] checks it against the runtime's reviewed policy
@@ -170,6 +174,38 @@ pub struct Manifest<'a> {
     pub propose: bool,
     /// Optional (#282): the gateway's routes it may use.
     pub https: Files<'a, MAX_ROUTES>,
+    /// Optional (#326): `route:one` or `route:two`, each a route of
+    /// `https`, at most once.
+    pub approve: Files<'a, MAX_ROUTES>,
+}
+
+impl Manifest<'_> {
+    /// How many people it asks to approve each request on `route`: 0, 1,
+    /// or 2 (#326).
+    pub fn approvers(&self, route: &[u8]) -> u8 {
+        (self.approve.as_slice().iter())
+            .filter_map(|a| approve_item(a))
+            .find(|(r, _)| *r == route)
+            .map_or(0, |(_, n)| n)
+    }
+}
+
+/// `route:one` or `route:two` (#326): the route and the approvers.
+fn approve_item(item: &[u8]) -> Option<(&[u8], u8)> {
+    let at = item.iter().position(|b| *b == b':')?;
+    let n = match &item[at + 1..] {
+        b"one" => 1,
+        b"two" => 2,
+        _ => return None,
+    };
+    let route = &item[..at];
+    crate::vault::valid_name(route).then_some((route, n))
+}
+
+fn approves(v: &[u8]) -> Option<Files<'_, MAX_ROUTES>> {
+    let mut items = [&b""[..]; MAX_ROUTES + 1];
+    let n = list(v, &mut items)?;
+    Files::new_with(&items[..n], |i| approve_item(i).is_some())
 }
 
 /// What the runtime's policy table allows one agent: the most it may get.
@@ -335,8 +371,8 @@ pub struct Refusal {
     pub why: Why,
 }
 
-/// The keys; the last six are optional.
-const KEYS: [&[u8]; 17] = [
+/// The keys; the last eight are optional.
+const KEYS: [&[u8]; 18] = [
     b"manifest",
     b"name",
     b"program",
@@ -354,6 +390,7 @@ const KEYS: [&[u8]; 17] = [
     b"knowledge_write",
     b"update",
     b"https",
+    b"approve",
 ];
 const REQUIRED: usize = 10;
 
@@ -479,7 +516,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
     if text.len() > MAX_SIZE {
         return Err(whole(Why::TooLarge));
     }
-    let mut values: [Option<&[u8]>; 17] = [None; 17];
+    let mut values: [Option<&[u8]>; 18] = [None; 18];
     for (i, line) in text.split(|b| *b == b'\n').enumerate() {
         let at = |why| Refusal { line: i + 1, why };
         if !line.iter().all(|b| (b' '..=b'~').contains(b)) {
@@ -502,7 +539,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
             return Err(at(Why::RepeatedKey));
         }
     }
-    let mut v = [&b""[..]; 17];
+    let mut v = [&b""[..]; 18];
     for (k, (out, value)) in v.iter_mut().zip(values).enumerate() {
         *out = match value {
             Some(value) => value,
@@ -528,6 +565,7 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
         write_list,
         update,
         route_list,
+        approve_list,
     ] = v;
     let bad = whole(Why::BadValue);
     if number(version, u32::MAX) != Some(VERSION) {
@@ -560,7 +598,22 @@ pub fn parse(text: &[u8]) -> Result<Manifest<'_>, Refusal> {
             _ => return Err(bad),
         },
         https: routes(route_list).ok_or(bad)?,
+        approve: approves(approve_list).ok_or(bad)?,
     };
+    // Each route once, and each one it lists (#326).
+    let marked = m.approve.as_slice();
+    let unique = marked.iter().enumerate().all(|(i, a)| {
+        let r = approve_item(a).map(|(r, _)| r);
+        marked[..i]
+            .iter()
+            .all(|b| approve_item(b).map(|(r, _)| r) != r)
+    });
+    let listed = marked
+        .iter()
+        .all(|a| approve_item(a).is_some_and(|(r, _)| m.https.as_slice().contains(&r)));
+    if !unique || !listed {
+        return Err(bad);
+    }
     if m.progress_ms > m.task_ms {
         return Err(whole(Why::ProgressOverTask));
     }
@@ -671,6 +724,7 @@ impl Manifest<'_> {
             (b"\nknowledge_read =", self.knowledge_read.as_slice()),
             (b"\nknowledge_write =", self.knowledge_write.as_slice()),
             (b"\nhttps =", self.https.as_slice()),
+            (b"\napprove =", self.approve.as_slice()),
         ] {
             if list.is_empty() {
                 continue;
@@ -781,6 +835,7 @@ pages = 2048\nmodels = 1\nattempts = 3\nprogress_ms = 30000\ntask_ms = 600000\nd
                 knowledge_write: Files::default(),
                 propose: false,
                 https: Files::default(),
+                approve: Files::default(),
             }
         );
         let text = plus("tools = send , read_file\nfiles = report.txt,a-b_c.1");
@@ -1098,6 +1153,25 @@ knowledge_read = notes, ops\nknowledge_write = notes\n",
             "https = a b",
         ] {
             assert!(parse(plus(bad).as_bytes()).is_err(), "{bad}");
+        }
+        // `approve` (#326): marks for routes it lists, each once.
+        let with = |line: &str| plus(&std::format!("https = issues, search\n{line}"));
+        let text = with("approve = issues:two, search:one");
+        let m = parse(text.as_bytes()).unwrap();
+        assert_eq!((m.approvers(b"issues"), m.approvers(b"search")), (2, 1));
+        assert_eq!(m.approvers(b"other"), 0);
+        let mut out = [0u8; MAX_SIZE];
+        let n = m.encode(&mut out).unwrap();
+        assert_eq!(parse(&out[..n]), Ok(m), "approve round trips");
+        for bad in [
+            "approve = other:one",
+            "approve = issues:three",
+            "approve = issues",
+            "approve = issues:one, issues:two",
+            "approve = Issues:one",
+            "approve = :one",
+        ] {
+            assert!(parse(with(bad).as_bytes()).is_err(), "{bad}");
         }
         // Up to MAX_ROUTES routes (#325); files stay at MAX_FILES.
         let names = |key: &str, n: usize| {

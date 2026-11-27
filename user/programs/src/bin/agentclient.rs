@@ -749,6 +749,14 @@ fn vault(c: Client) -> u64 {
         return 1;
     }
     say(b"ok vault: the fetcher's requests and refusals all checked");
+    // #326: the gateway itself, asked directly as test client 2 (handle
+    // 3), refuses the marked route's request whose approval the fetcher
+    // used: no approval is left for those bytes.
+    if gateway_unapproved() != Some(pharos_proto::gateway::NOT_APPROVED) {
+        say(b"FAILED vault: the gateway took a marked route's request with no approval");
+        return 1;
+    }
+    say(b"ok vault: the gateway refuses a marked route's request with no approval");
     // M6.2 review: the kernel kills what each line names, `init` restarts
     // it, and a request must still work. The kernel checks the restarts
     // came before the task's lines.
@@ -776,6 +784,37 @@ fn vault(c: Client) -> u64 {
         say(done);
     }
     0
+}
+
+/// `approved`'s request with `fetcher`'s bytes, sent to the gateway as
+/// test client 2 (#326): its status.
+fn gateway_unapproved() -> Option<u8> {
+    use pharos_proto::gateway::{self, Answered, Request as Gw};
+    const GATEWAY: Handle = 3;
+    let buffer = mem_map(4096).ok()?;
+    let memory = mem_share(&buffer).ok()?;
+    let mut msg = [0u8; 64];
+    let n = gateway::encode(&Gw::Attach { len: 4096 }, &mut msg)?;
+    let attached = send(GATEWAY, &msg[..n], memory, READ | WRITE, 0).is_ok();
+    let _ = delete(memory);
+    if !attached {
+        return None;
+    }
+    let (path, body) = (&b"/items"[..], &b"{\"n\":2}"[..]);
+    buffer.write_bytes(0, path);
+    buffer.write_bytes(path.len(), body);
+    let req = Gw::Request {
+        route: b"approved",
+        path_len: path.len() as u16,
+        body_len: body.len() as u32,
+    };
+    let n = gateway::encode(&req, &mut msg)?;
+    let reply = endpoint_create().ok()?;
+    let mut out = [0u8; 64];
+    match call_timeout(GATEWAY, &msg[..n], reply, &mut out, 35_000_000) {
+        Ok(Received::Message { len, .. }) => Answered::parse(&out[..len.min(64)]).map(|a| a.status),
+        _ => None,
+    }
 }
 
 fn soak(c: &Client) -> u64 {

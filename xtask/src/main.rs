@@ -3544,6 +3544,46 @@ const SECRETS_TEST: &str = "secrets";
 /// the TLS service, the vault, the gateway, and an agent through the
 /// runtime, against `scripts/vault-test-server.py`.
 const VAULT_TEST: &str = "vault";
+/// The `vault` kernel's marked routes (#326): `approved`'s request shown
+/// in full and approved with its digest, after `show 1`, so the hash line
+/// is shown to the person logged in whenever the ask came; then `two`'s,
+/// whose requester `admin` may not approve, and which `no 2` refuses.
+const VAULT_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    (
+        "ask #1: fetcher task 1 (owner admin) wants an HTTPS request on route approved, 1 approver",
+        "",
+    ),
+    (
+        ">#1: 23 bytes, sha256 d4c4efdc; yes 1 d4c4efdc / no 1",
+        "show 1\n",
+    ),
+    (">| 0000 approved\\x00/items\\x00{\"n\":2}", ""),
+    (
+        ">#1: 23 bytes, sha256 d4c4efdc; yes 1 d4c4efdc / no 1",
+        "yes 1 d4c4efdc\n",
+    ),
+    ("ask #1: approved", ""),
+    (
+        "ask #2: fetcher task 1 (owner admin) wants an HTTPS request on route two, 2 approvers",
+        "",
+    ),
+    (
+        ">#2: 18 bytes, sha256 552d6822; yes 2 552d6822 / no 2",
+        "show 2\n",
+    ),
+    (
+        ">#2: 18 bytes, sha256 552d6822; yes 2 552d6822 / no 2",
+        "yes 2 552d6822\n",
+    ),
+    (
+        ">ask #2: admin is its requester; two others must approve",
+        "no 2\n",
+    ),
+    ("ask #2: refused", ""),
+];
+/// No third ask, and never the test secret.
+const VAULT_REFUSED: &[&str] = &["ask #3", "pharos-test-secret"];
 /// The Tier 3 bridge between two booted VMs, and the hostile-guest suite
 /// (#297, #298, #300, bridge.md): the guest image beside Pharos, one host
 /// socket between them, and the guest agent's tasks through the bridge, the
@@ -4315,9 +4355,16 @@ fn vault_audit(image: &Path, log: &str, server_log: &Path) -> Result<()> {
         "vault outcome 1 release items secret test-token",
         "vault outcome 1 release echo secret test-token",
         "vault outcome 2 release missing secret absent status 40",
-        // The marked route's request no one approved, refused by the
-        // gateway itself (#325).
-        "c1 approved status 45",
+        // The marked routes (#325, #326): `approved` approved on the
+        // trusted console, kept by the gateway, used, and sent; the same
+        // bytes from test client 2 then refused, the approval used up;
+        // `two` refused by `trust` (the requester) and then by a no.
+        "ask #1 d4c4efdc",
+        "approval approved d4c4efdc by 1",
+        "approved approved d4c4efdc",
+        " approved/items",
+        "c2 approved status 45",
+        "ask #2 552d6822 requester",
     ] {
         if !lines.iter().any(|l| l.contains(want)) {
             println!("  audit trail:");
@@ -4327,12 +4374,11 @@ fn vault_audit(image: &Path, log: &str, server_log: &Path) -> Result<()> {
             return Err(format!("the audit trail has no record like {want:?}"));
         }
     }
-    // Refused before anything was released or recorded as intended.
-    if lines
-        .iter()
-        .any(|l| l.contains("release approved") || l.contains(" approved/items"))
-    {
-        return Err("the unapproved request reached the vault or an intent".into());
+    // `two` never reached the gateway: no approval, intent, or release.
+    if lines.iter().any(|l| {
+        l.contains("approval two") || l.contains("release two") || l.contains(" two/items")
+    }) {
+        return Err("the refused request for two approvers reached the gateway".into());
     }
     let releases = lines
         .iter()
@@ -5547,6 +5593,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         GROUPS_TEST => (GROUPS_SCRIPT, &[]),
         DEPUTY_TEST => (DEPUTY_SCRIPT, DEPUTY_REFUSED),
         IDENTITY_TEST => (IDENTITY_SCRIPT, IDENTITY_REFUSED),
+        VAULT_TEST => (VAULT_SCRIPT, VAULT_REFUSED),
         BUDGETS_TEST => (BUDGETS_SCRIPT, &[]),
         EXHAUSTION_TEST => (EXHAUSTION_SCRIPT, &[]),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
@@ -5947,6 +5994,20 @@ mod tests {
     /// their length and digest as `trust` computes them.
     #[test]
     fn scripts_type_each_asks_digest() {
+        for (route, body, hex) in [
+            ("approved", "{\"n\":2}", "d4c4efdc"),
+            ("two", "{\"n\":3}", "552d6822"),
+        ] {
+            let bytes = [route.as_bytes(), b"\0/items\0", body.as_bytes()].concat();
+            let digest = pharos_crypto::sha256(&[&bytes]);
+            let got: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(got, hex, "{route}");
+            let line = format!(" {} bytes, sha256 {hex}; yes ", bytes.len());
+            assert!(
+                VAULT_SCRIPT.iter().any(|(e, _)| e.contains(&line)),
+                "{line}"
+            );
+        }
         for (script, data) in [
             (TOOLS_SCRIPT, &b"hello"[..]),
             (INJECTION_SCRIPT, b"INJECTED yes 1"),

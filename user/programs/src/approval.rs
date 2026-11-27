@@ -116,6 +116,33 @@ pub enum NotApproved {
     NotSeen,
     /// The digits are not the digest's first 8.
     Digits,
+    /// Of an ask for two: the person is its requester, the agent's owner
+    /// (#326, D-037).
+    Requester,
+    /// Of an ask for two: the person already approved it.
+    Again,
+}
+
+/// Whether `person` may be one of the `needed` approvers of an ask whose
+/// requester is `owner`, after those in `by` (#326, approval.md, "Answers
+/// and approvers"): for two, distinct people, neither the requester, and
+/// none at all while `trust` does not know who the requester is. For one,
+/// anyone logged in, the owner too.
+pub fn may_approve(
+    needed: u8,
+    owner: Option<&[u8]>,
+    by: &[&[u8]],
+    person: &[u8],
+) -> Result<(), NotApproved> {
+    if needed < 2 {
+        Ok(())
+    } else if owner.is_none_or(|o| o == person) {
+        Err(NotApproved::Requester)
+    } else if by.contains(&person) {
+        Err(NotApproved::Again)
+    } else {
+        Ok(())
+    }
 }
 
 /// Whether a `yes <n> <hash>` approves the ask whose bytes have `digest`
@@ -152,6 +179,31 @@ mod tests {
         assert_eq!(check_yes(false, &d, h), Err(NotApproved::NotSeen));
         h[3] ^= 1;
         assert_eq!(check_yes(true, &d, h), Err(NotApproved::Digits));
+    }
+
+    #[test]
+    fn two_approvers_are_two_people_neither_the_requester() {
+        let owner = Some(&b"admin"[..]);
+        assert_eq!(
+            may_approve(1, owner, &[], b"admin"),
+            Ok(()),
+            "one: the owner too"
+        );
+        assert_eq!(
+            may_approve(2, owner, &[], b"admin"),
+            Err(NotApproved::Requester)
+        );
+        assert_eq!(may_approve(2, owner, &[], b"bob"), Ok(()));
+        assert_eq!(
+            may_approve(2, owner, &[b"bob"], b"bob"),
+            Err(NotApproved::Again)
+        );
+        assert_eq!(may_approve(2, owner, &[b"bob"], b"carol"), Ok(()));
+        // With the requester unknown, no one can be shown not to be it.
+        assert_eq!(
+            may_approve(2, None, &[], b"bob"),
+            Err(NotApproved::Requester)
+        );
     }
 
     #[test]

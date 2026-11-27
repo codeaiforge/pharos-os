@@ -728,8 +728,8 @@ mod tests {
             assert_eq!(check_routes(routes(arg), dests), Ok(()), "table {arg}");
         }
         assert_eq!(routes(10).len(), 3);
-        assert_eq!(routes(11).len(), 6);
-        assert_eq!(routes(12).len(), 6);
+        assert_eq!(routes(11).len(), 7);
+        assert_eq!(routes(12).len(), 7);
         assert_eq!(gateway_dests(BRIDGE), Some(1));
         assert_eq!(gateway_dests(VAULT), Some(1));
         // A table with a marked route lets its `trust` approve (#325).

@@ -25,6 +25,7 @@
 //! approval goes only with an unused one of its own bytes, by at least the
 //! mark's approvers, which it uses up; else it is `NOT_APPROVED`, recorded,
 //! before anything is released or opened. A restarted gateway holds none.
+//! `MARK` (#326) tells a client a route's mark, so the runtime asks first.
 
 #![no_std]
 #![no_main]
@@ -157,6 +158,17 @@ impl Gateway {
             } => {
                 let status = self.approved(badge, route, approvers, digest);
                 answer(cap, &[status]);
+            }
+            // A route's mark, for a client (#326): read only, unrecorded.
+            Request::Mark { route } => {
+                let mark = (self.routes.iter())
+                    .find(|r| r.name.as_bytes() == route)
+                    .filter(|r| client.is_some_and(|c| r.clients.contains(&c)))
+                    .map(|r| r.approve.count());
+                match mark {
+                    Some(m) => answer(cap, &[OK, m]),
+                    None => answer(cap, &[gateway::NOT_FOUND]),
+                }
             }
             Request::Attach { .. } => {}
         }
