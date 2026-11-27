@@ -1388,21 +1388,55 @@ Each entry lists the milestone by which it must be decided. **Proposed** entries
 
 ### D-037: Payload approval and risk routing
 
-- **Status:** Open
+- **Status:** Accepted (#322)
 - **Needed by:** M6.4
-- **Date accepted:**
+- **Date accepted:** 2026-11-27
 
-**Context.** The user confirms a `send`'s destination and size, not its payload (accepted at the M3.6 review, reopened 2026-11-13). The approver must see the exact bytes. The trusted console has 64-byte lines, and the dashboard is outside the trusted base, so it cannot approve. This is the hardest part of Phase 6.
+**Context.** The user confirms a `send`'s destination and size, not its payload (accepted at the M3.6 review, reopened 2026-11-13). The approver must see the exact bytes. The trusted console has 64-byte lines, and the dashboard is outside the trusted base, so it cannot approve. This is the hardest part of Phase 6. What exists at M6.5 (checked 2026-11-27):
+- Two actions send bytes an agent chose. `send` (tool, #128): the tool call's text is at most 1 KiB; the runtime asks `trust` with `CONFIRM` (agent, task, destination, size), `trust` writes `confirm #<n>: ...` from those fields alone, the user types `yes <n>` or `no <n>`, and the runtime decides, denying with no answer in 60 s (`APPROVE_US`). The gateway's `REQUEST` (#282): a granted route, a path the route's pattern allows, and a body of at most `max_body` (4 KiB by default, at most 60 KiB), with no approval per request (the M6.2 design's open question 4, decided "grants only; M6.4 adds approval of the exact payload"). Its intent record already carries the body's length and the first 8 bytes of its SHA-256.
+- `trust` writes lines of at most 256 bytes and reads lines of at most 64. It already asks the user to type a hash prefix in two places: an update is shown with 16 hex digits of its SHA-256, and `verify` takes 8.
+- Since M6.5, the console knows which person is typing (D-038), and every agent has an owner, a person.
+- `trust` holds no capability on the gateway; the runtime copies the path and the body into the gateway's buffer. A compromised runtime is outside what M6.5 defends against (its review's F11).
 
-**Options.** Display: paged payloads on `trust`; structured rendering per content type; a hash shown on the console and the payload shown elsewhere (weaker: the other display is not trusted). Approval: one approver, or two for marked actions; segregation of duties by identity (D-038). Timeouts deny.
+**Options.**
+- **The display.**
+  - (a) **Every byte, paged on `trust`:** the payload copied to `trust`, which writes it itself: 32 bytes a line, printable ASCII as itself and every other byte (and `\`) escaped as `\xNN`, each line prefixed with `| ` and its offset, so no payload line can look like one of `trust`'s; 16 lines a page, `more <n>` for the next. Usable for the payloads that exist (a 4 KiB body is 8 pages), and a payload too long to page is refused, not shortened.
+  - (b) **Rendered per content type** (JSON pretty-printed, form fields one per line): easier to read, but a parser per type joins the trusted base, and a renderer can hide bytes. Later, over (a), only for types whose rendering is shown to be lossless.
+  - (c) **A hash on the console, the payload elsewhere** (the dashboard, a host terminal): the approver checks bytes on a display that is not trusted, so an attacker who controls it shows other bytes with the same hash claim. Weaker than (a); not taken.
+- **The binding of bytes approved to bytes sent.**
+  - (d) **The hash of what was shown, checked where the bytes leave:** `trust` hashes the bytes it showed (SHA-256), and the approval names that hash. The sender sends only a payload with that hash, once, and refuses and records anything else. For `REQUEST` the sender is the gateway, and `trust` tells it the approved hash itself (a new `SEND` capability from `trust` to the gateway), so not even a compromised runtime can swap the body. For `send` the sender is the runtime, which checks the hash itself.
+  - (e) The runtime alone keeps and checks the hash: simpler, but the runtime that shows the bytes is the one that sends them, so a compromised runtime shows one payload and sends another.
+- **How the approver answers.**
+  - (f) `yes <n>`, as today.
+  - (g) **`yes <n> <8 hex>`:** the first 8 hexadecimal digits of the payload's SHA-256, shown after its last page, as `verify` takes them. An approval cannot be typed without reaching the end of the payload, and an approval that reaches the wrong request (a renumbered `<n>`) does not match.
+- **Which actions, and how many approvers.**
+  - (h) **Marks in compiled policy:** each gateway route says `approve: none`, `one`, or `two` (default `none`, so existing routes stay grant-only, as decided for M6.2); `send` is always at least `one`; an agent's manifest may ask for more approval than its policy entry, never less (D-030's ceilings). Until M6.6 (D-039) policy is the compiled, reviewed table.
+  - (i) Every action needs one approver: most fatigue, and it trains approvers to type `yes`.
+  - (j) A risk score computed at run time: hard to review, and a model or an agent shapes its input.
+- **Segregation of duties.**
+  - (k) **Two distinct people, neither the requester:** an action marked `two` waits for two logged-in people (D-038) who are different, and who are not its requester. The requester is the person who submitted the task, if a person did, and otherwise the agent's owner. Approvers log in one after the other at the one console; a `yes` given stays given when its approver logs out. A role may narrow who can approve a route (a route names a role its approvers must hold), never grant (D-018 item 2, D-038 item 4).
+  - (l) The requester may be one of two approvers: four eyes in name only.
+- **Timeouts.**
+  - (m) **No answer denies:** `one` keeps its 60 s; `two` gets 10 min, within which both must answer, each `yes` recorded as it comes. A `no` from anyone denies at once. A restart of `trust`, the runtime, or the gateway denies everything pending; the agent's attempt sees a refusal, never a wait without end.
 
 **Evaluation criteria.** The bytes sent equal the bytes approved; usable for real payloads; approvals per task (fatigue); no path through which an agent shapes the prompt.
 
-**Decision.** (empty while Open)
+**Decision.** Accepted by the maintainer on 2026-11-27, as proposed:
+1. **The approver sees every byte, paged on `trust`** (a): written by `trust` itself, escaped and prefixed so no payload byte can make a line that looks like `trust`'s, 16 lines a page; a payload too long to show is refused. Rendering by content type (b) may come later, over (a); a display outside the trusted base (c) never approves.
+2. **The approval names the SHA-256 of the bytes shown, and the sender checks it** (d): the gateway, which hears the approved hash from `trust` directly, for `REQUEST`; the runtime for `send`. A payload with any other hash is refused and recorded; an approval is used once.
+3. **The approver types `yes <n>` with the hash's first 8 hex digits** (g), shown after the last page.
+4. **Policy marks what needs approval** (h): `none`, `one`, or `two` per gateway route, `none` by default; `send` at least `one`. A manifest may ask for more, never less.
+5. **`two` means two distinct people, neither the requester** (k): the person who submitted the task, or else the agent's owner. A role may narrow who approves, never grant.
+6. **No answer denies** (m): 60 s for `one`, 10 min for `two`; a `no` denies at once; a restart denies what is pending.
+The message formats, the page and line sizes, how the payload reaches `trust`, and the records are the design's (#323).
 
 **Consequences.** The threat-model limit closes at M6.4.
+- `trust` grows: the pager, the escaping, SHA-256 over what it shows, two-approver state, and `SEND` on the gateway. The gateway grows a table of approved hashes, each used once and expired with its timeout. No new kernel code, no `unsafe`, no new dependency.
+- Approving costs a person reading the payload; only marked actions and `send` reach a human, and the demo's approvals per task are counted and held to a budget (the M6.4 gate).
+- A compromised runtime can still refuse to ask, or deny, but cannot have the gateway send a body nobody approved. For `send` it can, since the runtime is its sender: a limit until `send` moves behind a service of its own.
+- The M6.2 decision "grants only, no confirmation per request" stays true for unmarked routes.
 
-**Evidence.** None yet.
+**Evidence.** The facts above, checked in the code at `2ea37a5` (`trust`'s `CONFIRM` and update prompts, `APPROVE_US`, the gateway's `max_body` and intent record).
 
 ### D-038: Identity and organization model
 
