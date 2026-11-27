@@ -170,14 +170,14 @@ pub fn holds(yes: bool, own: Option<[u8; 32]>, given: Option<[u8; 32]>, call: bo
 
 /// How long an ask waits for its approvers before it is denied (#327,
 /// approval.md, "Timeouts and failures"): 60 s for one, 10 min for two,
-/// who log in one after the other; 5 s and 10 s with the test policy
-/// table, so a kernel sees each end.
+/// who log in one after the other; 5 s and 20 s with the test policy
+/// tables, so a kernel sees each end, with room for two logins.
 pub const fn timeout_us(approvers: u8, test: bool) -> u64 {
     match (approvers >= 2, test) {
         (false, false) => 60_000_000,
         (true, false) => 600_000_000,
         (false, true) => 5_000_000,
-        (true, true) => 10_000_000,
+        (true, true) => 20_000_000,
     }
 }
 

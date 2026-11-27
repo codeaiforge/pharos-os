@@ -4,7 +4,9 @@ server on Python's standard library only, started by `cargo xtask`.
 
   GET  /items  200 `items ok` if `Authorization` is `Bearer <secret>`, else 401
   GET  /echo   200 `you sent: <Authorization>`: the gateway must strip it
-  POST /items  201 `created <body length>` with the same check
+  POST /items  201 `created <body length>` with the same check; the log
+               names the body by the first 16 hex digits of its SHA-256
+               (#328): test bodies only, never a header
 
 The secret is read from the secrets file the machine gets (the value of
 `test-token`). The log names each request and whether its header was the
@@ -13,6 +15,7 @@ expected one, never the header or the secret.
 Usage: vault-test-server.py PORT CERT KEY SECRETS LOG
 """
 
+import hashlib
 import http.server
 import ssl
 import sys
@@ -58,6 +61,7 @@ def main():
 
         def do_POST(self):
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            log.write(f"POST {self.path} body {hashlib.sha256(body).hexdigest()[:16]}\n")
             if self.path == "/items" and self.authorized():
                 self.answer(201, f"created {len(body)}")
             else:

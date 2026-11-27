@@ -35,6 +35,8 @@
 //! (#190): an `s1` task, its result printed in hexadecimal. Argument 17:
 //! `fetcher` in the `vault` table (#284), started by `init`. Argument 18:
 //! `guest` in the `bridge` table (#298, #300), started by `init`.
+//! Argument 20: `fetcher` in the `approval` table (#328), started by
+//! `init`, with the gateway as test client 2 (handle 3).
 
 #![no_std]
 #![no_main]
@@ -194,6 +196,9 @@ fn main(arg: u64) -> u64 {
     }
     if arg == 17 {
         return vault(c);
+    }
+    if arg == 20 {
+        return approval(c);
     }
     if arg == 18 {
         return guest(c);
@@ -786,9 +791,56 @@ fn vault(c: Client) -> u64 {
     0
 }
 
+/// The `approval` kernel (#328): `fetcher`'s `approval` task, whose every
+/// ask the runner answers; then, as gateway client 2, the changed body
+/// (`f`) refused, the approved one the agent never sent (`e`) sent once,
+/// and refused a second time; then `trust` killed by the kernel at the
+/// cue, and an `after-trust` task, whose ask the restarted `trust` cannot
+/// answer the runtime about. Each step passed is `ok approval: <step>`.
+fn approval(c: Client) -> u64 {
+    let say = |line: &[u8]| {
+        let _ = debug_write(CONSOLE, line);
+    };
+    let run = |what: &[u8], want: &[u8], secs| {
+        let task = c.submit(b"fetcher", what).ok()?;
+        let (s, result) = c.wait(task, secs)?;
+        (s.state == State::Done && result == want).then_some(())
+    };
+    if run(b"approval", b"approval ok", 200).is_none() {
+        say(b"FAILED approval: the approval task failed");
+        return 1;
+    }
+    say(b"ok approval: every ask ended as the trusted console answered it");
+    let direct = |body: &[u8]| gateway_request(b"approved", b"/items", body);
+    let ok = pharos_proto::gateway::OK;
+    let not = Some(pharos_proto::gateway::NOT_APPROVED);
+    if direct(b"{\"f\":1}") != not
+        || direct(b"{\"e\":1}") != Some(ok)
+        || direct(b"{\"e\":1}") != not
+    {
+        say(b"FAILED approval: the gateway sent bytes no one approved, or one approval twice");
+        return 1;
+    }
+    say(b"ok approval: the gateway sends only approved bytes, once");
+    say(b"approval: kill trust");
+    sleep(5_000_000);
+    if run(b"after-trust", b"after-trust ok", 60).is_none() {
+        say(b"FAILED approval: the ask after trust restarted was not denied");
+        return 1;
+    }
+    say(b"ok approval: after trust restarted, its approval is denied");
+    0
+}
+
 /// `approved`'s request with `fetcher`'s bytes, sent to the gateway as
 /// test client 2 (#326): its status.
 fn gateway_unapproved() -> Option<u8> {
+    gateway_request(b"approved", b"/items", b"{\"n\":2}")
+}
+
+/// A request on `route`, sent to the gateway as test client 2 (handle 3),
+/// with a buffer of its own: the status of its answer.
+fn gateway_request(route: &[u8], path: &[u8], body: &[u8]) -> Option<u8> {
     use pharos_proto::gateway::{self, Answered, Request as Gw};
     const GATEWAY: Handle = 3;
     let buffer = mem_map(4096).ok()?;
@@ -800,11 +852,10 @@ fn gateway_unapproved() -> Option<u8> {
     if !attached {
         return None;
     }
-    let (path, body) = (&b"/items"[..], &b"{\"n\":2}"[..]);
     buffer.write_bytes(0, path);
     buffer.write_bytes(path.len(), body);
     let req = Gw::Request {
-        route: b"approved",
+        route,
         path_len: path.len() as u16,
         body_len: body.len() as u32,
     };

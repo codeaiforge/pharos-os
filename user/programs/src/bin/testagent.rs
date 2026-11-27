@@ -1962,6 +1962,61 @@ impl Agent {
         (a, got)
     }
 
+    /// The `approval` kernel's agent (#328, approval.md): each request on
+    /// a marked route ends as the runner answers it on the trusted
+    /// console; see `APPROVAL_SCRIPT`. In order: one approver (sent); two
+    /// (the requester refused, then two others); two, unanswered
+    /// (refused at the deadline); one shown while no one was logged in
+    /// (approved after `show`); and one approved, then changed before it
+    /// was repeated (the change asked anew and refused). The approved but
+    /// unsent bytes are the client's to send to the gateway itself next.
+    fn approval(&self) -> u64 {
+        let ok = |a: &Answered, got: &[u8]| {
+            (a.status, a.http) == (gateway::OK, 201) && got.ends_with(b"created 7")
+        };
+        let (a, got) = self.request_approved(b"approved", b"/items", b"{\"a\":1}");
+        if !ok(&a, &got) {
+            return self.fail(b"one approver: not sent");
+        }
+        let (a, got) = self.request_approved(b"two", b"/items", b"{\"b\":1}");
+        if !ok(&a, &got) {
+            return self.fail(b"two approvers: not sent");
+        }
+        let (a, _) = self.request_approved(b"two", b"/items", b"{\"c\":1}");
+        if a.status != agents::REFUSED {
+            return self.fail(b"two approvers, no answer: not refused");
+        }
+        // The runner logs out on the refusal; this ask comes after.
+        sleep(3_000_000);
+        let (a, got) = self.request_approved(b"approved", b"/items", b"{\"d\":1}");
+        if !ok(&a, &got) {
+            return self.fail(b"shown while logged out: not sent");
+        }
+        // Asked, approved by the runner meanwhile, then changed: the change
+        // is a new call, asked anew, which the runner refuses.
+        let (a, _) = self.request(b"approved", b"/items", b"{\"e\":1}");
+        if a.status != agents::PENDING {
+            return self.fail(b"changed: the first was not asked");
+        }
+        sleep(3_000_000);
+        let (a, _) = self.request_approved(b"approved", b"/items", b"{\"f\":1}");
+        if a.status != agents::REFUSED {
+            return self.fail(b"changed after approval: not refused");
+        }
+        self.complete(b"approval ok")
+    }
+
+    /// After `trust` restarted (#328): it shows the ask and the runner
+    /// approves, but the restarted `trust` has no channel to the runtime,
+    /// so the ask is denied at its deadline.
+    fn after_trust(&self) -> u64 {
+        let (a, _) = self.request_approved(b"approved", b"/items", b"{\"g\":1}");
+        if a.status != agents::REFUSED {
+            return self.fail(b"after trust restarted: not refused");
+        }
+        self.complete(b"after-trust ok")
+    }
+
     /// A request on a marked route (#326): repeated, as `send` is, while it
     /// is `PENDING`, for at most 100 s; the answer it ends with.
     fn request_approved(&self, route: &[u8], path: &[u8], body: &[u8]) -> (Answered, Vec<u8>) {
@@ -2777,6 +2832,8 @@ fn main(_: u64) -> u64 {
         b"net-talk" => a.net_talk(),
         b"https" => a.https(),
         b"again" => a.https_again(),
+        b"approval" => a.approval(),
+        b"after-trust" => a.after_trust(),
         b"hostile" => a.hostile(),
         b"spend" => a.spend(),
         b"glut" => a.glut(),

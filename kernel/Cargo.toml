@@ -347,6 +347,10 @@ name = "vault"
 harness = false
 
 [[test]]
+name = "approval"
+harness = false
+
+[[test]]
 name = "vector_state"
 harness = false
 

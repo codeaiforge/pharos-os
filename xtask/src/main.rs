@@ -3544,6 +3544,120 @@ const SECRETS_TEST: &str = "secrets";
 /// the TLS service, the vault, the gateway, and an agent through the
 /// runtime, against `scripts/vault-test-server.py`.
 const VAULT_TEST: &str = "vault";
+/// The `approval` kernel (#328, approval.md): every ask of `fetcher`'s
+/// answered as `APPROVAL_SCRIPT` says; see `kernel/tests/approval.rs`.
+const APPROVAL_TEST: &str = "approval";
+/// Its approvers besides the test person, who owns `fetcher`.
+const APPROVERS: [&str; 2] = ["bob", "carol"];
+/// The bodies, in ask order, with their approved bytes' digests: `a` one
+/// approver; `b` two; `c` two, unanswered; `d` shown logged out; `e`
+/// approved and never sent by the agent; `f` the change, refused; `g`
+/// after `trust` restarted.
+const APPROVAL_SCRIPT: &[console::Step] = &[
+    ("trust: ready", ""),
+    (
+        "ask #1: fetcher task 1 (owner admin) wants an HTTPS request on route approved, 1 approver",
+        "",
+    ),
+    (
+        ">#1: 23 bytes, sha256 fc6c2f9c; yes 1 fc6c2f9c / no 1",
+        "show 1\n",
+    ),
+    (
+        ">#1: 23 bytes, sha256 fc6c2f9c; yes 1 fc6c2f9c / no 1",
+        "yes 1 fc6c2f9c\n",
+    ),
+    (">ask #1: approved", ""),
+    // Two: the requester refused, `bob` (who must read it after his
+    // login), once only, then `carol`.
+    (
+        ">ask #2: fetcher task 1 (owner admin) wants an HTTPS request on route two, 2 approvers",
+        "",
+    ),
+    (
+        ">#2: 18 bytes, sha256 53e4066c; yes 2 53e4066c / no 2",
+        "show 2\n",
+    ),
+    (
+        ">#2: 18 bytes, sha256 53e4066c; yes 2 53e4066c / no 2",
+        "yes 2 53e4066c\n",
+    ),
+    (
+        ">ask #2: admin is its requester; two others must approve",
+        "logout\n",
+    ),
+    (">logged out admin", "login bob\n"),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as bob", "yes 2 53e4066c\n"),
+    (">ask #2: read it to its last page first", "show 2\n"),
+    (
+        ">#2: 18 bytes, sha256 53e4066c; yes 2 53e4066c / no 2",
+        "yes 2 53e4066c\n",
+    ),
+    (
+        ">ask #2: approved by bob, 1 more needed",
+        "yes 2 53e4066c\n",
+    ),
+    (">ask #2: bob already approved it", "logout\n"),
+    (">logged out bob", "login carol\n"),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as carol", "show 2\n"),
+    (
+        ">#2: 18 bytes, sha256 53e4066c; yes 2 53e4066c / no 2",
+        "yes 2 53e4066c\n",
+    ),
+    (">ask #2: approved", ""),
+    // Two, unanswered: refused at its deadline.
+    (
+        ">ask #3: fetcher task 1 (owner admin) wants an HTTPS request on route two, 2 approvers",
+        "",
+    ),
+    (">ask #3: no answer; refused", "logout\n"),
+    // Shown while no one was logged in: a yes needs `show` first.
+    (
+        ">ask #4: fetcher task 1 (owner admin) wants an HTTPS request on route approved, 1 approver",
+        "",
+    ),
+    (
+        ">#4: 23 bytes, sha256 6c7901d4; yes 4 6c7901d4 / no 4",
+        "login admin\n",
+    ),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", "yes 4 6c7901d4\n"),
+    (">ask #4: read it to its last page first", "show 4\n"),
+    (
+        ">#4: 23 bytes, sha256 6c7901d4; yes 4 6c7901d4 / no 4",
+        "yes 4 6c7901d4\n",
+    ),
+    (">ask #4: approved", ""),
+    // Approved, then changed by the agent: the change refused.
+    (
+        ">#5: 23 bytes, sha256 89570a61; yes 5 89570a61 / no 5",
+        "yes 5 89570a61\n",
+    ),
+    (">ask #5: approved", ""),
+    (
+        ">#6: 23 bytes, sha256 1fd90ee5; yes 6 1fd90ee5 / no 6",
+        "no 6\n",
+    ),
+    (">ask #6: refused", ""),
+    // `trust` killed and restarted: a new session, and an approval it
+    // cannot give the runtime.
+    (">trust: ready", "login admin\n"),
+    (">passphrase:", "pharos-test-passphrase\n"),
+    (">logged in as admin", ""),
+    (
+        ">#7: 23 bytes, sha256 7c1d9f9b; yes 7 7c1d9f9b / no 7",
+        "show 7\n",
+    ),
+    (
+        ">#7: 23 bytes, sha256 7c1d9f9b; yes 7 7c1d9f9b / no 7",
+        "yes 7 7c1d9f9b\n",
+    ),
+    (">answer: the runtime is not answering", ""),
+];
+/// No ask past the seventh, and never the test secret.
+const APPROVAL_REFUSED: &[&str] = &["ask #8", "pharos-test-secret"];
 /// The `vault` kernel's marked routes (#326): `approved`'s request shown
 /// in full and approved with its digest, after `show 1`, so the hash line
 /// is shown to the person logged in whenever the ask came; then `two`'s,
@@ -4392,6 +4506,61 @@ fn vault_audit(image: &Path, log: &str, server_log: &Path) -> Result<()> {
     println!("  audit trail: {} records; the gateway's:", lines.len());
     for l in lines.iter().filter(|l| l.contains(" client 6 ")) {
         println!("    {l}");
+    }
+    Ok(())
+}
+
+/// After the `approval` kernel (#328): the server received exactly the
+/// approved bodies, each once (by the first 16 hex digits of its SHA-256),
+/// and none of the refused; and the trail holds each answer by its person.
+fn approval_audit(image: &Path, server_log: &Path) -> Result<()> {
+    let seen = fs::read_to_string(server_log).map_err(io_err("cannot read", server_log))?;
+    let body = |b: &str| {
+        let h: String = pharos_crypto::sha256(&[b.as_bytes()])[..8]
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect();
+        format!("POST /items body {h}")
+    };
+    for (b, times) in [
+        ("{\"a\":1}", 1),
+        ("{\"b\":1}", 1),
+        ("{\"d\":1}", 1),
+        ("{\"e\":1}", 1),
+        ("{\"c\":1}", 0),
+        ("{\"f\":1}", 0),
+        ("{\"g\":1}", 0),
+    ] {
+        let n = seen.lines().filter(|l| *l == body(b)).count();
+        if n != times {
+            return Err(format!(
+                "the server received {b} {n} times, not {times}:\n{seen}"
+            ));
+        }
+    }
+    let streams = store_image::audit(image)?;
+    let lines: Vec<&String> = streams.iter().flat_map(|(_, l)| l).collect();
+    for want in [
+        // Each answer as its person: the refused requester, `bob`, his
+        // second yes, `carol`, and the change refused.
+        "Event approve admin task 0/0  trust outcome 2 ask #2 53e4066c requester",
+        "Event approve bob task 0/0  trust outcome 1 ask #2 53e4066c",
+        "Event approve bob task 0/0  trust outcome 2 ask #2 53e4066c again",
+        "Event approve carol task 0/0  trust outcome 1 ask #2 53e4066c",
+        "Event refuse admin task 0/0  trust outcome 1 ask #6",
+        // The gateway kept each approval, by its count, and used it.
+        "approval two 53e4066c by 2",
+        "approved two 53e4066c",
+        "approval approved 89570a61 by 1",
+        "c2 approved status 45",
+    ] {
+        if !lines.iter().any(|l| l.contains(want)) {
+            println!("  audit trail:");
+            for l in &lines {
+                println!("    {l}");
+            }
+            return Err(format!("the audit trail has no record like {want:?}"));
+        }
     }
     Ok(())
 }
@@ -5407,9 +5576,9 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
                 .map(|(path, text)| (path.to_string(), text.as_bytes().to_vec())),
         );
         kernel_modules(paths, &files)?
-    } else if name == VAULT_TEST {
+    } else if name == VAULT_TEST || name == APPROVAL_TEST {
         // The boot image, with the test authority as its one root and
-        // `fetcher`'s manifest (#284).
+        // `fetcher`'s manifest (#284, #328).
         let mut files = programs.clone();
         files.push((
             "system/tls/roots".into(),
@@ -5466,7 +5635,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     if name == TLS_TEST || name == SECRETS_TEST {
         store_image::fresh(&out.join(STORE_IMAGE), TLS_BLOCKS)?;
     }
-    if name == SECRETS_TEST || name == VAULT_TEST || name == BRIDGE_TEST {
+    if name == SECRETS_TEST || name == VAULT_TEST || name == APPROVAL_TEST || name == BRIDGE_TEST {
         let file = out.join("secrets");
         let text = format!(
             "{} {}\n",
@@ -5478,7 +5647,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         arg.push(&file);
         extra.extend(["-fw_cfg".into(), arg]);
     }
-    let _vault_server = if name == VAULT_TEST || name == BRIDGE_TEST {
+    let _vault_server = if name == VAULT_TEST || name == APPROVAL_TEST || name == BRIDGE_TEST {
         Some(vault_server::start(&out.join("tls"), &out.join("secrets"))?)
     } else {
         None
@@ -5594,6 +5763,7 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
         DEPUTY_TEST => (DEPUTY_SCRIPT, DEPUTY_REFUSED),
         IDENTITY_TEST => (IDENTITY_SCRIPT, IDENTITY_REFUSED),
         VAULT_TEST => (VAULT_SCRIPT, VAULT_REFUSED),
+        APPROVAL_TEST => (APPROVAL_SCRIPT, APPROVAL_REFUSED),
         BUDGETS_TEST => (BUDGETS_SCRIPT, &[]),
         EXHAUSTION_TEST => (EXHAUSTION_SCRIPT, &[]),
         AUDIT_TEST => (AUDIT_SCRIPT, &[]),
@@ -5613,6 +5783,11 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
     } else {
         // Again: the rounds above may leave a store of their own (#310).
         store_image::seed_test_person(&out.join(STORE_IMAGE))?;
+        if name == APPROVAL_TEST {
+            for who in APPROVERS {
+                store_image::seed_person(&out.join(STORE_IMAGE), who)?;
+            }
+        }
         let base = console::fresh(&out, console::PIPE)?;
         let (qmp, serial) = if name == HOTPLUG_TEST {
             // The kernel's own lines too: its audit holds the removal back.
@@ -5750,6 +5925,11 @@ fn runner_once(paths: &Paths, elf: &Path) -> Result<()> {
             tls_audit(&out.join(STORE_IMAGE))
         } else if name == SECRETS_TEST && run.status == Some(33) {
             secrets_audit(&out.join(STORE_IMAGE), &clean_log(&run.log))
+        } else if name == APPROVAL_TEST && run.status == Some(33) {
+            approval_audit(
+                &out.join(STORE_IMAGE),
+                &out.join("tls").join("vault-server.log"),
+            )
         } else if name == VAULT_TEST && run.status == Some(33) {
             vault_audit(
                 &out.join(STORE_IMAGE),
@@ -5994,6 +6174,26 @@ mod tests {
     /// their length and digest as `trust` computes them.
     #[test]
     fn scripts_type_each_asks_digest() {
+        for (route, body, hex) in [
+            ("approved", "{\"a\":1}", "fc6c2f9c"),
+            ("two", "{\"b\":1}", "53e4066c"),
+            ("approved", "{\"d\":1}", "6c7901d4"),
+            ("approved", "{\"e\":1}", "89570a61"),
+            ("approved", "{\"f\":1}", "1fd90ee5"),
+            ("approved", "{\"g\":1}", "7c1d9f9b"),
+        ] {
+            let bytes = [route.as_bytes(), b"\0/items\0", body.as_bytes()].concat();
+            let got: String = pharos_crypto::sha256(&[&bytes])[..4]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            assert_eq!(got, hex, "{route} {body}");
+            let line = format!(" {} bytes, sha256 {hex}; yes ", bytes.len());
+            assert!(
+                APPROVAL_SCRIPT.iter().any(|(e, _)| e.contains(&line)),
+                "{line}"
+            );
+        }
         for (route, body, hex) in [
             ("approved", "{\"n\":2}", "d4c4efdc"),
             ("two", "{\"n\":3}", "552d6822"),

@@ -685,18 +685,20 @@ pub fn person_path(name: &str) -> Vec<u8> {
 /// Seeds the test person into `image` unless it is there (#310): test and
 /// `run` stores only, never a release store.
 pub fn seed_test_person(image: &Path) -> Result<()> {
-    use pharos_services::{TEST_ITERATIONS, TEST_PASSPHRASE, TEST_PERSON};
-    let path = person_path(TEST_PERSON);
+    seed_person(image, pharos_services::TEST_PERSON)
+}
+
+/// Seeds person `name` with the test passphrase, if the store has none of
+/// that name: the test person, and the `approval` kernel's other two
+/// approvers (#328).
+pub fn seed_person(image: &Path, name: &str) -> Result<()> {
+    use pharos_services::{TEST_ITERATIONS, TEST_PASSPHRASE};
+    let path = person_path(name);
     if read(image, &path)?.is_some() {
         return Ok(());
     }
-    let salt = pharos_crypto::sha256(&[b"pharos test person salt"]);
-    let record = person_record(
-        TEST_PERSON,
-        TEST_PASSPHRASE.as_bytes(),
-        salt,
-        TEST_ITERATIONS,
-    )?;
+    let salt = pharos_crypto::sha256(&[b"pharos test person salt", name.as_bytes()]);
+    let record = person_record(name, TEST_PASSPHRASE.as_bytes(), salt, TEST_ITERATIONS)?;
     put(image, &path, &record)
 }
 

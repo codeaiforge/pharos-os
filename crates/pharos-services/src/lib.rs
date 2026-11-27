@@ -685,7 +685,7 @@ mod tests {
     #[test]
     fn only_trust_holds_the_identity_namespace_at_its_handle_6() {
         // #310 (identity.md): the people's records, written only by `trust`.
-        for n in 0..=12 {
+        for n in 0..=13 {
             for s in table(n) {
                 for (i, g) in s.caps.iter().enumerate() {
                     let identity = matches!(g.object, Object::Endpoint(Ep::Store))
@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn a_vault_and_gateway_read_their_own_tables_routes() {
         // Each table's vault and gateway name the table itself (#288).
-        for n in 0..=12 {
+        for n in 0..=13 {
             let t = table(n);
             assert!(route_table(t).is_none_or(|a| a == n), "table {n}");
         }
@@ -723,7 +723,7 @@ mod tests {
 
     #[test]
     fn every_tables_routes_keep_the_rules() {
-        for arg in 0..=12 {
+        for arg in 0..=13 {
             let dests = gateway_dests(table(arg));
             assert_eq!(check_routes(routes(arg), dests), Ok(()), "table {arg}");
         }
@@ -733,7 +733,7 @@ mod tests {
         assert_eq!(gateway_dests(BRIDGE), Some(1));
         assert_eq!(gateway_dests(VAULT), Some(1));
         // A table with a marked route lets its `trust` approve (#325).
-        for arg in 0..=12 {
+        for arg in 0..=13 {
             if routes(arg).iter().any(|r| r.approve != Approve::None) {
                 assert!(trust_approves(table(arg)), "table {arg}");
             }

@@ -4777,6 +4777,8 @@ fn main(arg: u64) -> u64 {
         2 => (BUDGETS, BUDGET_GROUPS),
         3 => (HTTPS_TABLE, &[]),
         4 => (GUEST_TABLE, &[]),
+        // The `approval` kernel (#328): `fetcher`, with short timeouts.
+        5 => (HTTPS_TABLE, &[]),
         _ => (&[], &[]),
     };
     let Ok(reply) = endpoint_create() else {
@@ -4908,7 +4910,7 @@ fn main(arg: u64) -> u64 {
         },
         pending: Vec::new(),
         next_request: 0,
-        short_approvals: arg == 1,
+        short_approvals: matches!(arg, 1 | 5),
         groups,
         group_use: alloc::vec![GroupUse::default(); groups.len()],
         infer_health: Health {

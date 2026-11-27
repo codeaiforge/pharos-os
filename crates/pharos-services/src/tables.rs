@@ -70,6 +70,7 @@ pub fn table(arg: u64) -> &'static [Service] {
         10 => SECRETS,
         11 => VAULT,
         12 => BRIDGE,
+        13 => APPROVAL,
         _ => &[],
     }
 }
@@ -79,7 +80,7 @@ pub fn table(arg: u64) -> &'static [Service] {
 pub fn routes(arg: u64) -> &'static [Route] {
     match arg {
         10 => &SECRETS_ROUTES,
-        11 | 12 => &VAULT_ROUTES,
+        11..=13 => &VAULT_ROUTES,
         _ => &[],
     }
 }
@@ -1112,6 +1113,22 @@ const FETCHCLIENT_CAPS: [Give; 3] = [
     send(Ep::Agents, AGENTS_CONTROL),
     send(Ep::Gateway, 2),
 ];
+
+/// The `approval` kernel (#328, approval.md): the `vault` table with its
+/// routes (13 as the vault's and the gateway's argument), the runtime on
+/// policy table 5 (`fetcher`, with the test table's short approval
+/// timeouts), and `agentclient` 20.
+pub const APPROVAL: &[Service] = &approval_table(BOOT_ENTRIES);
+
+const fn approval_table(boot: [Service; 9]) -> [Service; 12] {
+    let mut t = vault_table(boot);
+    t[8].arg = 13;
+    t[9].arg = 13;
+    t[10].arg = 5;
+    t[11].name = "approvalclient";
+    t[11].arg = 20;
+    t
+}
 
 /// `trust` with `SEND` on the gateway (#325), for its approvals.
 const TRUST_GATEWAY_CAPS: [Give; 7] = [
