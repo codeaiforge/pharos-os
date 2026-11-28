@@ -23,7 +23,7 @@
   - an ask waits forever, or `trust` blocks so the emergency stop stops working;
   - a payload or a secret reaches the trail.
 - **Dates:** 2026-11-27, milestone M6.4. Code under review: `main` at `61c48d4` (#322–#328).
-- **Status:** **awaiting the maintainer's sign-off** (the M6.4 gate, #329). Fixed: F1–F7, F9, and G1. Filed: #330 (F8), #331 (F10), #332 (F11). Documented: F12, F13, and G3.
+- **Status:** **signed off by the maintainer on 2026-11-28** (the M6.4 gate, #329), with the severities as proposed and #330–#332 filed rather than fixed before the gate. CI: `approval` passed on `main` at `bc5a7f5` (run 46056881506); the throwaway branch where the gateway flips a byte of an approved body failed `approval` (run 46147617447: the server received `{"a":1}` 0 times, not 1). The same runs found `exhaustion`'s `stop all` over its 200 ms bound in 2 of 6 CI runs since `bc5a7f5`, not shown to be caused by it, filed as #333. Fixed: F1–F7, F9, and G1. Filed: #330 (F8), #331 (F10), #332 (F11). Documented: F12, F13, and G3.
 
 ## Reviewers and their independence
 
