@@ -737,7 +737,7 @@ Rules for every planned milestone below: nothing moves into the kernel (each com
 
 ### M6.6 — Runtime policy
 
-- **Objective and scope:** Signed, versioned policy loaded without a rebuild, with a dry run and a diff that shows what each change widens; never wider than the compiled ceilings (D-030's rule kept). **Status: Current** (since 2026-11-28): D-039 accepted (#334); issues #334–#340.
+- **Objective and scope:** Signed, versioned policy loaded without a rebuild, with a dry run and a diff that shows what each change widens; never wider than the compiled ceilings (D-030's rule kept). **Status: Current** (since 2026-11-28): D-039 accepted (#334); the [design](../architecture/policy.md) accepted (#335); issues #334–#340.
 - **Deliverables:** Policy format and loader; signature and version checks; dry run; the diff on the trusted console; the language D-039 chooses (Cedar, Rego, or a small custom one, as options).
 - **Prerequisites:** D-039 accepted; M6.5.
 - **Acceptance criteria:** Test kernel `policy`: an unsigned or older policy refused; a policy above a ceiling refused, not narrowed; the dry run lists exactly the grants that change; a widening needs the user's yes.
