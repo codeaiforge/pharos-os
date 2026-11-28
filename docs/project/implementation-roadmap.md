@@ -737,7 +737,7 @@ Rules for every planned milestone below: nothing moves into the kernel (each com
 
 ### M6.6 — Runtime policy
 
-- **Objective and scope:** Signed, versioned policy loaded without a rebuild, with a dry run and a diff that shows what each change widens; never wider than the compiled ceilings (D-030's rule kept). **Status: Current** (since 2026-11-28): D-039 to be proposed first.
+- **Objective and scope:** Signed, versioned policy loaded without a rebuild, with a dry run and a diff that shows what each change widens; never wider than the compiled ceilings (D-030's rule kept). **Status: Current** (since 2026-11-28): D-039 accepted (#334); issues #334–#340.
 - **Deliverables:** Policy format and loader; signature and version checks; dry run; the diff on the trusted console; the language D-039 chooses (Cedar, Rego, or a small custom one, as options).
 - **Prerequisites:** D-039 accepted; M6.5.
 - **Acceptance criteria:** Test kernel `policy`: an unsigned or older policy refused; a policy above a ceiling refused, not narrowed; the dry run lists exactly the grants that change; a widening needs the user's yes.
@@ -965,7 +965,7 @@ Full entries are in the [decision log](decision-log.md). D-001 to D-003 were acc
 | D-036 | Foreign-agent bridge | M6.3 | **Accepted** (2026-11-24, #294): a virtio-serial port on each VM joined by one host unix socket, no relay program; a launch tool that refuses any other guest configuration and checks it through QEMU's monitor; frames parsed only by a Pharos service that speaks for the guest as one agent slot; a pinned Alpine initramfs with LangGraph |
 | D-037 | Payload approval and risk routing | M6.4 | **Accepted** (2026-11-27, #322): every byte shown, paged, on `trust`; the approved SHA-256 checked where the bytes leave; approval marked per route; two distinct approvers, neither the requester; no answer denies |
 | D-038 | Identity and organization model | M6.5 | **Accepted** (2026-11-25, #308): records in the store changed only from the trusted path, the first administrator in the image; a name and a passphrase at the console; the owner in the compiled policy entry; roles and tenants as data only; actors resolved from the trail; a directory import planned as a signed file |
-| D-039 | Runtime policy and its language | M6.6 | **Open:** candidates, relation to D-030's compiled ceilings, signing and versioning, dry run, diffs |
+| D-039 | Runtime policy and its language | M6.6 | **Accepted** (2026-11-28, #334): no new language, a signed bundle of manifest-format entries each checked `within` its compiled ceiling; a policy key of its own; strictly increasing versions; every load shown as a diff and applied only on the user's yes |
 | D-040 | Evidence export, observability, and anchoring | M6.7, M6.8 | **Open:** OTLP and the GenAI conventions version, anchoring target, report format, content addressing, privacy |
 | D-041 | Model broker | M6.9 | **Open:** provider allow-list, redaction, cost accounting, off-Pharos local inference, fallback, model output as untrusted input |
 | D-042 | Multi-tenant runtime and scale | M6.10 | **Open:** one runtime per tenant, limits, message durability, the SMP decision |

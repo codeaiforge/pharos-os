@@ -1495,21 +1495,53 @@ The record formats, the commands, the session timeout, and the passphrase hash's
 
 ### D-039: Runtime policy and its language
 
-- **Status:** Open
+- **Status:** Accepted (#334)
 - **Needed by:** M6.6
-- **Date accepted:**
+- **Date accepted:** 2026-11-28
 
-**Context.** Policy is compiled in today, within compiled ceilings (D-030). Organizations need signed, versioned policy loaded without a rebuild.
+**Context.** Policy is compiled in today, within compiled ceilings (D-030). Organizations need signed, versioned policy loaded without a rebuild. What exists at M6.4 (checked 2026-11-28):
+- Each agent's policy is a compiled, reviewed `manifest::Entry` in the runtime's policy table (models, data, network, budget, tools, files, channels, knowledge, routes and their approval marks, owner, and what it may ask for). An agent's manifest (v1, `key = value` text, at most 4 KiB) is untrusted: `manifest::parse` refuses unknown, repeated, missing, and out-of-range keys and never panics, and `Manifest::within` refuses a manifest that asks for more than its entry, never narrowing it.
+- Signed root images (D-028, `pharos-image`): a 128-byte header with a version, the SHA-256 of the image, and an Ed25519 signature (`ed25519-compact`, verify only on Pharos); a version lower than the newest good one is refused; an update runs only after `trust` shows its version and hash and the user types `apply <n>`.
+- `trust` pages bytes it writes itself, escaped and prefixed, and takes a hash prefix in an answer (D-037); its console lines are at most 64 bytes in and 256 out.
 
-**Options.** Cedar, Rego, or a small custom language, judged on `no_std` fit and trusted-base size; signature with D-028's key handling; dry run and a diff of what widens.
+**Options.**
+- **The language.**
+  - (a) **No new language: the policy is data, a bundle of entries in the manifest format** (each agent's grants as `key = value` lines, the keys a policy entry has), parsed by the existing parser's rules and checked per entry with `within` against that agent's compiled entry, its ceiling. A ceiling check of data is a field-by-field subset; no evaluator joins the trusted base, and what a policy grants is read off the file.
+  - (b) **Cedar** (`cedar-policy`): an analysable language with a reasoning tool, but a large Rust crate with no `no_std` support in its documentation; on Pharos it would need `std` or a port, and the ceiling check becomes a question about what a program can permit.
+  - (c) **Rego** (`regorus`): `no_std` is supported, but its smallest build is about 1.9 MB (its README), about nine times `trust` (211 KB) and more than `trust`, `init`, `agents`, and `gateway` together (1.05 MB; release builds, 2026-11-28); Rego policies are programs, so "never wider than the ceiling" must be proved about a program, not read off data.
+- **The signature.**
+  - (d) **The `pharos-image` header with its own magic and a policy key:** Ed25519 over the header (version, length, SHA-256 of the bundle), the public half compiled into the measured image, the private half never in the repository (test images use a key `xtask` generates under `target/`, as for images). A policy key apart from the release key: whoever writes policy need not be able to ship code.
+  - (e) The release key signs policy too: one key fewer, but every policy author can sign an image.
+- **Versions.**
+  - (f) **Strictly increasing:** a version not above the one in force is refused; the newest version loaded is kept in the store (`system` namespace), so a restart does not take an older signed bundle.
+- **What needs the user's yes.**
+  - (g) **Every load:** `trust` shows the bundle's version, SHA-256, and the diff against the policy in force (every grant that changes, widenings marked), and loads it only on `apply-policy <n> <8 hex>`; no answer or a `no` leaves the policy in force. As D-028 does for updates.
+  - (h) Only a widening: a narrowing applies with its signature alone. Fewer asks, but a signed narrowing can still stop a working agent unseen.
+- **Who stages a policy.**
+  - (i) **The host only in M6.6** (`cargo xtask store import` into the store, as images); no agent permission to propose one. An agent proposal, like `update propose`, is a later change.
+- **Restarts and failures.**
+  - (j) **A stored policy that fails its checks is refused and the compiled table used, recorded;** the runtime reads the policy in force at each attempt's start, and the attempt's `start` record names its version.
 
 **Evaluation criteria.** Never wider than the ceilings, refused rather than narrowed; analysability; size; host fuzzing of the parser.
 
-**Decision.** (empty while Open)
+**Recommendation.** (a), (d), (f), (g), (i), (j). The ceilings are data, so a policy that is data is checked by the subset test that already guards manifests, with no new parser shape and no evaluator in the trusted base; (b) and (c) answer questions Pharos's policy does not ask (attribute conditions at run time) at the cost of the size criterion. Rejected: (e), (h).
 
-**Consequences.** D-030's rule kept; the trusted console shows each widening.
+**Decision.** Accepted by the maintainer on 2026-11-28, as proposed:
+1. **No new language: policy is data** (a), a bundle of per-agent entries in the manifest format, each checked with `within` against that agent's compiled entry; an entry above its ceiling refuses the whole bundle, never narrowed. Cedar (b) and Rego (c) are not taken.
+2. **Signed with the `pharos-image` header, its own magic, and a policy key** (d), apart from the release key; the public half compiled into the measured image.
+3. **Versions strictly increase** (f), the newest loaded kept in the store.
+4. **Every load needs the user's yes** (g), after its version, SHA-256, and diff against the policy in force, widenings marked; no answer or a `no` leaves the policy in force.
+5. **Only the host stages a policy in M6.6** (i).
+6. **A stored policy that fails its checks is refused, the compiled table used, and recorded** (j); each attempt's `start` record names the policy version.
+The bundle's layout and size bound, the commands, the diff's lines, and the records are the design's (#335).
 
-**Evidence.** None yet.
+**Consequences.** D-030's rule kept; the trusted console shows each change, widenings marked.
+- The trusted base grows by the bundle's framing, a second Ed25519 public key, the diff, and `trust`'s load prompt; the parser and the ceiling check are the manifest's, extended to every key an entry has. No new kernel code, no `unsafe`, no new dependency.
+- A policy can narrow what the compiled table gives and widen back up to it, never past it: anything past a ceiling still needs a reviewed build.
+- A stolen policy key widens nothing without the user's yes, and nothing past the ceilings with it.
+- Next: the design (#335), the bundle and its checks (#336), `trust`'s dry run and load (#337), the runtime under loaded policy (#338), the `policy` test kernel (#339).
+
+**Evidence.** Cedar and Regorus documentation through Context7, 2026-11-28: Cedar's `cedar-policy-core` features (no `no_std` mentioned); Regorus's README (`no_std` compatible; 1.9 MB with no default features).
 
 ### D-040: Evidence export, observability, and anchoring
 
